@@ -1,0 +1,47 @@
+{
+  "name": "session-control",
+  "version": "0.1.0",
+  "description": "Session-control orchestrator mod: a side panel (/session-control) over the worker registry, queued work and open points, completion classification, launch/acknowledge/retire tools for workers, and bookkeeping tools for the helper files.",
+  "author": {
+    "name": "Matteo Buia"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "orchestratorDir": {
+      "type": "string",
+      "title": "Orchestrator directory",
+      "description": "Directory holding the orchestrator's CLAUDE.md and helper files. Empty: the mod uses the session's directory when its CLAUDE.md starts with '# Role: Session Orchestrator' and does nothing elsewhere.",
+      "default": ""
+    },
+    "registryPath": {
+      "type": "string",
+      "title": "Worker registry",
+      "description": "The headless-session registry (a JSON array of entries). A leading ~ is the home directory.",
+      "default": "~/.claude/headless-sessions.json"
+    },
+    "completionWrites": {
+      "type": "boolean",
+      "title": "Write completions to the registry",
+      "description": "When a worker's pid is gone, merge its outcome into its registry entry in place (drop pid, reported=false).",
+      "default": true
+    },
+    "pollSeconds": {
+      "type": "number",
+      "title": "Poll interval (seconds)",
+      "description": "How often the session state is gathered.",
+      "default": 5
+    },
+    "runsDir": {
+      "type": "string",
+      "title": "Worker run files",
+      "description": "Directory for the result and error files of launched workers (outside any repo). A leading ~ is the home directory.",
+      "default": "~/.claude/session-control/runs"
+    },
+    "licencePickCommand": {
+      "type": "string",
+      "title": "Licence picker command",
+      "description": "Command that chooses the licence for a fresh worker launch. {need} is replaced by the headroom percent; a leading ~/ is expanded. It prints one absolute config directory and exits 0, or exits 3 when no licence has room. Empty: workers start with the machine's default config directory (~/.claude).",
+      "default": ""
+    }
+  }
+}

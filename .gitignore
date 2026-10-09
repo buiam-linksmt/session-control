@@ -1,0 +1,11 @@
+# Allowlist: everything at the repository root is ignored unless named below.
+/*
+!/CLAUDE.md
+!/README.md
+!/model-complexity-matrix.md
+!/.gitignore
+!/mod/
+
+# Written by the engine when it loads the mod.
+/mod/.claude-plugin/types/
+/mod/tsconfig.json
