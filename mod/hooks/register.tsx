@@ -443,13 +443,21 @@ async function spawnWorker(
   if (worker === undefined) {
     return { result: `Started in the background but no claude process appeared within 30 s; check ${files.err}. Not registered.` }
   }
-  const sessionFile = await $.fs.read(`${verdict.configDir}/sessions/${worker.pid}.json`).catch(() => '')
+  // The engine writes the session file shortly after the process starts: read it again until it is there.
   let sessionId = verdict.resumeSid ?? ''
-  try {
-    const fromFile = (JSON.parse(sessionFile) as { sessionId?: unknown }).sessionId
-    if (typeof fromFile === 'string' && fromFile !== '') sessionId = fromFile
-  } catch {
-    // keep the resume id or the empty one reported below
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const sessionFile = await $.fs.read(`${verdict.configDir}/sessions/${worker.pid}.json`).catch(() => '')
+    try {
+      const fromFile = (JSON.parse(sessionFile) as { sessionId?: unknown }).sessionId
+      if (typeof fromFile === 'string' && fromFile !== '') {
+        sessionId = fromFile
+        break
+      }
+    } catch {
+      // not written yet
+    }
+    if (sessionId !== '') break
+    await $.process.run(['sleep', '1'], { timeoutMs: 5_000 })
   }
   if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
   const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files)

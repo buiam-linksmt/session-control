@@ -47,6 +47,8 @@ type World = {
 }
 
 const MISSING = new Set<string>()
+// Paths that read as missing until the first sleep, like a session file the engine writes a moment late.
+const LATE = new Set<string>()
 
 function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT): World {
   const w: World = { bash: [], spawned: false, writes: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
@@ -62,7 +64,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     return { value: { tool: `mcp__session-control__${e.name}` } }
   })
   on('fs.read', ($, e) => {
-    if (MISSING.has(e.path)) throw new Error(`ENOENT ${e.path}`)
+    if (MISSING.has(e.path) || LATE.has(e.path)) throw new Error(`ENOENT ${e.path}`)
     if (e.path === REGISTRY_PATH) return { value: registryText }
     if (e.path === '/work/orch/CLAUDE.md') return { value: '# Role: Session Orchestrator\n' }
     if (e.path === '/work/new/thin.md') return { value: 'Just do the work.' }
@@ -94,6 +96,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       return { value: { ...ok, stdout: PROBE_STDOUT + worker } }
     }
     if (e.argv[0] === 'sh') return { value: { ...ok, stdout: PROBE_STDOUT } }
+    if (e.argv[0] === 'sleep') LATE.clear()
     if (e.argv[0] === 'mkdir' || e.argv[0] === 'sleep' || e.argv[0] === 'rm') return { value: { ...ok, stdout: '' } }
     if (e.argv[0] === 'mv') {
       const text = w.writes.find(one => one.path === e.argv[2])?.text
@@ -343,6 +346,19 @@ describe('launch_worker', () => {
     expect(JSON.stringify(out)).not.toContain('deny')
     expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
     expect(String(w.bash[0]?.command)).toContain(`CLAUDE_CONFIG_DIR='${HOME}/.claude'`)
+  })
+
+  test('a session file that appears late is still read, and the worker is registered', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    LATE.add('/fixture/lic/a/sessions/7001.json')
+    try {
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toContain('Launched pid 7001')
+      expect(w.runs.some(argv => argv[2] === REGISTER_SCRIPT)).toBe(true)
+    } finally {
+      LATE.clear()
+    }
   })
 
   test('refuses the orchestrator dir as cwd', { options: OPTIONS }, async ($, on) => {
