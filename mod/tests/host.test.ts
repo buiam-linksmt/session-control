@@ -13,6 +13,7 @@ import { tailLines } from '../hooks/core'
 import { HOST_MEMBERS, selectHost } from '../hooks/host'
 import type { Host, HostPort } from '../hooks/host'
 import { withHelper } from '../hooks/host-helper'
+import { withPowerShellLaunch } from '../hooks/host-powershell'
 import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
 import { helperAnswer } from './fake-helper'
@@ -176,7 +177,7 @@ function portOf(m: Machine, runsDir: string, notes: string[] = []): HostPort {
 const NODE = 'node'
 const HELPER = '/m/mod/helper/host.mjs'
 
-type Case = { host: Host; name: string; platform: 'linux' | 'windows'; env: Record<string, string>; root: string; home: string }
+type Case = { host: Host; name: string; platform: 'linux' | 'windows'; env: Record<string, string>; root: string; home: string; isPowerShellRoute?: boolean }
 
 const LINUX_ENV = { HOME: '/m/home' }
 // Git Bash's HOME in its /c/... form; the adapter stores C:/...
@@ -187,6 +188,17 @@ const CASES: Case[] = [
   // The same contract with the Node helper in front of each adapter.
   { host: withHelper(posixHost, { node: NODE, script: HELPER }), name: 'linux with the helper', platform: 'linux', env: LINUX_ENV, root: '/m', home: '/m/home' },
   { host: withHelper(windowsHost, { node: NODE, script: HELPER }), name: 'windows with the helper', platform: 'windows', env: WINDOWS_ENV, root: 'C:/m', home: 'C:/m/home' },
+  // The Windows adapter on the PowerShell launch route (the launchRoute option at powershell), alone and behind the helper.
+  { host: withPowerShellLaunch(windowsHost), name: 'windows, PowerShell route', platform: 'windows', env: WINDOWS_ENV, root: 'C:/m', home: 'C:/m/home', isPowerShellRoute: true },
+  {
+    host: withHelper(withPowerShellLaunch(windowsHost), { node: NODE, script: HELPER }),
+    name: 'windows, PowerShell route, with the helper',
+    platform: 'windows',
+    env: WINDOWS_ENV,
+    root: 'C:/m',
+    home: 'C:/m/home',
+    isPowerShellRoute: true,
+  },
 ]
 
 describe('host contract', () => {
@@ -199,7 +211,7 @@ describe('host contract', () => {
       for (const name of HOST_MEMBERS) expect(host[name] === undefined).toBe(false)
       for (const name of HOST_MEMBERS.filter(name => !['platform', 'launchTool', 'launchToolHint'].includes(name))) expect(typeof host[name]).toBe('function')
       expect(host.platform).toBe(one.platform)
-      expect(host.launchTool).toBe('Bash')
+      expect(host.launchTool).toBe(one.isPowerShellRoute === true ? 'PowerShell' : 'Bash')
       expect(typeof host.launchToolHint).toBe('string')
     })
 
@@ -306,8 +318,16 @@ describe('host contract', () => {
       expect(typeof host.launchFacts('Goal: x')).toBe('object')
       expect(host.pickerArgv([`${root}/bin/pick`, '--need', '40'])).toEqual({ argv: [`${root}/bin/pick`, '--need', '40'] })
       const command = host.launchCommand(args, { configDir: `${one.home}/.claude`, isConfigInherited: true, name: 'w-new-1' }, `${runs}/r.json`, `${runs}/r.err`)
+      if (one.isPowerShellRoute === true) {
+        expect(command).toContain(`$p = Start-Process -FilePath $exe -ArgumentList '-p --model opus -n w-new-1 --settings `)
+        expect(command).toContain(`-WorkingDirectory '${root}/work' -RedirectStandardInput '${root}/work/prompt.md' -RedirectStandardOutput '${runs}/r.json' -RedirectStandardError '${runs}/r.err' `)
+        expect(host.launchPidFile(`${runs}/r.json`)).toBe(`${runs}/r.pid`)
+        expect(command).toEndWith(`Set-Content -LiteralPath '${runs}/r.pid' -Value $p.Id -Encoding Ascii\n$p.WaitForExit()\nexit $p.ExitCode`)
+        return
+      }
       expect(command).toStartWith(`cd '${root}/work' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-1' `)
       expect(command).toEndWith(`-- "$(cat '${root}/work/prompt.md')" > '${runs}/r.json' 2> '${runs}/r.err'`)
+      expect(host.launchPidFile(`${runs}/r.json`)).toBeUndefined()
     })
 
     test(`${one.name}: rotate turns the trace into .1 and .1 into .2`, async () => {

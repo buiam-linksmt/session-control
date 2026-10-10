@@ -281,6 +281,10 @@ export const windowsHost: Host = {
   // On Windows the engine offers the Bash tool only when it finds Git Bash, which it may miss for a per-user Git
   // whose mingw64 git.exe comes first on the PATH (a session started from Git Bash).
   launchToolHint: ' On Windows Claude Code offers the Bash tool only when it finds Git Bash: start the orchestrator with CLAUDE_CODE_GIT_BASH_PATH set to Git\\bin\\bash.exe.',
+  /** The Bash route's line writes no pid file (the PowerShell route's does: host-powershell.ts). */
+  launchPidFile: () => undefined,
+  /** The Bash route takes any path the guards pass. */
+  launchRefusal: () => undefined,
 
   createFile: writeIfAbsent,
   /** Writing the file script makes the runs directory; the backups directory comes with the first backup. */

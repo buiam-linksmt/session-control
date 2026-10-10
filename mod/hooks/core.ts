@@ -842,6 +842,12 @@ export function sessionFileFacts(text: string): { sessionId?: string; name?: str
   return facts
 }
 
+/** The pid in a launch's pid file (`Set-Content -Encoding Ascii`: the digits and a line end); undefined for anything else. */
+export function pidFromFile(text: string): number | undefined {
+  const digits = text.trim()
+  return /^[1-9][0-9]{0,9}$/.test(digits) ? Number(digits) : undefined
+}
+
 /**
  * The registry entry for a launch (a resume merges it over the existing entry in place). `name` is the session name
  * (the sessions file's, else the one the launch passed); `socket_path` is the sessions file's `messagingSocketPath`,

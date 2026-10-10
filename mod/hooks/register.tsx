@@ -25,6 +25,7 @@ import { selectHost } from './host'
 import type { Host, HostEnvName, HostPort } from './host'
 import { HELPER_SCRIPT, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
+import { withPowerShellLaunch } from './host-powershell'
 import {
   LAUNCH_SCHEMA,
   ACK_SCHEMA,
@@ -73,6 +74,7 @@ import {
   slugify,
   launchName,
   sessionFileFacts,
+  pidFromFile,
   reportCheck,
   resultReport,
 } from './core'
@@ -114,6 +116,8 @@ type Config = {
   helper: 'auto' | 'off'
   /** The node executable; empty: `node` from the PATH. */
   nodePath: string
+  /** `bash`: workers start through the Bash tool; `powershell`: on native Windows through the PowerShell tool (host-powershell.ts). */
+  launchRoute: 'bash' | 'powershell'
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -127,6 +131,7 @@ let config: Config = {
   debug: false,
   helper: 'auto',
   nodePath: '',
+  launchRoute: 'bash',
 }
 let isActive = false
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
@@ -305,8 +310,9 @@ async function traced<T>($: EngineInterface, work: () => Promise<T>): Promise<T>
 
 /**
  * The adapter of this load, chosen once by selectHost from OS and USERPROFILE at the first hook that needs it
- * (session.start); with the helper option `auto` its file operations go through the Node helper (host-helper.ts),
- * which looks for Node at its first operation.
+ * (session.start); on native Windows with the launchRoute option `powershell` workers start through the PowerShell
+ * tool (host-powershell.ts); with the helper option `auto` its file operations go through the Node helper
+ * (host-helper.ts), which looks for Node at its first operation.
  */
 async function hostOf($: EngineInterface): Promise<Host> {
   // A choice that failed (the environment unreadable) is made again by the next hook.
@@ -318,7 +324,9 @@ async function hostOf($: EngineInterface): Promise<Host> {
 }
 
 async function chooseHost($: EngineInterface): Promise<Host> {
-  const base = selectHost({ OS: await $.env.get('OS'), USERPROFILE: await $.env.get('USERPROFILE') })
+  const selected = selectHost({ OS: await $.env.get('OS'), USERPROFILE: await $.env.get('USERPROFILE') })
+  // The PowerShell route is Windows' own: on Linux and WSL the option changes nothing.
+  const base = config.launchRoute === 'powershell' && selected.platform === 'windows' ? withPowerShellLaunch(selected) : selected
   if (config.helper === 'off') return base
   const node = config.nodePath.trim() === '' ? 'node' : expandHome(config.nodePath.trim(), await base.homeDir(portOf($)))
   return withHelper(base, { node, script: `${$.plugin.root.replace(/[\\/]+$/, '')}/${HELPER_SCRIPT}` })
@@ -736,6 +744,12 @@ async function launch($: EngineInterface, given: LaunchArgs) {
   // The launch's paths in the form the host stores, from here on and in the registry (on Windows C:/..., never /c/...).
   const args = machine.launchArgs(given)
   const home = await homeDir($)
+  // A path the launch route cannot pass on is refused before anything runs (the PowerShell route's wildcard paths).
+  const routeRefusal = machine.launchRefusal(args, machine.nativePath(expandHome(config.runsDir, home)))
+  if (routeRefusal !== undefined) {
+    trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(routeRefusal, 'reason') })
+    return { deny: `${PLUGIN}: ${routeRefusal}` }
+  }
   const reg = await registryAndFacts($)
   if ('deny' in reg) return reg
   const { promptFileOk, dirOk } = await machine.launchChecks(portOf($), args)
@@ -775,7 +789,7 @@ async function launch($: EngineInterface, given: LaunchArgs) {
   return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, own)
 }
 
-/** Start the worker as a background Bash task, find its real pid and session, register it. */
+/** Start the worker as a background task of the host's launch tool, find its real pid and session, register it. */
 async function spawnWorker(
   $: EngineInterface,
   args: LaunchArgs,
@@ -802,7 +816,9 @@ async function spawnWorker(
   // The engine's own background task: its exit notification reaches the session.
   try {
     await $.tool.call({
-      tool: machine.launchTool,
+      // The PowerShell tool takes the Bash tool's input; a build's tool table lists only the tools it registers on its
+      // own machine (no PowerShell on Linux), so the name is typed as Bash's.
+      tool: machine.launchTool as 'Bash',
       command,
       description: `session-control worker: ${args.title}`.slice(0, 100),
       run_in_background: true,
@@ -811,7 +827,7 @@ async function spawnWorker(
   } catch (err) {
     const hint = machine.launchToolHint
     trace($, 'error', { where: 'worker.start', ...messageFields(errorText(err)) })
-    return { deny: `${PLUGIN}: the worker could not be started through the Bash tool (${errorText(err).slice(0, 160)}); nothing was launched.${hint}` }
+    return { deny: `${PLUGIN}: the worker could not be started through the ${machine.launchTool} tool (${errorText(err).slice(0, 160)}); nothing was launched.${hint}` }
   }
   let worker: ProcFact | undefined
   for (let attempt = 0; attempt < 15 && worker === undefined; attempt++) {
@@ -844,7 +860,11 @@ async function spawnWorker(
     const again = sessionFileFacts(await $.fs.read(sessionPath).catch(() => ''))
     if (again.sessionId === fromFile.sessionId) fromFile = again
   }
-  trace($, 'worker.found', { pid: worker.pid, sessionId, isNamed: fromFile.name !== undefined, isSocketSeen: fromFile.socketPath !== undefined })
+  // The pid file the PowerShell route writes is one more fact beside the probe, never the source of the pid.
+  const pidFile = machine.launchPidFile(files.result)
+  const filePid = pidFile === undefined ? undefined : pidFromFile(await $.fs.read(pidFile).catch(() => ''))
+  const pidFileFact = pidFile === undefined ? {} : { pidFile: filePid === undefined ? 'unread' : filePid === worker.pid ? 'same' : 'differs' }
+  trace($, 'worker.found', { pid: worker.pid, sessionId, isNamed: fromFile.name !== undefined, isSocketSeen: fromFile.socketPath !== undefined, ...pidFileFact })
   if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
   const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
   const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox, Math.floor(launchedAt / 1000))
@@ -853,8 +873,9 @@ async function spawnWorker(
   const note = failed === undefined ? 'registered' : writeFailed(failed)
   trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
   await refresh($)
+  const pidNote = filePid !== undefined && filePid !== worker.pid ? ` The launch's pid file names pid ${filePid}, not the one the probe found.` : ''
   return {
-    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.`,
+    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}`,
   }
 }
 
@@ -1015,6 +1036,7 @@ export const register: Register = (on, options) => {
     debug: options.debug === true,
     helper: options.helper === 'off' ? 'off' : 'auto',
     nodePath: String(options.nodePath ?? ''),
+    launchRoute: options.launchRoute === 'powershell' ? 'powershell' : 'bash',
   }
   isTraceWanted = config.debug
   isTracing = false

@@ -116,6 +116,10 @@ export const posixHost: Host = {
   launchTool: 'Bash',
   launchCommand: bashLaunchCommand,
   launchToolHint: '',
+  /** The Bash route's line writes no pid file. */
+  launchPidFile: () => undefined,
+  /** The Bash route takes any path the guards pass. */
+  launchRefusal: () => undefined,
 
   /** `test -e`, then `mkdir -p` and the write. */
   async createFile(port: HostPort, path: string, text: string): Promise<void> {

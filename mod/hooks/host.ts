@@ -93,12 +93,16 @@ export type Host = {
   launchFacts(promptText: string | undefined): Partial<LaunchFacts>
   /** The licence picker's argv as it is run, or why it is refused. */
   pickerArgv(argv: string[]): { argv: string[] } | { refusal: string }
-  /** The engine tool the worker is started through. */
-  readonly launchTool: 'Bash'
+  /** The engine tool the worker is started through: Bash, or PowerShell on the Windows PowerShell route (host-powershell.ts). */
+  readonly launchTool: 'Bash' | 'PowerShell'
   /** The command text that tool runs. */
   launchCommand(args: LaunchArgs, target: LaunchTarget, resultFile: string, errFile: string): string
   /** Said after the tool refused to start a worker ('' when there is nothing to add). */
   readonly launchToolHint: string
+  /** The file the command writes the worker's pid to, read as one more fact beside the probe; undefined: it writes none. */
+  launchPidFile(resultFile: string): string | undefined
+  /** Why the launch route cannot start this launch, said before anything runs; undefined: it can. */
+  launchRefusal(args: LaunchArgs, runsDir: string): string | undefined
 
   // ---- files
   /** Creates a missing file with its directory (the caller found it unreadable). */
@@ -146,6 +150,8 @@ export const HOST_MEMBERS = [
   'launchTool',
   'launchCommand',
   'launchToolHint',
+  'launchPidFile',
+  'launchRefusal',
   'createFile',
   'prepareHelperDirs',
   'prepareRunsDir',

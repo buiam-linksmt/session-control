@@ -43,6 +43,8 @@ const OPEN_POINTS_TEXT = JSON.stringify({
 type World = {
   /** Bash calls the plugin's own launch made through $.tool.call. */
   bash: { command?: string; run_in_background?: boolean; timeout?: number }[]
+  /** PowerShell calls of the same kind (the launchRoute option at powershell, on Windows). */
+  powershell: { command?: string; description?: string; run_in_background?: boolean; timeout?: number }[]
   /** Set once the fake worker "started": later probes show its process. */
   spawned: boolean
   writes: { path: string; text: string }[]
@@ -63,12 +65,13 @@ const UNREADABLE = new Set<string>()
 // The CLAUDE_CONFIG_DIR the Linux probe reads from the new worker's environment ('' when it has none).
 // isInboxless: the Linux worker's sessions file has no name and no messagingSocketPath, as an older claude writes it.
 // sid: the session id the Linux worker's sessions file names (a resume keeps the resumed one).
-const WORKER = { linuxConfigDir: '/fixture/lic/a', isBashMissing: false, isInboxless: false, sid: 'abcdabcd-0000-4000-8000-000000000001' }
+// isPowerShellMissing: the session offers no PowerShell tool.
+const WORKER = { linuxConfigDir: '/fixture/lic/a', isBashMissing: false, isPowerShellMissing: false, isInboxless: false, sid: 'abcdabcd-0000-4000-8000-000000000001' }
 /** The inbox fields of the Linux worker's sessions file. */
 const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320', messagingSocketPath: '/run/user/1000/cc-socks/7001.sock' })
 // Knobs of the Windows fixture: a failing move or probe; the config dir the probe finds the new worker's sessions
-// file in, or none (unplaced).
-const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false }
+// file in, or none (unplaced); what the PowerShell route's pid file holds (undefined: there is none).
+const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
 const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0 }
@@ -97,7 +100,7 @@ const given = (path: string, isWin: boolean) => {
 }
 
 function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
-  const w: World = { bash: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
+  const w: World = { bash: [], powershell: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
   // A test that answers env.get itself says so.
   if (!isEnvOwn) mock.env(on, env)
   const isWin = env.OS === 'Windows_NT' && /^[A-Za-z]:[\\/]/.test(env.USERPROFILE ?? '')
@@ -130,6 +133,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: WORKER.sid, procStart: '123', ...inboxFields() }) }
     if (seen(e.path) === 'C:/fixture/home/.claude/sessions/7001.json') return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
     if (path === '/work/new/big.md') return { value: BIG_PROMPT }
+    // The pid file a PowerShell launch writes beside its result file.
+    if (isWin && path.endsWith('.pid') && WINDOWS.pidFileText !== undefined) return { value: WINDOWS.pidFileText }
     // The mod's own scripts read back as written.
     const written = w.writes.filter(one => one.path === seen(e.path) && one.path.endsWith('.ps1')).at(-1)
     if (written !== undefined) return { value: written.text }
@@ -221,6 +226,13 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     w.spawned = true
     return { result: 'Command running in background with ID: fixture' }
   })
+  // The engine on Windows has the PowerShell tool; this build's tool table does not, hence the name as a string.
+  on('tool.call', { tool: 'PowerShell' } as never, (($: unknown, e: unknown) => {
+    if (WORKER.isPowerShellMissing) throw new Error('no tool named "PowerShell" in this session')
+    w.powershell.push(e as never)
+    w.spawned = true
+    return { result: 'Command running in background with ID: fixture' }
+  }) as never)
   on('ui.close', () => ({ value: undefined }) as never)
   on('ui.status', () => ({ value: undefined }) as never)
   on('ui.toast', ($, e) => {
@@ -1217,12 +1229,30 @@ describe('platform', () => {
   }
 
   // The flow recorded with the trace off, for the test after it.
-  const recorded: { off?: { runs: string[][]; writes: World['writes']; reads: string[] } } = {}
+  const recorded: { off?: { runs: string[][]; writes: World['writes']; reads: string[]; bash: World['bash'] } } = {}
   test('Linux, the trace off: a launch, an acknowledgement and a retirement, recorded', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     expect(await flow($, w)).toEqual(LINUX)
-    recorded.off = { runs: w.runs, writes: w.writes, reads: w.reads }
+    recorded.off = { runs: w.runs, writes: w.writes, reads: w.reads, bash: w.bash }
   })
+
+  // The PowerShell route is native Windows' own: on Linux, and on WSL with Windows values in its environment, the
+  // option changes nothing, down to the Bash tool's input.
+  for (const [name, env] of [linuxLike[0], linuxLike[1]] as [string, Record<string, string>][]) {
+    test(`Linux, launchRoute powershell: the same commands, writes, reads and Bash call as recorded without it (${name})`, { options: { ...OPTIONS, launchRoute: 'powershell' } }, async ($, on) => {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, env)
+      expect(await flow($, w)).toEqual(LINUX)
+      expect(recorded.off).toBeDefined()
+      expect(w.runs).toEqual(recorded.off?.runs ?? [])
+      expect(w.writes).toEqual(recorded.off?.writes ?? [])
+      expect(w.reads).toEqual(recorded.off?.reads ?? [])
+      // The engine gives every call a tool_use_id of its own; the rest of the Bash tool's input is the same.
+      const input = (calls: World['bash']) => calls.map(({ tool_use_id: _id, ...rest }: Record<string, unknown>) => rest)
+      expect(input(w.bash)).toEqual(input(recorded.off?.bash ?? []))
+      expect(w.bash.length).toBe(1)
+      expect(w.powershell).toEqual([])
+    })
+  }
 
   test('Linux, the trace on: the same commands, writes and reads as with it off, less the trace appends', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
     const w = world(on)
@@ -1376,6 +1406,185 @@ describe('platform', () => {
     } finally {
       WORKER.isBashMissing = false
     }
+  })
+
+  // ---- the PowerShell launch route (the launchRoute option at powershell)
+  const PS_OPTIONS = { ...NO_PICKER, launchRoute: 'powershell' }
+  /** The PowerShell route's command for the fixture launch: its config line (none when inherited), arguments and files. */
+  const psCommand = (config: string | undefined, argumentList: string, base: string, dir = 'C:/work/new', prompt = 'C:/work/new/prompt.md') =>
+    [
+      '$env:PSModulePath = "$PSHOME\\Modules"',
+      "$ErrorActionPreference = 'Stop'",
+      "$env:CLAUDE_CODE_EFFORT_LEVEL = 'high'",
+      ...(config === undefined ? [] : [config]),
+      '$exe = (Get-Command claude.exe -ErrorAction Stop).Source',
+      `$p = Start-Process -FilePath $exe -ArgumentList '${argumentList}' -WorkingDirectory '${dir}' -RedirectStandardInput '${prompt}' ` +
+        `-RedirectStandardOutput '${base}.json' -RedirectStandardError '${base}.err' -NoNewWindow -PassThru`,
+      '$null = $p.Handle',
+      `Set-Content -LiteralPath '${base}.pid' -Value $p.Id -Encoding Ascii`,
+      '$p.WaitForExit()',
+      'exit $p.ExitCode',
+    ].join('\n')
+  const PS_SETTINGS = '--settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json'
+
+  test('Windows, launchRoute powershell: the worker starts through the PowerShell tool, Start-Process with the prompt on standard input; found and registered as by the Bash route', { options: PS_OPTIONS }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+    expect(String(out.result)).toBe(
+      `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${WIN_HOME_CLAUDE}, registered. ` +
+        `Name: w-new-260921141320; socket: none. ` +
+        `Result: ${WIN_RUNS}/20260921141320-new.json; errors: ${WIN_RUNS}/20260921141320-new.err.`,
+    )
+    expect(w.bash).toEqual([])
+    expect(w.powershell.length).toBe(1)
+    expect(w.powershell[0]).toMatchObject({ description: 'session-control worker: new', run_in_background: true, timeout: 180 * 60_000 })
+    // No picker: the worker inherits the config dir, so no CLAUDE_CONFIG_DIR line.
+    expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`))
+    expect(lastRegistry(w).at(-1)).toEqual({
+      title: 'new',
+      pid: 7001,
+      session_id: 'abcdabcd-0000-4000-8000-000000000001',
+      name: 'w-new-260921141320',
+      config_dir: WIN_HOME_CLAUDE,
+      cwd: 'C:/work/new',
+      model: 'opus',
+      effort: 'high',
+      result_file: `${WIN_RUNS}/20260921141320-new.json`,
+      err_file: `${WIN_RUNS}/20260921141320-new.err`,
+      started_at: NOW_MS / 1000,
+    })
+    // The pid came from the probe, and the pid file was read beside it; every command is still one of the mod's scripts.
+    expect(w.reads).toContain(`${WIN_RUNS}/20260921141320-new.pid`)
+    expect(w.runs.every(argv => argv[0] === 'node' || (argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6]))))).toBe(true)
+  })
+
+  test('Windows, launchRoute powershell, with a picker: CLAUDE_CONFIG_DIR is set to the picked dir before Start-Process', { options: { ...WIN_OPTIONS, launchRoute: 'powershell', licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
+    WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered')
+      expect(w.powershell[0]?.command).toBe(psCommand("$env:CLAUDE_CONFIG_DIR = 'C:/fixture/lic/a'", `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`))
+      expect(w.bash).toEqual([])
+    } finally {
+      WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
+    }
+  })
+
+  test('Windows, launchRoute powershell: a resume passes --resume after the model and sets the entry\'s config dir', { options: PS_OPTIONS }, async ($, on) => {
+    const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_DEAD ? { ...one, config_dir: 'C:/fixture/lic/b' } : one)))
+    WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\b'
+    try {
+      const w = world(on, '', true, registry, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs, resume_sid: SID_DEAD } as never))
+      expect(String(out.result)).toContain(`Launched pid 7001, session ${SID_DEAD}, config_dir C:/fixture/lic/b`)
+      expect(w.powershell[0]?.command).toBe(psCommand("$env:CLAUDE_CONFIG_DIR = 'C:/fixture/lic/b'", `-p --model opus --resume ${SID_DEAD} -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`))
+    } finally {
+      WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
+    }
+  })
+
+  test('Windows, launchRoute powershell: a runs directory with blanks and a quote, and a title with quotes, stay single PowerShell strings', { options: { ...PS_OPTIONS, runsDir: "C:/fixture/my runs/it's here" } }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const title = `fix "the" parser's 'bug'`
+    const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs, title } as never))
+    expect(String(out.result)).toContain('Launched pid 7001')
+    const base = "C:/fixture/my runs/it''s here/20260921141320-fix-the-parser-s-bug"
+    expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-fix-the-parser-s-bug-260921141320 ${PS_SETTINGS}`, base))
+    // The title reaches the tool's description only, never the command.
+    expect(w.powershell[0]?.description).toBe(`session-control worker: ${title}`)
+    expect(lastRegistry(w).at(-1)).toMatchObject({ title, result_file: "C:/fixture/my runs/it's here/20260921141320-fix-the-parser-s-bug.json" })
+  })
+
+  test('Windows, launchRoute powershell, without a PowerShell tool: a clear refusal, nothing launched, no fall back to Bash', { options: PS_OPTIONS }, async ($, on) => {
+    WORKER.isPowerShellMissing = true
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const before = lastRegistry(w).length
+      const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+      // The engine's own reason sits in the brackets (the kit's differs from the engine's).
+      expect(String(out.deny)).toStartWith('session-control: the worker could not be started through the PowerShell tool (')
+      expect(String(out.deny)).toEndWith(
+        '); nothing was launched. On Windows Claude Code offers the PowerShell tool by default only when it does not find Git Bash: start the orchestrator with CLAUDE_CODE_USE_POWERSHELL_TOOL=1, or set the launchRoute option to bash.',
+      )
+      expect(w.powershell.length).toBe(0)
+      expect(w.bash.length).toBe(0)
+      expect(lastRegistry(w).length).toBe(before)
+      expect(w.reads.some(path => path.endsWith('.pid'))).toBe(false)
+    } finally {
+      WORKER.isPowerShellMissing = false
+    }
+  })
+
+  test('Windows, launchRoute powershell: a prompt file or runs directory with brackets is refused before anything runs', { options: { ...PS_OPTIONS, licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const runs = w.runs.length
+    const out = await $.tool.call({ tool: TOOL, ...winArgs, prompt_file: '/c/work/new/[draft] prompt.md' } as never)
+    expect(String(out.deny)).toBe(
+      'session-control: refused: on the PowerShell launch route Start-Process reads the prompt file and the run files as wildcard patterns, and Windows PowerShell 5.1 and PowerShell 7 ' +
+        'cannot both be given a path with [, ] or a backtick: the prompt file C:/work/new/[draft] prompt.md; move it to a path without them, or set the launchRoute option to bash',
+    )
+    // Not the picker, not the probe, not a tool: nothing ran.
+    expect(w.runs.length).toBe(runs)
+    expect([w.powershell.length, w.bash.length]).toEqual([0, 0])
+  })
+
+  test('Windows, launchRoute powershell: a runs directory with brackets is refused too; the Bash route takes it', { options: { ...PS_OPTIONS, runsDir: 'C:/fixture/runs [old]' } }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+    expect(String(out.deny)).toContain('cannot both be given a path with [, ] or a backtick: the runs directory C:/fixture/runs [old]; move it')
+    expect(w.powershell.length).toBe(0)
+  })
+
+  test('Windows, launchRoute powershell: a pid file naming another pid is said in the answer; the probe\'s pid is the one registered', { options: PS_OPTIONS }, async ($, on) => {
+    WINDOWS.pidFileText = '7002\r\n'
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      expect(String(out.result)).toEndWith(`errors: ${WIN_RUNS}/20260921141320-new.err. The launch's pid file names pid 7002, not the one the probe found.`)
+      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001 })
+    } finally {
+      WINDOWS.pidFileText = '7001\r\n'
+    }
+  })
+
+  test('Windows, launchRoute powershell: no pid file (not written yet, or unreadable) changes nothing', { options: PS_OPTIONS }, async ($, on) => {
+    WINDOWS.pidFileText = undefined
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      expect(String(out.result)).toEndWith(`errors: ${WIN_RUNS}/20260921141320-new.err.`)
+      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001 })
+    } finally {
+      WINDOWS.pidFileText = '7001\r\n'
+    }
+  })
+
+  test('Windows, launchRoute powershell, the trace on: the start names the route; the worker line says whether the pid file agrees', { options: { ...PS_OPTIONS, debug: true } }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+    const lines = traceOf(w, `${WIN_RUNS}/trace.log`)
+    expect((lines.find(line => line.event === 'session.start') as { options?: Record<string, unknown> }).options?.launchRoute).toBe('powershell')
+    expect(lines.find(line => line.event === 'worker.found')).toMatchObject({ pid: 7001, pidFile: 'same' })
+  })
+
+  test('Windows: a launchRoute other than powershell is the Bash route', { options: { ...NO_PICKER, launchRoute: 'pwsh' } }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+    expect(w.powershell).toEqual([])
+    expect(String(w.bash[0]?.command)).toStartWith(`cd 'C:/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' `)
+    expect(w.reads.some(path => path.endsWith('.pid'))).toBe(false)
   })
 
   test('Windows: a new claude.exe whose sessions file the probe found nowhere is still the worker', { options: NO_PICKER }, async ($, on) => {
@@ -1623,6 +1832,7 @@ describe('debug trace', () => {
         debug: true,
         helper: 'auto',
         nodePath: '',
+        launchRoute: 'bash',
       },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)

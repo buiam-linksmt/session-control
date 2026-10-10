@@ -60,6 +60,12 @@
       "title": "Node executable",
       "description": "The node executable the helper runs with (a leading ~/ is the home directory). Empty: node from the PATH.",
       "default": ""
+    },
+    "launchRoute": {
+      "type": "string",
+      "title": "Launch route",
+      "description": "bash: workers start through the Bash tool (on native Windows Claude Code offers it only when it finds Git Bash). powershell: on native Windows workers start through the PowerShell tool instead (claude.exe started by Start-Process, the prompt on standard input from the prompt file); on Linux and WSL the option changes nothing. Any other value counts as bash.",
+      "default": "bash"
     }
   }
 }
