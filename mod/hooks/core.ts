@@ -419,6 +419,12 @@ export type LaunchFacts = {
   dirOk?: boolean
   /** Checklist items the prompt file lacks; undefined when not checked. */
   missingItems?: readonly string[]
+  /** Native Windows: paths are compared and checked as Windows ones (dir and prompt_file already in native form). */
+  isWindows?: boolean
+  /** On Windows, the prompt's length in characters; undefined when it could not be read. */
+  promptChars?: number
+  /** On Windows, the prompt's first characters; undefined when it could not be read. */
+  promptLead?: string
 }
 
 export type LaunchVerdict =
@@ -447,25 +453,54 @@ function normalize(path: string): string {
   return cut === '' ? '/' : cut
 }
 
+/**
+ * The longest prompt a Windows launch passes, in characters: the prompt goes on claude.exe's command line, which
+ * Windows caps at 32767 characters, and Git Bash's argument conversion of it is untested.
+ */
+export const WINDOWS_PROMPT_MAX_CHARS = 30_000
+
+/**
+ * A prompt Git Bash would rewrite on its way to claude.exe: it turns an argument that starts like a POSIX path into
+ * a Windows one (`/c/x` and `/tmp/x` to C:/..., `-I/x`, a first word `NAME=/x`, lists `/a:/b`), and the prompt is one
+ * argument. Leading white space, a heading or a word first, `//x`, `x:/y`, URLs and C:/ paths pass untouched
+ * (tests/windows-selftest.py runs the MSYS_PROMPTS cases of tests/fixtures.ts through Git Bash).
+ */
+export const MSYS_REWRITTEN = /^(\/(?!\/)|-[^\s/=]*\/|\S*=\/)/
+
 /** Pure guard of launch_worker. */
 export function checkLaunch(args: LaunchArgs, ctx: LaunchFacts): LaunchVerdict {
+  const isWin = ctx.isWindows === true
+  const isAbsolute = (path: string) => (isWin ? isWinAbsolute(path) : path.startsWith('/'))
+  const onWindows = isWin ? ' (on Windows /c/... or C:/...)' : ''
   if (typeof args.model !== 'string' || args.model.trim() === '') return { ok: false, reason: 'model is required' }
   if (!(EFFORTS as readonly string[]).includes(args.effort)) {
     return { ok: false, reason: `effort is required, one of ${EFFORTS.join('|')}` }
   }
   if (typeof args.title !== 'string' || args.title.trim() === '') return { ok: false, reason: 'title is required' }
-  if (typeof args.dir !== 'string' || !args.dir.startsWith('/')) return { ok: false, reason: 'dir must be absolute' }
-  if (typeof args.prompt_file !== 'string' || !args.prompt_file.startsWith('/')) {
-    return { ok: false, reason: 'prompt_file must be absolute' }
+  if (typeof args.dir !== 'string' || !isAbsolute(args.dir)) return { ok: false, reason: `dir must be absolute${onWindows}` }
+  if (typeof args.prompt_file !== 'string' || !isAbsolute(args.prompt_file)) {
+    return { ok: false, reason: `prompt_file must be absolute${onWindows}` }
   }
   if (ctx.promptFileOk === false) return { ok: false, reason: `refused: prompt file ${args.prompt_file} is missing or empty` }
+  if (isWin && ctx.promptChars !== undefined && ctx.promptChars > WINDOWS_PROMPT_MAX_CHARS) {
+    return {
+      ok: false,
+      reason: `refused: on Windows the prompt goes on a command line of at most 32767 characters; it has ${ctx.promptChars}, the limit is ${WINDOWS_PROMPT_MAX_CHARS}: shorten it or move detail into files the worker reads`,
+    }
+  }
+  if (isWin && ctx.promptLead !== undefined && MSYS_REWRITTEN.test(ctx.promptLead)) {
+    return {
+      ok: false,
+      reason: 'refused: on Windows Git Bash rewrites an argument that starts like a POSIX path (/x, -I/x, NAME=/x) into a Windows path, and the prompt is one argument: start it with a word or a heading',
+    }
+  }
   if (ctx.missingItems !== undefined && ctx.missingItems.length > 0) {
     return { ok: false, reason: `refused: the prompt lacks: ${ctx.missingItems.join('; ')}` }
   }
   if (ctx.dirOk === false) return { ok: false, reason: `refused: directory ${args.dir} does not exist` }
-  const dir = normalize(args.dir)
-  if (dir === normalize(ctx.orchestratorDir)) return { ok: false, reason: 'refused: cwd is the orchestrator dir' }
-  if (dir === normalize(ctx.home)) return { ok: false, reason: 'refused: cwd is $HOME' }
+  const isSame = (a: string, b: string) => (isWin ? isSameWinPath(a, b) : normalize(a) === normalize(b))
+  if (isSame(args.dir, ctx.orchestratorDir)) return { ok: false, reason: 'refused: cwd is the orchestrator dir' }
+  if (isSame(args.dir, ctx.home)) return { ok: false, reason: 'refused: cwd is $HOME' }
 
   if (args.resume_sid !== undefined) {
     const entry = ctx.entries.find(one => one.session_id === args.resume_sid)
@@ -487,10 +522,17 @@ export function checkLaunch(args: LaunchArgs, ctx: LaunchFacts): LaunchVerdict {
   if (pick.exitCode !== 0 || configDir === '') {
     return { ok: false, reason: `the licence picker gave nothing usable (exit ${pick.exitCode})` }
   }
-  if (!configDir.startsWith('/') || configDir.includes('\n')) {
+  if (!isAbsolute(configDir) || configDir.includes('\n')) {
     return { ok: false, reason: `the licence picker answered an unexpected value: ${configDir.slice(0, 80)}` }
   }
-  return { ok: true, configDir }
+  return { ok: true, configDir: isWin ? winPath(configDir) : configDir }
+}
+
+/** On Windows the licence picker command starts with its executable's absolute path: what a bare name finds there is unknown. */
+export function windowsPickerRefusal(argv: readonly string[]): string | undefined {
+  const exe = argv[0] ?? ''
+  if (isWinAbsolute(exe)) return undefined
+  return `refused: on Windows the licence picker command must start with the absolute path of an executable (C:/.../picker.exe), not "${exe.slice(0, 80)}"`
 }
 
 /** The licence picker command as an argv: split on blanks, `{need}` replaced, a leading `~/` expanded. */
@@ -1147,10 +1189,14 @@ export function unackedPeers(ledger: readonly PeerNote[]): string[] {
 
 // --- live view of a worker -------------------------------------------------
 
-/** Where a worker's transcript lives: <config_dir>/projects/<cwd with every non-alphanumeric as ->/<sid>.jsonl */
-export function transcriptPath(entry: SessionEntry): string | undefined {
+/**
+ * Where a worker's transcript lives: <config_dir>/projects/<cwd with every non-alphanumeric as ->/<sid>.jsonl. On
+ * Windows the engine names the folder after its native cwd (C:\x\y is C--x-y), so the cwd is taken in that form.
+ */
+export function transcriptPath(entry: SessionEntry, isWindows = false): string | undefined {
   if (typeof entry.config_dir !== 'string' || typeof entry.cwd !== 'string' || typeof entry.session_id !== 'string') return undefined
-  return `${entry.config_dir}/projects/${entry.cwd.replace(/[^A-Za-z0-9]/g, '-')}/${entry.session_id}.jsonl`
+  const cwd = isWindows ? winPath(entry.cwd) : entry.cwd
+  return `${entry.config_dir}/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}/${entry.session_id}.jsonl`
 }
 
 /** Pick the entry a /session-control watch argument names: sid prefix or title fragment; none given = the first running one. */

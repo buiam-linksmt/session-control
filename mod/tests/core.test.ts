@@ -50,6 +50,9 @@ import {
   isWinAbsolute,
   tailLines,
   winPath,
+  WINDOWS_PROMPT_MAX_CHARS,
+  MSYS_REWRITTEN,
+  windowsPickerRefusal,
 } from '../hooks/core'
 import type { LaunchArgs, LaunchFacts } from '../hooks/core'
 import { freshText } from '../hooks/store'
@@ -69,6 +72,7 @@ import {
   TASK_NOTIFICATION_KILLED,
   REGISTRY_GOLDEN,
   WIN_PROBE_STDOUT,
+  MSYS_PROMPTS,
 } from './fixtures'
 import type { SessionEntry } from '../types'
 
@@ -727,5 +731,91 @@ describe('the new worker of a launch', () => {
     // A worker the probe placed wins over one it could not.
     const both = parseProcFacts([line(5, '', ''), line(6, 'C:/work/new', 'C:/Users/u/.claude')].join('\n'))
     expect(findNewWindowsWorker(both, winWant, new Set(), 10)?.pid).toBe(6)
+  })
+})
+
+describe('launch line', () => {
+  const linux: LaunchArgs = { dir: '/work/new', prompt_file: '/tmp/scratch/prompt.md', model: 'opus', effort: 'high', title: 'new' }
+  test('Linux: the line it always was', () => {
+    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude' }, '/home/u/.claude/session-control/runs/r.json', '/home/u/.claude/session-control/runs/r.err')).toEqual([
+      'sh',
+      '-c',
+      "cd '/work/new' && CLAUDE_CONFIG_DIR='/home/u/.claude' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/home/u/.claude/session-control/runs/r.json' 2> '/home/u/.claude/session-control/runs/r.err'",
+    ])
+    expect(buildLaunchArgv({ ...linux, dir: '/c/foo' }, { configDir: '/c/cfg', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111' }, '/r.json')[2]).toBe(
+      "cd '/c/foo' && CLAUDE_CONFIG_DIR='/c/cfg' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
+    )
+  })
+
+  test('Windows: the same line for Git Bash, every path native C:/... in single quotes', () => {
+    const args: LaunchArgs = { ...linux, dir: winPath("/c/Users/John Smith/O'Brien proj/"), prompt_file: winPath('/c/Users/John Smith/AppData/Local/Temp/prompt.md') }
+    const runs = 'C:/Users/John Smith/.claude/session-control/runs'
+    expect(buildLaunchArgv(args, { configDir: winPath('C:\\Users\\John Smith\\.claude') }, `${runs}/r.json`, `${runs}/r.err`)[2]).toBe(
+      "cd 'C:/Users/John Smith/O'\\''Brien proj' && CLAUDE_CONFIG_DIR='C:/Users/John Smith/.claude' CLAUDE_CODE_EFFORT_LEVEL='high' " +
+        "claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/John Smith/AppData/Local/Temp/prompt.md')\" " +
+        "> 'C:/Users/John Smith/.claude/session-control/runs/r.json' 2> 'C:/Users/John Smith/.claude/session-control/runs/r.err'",
+    )
+  })
+})
+
+describe('launch guard on Windows', () => {
+  const args: LaunchArgs = { dir: 'C:/work/new', prompt_file: 'C:/Users/u/AppData/Local/Temp/p.md', model: 'opus', effort: 'high', title: 'new' }
+  const ctx: LaunchFacts = {
+    home: 'C:/Users/u',
+    orchestratorDir: 'C:/Users/u/workspaces/session_control',
+    entries: [],
+    facts: parseProcFacts(''),
+    pick: { exitCode: 0, stdout: 'C:/Users/u/.claude' },
+    isWindows: true,
+  }
+  test('native paths pass; a POSIX one is refused with the Windows spelling', () => {
+    expect(checkLaunch(args, ctx)).toEqual({ ok: true, configDir: 'C:/Users/u/.claude' })
+    expect(checkLaunch({ ...args, dir: '/tmp/x' }, ctx)).toEqual({ ok: false, reason: 'dir must be absolute (on Windows /c/... or C:/...)' })
+    expect(checkLaunch({ ...args, prompt_file: '/tmp/p.md' }, ctx)).toEqual({ ok: false, reason: 'prompt_file must be absolute (on Windows /c/... or C:/...)' })
+    // Without the Windows flag nothing changes: a C:/ path is not absolute, and the reason has no Windows hint.
+    expect(checkLaunch(args, { ...ctx, isWindows: undefined })).toEqual({ ok: false, reason: 'dir must be absolute' })
+  })
+
+  test('the orchestrator dir and home are refused in any spelling and case', () => {
+    expect(checkLaunch({ ...args, dir: 'c:/users/U/Workspaces/session_control' }, ctx)).toEqual({ ok: false, reason: 'refused: cwd is the orchestrator dir' })
+    expect(checkLaunch({ ...args, dir: winPath('/c/Users/u/') }, ctx)).toEqual({ ok: false, reason: 'refused: cwd is $HOME' })
+  })
+
+  test('a picker answer in any Windows spelling is taken in native form; a POSIX one is refused', () => {
+    expect(checkLaunch(args, { ...ctx, pick: { exitCode: 0, stdout: 'C:\\Users\\u\\.claude\\lic\\b\r\n' } })).toEqual({ ok: true, configDir: 'C:/Users/u/.claude/lic/b' })
+    expect(checkLaunch(args, { ...ctx, pick: { exitCode: 0, stdout: '/home/u/.claude' } })).toEqual({ ok: false, reason: 'the licence picker answered an unexpected value: /home/u/.claude' })
+  })
+
+  test(`a prompt over ${WINDOWS_PROMPT_MAX_CHARS} characters is refused on Windows only`, () => {
+    expect(checkLaunch(args, { ...ctx, promptChars: WINDOWS_PROMPT_MAX_CHARS }).ok).toBe(true)
+    const refused = checkLaunch(args, { ...ctx, promptChars: WINDOWS_PROMPT_MAX_CHARS + 1 })
+    expect(refused.ok === false && refused.reason.startsWith('refused: on Windows the prompt goes on a command line of at most 32767 characters; it has 30001')).toBe(true)
+    expect(checkLaunch({ ...args, dir: '/work/new', prompt_file: '/p.md' }, { ...ctx, home: '/home/u', orchestratorDir: '/o', pick: { exitCode: 0, stdout: '/c' }, isWindows: undefined, promptChars: 100_000 }).ok).toBe(true)
+  })
+
+  test('a prompt Git Bash would rewrite is refused on Windows, any other passes', () => {
+    for (const one of MSYS_PROMPTS) {
+      const verdict = checkLaunch(args, { ...ctx, promptLead: one.text.slice(0, 200) })
+      expect([one.text, verdict.ok]).toEqual([one.text, !one.rewritten])
+      expect([one.text, MSYS_REWRITTEN.test(one.text)]).toEqual([one.text, one.rewritten])
+    }
+    const refused = checkLaunch(args, { ...ctx, promptLead: '/c/x' })
+    expect(refused.ok === false && refused.reason.startsWith('refused: on Windows Git Bash rewrites an argument that starts like a POSIX path')).toBe(true)
+    expect(checkLaunch({ ...args, dir: '/w', prompt_file: '/p' }, { ...ctx, home: '/h', orchestratorDir: '/o', pick: { exitCode: 0, stdout: '/c' }, isWindows: undefined, promptLead: '/c/x' }).ok).toBe(true)
+  })
+
+  test('the licence picker on Windows starts with an absolute executable', () => {
+    expect(windowsPickerRefusal(['pick', '--need', '40'])).toBe('refused: on Windows the licence picker command must start with the absolute path of an executable (C:/.../picker.exe), not "pick"')
+    expect(windowsPickerRefusal([])).toContain('not ""')
+    expect(windowsPickerRefusal(['C:/tools/pick.exe', '--need', '40'])).toBeUndefined()
+    expect(windowsPickerRefusal(['/c/tools/pick.exe'])).toBeUndefined()
+    expect(windowsPickerRefusal(pickArgv('~/bin/pick.exe --need {need}', 40, 'C:/Users/u'))).toBeUndefined()
+  })
+
+  test('the transcript folder is named after the native cwd on Windows, the given one on Linux', () => {
+    const entry = { config_dir: 'C:/Users/u/.claude', cwd: '/c/Users/u/proj', session_id: SID_ALIVE }
+    expect(transcriptPath(entry, true)).toBe(`C:/Users/u/.claude/projects/C--Users-u-proj/${SID_ALIVE}.jsonl`)
+    expect(transcriptPath({ ...entry, cwd: 'C:\\Users\\u\\proj\\' }, true)).toBe(`C:/Users/u/.claude/projects/C--Users-u-proj/${SID_ALIVE}.jsonl`)
+    expect(transcriptPath(entry)).toBe(`C:/Users/u/.claude/projects/-c-Users-u-proj/${SID_ALIVE}.jsonl`)
   })
 })

@@ -11,6 +11,8 @@ import {
   PROBE_PS1,
   PROBE_SCRIPT,
   findNewWindowsWorker,
+  isSameWinPath,
+  windowsPickerRefusal,
   isWinAbsolute,
   tailLines,
   winPath,
@@ -408,7 +410,7 @@ async function refreshWatch($: EngineInterface): Promise<void> {
   if (!isActive || sid === null) return
   const parsed = parseRegistry(await readRegistryText($))
   const entry = parsed.ok ? parsed.entries.find(one => one.session_id === sid) : undefined
-  const path = entry === undefined ? undefined : transcriptPath(entry)
+  const path = entry === undefined ? undefined : transcriptPath(entry, await isWindows($))
   const title = entry?.title ?? sid.slice(0, 8)
   if (path === undefined) {
     await update($, watch, () => ({ title, lines: ['no transcript path for this entry'] }))
@@ -522,22 +524,30 @@ async function retire($: EngineInterface, ids: readonly string[]) {
   return { result: `Retired: ${removed}.${refused}` }
 }
 
-async function launch($: EngineInterface, args: LaunchArgs) {
+async function launch($: EngineInterface, given: LaunchArgs) {
+  const isWin = await isWindows($)
+  // On Windows the schema's leading / is Git Bash's /c/...: from here on, and in the registry, the native C:/... form.
+  const native = (path: unknown) => (typeof path === 'string' ? winPath(path) : path) as string
+  const args = isWin ? { ...given, dir: native(given.dir), prompt_file: native(given.prompt_file) } : given
   const home = await homeDir($)
   const reg = await registryAndFacts($)
   if ('deny' in reg) return reg
-  const promptCheck = await $.process.run(['test', '-s', args.prompt_file], { timeoutMs: 5_000 })
-  const dirCheck = await $.process.run(['test', '-d', args.dir], { timeoutMs: 5_000 })
+  const { promptFileOk, dirOk } = await launchChecks($, args, isWin)
   const promptText = await $.fs.read(args.prompt_file).catch(() => undefined)
   const resumeSid = typeof args.resume_sid === 'string' ? args.resume_sid : undefined
   // Without a picker command a fresh launch uses the machine's default config directory.
   const picker = config.licencePickCommand.trim()
-  const pick =
-    resumeSid !== undefined
-      ? undefined
-      : picker === ''
-        ? { exitCode: 0, stdout: `${home}/.claude` }
-        : await $.process.run(pickArgv(picker, args.need ?? 40, home), { timeoutMs: 20_000 })
+  let pick: { exitCode: number; stdout: string; stderr?: string } | undefined
+  if (resumeSid === undefined && picker === '') pick = { exitCode: 0, stdout: `${home}/.claude` }
+  else if (resumeSid === undefined) {
+    const argv = pickArgv(picker, args.need ?? 40, home)
+    if (isWin) {
+      const refusal = windowsPickerRefusal(argv)
+      if (refusal !== undefined) return { deny: `${PLUGIN}: ${refusal}` }
+      argv[0] = winPath(argv[0] ?? '')
+    }
+    pick = await $.process.run(argv, { timeoutMs: 20_000 })
+  }
   const verdict = checkLaunch(args, {
     home,
     orchestratorDir: config.orchestratorDir,
@@ -545,12 +555,31 @@ async function launch($: EngineInterface, args: LaunchArgs) {
     facts: reg.facts,
     pick,
     transcriptExists: resumeSid === undefined ? undefined : reg.facts.transcriptMtime.has(resumeSid),
-    promptFileOk: promptCheck.exitCode === 0,
-    dirOk: dirCheck.exitCode === 0,
+    promptFileOk,
+    dirOk,
     missingItems: promptText === undefined ? undefined : missingPromptItems(promptText),
+    ...(isWin ? { isWindows: true, promptChars: promptText?.length, promptLead: promptText?.slice(0, 200) } : {}),
   })
   if (!verdict.ok) return { deny: `${PLUGIN}: ${verdict.reason}` }
   return spawnWorker($, args, verdict, reg.entries, reg.facts)
+}
+
+/** Whether the prompt file is there and not empty, and the dir is a directory: `test -s` and `test -d` on Linux, $.fs.stat on Windows. */
+async function launchChecks($: EngineInterface, args: LaunchArgs, isWin: boolean): Promise<{ promptFileOk: boolean; dirOk: boolean }> {
+  if (isWin) {
+    const prompt = await $.fs.stat(args.prompt_file).catch(() => undefined)
+    const dir = await $.fs.stat(args.dir).catch(() => undefined)
+    return { promptFileOk: prompt?.kind === 'file' && prompt.size > 0, dirOk: dir?.kind === 'dir' }
+  }
+  const promptCheck = await $.process.run(['test', '-s', args.prompt_file], { timeoutMs: 5_000 })
+  const dirCheck = await $.process.run(['test', '-d', args.dir], { timeoutMs: 5_000 })
+  return { promptFileOk: promptCheck.exitCode === 0, dirOk: dirCheck.exitCode === 0 }
+}
+
+/** Waits a few seconds: `sleep` on Linux, the engine's clock on Windows, which has no sleep to start. */
+async function pause($: EngineInterface, seconds: number): Promise<void> {
+  if (await isWindows($)) await $.clock.sleep(seconds * 1000)
+  else await $.process.run(['sleep', String(seconds)], { timeoutMs: 5_000 })
 }
 
 /** Start the worker as a background Bash task, find its real pid and session, register it. */
@@ -561,14 +590,16 @@ async function spawnWorker(
   entries: readonly SessionEntry[],
   before: ProcFacts,
 ) {
+  const isWin = await isWindows($)
   const runsDir = await runsPath($)
-  await $.process.run(['mkdir', '-p', runsDir], { timeoutMs: 5_000 })
+  // The launch's redirections need the runs directory: mkdir on Linux; on Windows writing the file script makes it.
+  if (isWin) await ensureScript($, 'files.ps1', FILES_PS1)
+  else await $.process.run(['mkdir', '-p', runsDir], { timeoutMs: 5_000 })
   const stamp = new Date(await $.clock.now()).toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const base = `${runsDir}/${stamp}-${slugify(args.title)}`
   const files = { result: `${base}.json`, err: `${base}.err` }
   const command = buildLaunchArgv(args, verdict, files.result, files.err)[2] ?? ''
   const known = new Set(before.claude.map(one => one.pid))
-  const isWin = await isWindows($)
   const launchedAt = await $.clock.now()
   // The engine's own background task: its exit notification reaches the session.
   await $.tool.call({
@@ -580,7 +611,7 @@ async function spawnWorker(
   })
   let worker: ReturnType<typeof findNewWorker>
   for (let attempt = 0; attempt < 15 && worker === undefined; attempt++) {
-    await $.process.run(['sleep', '2'], { timeoutMs: 5_000 })
+    await pause($, 2)
     const facts = await probe($, entries, [verdict.configDir])
     const want = { dir: args.dir, configDir: verdict.configDir, model: args.model }
     worker = isWin ? findNewWindowsWorker(facts, want, known, ((await $.clock.now()) - launchedAt) / 1000) : findNewWorker(facts, want, known)
@@ -602,7 +633,7 @@ async function spawnWorker(
       // not written yet
     }
     if (sessionId !== '') break
-    await $.process.run(['sleep', '1'], { timeoutMs: 5_000 })
+    await pause($, 1)
   }
   if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
   const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files)
@@ -678,11 +709,15 @@ export const register: Register = (on, options) => {
       description: 'Session-control panel: open or close the side panel (sessions, queued work, open points)',
     })
     // Without the option, the orchestrator directory is the one whose CLAUDE.md is the orchestrator's.
-    const cwd = e.cwd.replace(/\/+$/, '')
+    // On Windows both are taken in the native form and compared as Windows compares paths.
+    const isWin = await isWindows($)
+    const cwd = isWin ? winPath(e.cwd) : e.cwd.replace(/\/+$/, '')
     if (config.orchestratorDir === '' && (await $.fs.read(`${cwd}/CLAUDE.md`).catch(() => '')).startsWith(ORCHESTRATOR_HEADING)) {
       config.orchestratorDir = cwd
     }
-    if (config.orchestratorDir !== '' && cwd === config.orchestratorDir.replace(/\/+$/, '')) await activate($)
+    if (isWin && config.orchestratorDir !== '') config.orchestratorDir = winPath(config.orchestratorDir)
+    const isHere = isWin ? isSameWinPath(cwd, config.orchestratorDir) : cwd === config.orchestratorDir.replace(/\/+$/, '')
+    if (config.orchestratorDir !== '' && isHere) await activate($)
     return started
   })
 

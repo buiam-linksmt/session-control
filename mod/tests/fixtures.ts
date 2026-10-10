@@ -160,3 +160,30 @@ export const REGISTRY_GOLDEN: RegistryGolden[] = [
   {"name": "ack: an item that is not an object is refused", "op": "ack", "registry": "[{\"session_id\":\"aaaaaaaa-1111-4111-8111-111111111111\"},2]", "ids": ["aaaaaaaa-1111-4111-8111-111111111111"], "keep": false, "expect": {"refused": true}}
 ]
 // REGISTRY_GOLDEN:END
+
+/**
+ * Prompts as Git Bash hands them to a Windows program (claude.exe), shared with tests/windows-selftest.py, which runs
+ * them through Git Bash: `rewritten` when MSYS turns the start of the argument into a Windows path. The text between
+ * the markers is plain JSON.
+ */
+// MSYS_PROMPTS:BEGIN
+export const MSYS_PROMPTS: { text: string; rewritten: boolean }[] = [
+  {"text": "Goal: do \"the\" thing; it's $HOME `x` \\ back\\slash caf\u00e9 \u2615\nkey=/c/Users/x\n--flag=/tmp/y\nC:\\Users\\x and /c/Users/x\n  indented", "rewritten": false},
+  {"text": "# Goal\n/c/Users/x", "rewritten": false},
+  {"text": "see /c/Users/x", "rewritten": false},
+  {"text": " /c/Users/x", "rewritten": false},
+  {"text": "\n/c/Users/x first line was empty", "rewritten": false},
+  {"text": "//server/share is a share", "rewritten": false},
+  {"text": "x:/c/y", "rewritten": false},
+  {"text": "https://example.com/a", "rewritten": false},
+  {"text": "C:/Users/x", "rewritten": false},
+  {"text": "Note: /c/x", "rewritten": false},
+  {"text": "/c/Users/u/x is a path\nsecond line", "rewritten": true},
+  {"text": "/tmp/x and more", "rewritten": true},
+  {"text": "a=/c/Users/x", "rewritten": true},
+  {"text": "key=/c/Users/x\nmore lines here", "rewritten": true},
+  {"text": "--opt=/c/x", "rewritten": true},
+  {"text": "-I/c/x rest of it", "rewritten": true},
+  {"text": "/c/a:/c/b", "rewritten": true}
+]
+// MSYS_PROMPTS:END

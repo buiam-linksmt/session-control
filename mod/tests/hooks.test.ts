@@ -52,8 +52,17 @@ const MISSING = new Set<string>()
 const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
-// Set to make the Windows file script's move, or the Windows probe, fail.
-const WINDOWS = { isMoveBroken: false, isProbeBroken: false }
+// Knobs of the Windows fixture: a failing move or probe; the config dir the probe finds the new worker's sessions
+// file in, or none (unplaced).
+const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false }
+const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
+/** The rows of the transcript tail the fixture serves. */
+const TAIL = [
+  { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the suite files.' }, { type: 'tool_use', name: 'Bash', input: { command: 'git status -sb' } }] } },
+  { type: 'user', message: { content: [{ type: 'tool_result', content: '## develop...origin/develop' }] } },
+]
+  .map(row => JSON.stringify(row))
+  .join('\n')
 
 /** Windows PowerShell as the mod runs it when SystemRoot is unset. */
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
@@ -87,6 +96,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
     if (path === '/fixture/results/limit.json') return { value: RESULTS.limit }
     if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
+    if (e.path.endsWith('C:/fixture/home/.claude/sessions/7001.json')) return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
+    if (path === '/work/new/big.md') return { value: BIG_PROMPT }
     // The mod's own scripts read back as written.
     const written = w.writes.filter(one => one.path === e.path && one.path.endsWith('.ps1')).at(-1)
     if (written !== undefined) return { value: written.text }
@@ -98,6 +109,13 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   })
   // A path the read above refuses is missing, unless it is one that cannot be read.
   on('fs.exists', ($, e) => ({ value: UNREADABLE.has(fixture(e.path)) }))
+  on('fs.stat', ($, e) => {
+    const path = fixture(e.path)
+    const stat = { size: 0, mtimeMs: NOW_MS, isLink: false }
+    if (['/work/new/prompt.md', '/work/new/big.md'].includes(path)) return { value: { ...stat, kind: 'file', size: promptFileExists ? 100 : 0 } }
+    if (['/work/new', '/work/orch', ORCH_DIR].includes(path)) return { value: { ...stat, kind: 'dir' } }
+    throw new Error(`ENOENT ${e.path}`)
+  })
   on('process.run', ($, e) => {
     w.runs.push([...e.argv])
     const ok = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
@@ -129,8 +147,9 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === '/fixture/bin/pick') return { value: { ...ok, stdout: pickStdout, exitCode: pickStdout ? 0 : 3 } }
     if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/probe.ps1')) {
       if (WINDOWS.isProbeBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Invalid class' } }
+      const placed = WINDOWS.isWorkerUnplaced ? ['', ''] : ['C:\\work\\new', WINDOWS.workerConfigDir]
       const worker = w.spawned
-        ? 'P\t7001\tclaude\t3\tC:\\work\\new\tC:/fixture/lic/a\t"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus --dangerously-skip-permissions --output-format json -- prompt\n'
+        ? ['P', 7001, 'claude', 3, ...placed, '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus --dangerously-skip-permissions --output-format json -- prompt'].join('\t') + '\n'
         : ''
       // PowerShell's own line ends.
       return { value: { ...ok, stdout: (WIN_PROBE_STDOUT + worker).replace(/\n/g, '\r\n') } }
@@ -142,7 +161,10 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
         const text = w.writes.filter(one => fixture(one.path) === fixture(String(from))).at(-1)?.text
         if (text !== undefined) w.writes.push({ path: String(to), text })
       }
-      return { value: { ...ok, stdout: '' } }
+      return { value: { ...ok, stdout: op === 'tail' ? TAIL : '' } }
+    }
+    if (e.argv[0] === 'C:/fixture/bin/pick.exe') {
+      return { value: { ...ok, stdout: pickStdout.replace(/^\/fixture/, 'C:\\fixture').replace(/\//g, '\\').replace(/\n$/, '\r\n'), exitCode: pickStdout ? 0 : 3 } }
     }
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
   })
@@ -703,6 +725,114 @@ describe('platform', () => {
     } finally {
       WINDOWS.isProbeBroken = false
     }
+  })
+
+  /** A call that waits on $.clock.sleep: the mocked clock is moved on until it settles. */
+  const settled = async <T>(w: World, pending: Promise<T>): Promise<T> => {
+    let isDone = false
+    void pending.then(
+      () => (isDone = true),
+      () => (isDone = true),
+    )
+    for (let step = 0; step < 90 && !isDone; step++) await w.clock.advance(1000)
+    return pending
+  }
+  const winArgs = { dir: '/c/work/new', prompt_file: '/c/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
+  const WIN_HOME_CLAUDE = 'C:/fixture/home/.claude'
+  const NO_PICKER = { ...WIN_OPTIONS, licencePickCommand: '' }
+
+  test('Windows: a launch given /c/ paths runs native paths, no POSIX tool, finds the worker and registers it', { options: NO_PICKER }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+    expect(String(out.result)).toBe(
+      `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${WIN_HOME_CLAUDE}, registered. ` +
+        `Result: ${WIN_RUNS}/20260921141320-new.json; errors: ${WIN_RUNS}/20260921141320-new.err.`,
+    )
+    expect(w.bash[0]?.command).toBe(
+      `cd 'C:/work/new' && CLAUDE_CONFIG_DIR='${WIN_HOME_CLAUDE}' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json ` +
+        `-- "$(cat 'C:/work/new/prompt.md')" > '${WIN_RUNS}/20260921141320-new.json' 2> '${WIN_RUNS}/20260921141320-new.err'`,
+    )
+    expect(lastRegistry(w).at(-1)).toEqual({
+      title: 'new',
+      pid: 7001,
+      session_id: 'abcdabcd-0000-4000-8000-000000000001',
+      config_dir: WIN_HOME_CLAUDE,
+      cwd: 'C:/work/new',
+      model: 'opus',
+      effort: 'high',
+      result_file: `${WIN_RUNS}/20260921141320-new.json`,
+      err_file: `${WIN_RUNS}/20260921141320-new.err`,
+    })
+    // Every command is Windows PowerShell running one of the mod's scripts; the launch's probes also search its config dir.
+    expect(w.runs.every(argv => argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6])))).toBe(true)
+    expect(w.runs.some(argv => String(argv[6]).endsWith('/probe.ps1') && argv.at(-1) === `c:${WIN_HOME_CLAUDE}`)).toBe(true)
+  })
+
+  test('Windows: a new claude.exe whose sessions file the probe found nowhere is still the worker', { options: NO_PICKER }, async ($, on) => {
+    WINDOWS.isWorkerUnplaced = true
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      expect(String(out.result)).toContain('Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001')
+      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, cwd: 'C:/work/new', config_dir: WIN_HOME_CLAUDE })
+    } finally {
+      WINDOWS.isWorkerUnplaced = false
+    }
+  })
+
+  test('Windows: a picker named by absolute path runs, and its answer is taken in native form', { options: { ...WIN_OPTIONS, licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
+    WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs, need: 25 } as never))
+      expect(w.runs).toContainEqual(['C:/fixture/bin/pick.exe', '--need', '25'])
+      expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered')
+      expect(String(w.bash[0]?.command)).toContain("CLAUDE_CONFIG_DIR='C:/fixture/lic/a'")
+    } finally {
+      WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
+    }
+  })
+
+  test('Windows: a picker by bare name is refused before anything runs', { options: { ...WIN_OPTIONS, licencePickCommand: 'pick --need {need}' } }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+    expect(String(out.deny)).toBe('session-control: refused: on Windows the licence picker command must start with the absolute path of an executable (C:/.../picker.exe), not "pick"')
+    expect(w.runs.some(argv => argv[0] === 'pick')).toBe(false)
+    expect(w.bash.length).toBe(0)
+  })
+
+  test('Windows: a prompt too long for the command line is refused, a POSIX path too', { options: NO_PICKER }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const big = await $.tool.call({ tool: TOOL, ...winArgs, prompt_file: '/c/work/new/big.md' } as never)
+    expect(String(big.deny)).toContain(`it has ${BIG_PROMPT.length}, the limit is 30000`)
+    const posix = await $.tool.call({ tool: TOOL, ...winArgs, dir: '/tmp/new' } as never)
+    expect(String(posix.deny)).toBe('session-control: dir must be absolute (on Windows /c/... or C:/...)')
+    const gone = await $.tool.call({ tool: TOOL, ...winArgs, dir: '/c/work/gone' } as never)
+    expect(String(gone.deny)).toBe('session-control: refused: directory C:/work/gone does not exist')
+    expect(w.bash.length).toBe(0)
+  })
+
+  test('Windows: an empty prompt file is told by $.fs.stat', { options: NO_PICKER }, async ($, on) => {
+    const w = world(on, '', false, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    expect(String((await $.tool.call({ tool: TOOL, ...winArgs } as never)).deny)).toBe('session-control: refused: prompt file C:/work/new/prompt.md is missing or empty')
+    expect(w.bash.length).toBe(0)
+  })
+
+  test('Windows: a session\'s output box reads its transcript, past the read cap through the file script', { options: WIN_OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    stubPanel(on)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    await $.command.run({ command: 'session-control', args: '' } as never)
+    const ui = await mountPane($)
+    await ui.press({ key: `s:${SID_ALIVE}` })
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+    expect(w.runs).toContainEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'tail', `/fixture/lic/a/projects/-work-a/${SID_ALIVE}.jsonl`, '600', '20000'])
   })
 
   test('Windows: a HOME that Git Bash handed on (/c/...) is home, in native form', { options: WIN_OPTIONS }, async ($, on) => {
