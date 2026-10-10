@@ -456,6 +456,8 @@ describe('completion', () => {
     expect(w.toasts[0]).toStartWith('Session finished · limited worker: clean: ')
     const entry = lastRegistry(w).find(one => one.session_id === SID_DEAD)
     expect((entry?.outcome as { kind?: string }).kind).toBe('clean')
+    // The harvest time, in epoch seconds, ends the run's duration.
+    expect(entry?.ended_at).toBe(NOW_MS / 1000)
   })
 
   test('the report check adds one line to the completion notice of a clean report without the git reads; the toast and the outcome stay', { options: OPTIONS }, async ($, on) => {
@@ -537,7 +539,7 @@ describe('launch_worker', () => {
     await $.session.start(start(ORCH_DIR))
     const out = await $.tool.call({ tool: TOOL, ...args } as never)
     expect(String(out.result)).toContain('registered. Name: w-new-260921141320; socket: /run/user/1000/cc-socks/7001.sock. Result: ')
-    expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, name: 'w-new-260921141320', socket_path: '/run/user/1000/cc-socks/7001.sock' })
+    expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, name: 'w-new-260921141320', socket_path: '/run/user/1000/cc-socks/7001.sock', started_at: NOW_MS / 1000 })
   })
 
   test('an older claude whose sessions file has no inbox fields: the launch name, no socket_path, still registered', { options: OPTIONS }, async ($, on) => {
@@ -632,6 +634,20 @@ describe('launch_worker', () => {
       await $.session.start(start(ORCH_DIR))
       expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
       expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}' -n 'w-first-run-260901080000' --settings '{"crossSessionInbound":"accept"}' --dangerously`)
+    })
+    test('sets the new run\'s started_at and drops the previous run\'s ended_at', { options: OPTIONS }, async ($, on) => {
+      const timed = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? { ...one, started_at: 1_700_000_000, ended_at: 1_700_000_312 } : one)))
+      WORKER.sid = SID_UNREPORTED
+      try {
+        const w = world(on, '/fixture/lic/a\n', true, timed)
+        await $.session.start(start(ORCH_DIR))
+        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        const entry = lastRegistry(w).find(one => one.session_id === SID_UNREPORTED) as Record<string, unknown>
+        expect(entry).toMatchObject({ pid: 7001, started_at: NOW_MS / 1000 })
+        expect('ended_at' in entry).toBe(false)
+      } finally {
+        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
+      }
     })
     const stale = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? { ...one, name: 'w-first-run-260901080000', socket_path: '/run/user/1000/cc-socks/1.sock' } : one)))
     test('records the new socket over the old one', { options: OPTIONS }, async ($, on) => {
@@ -1249,6 +1265,7 @@ describe('platform', () => {
       effort: 'high',
       result_file: `${WIN_RUNS}/20260921141320-new.json`,
       err_file: `${WIN_RUNS}/20260921141320-new.err`,
+      started_at: NOW_MS / 1000,
     })
     // Every command is Windows PowerShell running one of the mod's scripts; the launch's probes also search its config dir.
     expect(w.runs.every(argv => argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6])))).toBe(true)
@@ -1658,5 +1675,92 @@ describe('debug trace', () => {
     } finally {
       LINUX_FIXTURE.traceSize = 0
     }
+  })
+})
+
+describe('seconds tick', () => {
+  // started_at 42 s before the fixture clock for the running entry; a finished run of 5m12s.
+  const TIMED = JSON.stringify(
+    JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) =>
+      one.session_id === SID_ALIVE ? { ...one, started_at: NOW_MS / 1000 - 42 } : one.session_id === SID_UNREPORTED ? { ...one, started_at: NOW_MS / 1000 - 4000, ended_at: NOW_MS / 1000 - 3688 } : one,
+    ),
+  )
+  type Ui = Awaited<ReturnType<typeof mountPane>>
+  /** The elapsed text at the end of a session row. */
+  const elapsedOf = async (ui: Ui, sid: string) => String((await ui.find({ key: `s:${sid}` }))?.props.label).trimEnd().split(/\s+/).at(-1)
+  const setup = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On) => {
+    const w = world(on, '/fixture/lic/a\n', true, TIMED)
+    const pane = { isUp: false, isShown: true, asked: 0 }
+    on('ui.open', () => {
+      pane.isUp = true
+      return { value: { isPlaced: true } } as never
+    })
+    on('ui.panes', () => {
+      pane.asked++
+      return { value: pane.isUp ? [{ id: 'session-control', title: 'Session control', isShown: pane.isShown, isFocused: false, isPlaced: true }] : [] } as never
+    })
+    await $.session.start(start(ORCH_DIR))
+    await $.command.run({ command: 'session-control', args: '' } as never)
+    return { w, pane, ui: await mountPane($) }
+  }
+
+  test('each second the running row counts on from started_at and the finished row keeps its run, with no process and no file read', { options: OPTIONS }, async ($, on) => {
+    const { w, ui } = await setup($, on)
+    expect(await elapsedOf(ui, SID_ALIVE)).toBe('42s')
+    expect(await elapsedOf(ui, SID_UNREPORTED)).toBe('5m12s')
+    const [runs, reads] = [w.runs.length, w.reads.length]
+    const seen: string[] = []
+    for (let step = 0; step < 4; step++) {
+      await w.clock.advance(1000)
+      seen.push(`${await elapsedOf(ui, SID_ALIVE)} ${await elapsedOf(ui, SID_UNREPORTED)}`)
+    }
+    expect(seen).toEqual(['43s 5m12s', '44s 5m12s', '45s 5m12s', '46s 5m12s'])
+    expect([w.runs.length, w.reads.length]).toEqual([runs, reads])
+  })
+
+  test('the tick stops when the command hides the panel, and comes back with the panel', { options: OPTIONS }, async ($, on) => {
+    const { w, pane, ui } = await setup($, on)
+    await w.clock.advance(1000)
+    expect(await elapsedOf(ui, SID_ALIVE)).toBe('43s')
+    await $.command.run({ command: 'session-control', args: '' } as never)
+    pane.isUp = false
+    const asked = pane.asked
+    await w.clock.advance(3000)
+    // No tick asked for the panes after the hide (the poll at 5 s has not come).
+    expect(pane.asked).toBe(asked)
+    expect(await elapsedOf(ui, SID_ALIVE)).toBe('43s')
+    await $.command.run({ command: 'session-control', args: '' } as never)
+    await w.clock.advance(1000)
+    expect(await elapsedOf(ui, SID_ALIVE)).toBe('47s')
+  })
+
+  test('closed by the engine\'s close mark or hidden behind another pane, the tick ends itself; the poll brings it back once the panel shows', { options: OPTIONS }, async ($, on) => {
+    const { w, pane, ui } = await setup($, on)
+    await w.clock.advance(1000)
+    pane.isShown = false
+    await w.clock.advance(1000)
+    const asked = pane.asked
+    await w.clock.advance(2000)
+    expect(pane.asked).toBe(asked)
+    expect(await elapsedOf(ui, SID_ALIVE)).toBe('43s')
+    pane.isShown = true
+    // The poll (every 5 s) sees the panel shown again and arms the tick.
+    await w.clock.advance(1000)
+    await w.clock.advance(1000)
+    expect(await elapsedOf(ui, SID_ALIVE)).toBe('48s')
+    pane.isUp = false
+    await w.clock.advance(1000)
+    const gone = pane.asked
+    await w.clock.advance(2000)
+    expect(pane.asked).toBe(gone)
+  })
+
+  test('an expanded section and a selected point stay as they are across ticks', { options: OPTIONS }, async ($, on) => {
+    const { w, ui } = await setup($, on)
+    await ui.press({ key: 'x:points' })
+    await ui.press({ key: 'p:a:0' })
+    for (let step = 0; step < 3; step++) await w.clock.advance(1000)
+    expect((await ui.find({ key: 'x:points' }))?.props.label).toBe('[-]')
+    expect(String(((await ui.findAll({}))[0] as { text?: string }).text)).toContain('Detail one')
   })
 })

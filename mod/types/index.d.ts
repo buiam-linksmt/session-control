@@ -17,6 +17,10 @@ export type SessionEntry = {
   name?: string
   /** The worker's messaging socket (messagingSocketPath of its sessions file), valid while its pid lives; null after a resume whose file had none. */
   socket_path?: string | null
+  /** When the launch started the current run (epoch seconds); a resume sets the new run's. Absent in older entries. */
+  started_at?: number
+  /** When the mod harvested the run's completion (epoch seconds); a resume drops it. */
+  ended_at?: number
   [field: string]: unknown
 }
 
@@ -42,8 +46,12 @@ export type SessionRow = {
   configDir: string
   status: SessionRowStatus
   pid?: number
-  /** Seconds the process has run (alive rows). */
+  /** Seconds the process had run at the probe (alive and orphan rows). */
   elapsedSec?: number
+  /** The entry's `started_at` (epoch seconds), when it has one. */
+  startedAt?: number
+  /** The entry's `ended_at` (epoch seconds), when it has one. */
+  endedAt?: number
   /** Seconds since the newest transcript write. */
   transcriptAgeSec?: number
   costUsd?: number
@@ -61,6 +69,8 @@ declare module 'claude-code' {
   interface PluginState {
     'session-control': {
       snapshot: SessionSnapshot | null
+      /** The display clock of the elapsed column (epoch seconds), moved on by the one-second tick while the panel is shown; 0 before the first tick. */
+      now: number
       /** Completion lines not yet handed to the model. */
       pendingNotes: string[]
       /** The watched worker's recent readable transcript lines; null before a watch. */

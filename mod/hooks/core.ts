@@ -222,6 +222,8 @@ export function buildRows(
       status,
       pid: typeof entry.pid === 'number' ? entry.pid : undefined,
       elapsedSec: status === 'alive' ? proc?.elapsedSec : undefined,
+      ...(typeof entry.started_at === 'number' ? { startedAt: entry.started_at } : {}),
+      ...(typeof entry.ended_at === 'number' ? { endedAt: entry.ended_at } : {}),
       transcriptAgeSec: mtime === undefined ? undefined : Math.max(0, nowSec - mtime),
       costUsd: typeof outcome?.costUsd === 'number' ? outcome.costUsd : undefined,
     })
@@ -242,10 +244,30 @@ export function buildRows(
   return rows.sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status])
 }
 
+/** An elapsed time: `42s` under a minute, `5m12s` under an hour, `1h05m` from an hour up. */
 export function formatAge(sec: number): string {
-  if (sec < 60) return `${Math.round(sec)}s`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m`
-  return `${Math.floor(sec / 3600)}h${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}`
+  const whole = Math.max(0, Math.floor(sec))
+  const two = (n: number) => String(n).padStart(2, '0')
+  if (whole < 60) return `${whole}s`
+  if (whole < 3600) return `${Math.floor(whole / 60)}m${two(whole % 60)}s`
+  return `${Math.floor(whole / 3600)}h${two(Math.floor((whole % 3600) / 60))}m`
+}
+
+/** The display clock of the elapsed column: now, and when the rows' probe ran (epoch seconds). */
+export type ElapsedClock = { nowSec: number; probedSec: number }
+
+/**
+ * A row's elapsed seconds at the display clock: a running entry's time since its `started_at`; a finished entry's run,
+ * `ended_at` less `started_at`; otherwise (an orphan, an entry from before `started_at`) the process age the probe
+ * read, plus the time since that probe. Undefined when there is nothing to tell (a finished entry without both
+ * times). Without a clock: the values as the probe left them.
+ */
+export function elapsedSeconds(row: SessionRow, clock?: ElapsedClock): number | undefined {
+  if (row.status === 'alive' && row.startedAt !== undefined && clock !== undefined) return Math.max(0, clock.nowSec - row.startedAt)
+  const isFinished = row.status === 'dead' || row.status === 'unreported' || row.status === 'done'
+  if (isFinished && row.startedAt !== undefined && row.endedAt !== undefined) return Math.max(0, row.endedAt - row.startedAt)
+  if (row.elapsedSec === undefined) return undefined
+  return row.elapsedSec + (clock === undefined ? 0 : Math.max(0, clock.nowSec - clock.probedSec))
 }
 
 /** The words shown for each status. */
@@ -261,19 +283,20 @@ const GAP = '   '
 
 export type PaneWidths = { title: number; sid: number; status: number; model: number; effort: number }
 
-function elapsedText(row: SessionRow): string {
-  return row.elapsedSec === undefined ? '-' : formatAge(row.elapsedSec)
+function elapsedText(row: SessionRow, clock?: ElapsedClock): string {
+  const sec = elapsedSeconds(row, clock)
+  return sec === undefined ? '-' : formatAge(sec)
 }
 
 /** Column widths from the content, so the columns sit close; the title takes what is left. */
-export function paneWidths(rows: readonly SessionRow[], columns: number): PaneWidths {
+export function paneWidths(rows: readonly SessionRow[], columns: number, clock?: ElapsedClock): PaneWidths {
   const widest = (header: string, cell: (row: SessionRow) => string) =>
     Math.max(header.length, ...rows.map(row => cell(row).length))
   const sid = widest('sid', row => row.sid8 || '-')
   const status = widest('status', row => statusLabel(row.status))
   const model = widest('model', row => row.model)
   const effort = widest('effort', row => row.effort)
-  const elapsed = widest('elapsed', elapsedText)
+  const elapsed = widest('elapsed', row => elapsedText(row, clock))
   const rest = sid + status + model + effort + elapsed + GAP.length * 5
   const wanted = widest('title', row => row.title)
   return { title: Math.max(12, Math.min(wanted, columns - rest)), sid, status, model, effort }
@@ -287,8 +310,8 @@ function cut(line: string, columns: number): string {
   return line.length > columns ? line.slice(0, Math.max(1, columns - 1)) + '…' : line
 }
 
-/** One pane line for a row: title, status, model, effort, elapsed; cut to `columns`. */
-export function formatRow(row: SessionRow, columns: number, widths: PaneWidths = paneWidths([row], columns)): string {
+/** One pane line for a row: title, status, model, effort, elapsed at the display clock; cut to `columns`. */
+export function formatRow(row: SessionRow, columns: number, widths: PaneWidths = paneWidths([row], columns), clock?: ElapsedClock): string {
   return cut(
     [
       fit(row.title, widths.title),
@@ -296,7 +319,7 @@ export function formatRow(row: SessionRow, columns: number, widths: PaneWidths =
       fit(statusLabel(row.status), widths.status),
       fit(row.model, widths.model),
       fit(row.effort, widths.effort),
-      elapsedText(row),
+      elapsedText(row, clock),
     ].join(GAP),
     columns,
   )
@@ -515,11 +538,12 @@ export type MergeResult =
 /**
  * Merges a completion into the registry text IN PLACE: the entry with that
  * session id keeps every field it has (the licence daemon's `resume` object
- * among them), loses `pid`, gains `reported: false` and `outcome`. Every other
+ * among them), loses `pid`, gains `reported: false`, `outcome` and `ended_at`
+ * (`endedSec`, the harvest time in epoch seconds). Every other
  * entry is left as parsed. Refuses when the entry is gone or no longer has a
  * pid (someone else already harvested it).
  */
-export function mergeCompletion(registryText: string, sessionId: string, outcome: SessionOutcome): MergeResult {
+export function mergeCompletion(registryText: string, sessionId: string, outcome: SessionOutcome, endedSec: number): MergeResult {
   let value: unknown
   try {
     value = JSON.parse(registryText)
@@ -536,6 +560,7 @@ export function mergeCompletion(registryText: string, sessionId: string, outcome
   delete entry.pid
   entry.reported = false
   entry.outcome = { kind: outcome.kind, summary: outcome.summary, ...(outcome.costUsd === undefined ? {} : { costUsd: outcome.costUsd }) }
+  entry.ended_at = endedSec
   return { changed: true, text: JSON.stringify(value, null, 2) + '\n', entry }
 }
 
@@ -856,7 +881,7 @@ export function sessionFileFacts(text: string): { sessionId?: string; name?: str
  * The registry entry for a launch (a resume merges it over the existing entry in place). `name` is the session name
  * (the sessions file's, else the one the launch passed); `socket_path` is the sessions file's `messagingSocketPath`,
  * valid while the pid lives. Without one a fresh entry has no `socket_path` and a resume writes null, so the dead
- * socket of the earlier run is not kept.
+ * socket of the earlier run is not kept. `started_at` is `startedSec`, when the launch started this run (epoch seconds).
  */
 export function newRegistryEntry(
   args: LaunchArgs,
@@ -865,6 +890,7 @@ export function newRegistryEntry(
   sessionId: string,
   files: { result: string; err: string },
   inbox: { name: string; socketPath?: string },
+  startedSec: number,
 ): SessionEntry {
   const socket = inbox.socketPath !== undefined ? { socket_path: inbox.socketPath } : verdict.resumeSid ? { socket_path: null } : {}
   return {
@@ -879,19 +905,20 @@ export function newRegistryEntry(
     effort: args.effort,
     result_file: files.result,
     err_file: files.err,
+    started_at: startedSec,
   }
 }
 
 /**
  * Appends (mode `new`) or updates in place (mode `resume`: the entry with that session id gets the
- * fields, `reported` and the previous `outcome` are dropped) one registry entry, through a temp file and `mv` so a reader never
+ * fields, `reported`, the previous `outcome` and the previous run's `ended_at` are dropped) one registry entry, through a temp file and `mv` so a reader never
  * sees half a file. Args: registry path, entry JSON, mode. Fields it does not know stay.
  */
 export const REGISTER_SCRIPT = String.raw`R=$1; E=$2; M=$3
 [ -f "$R" ] || echo '[]' > "$R"
 tmp="$R.tmp.$$"
 if [ "$M" = resume ]; then
-  jq --argjson e "$E" 'map(if .session_id == $e.session_id then (. + $e) | del(.reported, .outcome) else . end)' "$R" > "$tmp"
+  jq --argjson e "$E" 'map(if .session_id == $e.session_id then (. + $e) | del(.reported, .outcome, .ended_at) else . end)' "$R" > "$tmp"
 else
   jq --argjson e "$E" '. + [$e]' "$R" > "$tmp"
 fi && mv "$tmp" "$R"`
@@ -1029,7 +1056,7 @@ const isEntryOrNull = (one: unknown) => one === null || (typeof one === 'object'
 /** The ids as the scripts take them: one per line of their arguments. */
 const idLines = (ids: readonly string[]) => ids.flatMap(id => id.split('\n'))
 
-/** REGISTER_SCRIPT: `new` appends the entry; `resume` merges it over every entry with its session id, dropping `reported` and `outcome`. */
+/** REGISTER_SCRIPT: `new` appends the entry; `resume` merges it over every entry with its session id, dropping `reported`, `outcome` and `ended_at`. */
 export function registerEntry(text: string, entry: SessionEntry, mode: 'new' | 'resume'): RegistryEdit {
   if (mode === 'resume' && text.trim() === '') return { ok: true, text: '' }
   const read = registryList(text)
@@ -1043,6 +1070,7 @@ export function registerEntry(text: string, entry: SessionEntry, mode: 'new' | '
     const merged: Rec = { ...(one as Rec | null), ...fresh }
     delete merged.reported
     delete merged.outcome
+    delete merged.ended_at
     return merged
   })
   return { ok: true, text: jqText(list, 2) + '\n' }

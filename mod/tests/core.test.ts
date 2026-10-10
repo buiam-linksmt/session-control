@@ -58,6 +58,8 @@ import {
   findNewWorker,
   isHeadless,
   isLicenceRun,
+  elapsedSeconds,
+  formatAge,
   isSameWinPath,
   isWinAbsolute,
   tailLines,
@@ -322,7 +324,7 @@ describe('completion classifier', () => {
 
 describe('registry merge in place', () => {
   test('drops pid, sets reported:false, keeps resume and unknown fields, leaves others alone', () => {
-    const merged = mergeCompletion(REGISTRY_TEXT, SID_DEAD, classifyResult(RESULTS.limit))
+    const merged = mergeCompletion(REGISTRY_TEXT, SID_DEAD, classifyResult(RESULTS.limit), NOW_SEC)
     expect(merged.changed).toBe(true)
     if (!merged.changed) return
     const after = JSON.parse(merged.text) as Record<string, unknown>[]
@@ -333,14 +335,15 @@ describe('registry merge in place', () => {
     expect(entry.unknown_future_field).toEqual([1, 2, 3])
     expect(entry.result_file).toBe('/fixture/results/limit.json')
     expect((entry.outcome as { kind: string }).kind).toBe('limit')
+    expect(entry.ended_at).toBe(NOW_SEC)
     expect(after.length).toBe(REGISTRY.length)
     expect(after.filter((_, i) => i !== 1)).toEqual(REGISTRY.filter((_, i) => i !== 1))
   })
 
   test('refuses an entry already harvested or missing', () => {
-    expect(mergeCompletion(REGISTRY_TEXT, SID_UNREPORTED, classifyResult(RESULTS.clean)).changed).toBe(false)
-    expect(mergeCompletion(REGISTRY_TEXT, 'nope', classifyResult(RESULTS.clean)).changed).toBe(false)
-    expect(mergeCompletion('{', SID_DEAD, classifyResult(RESULTS.clean)).changed).toBe(false)
+    expect(mergeCompletion(REGISTRY_TEXT, SID_UNREPORTED, classifyResult(RESULTS.clean), NOW_SEC).changed).toBe(false)
+    expect(mergeCompletion(REGISTRY_TEXT, 'nope', classifyResult(RESULTS.clean), NOW_SEC).changed).toBe(false)
+    expect(mergeCompletion('{', SID_DEAD, classifyResult(RESULTS.clean), NOW_SEC).changed).toBe(false)
   })
 })
 
@@ -452,6 +455,54 @@ describe('pane columns', () => {
     const rows = buildRows(REGISTRY, facts, NOW_SEC)
     const widths = paneWidths(rows, 70)
     expect(formatRow(rows[0]!, 70, widths).length).toBeLessThanOrEqual(70)
+  })
+})
+
+describe('elapsed column', () => {
+  const timed = REGISTRY.map(entry => {
+    if (entry.session_id === SID_ALIVE) return { ...entry, started_at: NOW_SEC - 42 }
+    if (entry.session_id === SID_UNREPORTED) return { ...entry, started_at: NOW_SEC - 4000, ended_at: NOW_SEC - 3688 }
+    if (entry.session_id === SID_DONE) return { ...entry, started_at: NOW_SEC - 9000, ended_at: NOW_SEC - 5000 }
+    return entry
+  })
+  const at = (sec: number) => ({ nowSec: NOW_SEC + sec, probedSec: NOW_SEC })
+  const textOf = (rows: ReturnType<typeof buildRows>, title: string, sec: number) => {
+    const row = rows.find(one => one.title === title)!
+    return formatRow(row, 200, paneWidths(rows, 200, at(sec)), at(sec)).trimEnd().split(/\s+/).at(-1)
+  }
+
+  test('42s under a minute, 5m12s under an hour, 1h05m from an hour up', () => {
+    expect([0, 42, 59.9, 60, 312, 3599, 3600, 3900, 3959, 86_400 + 61].map(formatAge)).toEqual(['0s', '42s', '59s', '1m00s', '5m12s', '59m59s', '1h00m', '1h05m', '1h05m', '24h01m'])
+  })
+
+  test('a running entry counts from started_at, a finished one shows its run, an orphan and an older entry the probe age', () => {
+    const rows = buildRows(timed, facts, NOW_SEC)
+    expect(rows.find(one => one.sid === SID_ALIVE)).toMatchObject({ startedAt: NOW_SEC - 42, elapsedSec: 125 })
+    expect(textOf(rows, 'alive worker', 0)).toBe('42s')
+    expect(textOf(rows, 'alive worker', 30)).toBe('1m12s')
+    expect(textOf(rows, 'unreported worker', 30)).toBe('5m12s')
+    expect(textOf(rows, 'done worker', 30)).toBe('1h06m')
+    // The orphan: 2400 s at the probe, then the display clock's seconds since.
+    expect(textOf(rows, '(no entry) /work/x', 0)).toBe('40m00s')
+    expect(textOf(rows, '(no entry) /work/x', 7)).toBe('40m07s')
+    // Entries without the fields stay valid: the probe age while running, '-' once finished.
+    const old = buildRows(REGISTRY, facts, NOW_SEC)
+    expect(textOf(old, 'alive worker', 5)).toBe('2m10s')
+    expect(textOf(old, 'unreported worker', 5)).toBe('-')
+    expect(textOf(old, 'limited worker', 5)).toBe('-')
+  })
+
+  test('without a display clock the row shows what the probe left; a started_at in the future reads 0s', () => {
+    const rows = buildRows(timed, facts, NOW_SEC)
+    expect(formatRow(rows[0]!, 200).trimEnd().endsWith('2m05s')).toBe(true)
+    expect(elapsedSeconds({ ...rows[0]!, startedAt: NOW_SEC + 5 }, at(0))).toBe(0)
+    expect(elapsedSeconds({ ...rows[0]!, status: 'dead', endedAt: undefined }, at(0))).toBe(125)
+  })
+
+  test('the columns stay put while the seconds tick: the elapsed column is as wide as its header', () => {
+    const rows = buildRows(timed, facts, NOW_SEC)
+    const widths = [0, 1, 17, 59, 61, 600, 3599, 3600].map(sec => paneWidths(rows, 120, at(sec)))
+    expect(widths.every(one => JSON.stringify(one) === JSON.stringify(widths[0]))).toBe(true)
   })
 })
 
@@ -731,7 +782,7 @@ describe('registry edits: the differential cases the jq scripts are checked agai
 
   test('every kind of case is there', () => {
     const names = REGISTRY_GOLDEN.map(one => one.name).join('\n')
-    for (const word of ['register new', 'register resume', 'clear', 'ack keep', 'ack plain', 'missing', 'empty', 'surrogate', 'DEL', 'key order', 'not JSON', 'inbox fields', 'socket_path null']) {
+    for (const word of ['register new', 'register resume', 'clear', 'ack keep', 'ack plain', 'missing', 'empty', 'surrogate', 'DEL', 'key order', 'not JSON', 'inbox fields', 'socket_path null', 'started_at', 'ended_at']) {
       expect(names).toContain(word)
     }
   })
@@ -1130,18 +1181,18 @@ describe('the inbox fields of the registry entry', () => {
     for (const text of ['', '{', 'null', '[1]', '"x"']) expect(sessionFileFacts(text)).toEqual({})
   })
   test('a fresh entry: name after the session id, socket_path when known, none otherwise', () => {
-    expect(Object.keys(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }))).toEqual([
-      'title', 'pid', 'session_id', 'name', 'socket_path', 'config_dir', 'cwd', 'model', 'effort', 'result_file', 'err_file',
+    expect(Object.keys(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }, NOW_SEC - 9))).toEqual([
+      'title', 'pid', 'session_id', 'name', 'socket_path', 'config_dir', 'cwd', 'model', 'effort', 'result_file', 'err_file', 'started_at',
     ])
-    expect(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N })).toEqual({
-      title: 'new', pid: 7, session_id: SID_DEAD, name: N, config_dir: '/c/a', cwd: '/work/new', model: 'haiku', effort: 'low', result_file: '/r/new.json', err_file: '/r/new.err',
+    expect(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N }, NOW_SEC - 9)).toEqual({
+      title: 'new', pid: 7, session_id: SID_DEAD, name: N, config_dir: '/c/a', cwd: '/work/new', model: 'haiku', effort: 'low', result_file: '/r/new.json', err_file: '/r/new.err', started_at: NOW_SEC - 9,
     })
   })
   test('a resume entry: socket_path null when the new sessions file has none, so the merge clears the dead socket', () => {
-    expect(newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }).socket_path).toBeNull()
-    expect(newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }).socket_path).toBe('/s.sock')
+    expect(newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }, NOW_SEC - 9).socket_path).toBeNull()
+    expect(newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }, NOW_SEC - 9).socket_path).toBe('/s.sock')
     const before = JSON.stringify([{ session_id: SID_DEAD, name: N, socket_path: '/old.sock', reported: false }])
-    const merged = registerEntry(before, newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }), 'resume')
+    const merged = registerEntry(before, newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }, NOW_SEC - 9), 'resume')
     expect(merged.ok && JSON.parse(merged.text)[0].socket_path).toBeNull()
   })
 })

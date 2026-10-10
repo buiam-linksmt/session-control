@@ -113,6 +113,7 @@ const tab = atom({ plugin: 'session-control', key: 'tab' } as const, 'sessions')
 const selected = atom({ plugin: 'session-control', key: 'selected' } as const, null)
 const points = atom({ plugin: 'session-control', key: 'points' } as const, null)
 const expanded = atom({ plugin: 'session-control', key: 'expanded' } as const, null)
+const now = atom({ plugin: 'session-control', key: 'now' } as const, 0)
 
 type Config = {
   orchestratorDir: string
@@ -141,6 +142,10 @@ let isAfterCompact = false
 let isBusy = false
 let isArmed = false
 let isPolling = false
+/** The display tick of the elapsed column, while the panel is shown; undefined when none runs. */
+let displayTick: { cancel: () => void } | undefined
+/** The display tick's period: it only moves the `now` atom on, so the pane redraws its elapsed column. */
+const DISPLAY_TICK_MS = 1000
 let lastError: string | undefined
 let isDirectWriteNoted = false
 const harvested = new Set<string>()
@@ -554,7 +559,7 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
     const path = await registryPath($)
     for (let attempt = 0; attempt < 2; attempt++) {
       const fresh = await readRegistryText($)
-      const merged = mergeCompletion(fresh, sid, outcome)
+      const merged = mergeCompletion(fresh, sid, outcome, Math.floor((await $.clock.now()) / 1000))
       if (!merged.changed) break
       await backupOnce($, 'headless-sessions.json', 'completion', localDate(await $.clock.now()), fresh)
       if (await writeAtomic($, path, merged.text, fresh)) break
@@ -659,12 +664,45 @@ async function transcriptTail($: EngineInterface, path: string): Promise<string 
 }
 
 function tick($: EngineInterface): void {
+  // A panel shown again (after another pane in front of it, or a reload) gets its display tick back here.
+  if (displayTick === undefined) void armDisplayTick($)
   if (!isTracing) {
     void refresh($)
     void refreshWatch($)
     return
   }
   void tracedTick($)
+}
+
+/** Starts the display tick when the panel is shown and none runs. */
+async function armDisplayTick($: EngineInterface): Promise<void> {
+  if (displayTick !== undefined || !(await isPanelShown($))) return
+  // Checked again after the wait: the poll and the command may both have asked.
+  if (displayTick !== undefined) return
+  displayTick = $.clock.every(DISPLAY_TICK_MS, () => void displayStep($))
+}
+
+function stopDisplayTick(): void {
+  displayTick?.cancel()
+  displayTick = undefined
+}
+
+async function isPanelShown($: EngineInterface): Promise<boolean> {
+  const pane = (await $.ui.panes().catch(() => [])).find(one => one.id === PANE)
+  return pane !== undefined && pane.isShown !== false
+}
+
+/**
+ * One display tick: no process and no file read, only the clock into the `now` atom the pane reads, so the elapsed
+ * column redraws with the seconds; the tick ends itself once the panel is hidden or closed.
+ */
+async function displayStep($: EngineInterface): Promise<void> {
+  if (!(await isPanelShown($))) {
+    stopDisplayTick()
+    return
+  }
+  const sec = Math.floor((await $.clock.now()) / 1000)
+  await update($, now, () => sec)
 }
 
 /** A poll tick with the trace on: its line, the renders counted since the last one, then the lines the tick made. */
@@ -904,7 +942,7 @@ async function spawnWorker(
   trace($, 'worker.found', { pid: worker.pid, sessionId, isNamed: fromFile.name !== undefined, isSocketSeen: fromFile.socketPath !== undefined })
   if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
   const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
-  const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox)
+  const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox, Math.floor(launchedAt / 1000))
   // A missing registry starts as an empty one, as REGISTER_SCRIPT starts it.
   const failed = await editRegistry($, async text => registerEntry(text, entry, verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
   const note = failed === undefined ? 'registered' : writeFailed(failed)
@@ -996,6 +1034,7 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
   const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
   if (isUp) {
     await $.ui.close({ id: PANE })
+    stopDisplayTick()
     await update($, selected, () => null)
     await update($, expanded, () => null)
     trace($, 'panel', { isShown: false })
@@ -1005,6 +1044,9 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
   // Each panel starts with no section expanded, also after the engine's close mark closed the last one.
   await update($, expanded, () => null)
   const opened = await $.ui.open({ id: PANE, title: 'Session control' })
+  const shownSec = Math.floor((await $.clock.now()) / 1000)
+  await update($, now, () => shownSec)
+  await armDisplayTick($)
   trace($, 'panel', { isShown: true, isPlaced: opened.isPlaced })
   return { text: opened.isPlaced ? 'Session-control panel opened.' : `Session-control panel waits: ${opened.reason}` }
 }
@@ -1213,7 +1255,7 @@ export const register: Register = (on, options) => {
     const snap = await read($, snapshot)
     const columns = e.props.bodyColumns
     if (snap === null) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
-    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState] = await Promise.all([
+    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState, nowSec] = await Promise.all([
       read($, watch),
       read($, selected),
       read($, queued),
@@ -1223,6 +1265,7 @@ export const register: Register = (on, options) => {
       read($, offsets),
       read($, tab),
       read($, expanded),
+      read($, now),
     ])
     const width = Math.max(20, columns - 4)
     const isLogOpen = sel !== null && view !== null
@@ -1238,7 +1281,10 @@ export const register: Register = (on, options) => {
     const boxes: SectionBox[] = isCompact ? [{ id: activeId, top: 1, height: compactRows - 1 }] : sectionBoxes(bodyRows, isLogOpen, expandedId)
     layout = { boxes, totals: {} }
     type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning' }
-    const widths = paneWidths(snap.rows, width - 2)
+    // The elapsed column at the display clock: the tick's time, never before the probe the rows come from.
+    const probedSec = Math.floor(snap.at / 1000)
+    const clock = { nowSec: Math.max(nowSec, probedSec), probedSec }
+    const widths = paneWidths(snap.rows, width - 2, clock)
     const toggle = (sid: string) => async () => {
       await update($, expanded, () => null)
       await update($, selected, current => (current === sid ? null : sid))
@@ -1319,7 +1365,7 @@ export const register: Register = (on, options) => {
     }
     const sessionRows: PRow[] = snap.rows.length === 0 ? [{ text: 'No workers in the registry.', dim: true }] : snap.rows.map(row => {
       const sid = row.sid
-      const text = (sid !== undefined && sid === sel ? '\u25B8 ' : '  ') + formatRow(row, width - 2, widths)
+      const text = (sid !== undefined && sid === sel ? '\u25B8 ' : '  ') + formatRow(row, width - 2, widths, clock)
       if (sid === undefined) return { text, dim: row.status === 'done', color: row.status === 'dead' || row.status === 'orphan' ? ('warning' as const) : undefined }
       return { text, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done' }
     })
