@@ -894,8 +894,8 @@ describe('session name and inbox of a launch', () => {
   test('the name: w-, the title slug up to 24, the UTC launch time; letters, digits and dashes, at most 39 characters', () => {
     expect(workerName('new', at)).toBe(N)
     expect(workerName("Design: launch_worker with an inbox (claude -p) - it's long", at)).toBe('w-design-launch-worker-wit-261010120000')
-    expect(workerName('Ünïcode ☕ — only', at)).toBe('w-n-code-only-261010120000')
-    expect(workerName('☕☕', at)).toBe('w-worker-261010120000')
+    expect(workerName('Ünïcode \u2615 — only', at)).toBe('w-n-code-only-261010120000')
+    expect(workerName('\u2615\u2615', at)).toBe('w-worker-261010120000')
     // A slug cut at 24 that ends on a dash loses the dash.
     expect(workerName('abcdefghijklmnopqrstuvw-xyz', at)).toBe('w-abcdefghijklmnopqrstuvw-261010120000')
     for (const title of ['x', 'a'.repeat(120), '--- ---', 'A B/C\\D"E\'F$G`H', 'tab\there\nnewline']) {
