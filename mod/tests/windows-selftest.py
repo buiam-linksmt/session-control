@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run with `python3 -I tests/windows-selftest.py` from WSL, where Windows PowerShell is reachable.
 
-Extracts the Windows PowerShell scripts from hooks/core.ts, writes them to a scratch directory on the Windows
+Extracts the Windows PowerShell scripts from hooks/host-windows.ts, writes them to a scratch directory on the Windows
 side and runs them through powershell.exe, the way the mod runs them on native Windows (absolute path, -File).
 It proves the scripts' own behaviour on this host's PowerShell and file system only: not what the Windows engine
 passes them, nor a real claude.exe. The scratch directory is a new folder under SC_WIN_SCRATCH (a Windows path)
@@ -10,6 +10,8 @@ import ast, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = open(os.path.join(HERE, '..', 'hooks', 'core.ts'), encoding='utf-8').read()
+# The scripts the Windows adapter runs (FILES_PS1, PROBE_PS1) live in hooks/host-windows.ts.
+WIN_SRC = open(os.path.join(HERE, '..', 'hooks', 'host-windows.ts'), encoding='utf-8').read()
 PS = shutil.which('powershell.exe') or '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 if not os.path.exists(PS):
     print('windows-selftest: skipped (no powershell.exe)')
@@ -17,8 +19,8 @@ if not os.path.exists(PS):
 
 
 def constant(name):
-    """A `[...].join('\\r\\n')` constant of core.ts, as the text the mod writes."""
-    body = SRC.split(f'export const {name} = [', 1)[1].split("].join('\\r\\n')", 1)[0]
+    """A `[...].join('\\r\\n')` constant of host-windows.ts, as the text the mod writes."""
+    body = WIN_SRC.split(f'export const {name} = [', 1)[1].split("].join('\\r\\n')", 1)[0]
     lines = [l.strip() for l in body.strip().splitlines()]
     return '\r\n'.join(ast.literal_eval(l.rstrip(',')) for l in lines if l and not l.startswith('//'))
 

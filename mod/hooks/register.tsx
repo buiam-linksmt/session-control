@@ -6,7 +6,6 @@ import { DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, editOpenPo
 import type { Edit } from './bookkeeping'
 import { backupName, dirOf, freshText, localDate, tmpPath } from './store'
 import {
-  ROTATE_SCRIPT,
   TRACE_FILE,
   TRACE_KEEP,
   TRACE_MAX_BYTES,
@@ -22,12 +21,10 @@ import {
   traceMessage,
   utf8Bytes,
 } from './trace'
+import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from './host-posix'
+import { FILES_PS1, PROBE_PS1 } from './host-windows'
 import {
-  APPEND_SCRIPT,
-  FILES_PS1,
   LAUNCH_SCHEMA,
-  PROBE_PS1,
-  PROBE_SCRIPT,
   findNewWindowsWorker,
   isSameWinPath,
   windowsPickerRefusal,

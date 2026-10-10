@@ -5,8 +5,10 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { APPEND_SCRIPT, FILES_PS1, PROBE_PS1, PROBE_SCRIPT, REGISTER_SCRIPT, probeArgs } from '../hooks/core'
-import { ROTATE_SCRIPT, TRACE_MAX_BYTES, localIso } from '../hooks/trace'
+import { REGISTER_SCRIPT, probeArgs } from '../hooks/core'
+import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
+import { FILES_PS1, PROBE_PS1 } from '../hooks/host-windows'
+import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
 
 import {
   HOME,

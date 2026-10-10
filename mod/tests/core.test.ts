@@ -45,16 +45,12 @@ import {
   parseRegistry,
   parseTaskNotification,
   pickArgv,
-  PROBE_SCRIPT,
   probeArgs,
   rowStatus,
   statusLabel,
   registerEntry,
   removeEntries,
   ackEntries,
-  FILES_PS1,
-  PROBE_PS1,
-  START_MATCH_MS,
   findNewWindowsWorker,
   findNewWorker,
   isHeadless,
@@ -72,6 +68,8 @@ import {
   isDefaultConfigDir,
 } from '../hooks/core'
 import type { LaunchArgs, LaunchFacts } from '../hooks/core'
+import { PROBE_SCRIPT } from '../hooks/host-posix'
+import { FILES_PS1, PROBE_PS1, START_MATCH_MS } from '../hooks/host-windows'
 import { freshText } from '../hooks/store'
 import {
   DAEMON_RESUME,

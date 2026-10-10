@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { APPEND_SCRIPT, FILES_PS1, PROBE_SCRIPT } from '../hooks/core'
+import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
+import { FILES_PS1 } from '../hooks/host-windows'
 import {
   REDACTED,
-  ROTATE_SCRIPT,
   TRACE_CHUNK_BYTES,
   TRACE_KEEP,
   TRACE_MAX_BYTES,

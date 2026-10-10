@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Run with `python3 -I tests/probe-selftest.py` from the plugin folder.
 
-Extracts PROBE_SCRIPT from hooks/core.ts, checks it parses under `sh -n` and runs it against a
+Extracts PROBE_SCRIPT from hooks/host-posix.ts, checks it parses under `sh -n` and runs it against a
 fixture config dir: a transcript with a known mtime and a sessions file whose procStart matches this
 process. The plugin tests cannot import node modules, so this check lives beside them."""
 import ast, os, subprocess, sys, tempfile, json
 
 src = open(os.path.join(os.path.dirname(__file__), '..', 'hooks', 'core.ts')).read()
-body = src.split("export const PROBE_SCRIPT = [", 1)[1].split("].join('\\n')", 1)[0]
+# The scripts the Linux adapter runs (PROBE_SCRIPT, APPEND_SCRIPT, ROTATE_SCRIPT) live in hooks/host-posix.ts.
+posix_src = open(os.path.join(os.path.dirname(__file__), '..', 'hooks', 'host-posix.ts')).read()
+body = posix_src.split("export const PROBE_SCRIPT = [", 1)[1].split("].join('\\n')", 1)[0]
 script = '\n'.join(ast.literal_eval(l.strip().rstrip(',')) for l in body.strip().splitlines() if l.strip())
 
 syntax = subprocess.run(['sh', '-n', '-c', script], capture_output=True, text=True)
@@ -148,7 +150,7 @@ finally:
 print(f'registry-golden-selftest: ok ({len(golden)} cases)')
 
 # --- APPEND_SCRIPT adds lines to the cleared log without reading it, whatever its size
-append = src.split("export const APPEND_SCRIPT = `", 1)[1].split("`\n", 1)[0].replace('\\\\', '\\')
+append = posix_src.split("export const APPEND_SCRIPT = `", 1)[1].split("`\n", 1)[0].replace('\\\\', '\\')
 append_dir = tempfile.mkdtemp(prefix='session-append-')
 try:
     log = f'{append_dir}/cleared.jsonl'
@@ -164,8 +166,7 @@ print('append-selftest: ok')
 
 # --- ROTATE_SCRIPT keeps three trace files: .1 moves to .2 (the oldest goes), the trace becomes .1. It reads the size
 # itself, so of several processes that found the trace too big only the first rotates; a missing trace is no failure.
-trace_src = open(os.path.join(os.path.dirname(__file__), '..', 'hooks', 'trace.ts')).read()
-rotate = trace_src.split("export const ROTATE_SCRIPT = String.raw`", 1)[1].split("`", 1)[0]
+rotate = posix_src.split("export const ROTATE_SCRIPT = String.raw`", 1)[1].split("`", 1)[0]
 assert subprocess.run(['sh', '-n', '-c', rotate], capture_output=True).returncode == 0
 rotate_dir = tempfile.mkdtemp(prefix='session-rotate-')
 def rotate_run(trace, max_bytes, adding):

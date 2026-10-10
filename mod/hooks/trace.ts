@@ -1,12 +1,13 @@
 // Pure parts of the debug trace: the line format, the redaction, what of a message and of a command line is shown and
 // the rotation. The writing itself lives in register.tsx, where `$` is available.
 
-import { APPEND_SCRIPT, FILES_PS1, PROBE_PS1, PROBE_SCRIPT } from './core'
+import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from './host-posix'
+import { FILES_PS1, PROBE_PS1 } from './host-windows'
 
 /** The trace file's name inside the runs directory. */
 export const TRACE_FILE = 'trace.log'
 
-/** The trace is rotated before an append would take it past about this size (several processes share it, see ROTATE_SCRIPT). */
+/** The trace is rotated before an append would take it past about this size (several processes share it, see ROTATE_SCRIPT in host-posix.ts). */
 export const TRACE_MAX_BYTES = 2 * 1024 * 1024
 
 /** Files kept in all: trace.log, trace.log.1 and trace.log.2. */
@@ -182,19 +183,6 @@ export function rotationMoves(path: string, keep = TRACE_KEEP): [string, string]
   for (let at = keep - 1; at >= 1; at--) moves.push([at === 1 ? path : `${path}.${at - 1}`, `${path}.${at}`])
   return moves
 }
-
-/**
- * The rotation on Linux, one process: args are the trace path, the number of the oldest file kept, the size limit and
- * the bytes about to go in. The size is read here, right before the renames, so of several processes sharing the
- * trace only the first to find it too big rotates it; the others find it small or gone and leave it. Each older file
- * moves one up (the oldest is overwritten; a move another process made first is no failure), then the trace becomes
- * .1: the exit code is that move's, and a trace another process moved meanwhile is no failure either.
- */
-export const ROTATE_SCRIPT = String.raw`L=$1; i=$2; max=$3; add=$4
-{ size=$(wc -c < "$L"); } 2>/dev/null || exit 0
-[ $((size)) -gt 0 ] && [ $((size + add)) -gt "$max" ] || exit 0
-while [ "$i" -gt 1 ]; do p=$((i - 1)); [ -f "$L.$p" ] && mv -f "$L.$p" "$L.$i" 2>/dev/null; i=$p; done
-mv -f "$L" "$L.1" 2>/dev/null || [ ! -e "$L" ]`
 
 /** Lines in batches of at most `maxBytes` (a longer line goes alone). */
 export function chunkLines(lines: readonly string[], maxBytes = TRACE_CHUNK_BYTES): string[][] {
