@@ -41,6 +41,8 @@ import {
   removeEntries,
   retireVerdict,
   buildLaunchArgv,
+  defaultConfigDir,
+  isDefaultConfigDir,
   ackPeerNote,
   addPeerNote,
   buildRows,
@@ -755,10 +757,13 @@ async function launch($: EngineInterface, given: LaunchArgs) {
   const { promptFileOk, dirOk } = await launchChecks($, args, isWin)
   const promptText = await $.fs.read(args.prompt_file).catch(() => undefined)
   const resumeSid = typeof args.resume_sid === 'string' ? args.resume_sid : undefined
-  // Without a picker command a fresh launch uses the machine's default config directory.
+  // Without a picker command a fresh launch inherits the machine's default configuration: the orchestrator's own
+  // CLAUDE_CONFIG_DIR when it has one, else <home>/.claude, which is what the registry records.
   const picker = config.licencePickCommand.trim()
+  const own = await ownConfigDir($)
+  const defaultDir = defaultConfigDir(home, own, isWin)
   let pick: { exitCode: number; stdout: string; stderr?: string } | undefined
-  if (resumeSid === undefined && picker === '') pick = { exitCode: 0, stdout: `${home}/.claude` }
+  if (resumeSid === undefined && picker === '') pick = { exitCode: 0, stdout: defaultDir }
   else if (resumeSid === undefined) {
     const argv = pickArgv(picker, args.need ?? 40, home)
     if (isWin) {
@@ -785,7 +790,9 @@ async function launch($: EngineInterface, given: LaunchArgs) {
   })
   trace($, 'guard', verdict.ok ? { tool: 'launch_worker', isOk: true, configDir: verdict.configDir, resumeSid: verdict.resumeSid } : { tool: 'launch_worker', isOk: false, ...messageFields(verdict.reason, 'reason') })
   if (!verdict.ok) return { deny: `${PLUGIN}: ${verdict.reason}` }
-  return spawnWorker($, args, verdict, reg.entries, reg.facts)
+  // No CLAUDE_CONFIG_DIR on the line: a fresh launch without a picker, or a resume under the default directory.
+  const isConfigInherited = picker === '' && (verdict.resumeSid === undefined || isDefaultConfigDir(verdict.configDir, defaultDir, isWin))
+  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, own)
 }
 
 /** Whether the prompt file is there and not empty, and the dir is a directory: `test -s` and `test -d` on Linux, $.fs.stat on Windows. */
@@ -810,9 +817,10 @@ async function pause($: EngineInterface, seconds: number): Promise<void> {
 async function spawnWorker(
   $: EngineInterface,
   args: LaunchArgs,
-  verdict: { configDir: string; resumeSid?: string },
+  verdict: { configDir: string; resumeSid?: string; isConfigInherited?: boolean },
   entries: readonly SessionEntry[],
   before: ProcFacts,
+  own: string | undefined,
 ) {
   const isWin = await isWindows($)
   const runsDir = await runsPath($)
@@ -825,7 +833,7 @@ async function spawnWorker(
   const command = buildLaunchArgv(args, verdict, files.result, files.err)[2] ?? ''
   const known = new Set(before.claude.map(one => one.pid))
   const launchedAt = await $.clock.now()
-  trace($, 'worker.start', { configDir: verdict.configDir, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
+  trace($, 'worker.start', { configDir: verdict.configDir, isConfigDirSet: verdict.isConfigInherited !== true, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
   // The engine's own background task: its exit notification reaches the session.
   await $.tool.call({
     tool: 'Bash',
@@ -838,7 +846,10 @@ async function spawnWorker(
   for (let attempt = 0; attempt < 15 && worker === undefined; attempt++) {
     await pause($, 2)
     const facts = await probe($, entries, [verdict.configDir])
-    const want = { dir: args.dir, configDir: verdict.configDir, model: args.model }
+    // On Linux the probe reads the worker's CLAUDE_CONFIG_DIR from its environment: an inherited one is the
+    // orchestrator's own, or none. On Windows it reads where the worker's sessions file is: the config dir itself.
+    const seen = verdict.isConfigInherited === true && !isWin ? (own ?? '') : verdict.configDir
+    const want = { dir: args.dir, configDir: seen, model: args.model }
     worker = isWin ? findNewWindowsWorker(facts, want, known, ((await $.clock.now()) - launchedAt) / 1000) : findNewWorker(facts, want, known)
   }
   if (worker === undefined) {
@@ -979,6 +990,16 @@ async function tracedTool<T extends object>($: EngineInterface, tool: string, e:
     }
     return answer
   })
+}
+
+/** The orchestrator's own CLAUDE_CONFIG_DIR, which a worker launched without one inherits; undefined when unset or unreadable. */
+async function ownConfigDir($: EngineInterface): Promise<string | undefined> {
+  try {
+    const dir = await $.env.get('CLAUDE_CONFIG_DIR')
+    return dir === '' ? undefined : dir
+  } catch {
+    return undefined
+  }
 }
 
 /** SESSION_CONTROL_DEBUG, or undefined when the environment cannot be read. */

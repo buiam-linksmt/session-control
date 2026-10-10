@@ -3,7 +3,8 @@
 # removes: (a) one headless haiku orchestrator launches one haiku worker through launch_worker and waits for it in the
 # foreground; (b) where tmux exists, an interactive claude opens the panel with /session-control (no model call).
 # Everything goes to the scratch directory (registry, runs directory, trace); the real registry, helper files and runs
-# directory are never touched, and the licence picker option is empty (the worker uses the default config directory).
+# directory are never touched, and the licence picker option is empty: the worker gets no CLAUDE_CONFIG_DIR and
+# inherits the default configuration (this shell's CLAUDE_CONFIG_DIR, else ~/.claude), which the registry records.
 # POSIX sh, for Linux and Git Bash: sh mod/tests/e2e-smoke.sh. A few cents of haiku (the orchestrator is capped at
 # USD 0.25). One line per check; exit 1 on a failure. KEEP_TRACE=<file> copies the trace there before the scratch
 # directory goes.
@@ -74,13 +75,28 @@ EOF
   --max-budget-usd 0.25 --output-format json --settings "$SETTINGS" < "$S/instruction.txt" > "$S/orchestrator.json" 2> "$S/orchestrator.err") &
 OPID=$!
 SEEN_PID=''
+# The worker's launch line, read off the command line of the shell that runs it, where /proc shows the worker (not
+# in Git Bash, whose /proc does not list a native claude.exe). A haiku worker lives a few seconds: looked for 4 times
+# a second.
+WLINE=''
+catch_worker() {
+  for _d in /proc/[0-9]*; do
+    [ "$(readlink "$_d/cwd" 2>/dev/null)" = "$WORK" ] && [ "$(cat "$_d/comm" 2>/dev/null)" = claude ] || continue
+    _pp=$(sed -n 's/^PPid:[[:space:]]*//p' "$_d/status" 2>/dev/null)
+    WLINE=$(tr '\0' ' ' < "/proc/$_pp/cmdline" 2>/dev/null)
+    return
+  done
+}
 elapsed=0
 while kill -0 "$OPID" 2>/dev/null && [ "$elapsed" -lt 480 ]; do
   if [ -z "$SEEN_PID" ] && [ -f "$REG" ]; then
     SEEN_PID=$(grep -o '"pid": *[0-9]*' "$REG" | head -n 1 | grep -o '[0-9]*$')
     [ -n "$SEEN_PID" ] && WPID=$SEEN_PID
   fi
-  sleep 1
+  for _q in 1 2 3 4; do
+    [ -z "$WLINE" ] && [ -d /proc/self ] && catch_worker
+    sleep 0.25
+  done
   elapsed=$((elapsed + 1))
 done
 if kill -0 "$OPID" 2>/dev/null; then
@@ -105,6 +121,15 @@ RESULT_FILE=$(field result_file)
 ERR_FILE=$(field err_file)
 if [ -n "$RESULT_FILE" ] && [ -s "$RESULT_FILE" ]; then pass 'worker result file exists'; else fail "worker result file exists ('$RESULT_FILE')"; fi
 if [ -n "$ERR_FILE" ] && [ -e "$ERR_FILE" ]; then pass 'worker error file exists'; else fail "worker error file exists ('$ERR_FILE')"; fi
+# No picker: the registry records the configuration the worker inherited.
+WANT_CFG=$(native "${CLAUDE_CONFIG_DIR:-$HOME/.claude}")
+CFG=$(field config_dir)
+if [ "$CFG" = "$WANT_CFG" ]; then pass "registry entry has the inherited config_dir ($CFG)"; else fail "registry entry has the inherited config_dir $WANT_CFG (got '$CFG')"; fi
+if [ -n "$WLINE" ]; then
+  if printf '%s' "$WLINE" | grep -F -q 'claude -p' && ! printf '%s' "$WLINE" | grep -F -q 'CLAUDE_CONFIG_DIR='; then pass "worker's launch line sets no CLAUDE_CONFIG_DIR"; else fail "worker's launch line sets no CLAUDE_CONFIG_DIR: $(printf '%s' "$WLINE" | head -c 300)"; fi
+else
+  skip "worker's launch line (its shell not seen in /proc)"
+fi
 [ -n "$RESULT_FILE" ] && info "worker cost USD $(grep -o '"total_cost_usd": *[0-9.e-]*' "$RESULT_FILE" 2>/dev/null | grep -o '[0-9.e-]*$')"
 
 has() { grep -F -q -- "$1" "$TRACE" 2>/dev/null; }
@@ -116,6 +141,7 @@ if has "\"event\":\"fs.write\",\"path\":\"$REGN.tmp." && grep -F '"event":"proce
 else
   fail 'trace has the register write: its temp file and the process.run of the rename'
 fi
+if has '"event":"worker.start"' && has '"isConfigDirSet":false'; then pass 'trace: the worker.start line sets no CLAUDE_CONFIG_DIR'; else fail 'trace: the worker.start line sets no CLAUDE_CONFIG_DIR'; fi
 if has '"licencePickCommand":"empty"' && has "\"registryPath\":\"$REGN\""; then pass 'trace shows the scratch options (scratch registry, no licence picker)'; else fail 'trace shows the scratch options (scratch registry, no licence picker)'; fi
 SN=$(native "$S")
 OUTSIDE=$(grep -E -o '"event":"fs\.(write|append)","path":"[^"]*"' "$TRACE" 2>/dev/null | sed 's/.*"path":"//; s/"$//' | grep -v -F "$SN/" | head -n 3)

@@ -53,6 +53,8 @@ import {
   WINDOWS_PROMPT_MAX_CHARS,
   MSYS_REWRITTEN,
   windowsPickerRefusal,
+  defaultConfigDir,
+  isDefaultConfigDir,
 } from '../hooks/core'
 import type { LaunchArgs, LaunchFacts } from '../hooks/core'
 import { freshText } from '../hooks/store'
@@ -749,6 +751,38 @@ describe('launch line', () => {
     expect(buildLaunchArgv({ ...linux, dir: '/c/foo' }, { configDir: '/c/cfg', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111' }, '/r.json')[2]).toBe(
       "cd '/c/foo' && CLAUDE_CONFIG_DIR='/c/cfg' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
     )
+  })
+
+  test('an inherited configuration: no CLAUDE_CONFIG_DIR on the line, on Linux and on Windows; everything else as before', () => {
+    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude', isConfigInherited: true }, '/home/u/.claude/session-control/runs/r.json', '/home/u/.claude/session-control/runs/r.err')[2]).toBe(
+      "cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/home/u/.claude/session-control/runs/r.json' 2> '/home/u/.claude/session-control/runs/r.err'",
+    )
+    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111', isConfigInherited: true }, '/r.json')[2]).toBe(
+      "cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
+    )
+    // isConfigInherited false is the line with the variable, as when the field is absent.
+    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude', isConfigInherited: false }, '/r.json')).toEqual(buildLaunchArgv(linux, { configDir: '/home/u/.claude' }, '/r.json'))
+    const win: LaunchArgs = { ...linux, dir: 'C:/Users/u/proj', prompt_file: 'C:/Users/u/AppData/Local/Temp/p.md' }
+    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude', isConfigInherited: true }, 'C:/Users/u/.claude/session-control/runs/r.json', 'C:/Users/u/.claude/session-control/runs/r.err')[2]).toBe(
+      "cd 'C:/Users/u/proj' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/u/AppData/Local/Temp/p.md')\" " +
+        "> 'C:/Users/u/.claude/session-control/runs/r.json' 2> 'C:/Users/u/.claude/session-control/runs/r.err'",
+    )
+    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude/lic/b' }, 'C:/r.json')[2]).toBe(
+      "cd 'C:/Users/u/proj' && CLAUDE_CONFIG_DIR='C:/Users/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/u/AppData/Local/Temp/p.md')\" > 'C:/r.json'",
+    )
+  })
+
+  test('the default config dir: the orchestrator\'s own CLAUDE_CONFIG_DIR, else <home>/.claude; compared as the platform does', () => {
+    expect(defaultConfigDir('/home/u', undefined)).toBe('/home/u/.claude')
+    expect(defaultConfigDir('/home/u', '')).toBe('/home/u/.claude')
+    expect(defaultConfigDir('/home/u', '/home/u/.claude/lic/b')).toBe('/home/u/.claude/lic/b')
+    expect(defaultConfigDir('C:/Users/u', undefined, true)).toBe('C:/Users/u/.claude')
+    expect(defaultConfigDir('C:/Users/u', 'C:\\Users\\u\\.claude\\lic\\b\\', true)).toBe('C:/Users/u/.claude/lic/b')
+    expect(isDefaultConfigDir('/home/u/.claude/', '/home/u/.claude')).toBe(true)
+    expect(isDefaultConfigDir('/home/u/.claude/lic/b', '/home/u/.claude')).toBe(false)
+    expect(isDefaultConfigDir('/Home/u/.claude', '/home/u/.claude')).toBe(false)
+    expect(isDefaultConfigDir('c:\\users\\U\\.claude', 'C:/Users/u/.claude', true)).toBe(true)
+    expect(isDefaultConfigDir('C:/Users/u/.claude/lic/b', 'C:/Users/u/.claude', true)).toBe(false)
   })
 
   test('Windows: the same line for Git Bash, every path native C:/... in single quotes', () => {

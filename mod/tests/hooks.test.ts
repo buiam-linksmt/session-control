@@ -19,6 +19,7 @@ import {
   SID_ALIVE,
   SID_DEAD,
   SID_DONE,
+  SID_UNREPORTED,
   TASK_NOTIFICATION_KILLED,
   WIN_PROBE_STDOUT,
 } from './fixtures'
@@ -56,6 +57,8 @@ const MISSING = new Set<string>()
 const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
+// The CLAUDE_CONFIG_DIR the Linux probe reads from the new worker's environment ('' when it has none).
+const WORKER = { linuxConfigDir: '/fixture/lic/a' }
 // Knobs of the Windows fixture: a failing move or probe; the config dir the probe finds the new worker's sessions
 // file in, or none (unplaced).
 const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false }
@@ -113,6 +116,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE_TEXT }
     if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
     if (path === '/fixture/results/limit.json') return { value: RESULTS.limit }
+    if (['/fixture/home/.claude/sessions/7001.json', '/fixture/lic/own/sessions/7001.json'].includes(path) && !isWin) return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
     if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
     if (seen(e.path) === 'C:/fixture/home/.claude/sessions/7001.json') return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
     if (path === '/work/new/big.md') return { value: BIG_PROMPT }
@@ -160,7 +164,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === 'sh' && e.argv[2] === PROBE_SCRIPT) {
       if (LINUX_FIXTURE.isProbeBroken) throw new Error('the probe timed out')
       const worker = w.spawned
-        ? `\nP\t7001\tclaude\t3\t/work/new\t/fixture/lic/a\tclaude -p --model opus --dangerously-skip-permissions --output-format json -- prompt\n`
+        ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus --dangerously-skip-permissions --output-format json -- prompt\n`
         : ''
       return { value: { ...ok, stdout: PROBE_STDOUT + worker } }
     }
@@ -448,13 +452,70 @@ describe('launch_worker', () => {
     expect(w.runs.some(argv => argv.join(' ') === '/fixture/bin/pick --need 40')).toBe(true)
   })
 
-  test('without a licence picker command a fresh launch uses the default config directory and runs no picker', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
-    const w = world(on, '')
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...args } as never)
-    expect(JSON.stringify(out)).not.toContain('deny')
-    expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
-    expect(String(w.bash[0]?.command)).toContain(`CLAUDE_CONFIG_DIR='${HOME}/.claude'`)
+  test('without a licence picker command a fresh launch runs no picker, sets no CLAUDE_CONFIG_DIR and records <home>/.claude', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
+    WORKER.linuxConfigDir = ''
+    try {
+      const w = world(on, '')
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toContain(`Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${HOME}/.claude, registered.`)
+      expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
+      expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
+      expect(String(w.bash[0]?.command)).toStartWith("cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ")
+      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: `${HOME}/.claude`, cwd: '/work/new' })
+    } finally {
+      WORKER.linuxConfigDir = '/fixture/lic/a'
+    }
+  })
+
+  test('without a picker, an orchestrator with its own CLAUDE_CONFIG_DIR: the worker inherits it, and the registry records it', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
+    WORKER.linuxConfigDir = '/fixture/lic/own'
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, { HOME, CLAUDE_CONFIG_DIR: '/fixture/lic/own' })
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toContain('config_dir /fixture/lic/own, registered.')
+      expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
+      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: '/fixture/lic/own' })
+    } finally {
+      WORKER.linuxConfigDir = '/fixture/lic/a'
+    }
+  })
+
+  describe('a resume', () => {
+    // The unreported entry: no pid, its transcript seen by the probe.
+    const underHome = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? { ...one, config_dir: `${HOME}/.claude` } : one)))
+    const resume = { ...args, resume_sid: SID_UNREPORTED }
+    test('without a picker, of an entry under the default directory, sets no CLAUDE_CONFIG_DIR', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
+      WORKER.linuxConfigDir = ''
+      try {
+        const w = world(on, '', true, underHome)
+        await $.session.start(start(ORCH_DIR))
+        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
+        expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}'`)
+      } finally {
+        WORKER.linuxConfigDir = '/fixture/lic/a'
+      }
+    })
+    test('without a picker, of an entry under another directory, sets it', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
+      const w = world(on, '')
+      await $.session.start(start(ORCH_DIR))
+      expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+      expect(String(w.bash[0]?.command)).toContain(`CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume '${SID_UNREPORTED}'`)
+    })
+    test('with a picker, of an entry under the default directory, sets it as before', { options: OPTIONS }, async ($, on) => {
+      WORKER.linuxConfigDir = `${HOME}/.claude`
+      try {
+        const w = world(on, '/fixture/lic/a\n', true, underHome)
+        await $.session.start(start(ORCH_DIR))
+        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        expect(String(w.bash[0]?.command)).toContain(`CLAUDE_CONFIG_DIR='${HOME}/.claude'`)
+        expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
+      } finally {
+        WORKER.linuxConfigDir = '/fixture/lic/a'
+      }
+    })
   })
 
   test('a session file that appears late is still read, and the worker is registered', { options: OPTIONS }, async ($, on) => {
@@ -844,7 +905,7 @@ describe('platform', () => {
         `Result: ${WIN_RUNS}/20260921141320-new.json; errors: ${WIN_RUNS}/20260921141320-new.err.`,
     )
     expect(w.bash[0]?.command).toBe(
-      `cd 'C:/work/new' && CLAUDE_CONFIG_DIR='${WIN_HOME_CLAUDE}' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json ` +
+      `cd 'C:/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json ` +
         `-- "$(cat 'C:/work/new/prompt.md')" > '${WIN_RUNS}/20260921141320-new.json' 2> '${WIN_RUNS}/20260921141320-new.err'`,
     )
     expect(lastRegistry(w).at(-1)).toEqual({
@@ -861,6 +922,20 @@ describe('platform', () => {
     // Every command is Windows PowerShell running one of the mod's scripts; the launch's probes also search its config dir.
     expect(w.runs.every(argv => argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6])))).toBe(true)
     expect(w.runs.some(argv => String(argv[6]).endsWith('/probe.ps1') && argv.at(-1) === `c:${WIN_HOME_CLAUDE}`)).toBe(true)
+  })
+
+  test('Windows: an orchestrator with its own CLAUDE_CONFIG_DIR: no variable on the line, its dir in native form in the registry', { options: NO_PICKER }, async ($, on) => {
+    WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, { ...WINDOWS_ENV, CLAUDE_CONFIG_DIR: 'C:\\fixture\\lic\\a\\' })
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered.')
+      expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
+      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: 'C:/fixture/lic/a' })
+    } finally {
+      WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
+    }
   })
 
   test('Windows: a new claude.exe whose sessions file the probe found nowhere is still the worker', { options: NO_PICKER }, async ($, on) => {
@@ -1045,7 +1120,7 @@ describe('debug trace', () => {
       PICK,
       { event: 'guard', tool: 'launch_worker', isOk: true, configDir: '/fixture/lic/a' },
       ran(['mkdir', '-p', RUNS]),
-      { event: 'worker.start', configDir: '/fixture/lic/a', resultFile: `${RUNS}/${stamp}-new.json`, errFile: `${RUNS}/${stamp}-new.err`, timeoutMs: 180 * 60_000 },
+      { event: 'worker.start', configDir: '/fixture/lic/a', isConfigDirSet: true, resultFile: `${RUNS}/${stamp}-new.json`, errFile: `${RUNS}/${stamp}-new.err`, timeoutMs: 180 * 60_000 },
       ran(['sleep', '2']),
       PROBE,
       { event: 'worker.found', pid: 7001, sessionId: sid },
@@ -1059,6 +1134,23 @@ describe('debug trace', () => {
     expect(w.runs.filter(isTraceRun).length).toBe(2)
     // Neither the title nor the picker's command line is in it.
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('"title"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
+  })
+
+  test('a launch without a picker: options say empty, the verdict names the default dir, the worker line sets no variable', { options: { ...TRACED, licencePickCommand: '' } }, async ($, on) => {
+    WORKER.linuxConfigDir = ''
+    try {
+      const w = world(on, '')
+      await $.session.start(start(ORCH_DIR))
+      await $.tool.call({ tool: TOOL, ...args } as never)
+      const lines = bare(traceOf(w))
+      expect((lines.find(one => one.event === 'session.start') as { options?: { licencePickCommand?: string } }).options?.licencePickCommand).toBe('empty')
+      expect(lines.find(one => one.event === 'tool.call')).toEqual({ event: 'tool.call', tool: 'launch_worker', ...called })
+      expect(lines.find(one => one.event === 'guard')).toEqual({ event: 'guard', tool: 'launch_worker', isOk: true, configDir: `${HOME}/.claude` })
+      expect(lines.find(one => one.event === 'worker.start')).toMatchObject({ event: 'worker.start', configDir: `${HOME}/.claude`, isConfigDirSet: false })
+      expect(lines.some(one => one.event === 'process.run' && 'picker' in one)).toBe(false)
+    } finally {
+      WORKER.linuxConfigDir = '/fixture/lic/a'
+    }
   })
 
   test('the start: platform, options and the activation, no environment', { options: TRACED }, async ($, on) => {

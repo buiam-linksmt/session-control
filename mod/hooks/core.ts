@@ -543,20 +543,39 @@ export function pickArgv(command: string, need: number, home: string): string[] 
     .map(part => (part.startsWith('~/') ? `${home}/${part.slice(2)}` : part).replace(/\{need\}/g, String(need)))
 }
 
-/** The argv the launch runs: result and error go to files the caller names (never inside the repo). */
+/**
+ * The argv the launch runs: result and error go to files the caller names (never inside the repo). A worker that
+ * inherits the machine's default configuration (`isConfigInherited`) gets no CLAUDE_CONFIG_DIR: Claude Code then
+ * reads its global config where it always does (~/.claude.json), not inside the config directory.
+ */
 export function buildLaunchArgv(
   args: LaunchArgs,
-  verdict: { configDir: string; resumeSid?: string },
+  verdict: { configDir: string; resumeSid?: string; isConfigInherited?: boolean },
   resultFile: string,
   errFile?: string,
 ): string[] {
   const resume = verdict.resumeSid ? ` --resume ${shq(verdict.resumeSid)}` : ''
   const err = errFile === undefined ? '' : ` 2> ${shq(errFile)}`
+  const config = verdict.isConfigInherited === true ? '' : `CLAUDE_CONFIG_DIR=${shq(verdict.configDir)} `
   const script =
-    `cd ${shq(args.dir)} && CLAUDE_CONFIG_DIR=${shq(verdict.configDir)} CLAUDE_CODE_EFFORT_LEVEL=${shq(args.effort)} ` +
+    `cd ${shq(args.dir)} && ${config}CLAUDE_CODE_EFFORT_LEVEL=${shq(args.effort)} ` +
     `claude -p --model ${shq(args.model)}${resume} --dangerously-skip-permissions --output-format json ` +
     `-- "$(cat ${shq(args.prompt_file)})" > ${shq(resultFile)}${err}`
   return ['sh', '-c', script]
+}
+
+/**
+ * The config directory a worker without a licence picker runs under: the orchestrator's own CLAUDE_CONFIG_DIR, which
+ * the worker inherits, when it has one; else <home>/.claude. On Windows in the native form.
+ */
+export function defaultConfigDir(home: string, own: string | undefined, isWindows = false): string {
+  if (own !== undefined && own !== '') return isWindows ? winPath(own) : own
+  return `${home}/.claude`
+}
+
+/** Whether a config directory is that default one, compared as the platform compares paths. */
+export function isDefaultConfigDir(dir: string, defaultDir: string, isWindows = false): boolean {
+  return isWindows ? isSameWinPath(dir, defaultDir) : normalize(dir) === normalize(defaultDir)
 }
 
 /** The Bash background limit in milliseconds for a launch (default 180 minutes, 5 to 600). */
