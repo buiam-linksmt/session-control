@@ -63,6 +63,8 @@ const MISSING = new Set<string>()
 const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
+// Reads a test holds until it releases them: the transcript tail of the alive worker.
+const HELD: { tail: Promise<unknown> | undefined } = { tail: undefined }
 // The CLAUDE_CONFIG_DIR the Linux probe reads from the new worker's environment ('' when it has none).
 // isInboxless: the Linux worker's sessions file has no name and no messagingSocketPath, as an older claude writes it.
 // sid: the session id the Linux worker's sessions file names (a resume keeps the resumed one).
@@ -100,7 +102,7 @@ const given = (path: string, isWin: boolean) => {
   return isWin ? slashed : slashed.replace(/^[A-Za-z]:(?=\/)/, '')
 }
 
-function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText: string | (() => string) = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
+function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText: string | (() => string | Promise<string>) = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
   const w: World = { bash: [], powershell: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
   // A test that answers env.get itself says so.
   if (!isEnvOwn) mock.env(on, env)
@@ -121,7 +123,11 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     w.reads.push(seen(e.path))
     if (MISSING.has(path) || LATE.has(path)) throw new Error(`ENOENT ${e.path}`)
     if (UNREADABLE.has(path)) throw new Error(`EFBIG ${e.path}`)
-    if (path === REGISTRY_PATH) return { value: typeof registryText === 'function' ? registryText() : registryText }
+    if (path === REGISTRY_PATH) {
+      // A test may hold the read (a promise) while something else happens.
+      const text = typeof registryText === 'function' ? registryText() : registryText
+      return typeof text === 'string' ? { value: text } : text.then(value => ({ value }))
+    }
     if (path === '/work/orch/CLAUDE.md') return { value: '# Role: Session Orchestrator\n' }
     if (path === '/work/new/thin.md') return { value: 'Just do the work.' }
     if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE_TEXT }
@@ -161,11 +167,13 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     // The fixture machine has no Node: the helper's lookup cannot start, and the adapters' own operations run.
     if (e.argv[0] === 'node' && e.argv[1] === '--version') throw new Error('spawn node ENOENT')
     if (e.argv[0] === 'sh' && String(e.argv[2]).startsWith('tail ')) {
+      const held = HELD.tail !== undefined && String(e.argv[4]).includes(SID_ALIVE) ? HELD.tail : undefined
       const rows = [
         { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the suite files.' }, { type: 'tool_use', name: 'Bash', input: { command: 'git status -sb' } }] } },
         { type: 'user', message: { content: [{ type: 'tool_result', content: '## develop...origin/develop' }] } },
       ]
-      return { value: { ...ok, stdout: rows.map(r => JSON.stringify(r)).join('\n') } }
+      const done = { value: { ...ok, stdout: rows.map(r => JSON.stringify(r)).join('\n') } }
+      return held === undefined ? done : held.then(() => done)
     }
     if (e.argv[0] === 'sh' && e.argv[2] === REGISTER_SCRIPT) return { value: { ...ok, stdout: '' } }
     // An append is recorded as a write of what it adds.
@@ -2095,8 +2103,12 @@ describe('a log whose session leaves the registry', () => {
     (await ui.findAll({ type: 'Box' })).filter(box => box.props.borderStyle === 'round').map(box => /^(SESSIONS|QUEUED WORK|OPEN POINTS|LOG)/.exec(box.text)?.[1])
   const THREE = ['SESSIONS', 'QUEUED WORK', 'OPEN POINTS']
   const setup = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On) => {
-    const reg = { text: REGISTRY_TEXT }
-    const w = world(on, '/fixture/lic/a\n', true, () => reg.text)
+    // `hold`: while it is set, every read of the registry waits for it and answers the text it found.
+    const reg: { text: string; hold: Promise<void> | undefined } = { text: REGISTRY_TEXT, hold: undefined }
+    const w = world(on, '/fixture/lic/a\n', true, () => {
+      const text = reg.text
+      return reg.hold === undefined ? text : reg.hold.then(() => text)
+    })
     stubPanel(on)
     await $.session.start(start(ORCH_DIR))
     await $.command.run({ command: 'session-control', args: 'side' } as never)
@@ -2166,6 +2178,85 @@ describe('a log whose session leaves the registry', () => {
     await w.clock.advance(5000)
     expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
     expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+  })
+
+  // The done worker has a working directory here, so it has a transcript of its own to show.
+  const B = SID_DONE
+  const withB = (...gone: string[]) =>
+    JSON.stringify(REGISTRY.filter(one => !gone.includes(one.session_id ?? '')).map(one => (one.session_id === B ? { ...one, cwd: '/work/d' } : one)), null, 2) + '\n'
+  const logTitle = async (ui: Ui) => (await ui.findAll({ type: 'Box' })).map(box => /^LOG [a-z ]+/.exec(box.text)?.[0]).find(one => one !== undefined)
+  const holdUp = () => {
+    let release = () => {}
+    const hold = new Promise<void>(resolve => (release = resolve))
+    return { hold, release }
+  }
+
+  test('a row pressed while the registry is read for the retired session stays selected and shows its log', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    reg.text = withB(SID)
+    const { hold, release } = holdUp()
+    reg.hold = hold
+    // The poll reads the registry for the alive worker's log, which is retired; the press of the other row lands meanwhile.
+    await w.clock.advance(5000)
+    const pressed = ui.press({ key: `s:${B}` })
+    release()
+    await pressed
+    reg.hold = undefined
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    expect(await logTitle(ui)).toBe('LOG done worker')
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    expect(await logTitle(ui)).toBe('LOG done worker')
+    expect((await ui.findAll({ type: 'Button' })).some(one => String(one.props.label).startsWith('\u25B8') && String(one.props.label).includes('done worker'))).toBe(true)
+  })
+
+  test('a log read for a session the selection has left is dropped, not shown over the new one', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    reg.text = withB()
+    const { hold, release } = holdUp()
+    HELD.tail = hold
+    try {
+      // The poll reads the alive worker's transcript, held; the other row is pressed and shows its own log meanwhile.
+      await w.clock.advance(5000)
+      await ui.press({ key: `s:${B}` })
+      expect(await logTitle(ui)).toBe('LOG done worker')
+      release()
+      await w.clock.advance(1000)
+      expect(await logTitle(ui)).toBe('LOG done worker')
+      await w.clock.advance(5000)
+      expect(await logTitle(ui)).toBe('LOG done worker')
+      expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+    } finally {
+      HELD.tail = undefined
+    }
+  })
+
+  test('an empty or whitespace-only registry text is a read in progress: the log stays; the text [] is a registry without entries and closes it', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    for (const text of ['', '   \n\t\n']) {
+      reg.text = text
+      await w.clock.advance(5000)
+      await w.clock.advance(5000)
+      expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+      expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+      reg.text = REGISTRY_TEXT
+      await w.clock.advance(5000)
+      expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    }
+    reg.text = '[]\n'
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(THREE)
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeUndefined()
+    await w.clock.advance(10000)
+    expect(await boxesOf(ui)).toEqual(THREE)
+  })
+
+  test('a registry with entries, none of them the selected one, closes the log', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    reg.text = JSON.stringify([REGISTRY.find(one => one.session_id === SID_DONE)])
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(THREE)
   })
 
   test('a session retired while the panel is hidden leaves nothing selected when the panel is shown again', { options: OPTIONS }, async ($, on) => {

@@ -73,8 +73,8 @@ declare module 'claude-code' {
       now: number
       /** Completion lines not yet handed to the model. */
       pendingNotes: string[]
-      /** The watched worker's recent readable transcript lines; null before a watch. */
-      watch: { title: string; lines: string[] } | null
+      /** The watched worker's recent readable transcript lines, with the session id they were read for; null before a watch. */
+      watch: { sid: string; title: string; lines: string[] } | null
       /** The box shown in the compact (inline) panel. */
       tab: string
       /** Rows each scrollable box of the panel is scrolled down from its top. */

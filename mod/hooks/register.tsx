@@ -575,35 +575,60 @@ async function refresh($: EngineInterface, taskStatus?: string): Promise<void> {
   }
 }
 
+/**
+ * Closes the log of `sid` if it is still the open one. The selection clears by compare-and-set, and the watched view
+ * and the expanded state go with it only when the selection was still `sid`: a row pressed meanwhile keeps its selection.
+ */
+async function closeLog($: EngineInterface, sid: string): Promise<void> {
+  let wasOpen = false
+  await update($, selected, current => {
+    wasOpen = current === sid
+    return wasOpen ? null : current
+  })
+  if (!wasOpen) return
+  await update($, watch, current => (current?.sid === sid ? null : current))
+  await update($, expanded, () => null)
+}
+
+/**
+ * Shows the log read for `sid`, unless the selection has left it: a result for a session no longer selected is dropped.
+ * The selection and the view are two atoms, so a press can still land between the check and the write; the check after
+ * the write takes such a stale view back (the poll writes the new selection's view).
+ */
+async function showWatch($: EngineInterface, sid: string, view: { title: string; lines: string[] }): Promise<void> {
+  const next = { sid, ...view }
+  if ((await read($, selected)) !== sid || isSame(await read($, watch), next)) return
+  await update($, watch, () => next)
+  if ((await read($, selected)) !== sid) await update($, watch, current => (current?.sid === sid ? null : current))
+}
+
 /** Re-read the tail of the watched worker's transcript into the pane's atom. */
 async function refreshWatch($: EngineInterface): Promise<void> {
   const sid = await read($, selected)
   if (!isActive || sid === null) return
   // A registry that cannot be read or parsed leaves the view as it is: a read error must not close the user's log.
+  // Empty or whitespace-only text counts as unreadable (parseRegistry takes it for an empty registry): it is what a
+  // read of a file being rewritten can return. The mod writes the registry as a JSON array, so a registry that
+  // lost its last entry reads `[]`, never empty text: that one is a registry holding no entries and closes the log.
   const text = await $.fs.read(await registryPath($)).catch(() => undefined)
-  const parsed = text === undefined ? undefined : parseRegistry(text)
-  if (parsed === undefined || !parsed.ok) return
+  if (text === undefined || text.trim() === '') return
+  const parsed = parseRegistry(text)
+  if (!parsed.ok) return
   const entry = parsed.entries.find(one => one.session_id === sid)
   if (entry === undefined) {
     // The session left the registry (retired): its log closes and the default three sections return, unless the
     // selection moved on while the registry was read.
-    if ((await read($, selected)) === sid) {
-      await update($, selected, () => null)
-      await update($, watch, () => null)
-      await update($, expanded, () => null)
-    }
+    await closeLog($, sid)
     return
   }
   const path = (await hostOf($)).transcriptPath(entry)
   const title = entry.title ?? sid.slice(0, 8)
   if (path === undefined) {
-    await update($, watch, () => ({ title, lines: ['no transcript path for this entry'] }))
+    await showWatch($, sid, { title, lines: ['no transcript path for this entry'] })
     return
   }
   const tail = await transcriptTail($, path)
-  const lines = tail === undefined ? [`cannot read ${path}`] : summarizeTranscript(tail, 300)
-  const next = { title, lines }
-  if (!isSame(await read($, watch), next)) await update($, watch, () => next)
+  await showWatch($, sid, { title, lines: tail === undefined ? [`cannot read ${path}`] : summarizeTranscript(tail, 300) })
 }
 
 /** The last 600 lines of a transcript, each cut to 20000 characters, so one huge tool result cannot push the newest rows out (host.tail). */
