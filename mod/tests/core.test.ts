@@ -1035,6 +1035,19 @@ describe('worker-report check', () => {
     expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD → 128`)).toBe('git log @{u}..HEAD exited 128')
     expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD exited 1`)).toBe('git log @{u}..HEAD exited 1')
   })
+  test('the ASCII arrow -> 0 is an exit spelling in the same places as the Unicode arrow', () => {
+    const status = '`git status -sb` (exit 0):\n```\n## main...origin/main\n```\n'
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD   -> 0`)).toBeUndefined()
+    expect(reportCheck(`$ git status -sb -> 0\n## main...origin/main\n$ git log --oneline @{u}..HEAD ->0`)).toBeUndefined()
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD -> 128`)).toBe('git log @{u}..HEAD exited 128')
+    // On the exit marker line after the output, and on the line after the fence that ends the block.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix(toast): drop the plugin name\n-> 0`)).toBe('git log @{u}..HEAD lists 1 unpushed commit')
+    expect(reportCheck(`${status}\`\`\`\n$ git log --oneline @{u}..HEAD\n\`\`\`\n-> 0`)).toBeUndefined()
+    // A marker line stops the block: a commit-like line below it is not counted.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n-> 0\n9b6e367 fix(toast): drop the plugin name`)).toBeUndefined()
+    // Without a number after the arrow there is no exit code.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD -> none`)).toBe('report lacks git log --oneline @{u}..HEAD with its exit code')
+  })
   test('the log\'s exit code sits in or right after its block, not later in the report', () => {
     const status = '`git status -sb` (exit 0):\n```\n## main...origin/main\n```\n'
     const lacking = 'report lacks git log --oneline @{u}..HEAD with its exit code'

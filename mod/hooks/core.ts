@@ -396,8 +396,8 @@ const GIT_STATUS = /git\s+status\s+-sb\b/gi
 const GIT_LOG = /git\s+log\s+--oneline\s+@\{(?:u|upstream)\}\.\.HEAD/gi
 /** Either command named: where one command's text ends and the next begins. */
 const GIT_COMMAND = /git\s+(?:status\s+-sb|log\s+--oneline)/i
-/** An exit code as reports write it: `exit 0`, `exit=0`, `exit code: 0`, `exit status 0`, `exited 0`, `rc=0`, `→ 0`. */
-const EXIT_CODE = /(?:\bexit(?:ed)?(?:\s+(?:code|status))?\s*[:=]?\s*|\brc\s*[:=]?\s*|→\s*)(\d+)/i
+/** An exit code as reports write it: `exit 0`, `exit=0`, `exit code: 0`, `exit status 0`, `exited 0`, `rc=0`, `→ 0`, `-> 0`. */
+const EXIT_CODE = /(?:\bexit(?:ed)?(?:\s+(?:code|status))?\s*[:=]?\s*|\brc\s*[:=]?\s*|(?:→|->)\s*)(\d+)/i
 /** A `git status -sb` branch line: `## main...origin/main [ahead 1]`, `## HEAD (no branch)`. */
 const BRANCH_LINE = /^[\s>]*##\s+\S/m
 /** A `git log --oneline` line: an abbreviated sha holding a digit, then the subject; a list mark or backticks may lead. */
@@ -406,7 +406,7 @@ const COMMIT_LINE = /^[\s>]*(?:[-*]\s+)?`?(?=[0-9a-f]*\d)[0-9a-f]{7,40}`?\s+\S/m
 const HEADING_LINE = /^[\s>]*#{1,6}\s/
 const COMMAND_LINE = /^[\s>]*(?:[-*]\s+)?[`$]*\s*git\s/i
 const FENCE_LINE = /^[\s>]*```/
-const EXIT_LINE = /^[\s>]*[([]?\s*(?:exit|exited|rc\b|→)/i
+const EXIT_LINE = /^[\s>]*[([]?\s*(?:exit|exited|rc\b|→|->)/i
 
 /** The text after a command mention up to the next mention of either command, at most `max` characters. */
 function after(text: string, end: number, max: number): string {
