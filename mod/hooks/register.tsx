@@ -5,7 +5,23 @@ import type { SessionEntry, SessionOutcome } from '../types'
 import { DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, editOpenPoints, editQueue } from './bookkeeping'
 import type { Edit } from './bookkeeping'
 import { backupName, dirOf, freshText, localDate, tmpPath } from './store'
-import { ROTATE_SCRIPT, TRACE_FILE, TRACE_KEEP, chunkLines, isTraceSwitch, needsRotation, rotationMoves, shownArgv, traceLine, utf8Bytes } from './trace'
+import {
+  ROTATE_SCRIPT,
+  TRACE_FILE,
+  TRACE_KEEP,
+  TRACE_MAX_BYTES,
+  TRACE_MAX_STRING,
+  chunkLines,
+  isTraceSwitch,
+  messageFields,
+  needsRotation,
+  rotationMoves,
+  shownArgv,
+  shownPicker,
+  traceLine,
+  traceMessage,
+  utf8Bytes,
+} from './trace'
 import {
   APPEND_SCRIPT,
   FILES_PS1,
@@ -120,14 +136,16 @@ let lastError: string | undefined
 let isDirectWriteNoted = false
 const harvested = new Set<string>()
 
-// The debug trace (the debug option or SESSION_CONTROL_DEBUG): lines wait here until the hook that made them ends or
-// the next poll tick, whichever comes first. Off, every trace call returns at its first check.
+// The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
+// wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
+// returns at its first check.
 type TraceEntry = { seq: number; at?: number; stamp: Promise<void>; event: string; fields: Record<string, unknown> }
+let isTraceWanted = false
 let isTracing = false
+let traceStart: Record<string, unknown> = {}
 let traceSeq = 0
 let traceRenders = 0
 let traceFile: string | undefined
-let traceBytes: number | undefined
 let isTraceFlushing = false
 let isTraceFailNoted = false
 const traceBuffer: TraceEntry[] = []
@@ -169,24 +187,35 @@ function trace($: EngineInterface, event: string, fields: Record<string, unknown
   traceBuffer.push(entry)
 }
 
-/** A caught error, traced with where it was caught. */
+/** A caught error, traced with where it was caught: its kind when known and its message as traceMessage keeps it. */
 function traceError($: EngineInterface, where: string, err: unknown): void {
   if (!isTracing) return
-  trace($, 'error', { where, message: errorText(err) })
+  trace($, 'error', { where, ...messageFields(errorText(err)) })
 }
 
-/** `$.process.run`; with the trace on also a line: the argv as shownArgv shows it, the exit code, the time taken, the start of stderr. */
-async function run($: EngineInterface, argv: readonly string[], init?: ProcessRunInit, isQuiet = false): Promise<ProcessRunResult> {
+/** The trace starts when the board goes on, with the session's start line, once per load. */
+function startTrace($: EngineInterface): void {
+  if (!isTraceWanted || isTracing) return
+  isTracing = true
+  trace($, 'session.start', traceStart)
+}
+
+/**
+ * `$.process.run`; with the trace on also a line: the command as `shown` gives it (else the argv as shownArgv shows
+ * it), the exit code, the time taken and the size of stderr, never its text.
+ */
+async function run($: EngineInterface, argv: readonly string[], init?: ProcessRunInit, isQuiet = false, shown?: Record<string, unknown>): Promise<ProcessRunResult> {
   if (!isTracing || isQuiet) return $.process.run(argv, init)
+  const command = shown ?? { argv: shownArgv(argv) }
   const now = () => $.clock.now().catch(() => 0)
   const startedAt = await now()
   try {
     const ran = await $.process.run(argv, init)
-    const stderr = ran.stderr === '' ? {} : { stderr: ran.stderr.slice(0, 200) }
-    trace($, 'process.run', { argv: shownArgv(argv), exitCode: ran.exitCode, ms: (await now()) - startedAt, ...stderr })
+    const stderr = ran.stderr === '' ? {} : { stderrBytes: utf8Bytes(ran.stderr) }
+    trace($, 'process.run', { ...command, exitCode: ran.exitCode, ms: (await now()) - startedAt, ...stderr })
     return ran
   } catch (err) {
-    trace($, 'process.run', { argv: shownArgv(argv), ms: (await now()) - startedAt, error: errorText(err) })
+    trace($, 'process.run', { ...command, ms: (await now()) - startedAt, error: traceMessage(errorText(err)) })
     throw err
   }
 }
@@ -198,7 +227,7 @@ async function write($: EngineInterface, path: string, text: string, isQuiet = f
     await $.fs.write(path, text)
     trace($, 'fs.write', { path, bytes: utf8Bytes(text) })
   } catch (err) {
-    trace($, 'fs.write', { path, bytes: utf8Bytes(text), error: errorText(err) })
+    trace($, 'fs.write', { path, bytes: utf8Bytes(text), error: traceMessage(errorText(err)) })
     throw err
   }
 }
@@ -228,16 +257,15 @@ async function flushTrace($: EngineInterface): Promise<void> {
   }
 }
 
-/** Appends lines to trace.log in the runs directory, rotating it first when it would grow past its limit. */
+/**
+ * Appends lines to trace.log in the runs directory, rotating it first when it would grow past its limit. The size is
+ * read before each append: other sessions may write the same trace.
+ */
 async function writeTrace($: EngineInterface, lines: readonly string[]): Promise<string | undefined> {
   const path = traceFile ?? (traceFile = `${await runsPath($)}/${TRACE_FILE}`)
   for (const chunk of chunkLines(lines)) {
     const adding = utf8Bytes(chunk.join('\n')) + 1
-    if (traceBytes === undefined) traceBytes = (await $.fs.stat(path).catch(() => undefined))?.size ?? 0
-    if (needsRotation(traceBytes, adding)) {
-      await rotateTrace($, path)
-      traceBytes = 0
-    }
+    if (needsRotation((await $.fs.stat(path).catch(() => undefined))?.size ?? 0, adding)) await rotateTrace($, path, adding)
     let problem = await appendLog($, path, chunk, true)
     // Outside the orchestrator directory nothing may have made the runs directory yet (Windows' append makes it).
     if (problem !== undefined && !(await isWindows($))) {
@@ -245,22 +273,25 @@ async function writeTrace($: EngineInterface, lines: readonly string[]): Promise
       problem = await appendLog($, path, chunk, true)
     }
     if (problem !== undefined) return problem
-    traceBytes += adding
   }
   return undefined
 }
 
-/** Rotates the trace: ROTATE_SCRIPT on Linux; on Windows each rename of rotationMoves by the file script. */
-async function rotateTrace($: EngineInterface, path: string): Promise<void> {
+/**
+ * Rotates the trace: ROTATE_SCRIPT on Linux, which checks the size again itself; on Windows each rename of
+ * rotationMoves by the file script, where a file another session moved meanwhile is no failure.
+ */
+async function rotateTrace($: EngineInterface, path: string, adding: number): Promise<void> {
   if (!(await isWindows($))) {
-    const ran = await $.process.run(['sh', '-c', ROTATE_SCRIPT, 'session-trace', path, String(TRACE_KEEP - 1)], { timeoutMs: 10_000 })
+    const argv = ['sh', '-c', ROTATE_SCRIPT, 'session-trace', path, String(TRACE_KEEP - 1), String(TRACE_MAX_BYTES), String(adding)]
+    const ran = await $.process.run(argv, { timeoutMs: 10_000 })
     if (ran.exitCode !== 0) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
     return
   }
   for (const [from, to] of rotationMoves(path)) {
     if (!(await $.fs.exists(from).catch(() => false))) continue
     const ran = await runScript($, 'files.ps1', FILES_PS1, ['move', from, to], 10_000, true)
-    if (ran.exitCode !== 0) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`)
+    if (ran.exitCode !== 0 && (await $.fs.exists(from).catch(() => true))) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`)
   }
 }
 
@@ -553,7 +584,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined): Promi
 function noteError($: EngineInterface, error: string | undefined): void {
   if (error === lastError) return
   lastError = error
-  if (error !== undefined) trace($, 'error', { where: 'panel', message: error })
+  if (error !== undefined) trace($, 'error', { where: 'panel', ...messageFields(error) })
   if (error !== undefined) $.ui.toast(`session-control: ${error}`, { timeoutMs: 10000 })
 }
 
@@ -733,12 +764,12 @@ async function launch($: EngineInterface, given: LaunchArgs) {
     if (isWin) {
       const refusal = windowsPickerRefusal(argv)
       if (refusal !== undefined) {
-        trace($, 'guard', { tool: 'launch_worker', isOk: false, reason: refusal })
+        trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(refusal, 'reason') })
         return { deny: `${PLUGIN}: ${refusal}` }
       }
       argv[0] = winPath(argv[0] ?? '')
     }
-    pick = await run($, argv, { timeoutMs: 20_000 })
+    pick = await run($, argv, { timeoutMs: 20_000 }, false, shownPicker(argv))
   }
   const verdict = checkLaunch(args, {
     home,
@@ -752,7 +783,7 @@ async function launch($: EngineInterface, given: LaunchArgs) {
     missingItems: promptText === undefined ? undefined : missingPromptItems(promptText),
     ...(isWin ? { isWindows: true, promptChars: promptText?.length, promptLead: promptText?.slice(0, 200) } : {}),
   })
-  trace($, 'guard', verdict.ok ? { tool: 'launch_worker', isOk: true, configDir: verdict.configDir, resumeSid: verdict.resumeSid } : { tool: 'launch_worker', isOk: false, reason: verdict.reason })
+  trace($, 'guard', verdict.ok ? { tool: 'launch_worker', isOk: true, configDir: verdict.configDir, resumeSid: verdict.resumeSid } : { tool: 'launch_worker', isOk: false, ...messageFields(verdict.reason, 'reason') })
   if (!verdict.ok) return { deny: `${PLUGIN}: ${verdict.reason}` }
   return spawnWorker($, args, verdict, reg.entries, reg.facts)
 }
@@ -794,7 +825,7 @@ async function spawnWorker(
   const command = buildLaunchArgv(args, verdict, files.result, files.err)[2] ?? ''
   const known = new Set(before.claude.map(one => one.pid))
   const launchedAt = await $.clock.now()
-  trace($, 'worker.start', { title: args.title, configDir: verdict.configDir, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
+  trace($, 'worker.start', { configDir: verdict.configDir, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
   // The engine's own background task: its exit notification reaches the session.
   await $.tool.call({
     tool: 'Bash',
@@ -811,7 +842,7 @@ async function spawnWorker(
     worker = isWin ? findNewWindowsWorker(facts, want, known, ((await $.clock.now()) - launchedAt) / 1000) : findNewWorker(facts, want, known)
   }
   if (worker === undefined) {
-    trace($, 'worker.missing', { title: args.title, seconds: 30 })
+    trace($, 'worker.missing', { seconds: 30 })
     return { result: `Started in the background but no claude process appeared within 30 s; check ${files.err}. Not registered.` }
   }
   // The engine writes the session file shortly after the process starts: read it again until it is there.
@@ -836,7 +867,7 @@ async function spawnWorker(
   // A missing registry starts as an empty one, as REGISTER_SCRIPT starts it.
   const failed = await editRegistry($, async text => registerEntry(text, entry, verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
   const note = failed === undefined ? 'registered' : writeFailed(failed)
-  trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, ...(failed === undefined ? {} : { reason: failed }) })
+  trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
   await refresh($)
   return {
     result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Result: ${files.result}; errors: ${files.err}.`,
@@ -846,6 +877,7 @@ async function spawnWorker(
 /** Turn the board on: register the launch tool, start the poll once, gather. */
 async function activate($: EngineInterface): Promise<void> {
   isActive = true
+  startTrace($)
   // A failure here (a read-only home, say) must not stop the board: the panel then shows what it can read.
   await ensureHelperFiles($).catch(err => noteError($, `helper files: ${String(err).slice(0, 120)}`))
   if (!isArmed) {
@@ -903,21 +935,22 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
   }
   if (isWin && config.orchestratorDir !== '') config.orchestratorDir = winPath(config.orchestratorDir)
   const isHere = isWin ? isSameWinPath(cwd, config.orchestratorDir) : cwd === config.orchestratorDir.replace(/\/+$/, '')
-  if (isTracing) {
-    const { pollMs, registrySetting, ...rest } = config
-    const options = { ...rest, registryPath: registrySetting, pollSeconds: pollMs / 1000 }
-    trace($, 'session.start', { cwd, platform: isWin ? 'windows' : 'linux', isOrchestratorDir: config.orchestratorDir !== '' && isHere, options })
+  if (isTraceWanted) {
+    // The picker command is a command line of its own: the trace says only whether one is set.
+    const { pollMs, registrySetting, licencePickCommand, ...rest } = config
+    const options = { ...rest, registryPath: registrySetting, pollSeconds: pollMs / 1000, licencePickCommand: licencePickCommand.trim() === '' ? 'empty' : 'set' }
+    traceStart = { cwd, platform: isWin ? 'windows' : 'linux', isOrchestratorDir: config.orchestratorDir !== '' && isHere, options }
   }
   if (config.orchestratorDir !== '' && isHere) await activate($)
 }
 
 /** /session-control: refused outside an orchestrator directory; else the board on and the panel shown or hidden. */
 async function togglePanel($: EngineInterface): Promise<{ text: string }> {
-  trace($, 'command.run', { command: 'session-control' })
   if (config.orchestratorDir === '') {
-    trace($, 'guard', { command: 'session-control', isOk: false, reason: 'not an orchestrator directory and no orchestratorDir option' })
     return { text: `session-control: this directory is not an orchestrator directory (its CLAUDE.md does not start with "${ORCHESTRATOR_HEADING}") and no orchestratorDir option is set.` }
   }
+  startTrace($)
+  trace($, 'command.run', { command: 'session-control' })
   await activate($)
   const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
   if (isUp) {
@@ -934,15 +967,27 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
 
 /**
  * A tool hook's work: the call's line with the named fields of its input, the work, the answer's line (the refusal or
- * the mod's own result text), then the lines written.
+ * the mod's own result text, as traceMessage keeps them), then the lines written.
  */
 async function tracedTool<T extends object>($: EngineInterface, tool: string, e: unknown, fields: readonly string[], work: () => Promise<T>): Promise<T> {
   if (isTracing) trace($, 'tool.call', { tool, ...pickFields(e, fields) })
   return traced($, async () => {
     const answer = await work()
-    if (isTracing) trace($, 'tool.result', { tool, ...('deny' in answer ? { deny: answer.deny } : 'result' in answer ? { result: answer.result } : {}) })
+    if (isTracing) {
+      const text = 'deny' in answer ? messageFields(String(answer.deny), 'deny') : 'result' in answer ? { result: traceMessage(String(answer.result), TRACE_MAX_STRING) } : {}
+      trace($, 'tool.result', { tool, ...text })
+    }
     return answer
   })
+}
+
+/** SESSION_CONTROL_DEBUG, or undefined when the environment cannot be read. */
+async function debugSwitch($: EngineInterface): Promise<string | undefined> {
+  try {
+    return await $.env.get('SESSION_CONTROL_DEBUG')
+  } catch {
+    return undefined
+  }
 }
 
 /** The fields of a tool call the trace shows: the named ones that are set, never free text. */
@@ -962,12 +1007,14 @@ export const register: Register = (on, options) => {
     licencePickCommand: String(options.licencePickCommand ?? ''),
     debug: options.debug === true,
   }
-  isTracing = config.debug
+  isTraceWanted = config.debug
+  isTracing = false
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    // The trace is switched on at launch, by the debug option or by the environment.
-    if (!config.debug && isTraceSwitch(await $.env.get('SESSION_CONTROL_DEBUG'))) isTracing = true
+    // The trace is wanted from the launch, by the debug option or by the environment (an environment that cannot be
+    // read leaves it off); it is written once the board is on.
+    if (!config.debug && isTraceSwitch(await debugSwitch($))) isTraceWanted = true
     await traced($, () => startSession($, e.cwd))
     return started
   })
@@ -1081,8 +1128,9 @@ export const register: Register = (on, options) => {
     return next.called ? next(e) : { deny: `${PLUGIN}: retire_workers failed` }
   })
 
-  // The launch's fields are paths, names and numbers; the prompt is in its file, which the trace never reads.
-  const LAUNCH_FIELDS = ['dir', 'prompt_file', 'model', 'effort', 'title', 'need', 'resume_sid', 'timeout_minutes'] as const
+  // The launch's fields are paths, names and numbers; the title is free text and stays out (its slug is in the run's
+  // file names); the prompt is in its file, which the trace never reads.
+  const LAUNCH_FIELDS = ['dir', 'prompt_file', 'model', 'effort', 'need', 'resume_sid', 'timeout_minutes'] as const
   on('tool.call', { tool: TOOL }, ($, e) => tracedTool($, 'launch_worker', e, LAUNCH_FIELDS, () => launch($, e as unknown as LaunchArgs))).catch(($, e, next) => {
     traceError($, 'launch_worker', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: launch_worker guard failed` }

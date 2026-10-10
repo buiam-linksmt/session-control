@@ -1,12 +1,12 @@
-// Pure parts of the debug trace: the line format, the redaction, the rotation arithmetic and what of a command line
-// is shown. The writing itself lives in register.tsx, where `$` is available.
+// Pure parts of the debug trace: the line format, the redaction, what of a message and of a command line is shown and
+// the rotation. The writing itself lives in register.tsx, where `$` is available.
 
 import { APPEND_SCRIPT, FILES_PS1, PROBE_PS1, PROBE_SCRIPT } from './core'
 
 /** The trace file's name inside the runs directory. */
 export const TRACE_FILE = 'trace.log'
 
-/** The trace is rotated before an append would take it past this size. */
+/** The trace is rotated before an append would take it past about this size (several processes share it, see ROTATE_SCRIPT). */
 export const TRACE_MAX_BYTES = 2 * 1024 * 1024
 
 /** Files kept in all: trace.log, trace.log.1 and trace.log.2. */
@@ -45,25 +45,62 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
   /\bgh[pousr]_[A-Za-z0-9]{16,}/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\b(?:AKIA|ASIA)[A-Za-z0-9]{16}/g,
   /\b[0-9a-fA-F]{32,}\b/g,
 ]
 
-/** A `name=value` whose name says secret: the value goes, the name stays. */
-const SECRET_ASSIGNMENT = /\b((?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password|passwd)\s*[=:]\s*)[^\s&;,'"]+/gi
+/** The words that make a name secret, in any case; underscores and hyphens separate words, so API_KEY counts. */
+const SECRET_WORD = '(?:key|token|secret|passwd|password|auth|credential)'
+const NAME_CHAR = '[A-Za-z0-9_.-]'
+
+/** `Authorization: Basic|Bearer|Token <anything>`: the scheme and what follows go, the header name stays. */
+const AUTHORIZATION = /\b(Authorization["']?\s*[:=]\s*["']?)(?:Basic|Bearer|Token)\s+\S+/gi
+
+/** A `NAME=value` or `NAME: value` whose name says secret: the value goes, the name stays. */
+const SECRET_ASSIGNMENT = new RegExp(`(?<!${NAME_CHAR})(${NAME_CHAR}*${SECRET_WORD}${NAME_CHAR}*["']?\\s*[=:]\\s*["']?)[^\\s&;,'"]+`, 'gi')
+
+/** A `--flag value` whose flag says secret, in one string: the value goes, the flag stays. */
+const SECRET_FLAG = new RegExp(`(?<!${NAME_CHAR})(--?${NAME_CHAR}*${SECRET_WORD}${NAME_CHAR}*\\s+)[^\\s'"]+`, 'gi')
+
+/** A flag that says secret as one argument of an argv: the next argument is its value. */
+const SECRET_FLAG_ARG = new RegExp(`^--?${NAME_CHAR}*${SECRET_WORD}${NAME_CHAR}*$`, 'i')
+
+/** URL userinfo, `scheme://user:pass@host`: the userinfo goes. */
+const URL_USERINFO = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@'"]+@/g
 
 /**
- * A long run of base64 characters with lower case, upper case and digits in one piece of 24 or more between
- * slashes: a path's segments are short, a token's are not. A session id (lower-case hex and hyphens) stays.
+ * An absolute path (`/...`, `~/...`, `C:/...`, `C:\...`) or a run of 32 or more letters, digits, - _ / + = (a run
+ * with a letter and a digit in it is a token). A path is matched first so it can be kept whole.
  */
-const BASE64_RUN = /[A-Za-z0-9+/_=-]{32,}/g
-const isBase64Token = (run: string) =>
-  run.split('/').some(piece => piece.length >= 24 && /[a-z]/.test(piece) && /[A-Z]/.test(piece) && /[0-9]/.test(piece))
+const PATH_OR_RUN = /(?<![A-Za-z0-9_./~+=-])(?:[A-Za-z]:[\\/]|~\/|\/)[^\s"'|<>()[\]{},;:*?]*|[A-Za-z0-9_/+=-]{32,}/g
+const RUN = /[A-Za-z0-9_/+=-]{32,}/g
+const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
 
-/** A string with everything that looks like a token replaced by [redacted]. */
+/** A run that is a token: it has a letter and a digit, and it is no UUID (a session id stays). */
+const isTokenRun = (run: string) => /[A-Za-z]/.test(run) && /[0-9]/.test(run) && !UUID.test(run)
+
+/**
+ * A plain path: every word of every segment (split at - _ . + = and spaces) is letters only, digits only or shorter
+ * than 16 characters. A long word mixing letters and digits is a token, wherever it sits.
+ */
+const isPlainPath = (path: string) =>
+  path
+    .split(/[\\/]/)
+    .flatMap(segment => segment.split(/[-_.+=~]/))
+    .every(word => word.length < 16 || /^[A-Za-z]+$/.test(word) || /^[0-9]+$/.test(word))
+
+/** A string with everything that looks like a credential replaced by [redacted]; UUIDs and plain absolute paths stay. */
 export function redact(text: string): string {
-  let out = text.replace(SECRET_ASSIGNMENT, (_, name: string) => `${name}${REDACTED}`)
+  let out = text
+    .replace(AUTHORIZATION, (_, name: string) => `${name}${REDACTED}`)
+    .replace(URL_USERINFO, (_, scheme: string) => `${scheme}${REDACTED}@`)
+    .replace(SECRET_ASSIGNMENT, (_, name: string) => `${name}${REDACTED}`)
+    .replace(SECRET_FLAG, (_, flag: string) => `${flag}${REDACTED}`)
   for (const pattern of TOKEN_PATTERNS) out = out.replace(pattern, REDACTED)
-  return out.replace(BASE64_RUN, run => (isBase64Token(run) ? REDACTED : run))
+  return out.replace(PATH_OR_RUN, found => {
+    if (!/^(?:[A-Za-z]:[\\/]|~\/|\/)/.test(found)) return isTokenRun(found) ? REDACTED : found
+    return isPlainPath(found) ? found : found.replace(RUN, run => (isTokenRun(run) ? REDACTED : run))
+  })
 }
 
 /** A value with every string in it redacted and cut to TRACE_MAX_STRING characters; keys stay. */
@@ -72,11 +109,50 @@ export function redactValue(value: unknown): unknown {
     const clean = redact(value)
     return clean.length <= TRACE_MAX_STRING ? clean : `${clean.slice(0, TRACE_MAX_STRING)}...[+${clean.length - TRACE_MAX_STRING} chars]`
   }
-  if (Array.isArray(value)) return value.map(redactValue)
+  // In an argv a flag that says secret takes the next argument as its value.
+  if (Array.isArray(value)) return value.map((part, at) => (at > 0 && typeof value[at - 1] === 'string' && SECRET_FLAG_ARG.test(value[at - 1]) ? REDACTED : redactValue(part)))
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, part]) => [key, redactValue(part)]))
   }
   return value
+}
+
+/** The most an error, refusal or answer text in the trace keeps. */
+export const TRACE_MAX_MESSAGE = 120
+
+/** Where a message goes on with text it was handed (a command's output, the picker's answer): all of that goes. */
+const ECHO_TAIL = /((?:\(exit -?\d+\)|no licence has room|answered an unexpected value)\s*:)[\s\S]*$/
+/** A quoted fragment: double, back or typographic quotes, or single quotes that are no apostrophe. */
+const QUOTED = /"[^"]*"|`[^`]*`|“[^”]*”|(?<![A-Za-z])'[^']*'(?![A-Za-z])/g
+
+/** The kind of a message the trace can tell: a JSON parse, the picker's exit or answer, a command's exit. */
+export function messageKind(text: string): string | undefined {
+  if (/no licence has room/.test(text)) return 'picker-exit-3'
+  const picker = /licence picker gave nothing usable \(exit (-?\d+)\)/.exec(text)
+  if (picker !== null) return `picker-exit-${picker[1]}`
+  if (/licence picker answered an unexpected value/.test(text)) return 'picker-value'
+  if (/not JSON|does not parse|JSON Parse error|not valid JSON|SyntaxError/i.test(text)) return 'json-parse'
+  const exit = /\(exit (-?\d+)\)/.exec(text)
+  return exit === null ? undefined : `exit-${exit[1]}`
+}
+
+/**
+ * A message as the trace keeps it: what a command or the picker printed and every quoted fragment become …, so no
+ * file content, output or command text a message quotes reaches the trace; cut at `max` characters.
+ */
+export function traceMessage(text: string, max = TRACE_MAX_MESSAGE): string {
+  return text.replace(ECHO_TAIL, '$1 …').replace(QUOTED, '…').slice(0, max)
+}
+
+/** An error or refusal as trace fields: its kind when one is known, and the message as traceMessage keeps it. */
+export function messageFields(text: string, name = 'message'): Record<string, string> {
+  const kind = messageKind(text)
+  return { ...(kind === undefined ? {} : { kind }), [name]: traceMessage(text) }
+}
+
+/** The licence picker as the trace shows it: its executable's name and how many arguments it got, never its text. */
+export function shownPicker(argv: readonly string[]): { picker: string; args: number } {
+  return { picker: (argv[0] ?? '').split(/[\\/]/).pop() ?? '', args: Math.max(0, argv.length - 1) }
 }
 
 /** One trace line (no newline): the time, the sequence number, the event, then the fields, redacted. */
@@ -108,12 +184,17 @@ export function rotationMoves(path: string, keep = TRACE_KEEP): [string, string]
 }
 
 /**
- * The rotation on Linux, one process: args are the trace path and the number of the oldest file kept. Each older
- * file moves one up (the oldest is overwritten), then the trace becomes .1.
+ * The rotation on Linux, one process: args are the trace path, the number of the oldest file kept, the size limit and
+ * the bytes about to go in. The size is read here, right before the renames, so of several processes sharing the
+ * trace only the first to find it too big rotates it; the others find it small or gone and leave it. Each older file
+ * moves one up (the oldest is overwritten; a move another process made first is no failure), then the trace becomes
+ * .1: the exit code is that move's, and a trace another process moved meanwhile is no failure either.
  */
-export const ROTATE_SCRIPT = String.raw`L=$1; i=$2
-while [ "$i" -gt 1 ]; do p=$((i - 1)); if [ -f "$L.$p" ]; then mv -f "$L.$p" "$L.$i" || exit 1; fi; i=$p; done
-mv -f "$L" "$L.1"`
+export const ROTATE_SCRIPT = String.raw`L=$1; i=$2; max=$3; add=$4
+{ size=$(wc -c < "$L"); } 2>/dev/null || exit 0
+[ $((size)) -gt 0 ] && [ $((size + add)) -gt "$max" ] || exit 0
+while [ "$i" -gt 1 ]; do p=$((i - 1)); [ -f "$L.$p" ] && mv -f "$L.$p" "$L.$i" 2>/dev/null; i=$p; done
+mv -f "$L" "$L.1" 2>/dev/null || [ ! -e "$L" ]`
 
 /** Lines in batches of at most `maxBytes` (a longer line goes alone). */
 export function chunkLines(lines: readonly string[], maxBytes = TRACE_CHUNK_BYTES): string[][] {

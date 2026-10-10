@@ -86,9 +86,10 @@ const given = (path: string, isWin: boolean) => {
   return isWin ? slashed : slashed.replace(/^[A-Za-z]:(?=\/)/, '')
 }
 
-function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT, env: Record<string, string> = { HOME }): World {
+function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
   const w: World = { bash: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
-  mock.env(on, env)
+  // A test that answers env.get itself says so.
+  if (!isEnvOwn) mock.env(on, env)
   const isWin = env.OS === 'Windows_NT' && /^[A-Za-z]:[\\/]/.test(env.USERPROFILE ?? '')
   const seen = (path: string) => given(path, isWin)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -149,6 +150,11 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === 'sh' && e.argv[2] === APPEND_SCRIPT) {
       if (LINUX_FIXTURE.isAppendBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'sh: cannot create: Read-only file system' } }
       w.writes.push({ path: String(e.argv[5]), text: `${e.argv[4]}\n` })
+      return { value: { ...ok, stdout: '' } }
+    }
+    // A rotation moves the trace away: it is empty from then on.
+    if (e.argv[0] === 'sh' && e.argv[2] === ROTATE_SCRIPT) {
+      LINUX_FIXTURE.traceSize = 0
       return { value: { ...ok, stdout: '' } }
     }
     if (e.argv[0] === 'sh' && e.argv[2] === PROBE_SCRIPT) {
@@ -786,14 +792,16 @@ describe('platform', () => {
     try {
       const before = traceOf(w, trace).length
       await w.clock.advance(5000)
-      const message = 'the process probe failed (exit 1): Invalid class'
+      // The probe's stderr is output: the trace has its size, and the error that quotes it has … in its place.
+      const message = 'the process probe failed (exit 1): \u2026'
       const probe = [POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT))]
       expect(bare(traceOf(w, trace)).slice(before)).toEqual([
         { event: 'poll.tick' },
-        { event: 'process.run', argv: probe, exitCode: 1, ms: 0, stderr: 'Invalid class' },
-        { event: 'error', where: 'refresh', message },
-        { event: 'error', where: 'panel', message: `Error: ${message}` },
+        { event: 'process.run', argv: probe, exitCode: 1, ms: 0, stderrBytes: 'Invalid class'.length },
+        { event: 'error', where: 'refresh', kind: 'exit-1', message },
+        { event: 'error', where: 'panel', kind: 'exit-1', message: `Error: ${message}` },
       ])
+      expect(w.writes.filter(one => one.path === trace).some(one => one.text.includes('Invalid class'))).toBe(false)
       // Each flush is one append of the file script, from a file of its own.
       expect(w.runs.filter(isTraceRun).every(argv => String(argv[8]).startsWith(`${trace}.add.`))).toBe(true)
     } finally {
@@ -1013,6 +1021,9 @@ describe('platform', () => {
 
 describe('debug trace', () => {
   const args = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
+  // The call's line: the title is free text and stays out.
+  const { title: _title, ...called } = args
+  const PICK = { event: 'process.run', picker: 'pick', args: 2, exitCode: 0, ms: 0 }
   const TRACED = { ...OPTIONS, debug: true }
   const RUNS = `${HOME}/.claude/session-control/runs`
   const tmp = `${REGISTRY_PATH}.tmp.${NOW_MS}`
@@ -1027,14 +1038,14 @@ describe('debug trace', () => {
     const stamp = new Date(NOW_MS).toISOString().replace(/[-:T]/g, '').slice(0, 14)
     const sid = 'abcdabcd-0000-4000-8000-000000000001'
     expect(from(bare(traceOf(w)), 'tool.call')).toEqual([
-      { event: 'tool.call', tool: 'launch_worker', ...args },
+      { event: 'tool.call', tool: 'launch_worker', ...called },
       PROBE,
       ran(['test', '-s', '/work/new/prompt.md']),
       ran(['test', '-d', '/work/new']),
-      ran(['/fixture/bin/pick', '--need', '40']),
+      PICK,
       { event: 'guard', tool: 'launch_worker', isOk: true, configDir: '/fixture/lic/a' },
       ran(['mkdir', '-p', RUNS]),
-      { event: 'worker.start', title: 'new', configDir: '/fixture/lic/a', resultFile: `${RUNS}/${stamp}-new.json`, errFile: `${RUNS}/${stamp}-new.err`, timeoutMs: 180 * 60_000 },
+      { event: 'worker.start', configDir: '/fixture/lic/a', resultFile: `${RUNS}/${stamp}-new.json`, errFile: `${RUNS}/${stamp}-new.err`, timeoutMs: 180 * 60_000 },
       ran(['sleep', '2']),
       PROBE,
       { event: 'worker.found', pid: 7001, sessionId: sid },
@@ -1046,6 +1057,8 @@ describe('debug trace', () => {
     ])
     // The trace is written in one append per hook: session.start's and the launch's.
     expect(w.runs.filter(isTraceRun).length).toBe(2)
+    // Neither the title nor the picker's command line is in it.
+    expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('"title"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
   })
 
   test('the start: platform, options and the activation, no environment', { options: TRACED }, async ($, on) => {
@@ -1057,9 +1070,9 @@ describe('debug trace', () => {
       cwd: ORCH_DIR,
       platform: 'linux',
       isOrchestratorDir: true,
-      options: { orchestratorDir: ORCH_DIR, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, pollSeconds: 5, runsDir: '~/.claude/session-control/runs', licencePickCommand: PICKER, debug: true },
+      options: { orchestratorDir: ORCH_DIR, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, pollSeconds: 5, runsDir: '~/.claude/session-control/runs', licencePickCommand: 'set', debug: true },
     })
-    expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"'))).toBe(false)
+    expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
   })
 
   test('a refused launch: the verdict with its reason, and the refusal the model gets', { options: TRACED }, async ($, on) => {
@@ -1067,11 +1080,11 @@ describe('debug trace', () => {
     await $.session.start(start(ORCH_DIR))
     await $.tool.call({ tool: TOOL, ...args, dir: ORCH_DIR } as never)
     expect(from(bare(traceOf(w)), 'tool.call')).toEqual([
-      { event: 'tool.call', tool: 'launch_worker', ...args, dir: ORCH_DIR },
+      { event: 'tool.call', tool: 'launch_worker', ...called, dir: ORCH_DIR },
       PROBE,
       ran(['test', '-s', '/work/new/prompt.md']),
       ran(['test', '-d', ORCH_DIR]),
-      ran(['/fixture/bin/pick', '--need', '40']),
+      PICK,
       { event: 'guard', tool: 'launch_worker', isOk: false, reason: 'refused: cwd is the orchestrator dir' },
       { event: 'tool.result', tool: 'launch_worker', deny: 'session-control: refused: cwd is the orchestrator dir' },
     ])
@@ -1129,6 +1142,47 @@ describe('debug trace', () => {
     expect(traceOf(w)[0]?.event).toBe('session.start')
   })
 
+  test('an environment that cannot be read leaves the trace off and the start goes on', { options: OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME }, true)
+    let isAsked = false
+    on('env.get', ($, e) => {
+      if (!JSON.stringify(e).includes('SESSION_CONTROL_DEBUG')) return { value: JSON.stringify(e).includes('"HOME"') ? HOME : undefined } as never
+      isAsked = true
+      throw new Error('the environment cannot be read')
+    })
+    await $.session.start(start(ORCH_DIR))
+    expect(isAsked).toBe(true)
+    expect(w.registered).toContain('launch_worker')
+    expect(w.writes.some(one => one.path.includes('trace.log'))).toBe(false)
+    expect(w.runs.some(isTraceRun)).toBe(false)
+  })
+
+  // A worker inherits SESSION_CONTROL_DEBUG; with the debug option on a machine the option is on for every session.
+  for (const [name, options, env] of [
+    ['SESSION_CONTROL_DEBUG=1', OPTIONS, { HOME, SESSION_CONTROL_DEBUG: '1' }],
+    ['the debug option', TRACED, { HOME }],
+    ['the debug option, no orchestratorDir option', { ...TRACED, orchestratorDir: '' }, { HOME }],
+  ] as const) {
+    test(`outside the orchestrator directory nothing is traced and no runs directory is made: ${name}`, { options }, async ($, on) => {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, env)
+      await $.session.start(start('/work/new'))
+      expect(w.runs).toEqual([])
+      expect(w.writes).toEqual([])
+      expect(w.registered).toEqual(['/session-control'])
+    })
+  }
+
+  test('/session-control turns the board on elsewhere: the trace starts there, with the start line', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    stubPanel(on)
+    await $.session.start(start('/work/elsewhere'))
+    expect(w.writes.some(one => one.path === TRACE)).toBe(false)
+    await $.command.run({ command: 'session-control', args: '' } as never)
+    const [first, second] = bare(traceOf(w))
+    expect(first).toMatchObject({ event: 'session.start', cwd: '/work/elsewhere', isOrchestratorDir: false })
+    expect(second).toEqual({ event: 'command.run', command: 'session-control' })
+  })
+
   test('off by default: no trace file, no trace command', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SESSION_CONTROL_DEBUG: '0' })
     await $.session.start(start(ORCH_DIR))
@@ -1161,7 +1215,9 @@ describe('debug trace', () => {
       await $.session.start(start(ORCH_DIR))
       await $.tool.call({ tool: TOOL, ...args } as never)
       const rotations = w.runs.filter(argv => argv[2] === ROTATE_SCRIPT)
-      expect(rotations).toEqual([['sh', '-c', ROTATE_SCRIPT, 'session-trace', TRACE, '2']])
+      // The script reads the size again itself: it gets the limit and the bytes about to go in.
+      expect(rotations.map(argv => argv.slice(0, 7))).toEqual([['sh', '-c', ROTATE_SCRIPT, 'session-trace', TRACE, '2', String(TRACE_MAX_BYTES)]])
+      expect(Number(rotations[0]?.[7])).toBeGreaterThan(10)
       expect(w.runs.findIndex(argv => argv[2] === ROTATE_SCRIPT)).toBeLessThan(w.runs.findIndex(argv => argv[2] === APPEND_SCRIPT))
     } finally {
       LINUX_FIXTURE.traceSize = 0

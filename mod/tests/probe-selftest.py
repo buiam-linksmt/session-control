@@ -162,24 +162,63 @@ finally:
     shutil.rmtree(append_dir)
 print('append-selftest: ok')
 
-# --- ROTATE_SCRIPT keeps three trace files: .1 moves to .2 (the oldest goes), the trace becomes .1
+# --- ROTATE_SCRIPT keeps three trace files: .1 moves to .2 (the oldest goes), the trace becomes .1. It reads the size
+# itself, so of several processes that found the trace too big only the first rotates; a missing trace is no failure.
 trace_src = open(os.path.join(os.path.dirname(__file__), '..', 'hooks', 'trace.ts')).read()
 rotate = trace_src.split("export const ROTATE_SCRIPT = String.raw`", 1)[1].split("`", 1)[0]
 assert subprocess.run(['sh', '-n', '-c', rotate], capture_output=True).returncode == 0
 rotate_dir = tempfile.mkdtemp(prefix='session-rotate-')
+def rotate_run(trace, max_bytes, adding):
+    return subprocess.run(['sh', '-c', rotate, 'session-trace', trace, '2', str(max_bytes), str(adding)], capture_output=True, text=True, timeout=30)
 try:
     trace = f'{rotate_dir}/trace.log'
     for name, text in [('trace.log', 'new\n'), ('trace.log.1', 'mid\n'), ('trace.log.2', 'old\n')]:
         open(f'{rotate_dir}/{name}', 'w').write(text)
-    r = subprocess.run(['sh', '-c', rotate, 'session-trace', trace, '2'], capture_output=True, text=True, timeout=30)
+    # Within the limit (4 + 6 bytes of 10): nothing moves.
+    r = rotate_run(trace, 10, 6)
+    assert r.returncode == 0 and r.stderr == '', r
+    assert sorted(os.listdir(rotate_dir)) == ['trace.log', 'trace.log.1', 'trace.log.2'] and open(trace).read() == 'new\n'
+    r = rotate_run(trace, 10, 7)
     assert r.returncode == 0 and r.stderr == '', r
     assert sorted(os.listdir(rotate_dir)) == ['trace.log.1', 'trace.log.2'], os.listdir(rotate_dir)
     assert open(f'{trace}.1').read() == 'new\n' and open(f'{trace}.2').read() == 'mid\n'
+    # The trace is gone (another process rotated it): nothing to do, no failure, no message.
+    r = rotate_run(trace, 10, 100)
+    assert r.returncode == 0 and r.stderr == '', r
+    assert sorted(os.listdir(rotate_dir)) == ['trace.log.1', 'trace.log.2']
+    # An empty trace is never rotated.
+    open(trace, 'w').close()
+    r = rotate_run(trace, 10, 100)
+    assert r.returncode == 0 and sorted(os.listdir(rotate_dir)) == ['trace.log', 'trace.log.1', 'trace.log.2']
     # The first rotation: only the trace is there.
     open(trace, 'w').write('first\n'); os.remove(f'{trace}.1'); os.remove(f'{trace}.2')
-    r = subprocess.run(['sh', '-c', rotate, 'session-trace', trace, '2'], capture_output=True, text=True, timeout=30)
+    r = rotate_run(trace, 10, 100)
     assert r.returncode == 0 and r.stderr == '', r
     assert sorted(os.listdir(rotate_dir)) == ['trace.log.1'] and open(f'{trace}.1').read() == 'first\n'
+    # A trace that is there and cannot be moved (a read-only directory; root moves it anyway) is a failure.
+    if os.geteuid() != 0:
+        open(trace, 'w').write('stuck\n')
+        os.chmod(rotate_dir, 0o555)
+        try:
+            r = rotate_run(trace, 1, 100)
+        finally:
+            os.chmod(rotate_dir, 0o755)
+        assert r.returncode == 1 and os.path.exists(trace), r
+    # Eight processes find the same big trace and rotate at once, many times over: every one ends with exit 0 and no
+    # message, at most three files remain and the big trace is kept whole as .1 or .2.
+    big = 'x' * 5000 + '\n'
+    for _round in range(20):
+        for name in os.listdir(rotate_dir):
+            os.remove(f'{rotate_dir}/{name}')
+        open(trace, 'w').write(big)
+        open(f'{trace}.1', 'w').write('mid\n')
+        racers = [subprocess.Popen(['sh', '-c', rotate, 'session-trace', trace, '2', '4096', '10'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(8)]
+        for racer in racers:
+            out, err = racer.communicate(timeout=30)
+            assert racer.returncode == 0 and err == '', (racer.returncode, err)
+        left = sorted(os.listdir(rotate_dir))
+        assert set(left) <= {'trace.log', 'trace.log.1', 'trace.log.2'} and 'trace.log' not in left, left
+        assert big in [open(f'{rotate_dir}/{name}').read() for name in left], left
 finally:
     shutil.rmtree(rotate_dir)
 print('rotate-selftest: ok')

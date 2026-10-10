@@ -7,16 +7,21 @@ import {
   TRACE_CHUNK_BYTES,
   TRACE_KEEP,
   TRACE_MAX_BYTES,
+  TRACE_MAX_MESSAGE,
   TRACE_MAX_STRING,
   chunkLines,
   isTraceSwitch,
   localIso,
+  messageFields,
+  messageKind,
   needsRotation,
   redact,
   redactValue,
   rotationMoves,
   shownArgv,
+  shownPicker,
   traceLine,
+  traceMessage,
   utf8Bytes,
 } from '../hooks/trace'
 
@@ -35,6 +40,51 @@ describe('redaction', () => {
     expect(redact('API_KEY: abc123')).toBe(`API_KEY: ${REDACTED}`)
   })
 
+  test('NAME=value and NAME: value whose name says secret, in any case, underscores and hyphens separating words', () => {
+    expect(redact('ANTHROPIC_API_KEY=abc')).toBe(`ANTHROPIC_API_KEY=${REDACTED}`)
+    expect(redact('env GITHUB_TOKEN=x1 MY_SECRET_VALUE=y db_password=z PASSWD=w')).toBe(
+      `env GITHUB_TOKEN=${REDACTED} MY_SECRET_VALUE=${REDACTED} db_password=${REDACTED} PASSWD=${REDACTED}`,
+    )
+    expect(redact('proxy-auth=u:p and aws_credentials: q')).toBe(`proxy-auth=${REDACTED} and aws_credentials: ${REDACTED}`)
+    expect(redact('{"client_secret": "s3"}')).toBe(`{"client_secret": "${REDACTED}"}`)
+    expect(redact('https://h/cb?access_token=t0&state=1')).toBe(`https://h/cb?access_token=${REDACTED}&state=1`)
+  })
+
+  test('--flag value and --flag=value whose flag says secret, in one string or as two arguments of an argv', () => {
+    expect(redact('tool --api-key abc --verbose')).toBe(`tool --api-key ${REDACTED} --verbose`)
+    expect(redact('tool --Password=hunter2')).toBe(`tool --Password=${REDACTED}`)
+    expect(redact('login -auth-token xyz')).toBe(`login -auth-token ${REDACTED}`)
+    expect(redactValue(['tool', '--client-secret', 'plain', '--Token', 'v', '--model', 'haiku'])).toEqual(['tool', '--client-secret', REDACTED, '--Token', REDACTED, '--model', 'haiku'])
+  })
+
+  test('Authorization: Basic, Bearer or Token with anything after it', () => {
+    expect(redact('Authorization: Basic dXNlcjpwYXNz')).toBe(`Authorization: ${REDACTED}`)
+    expect(redact('authorization: token a.b/c!d')).toBe(`authorization: ${REDACTED}`)
+    // Anything: up to the next space, a closing quote included.
+    expect(redact('-H "Authorization: Bearer x" -s')).toBe(`-H "Authorization: ${REDACTED} -s`)
+  })
+
+  test('URL userinfo', () => {
+    expect(redact('git clone https://user:pa55@example.com/org/repo.git')).toBe(`git clone https://${REDACTED}@example.com/org/repo.git`)
+    expect(redact('ssh://deploy@host:22/x')).toBe(`ssh://${REDACTED}@host:22/x`)
+  })
+
+  test('AWS access key ids', () => {
+    expect(redact('id AKIAABCDEFGHIJKLMNOP end')).toBe(`id ${REDACTED} end`)
+    expect(redact('ASIA1234567890ABCDEF')).toBe(REDACTED)
+  })
+
+  test('a run of 32 or more letters, digits, - _ / + = with a letter and a digit, outside a plain path', () => {
+    const token = 'abcdefghij0123456789klmnopqrstuv'
+    expect(token.length).toBe(32)
+    expect(redact(`t ${token} e`)).toBe(`t ${REDACTED} e`)
+    expect(redact('see abc_def-ghi/jkl+mno=pqr1stuvwxyz0123 here')).toBe(`see ${REDACTED} here`)
+    // A path with a token in a segment is no plain path: the run it is part of goes, slashes and all.
+    expect(redact(`/home/u/${token}/x`)).toBe(REDACTED)
+    expect(redact(`/${token}`)).toBe(REDACTED)
+    expect(redact('/srv/cache/tok-ABCDEFGHIJ0123456789xy/data.json')).toBe(`${REDACTED}.json`)
+  })
+
   test('ids, paths, names and times stay as they are', () => {
     const kept = [
       'abcdabcd-0000-4000-8000-000000000001',
@@ -46,6 +96,15 @@ describe('redaction', () => {
       'claude -p --model haiku --dangerously-skip-permissions --output-format json',
       '2026-10-10T12:34:56.789+02:00',
       'the prompt lacks: foreground wait (never end the turn on a background watcher)',
+      // UUID session ids, alone or in paths, and plain absolute paths with long slugs, Linux and Windows.
+      'session ABCDABCD-0000-4000-8000-000000000001',
+      '/home/u/.claude/projects/-home-u-workspaces-session-control/abcdabcd-0000-4000-8000-000000000001.jsonl',
+      't:abcdabcd-0000-4000-8000-000000000001|/home/u/.claude/projects/-home-u-workspaces-some-long-project-name-2026',
+      '/tmp/session-control-e2e.Ab12Cd/work-dir/20261010120000-e2e-smoke-worker.err',
+      'C:\\Users\\Someone\\AppData\\Local\\session-control\\runs\\20261010120000-a-long-worker-title.json',
+      '~/.claude/session-control/runs/20261010120000-windows-support-for-the-panel.json',
+      'model claude-opus-5-5 at effort high, timeout 180 minutes',
+      '--dangerously-skip-permissions --output-format json --max-budget-usd 0.25',
     ]
     for (const text of kept) expect(redact(text)).toBe(text)
   })
@@ -61,6 +120,37 @@ describe('redaction', () => {
     const long = redactValue('x '.repeat(TRACE_MAX_STRING)) as string
     expect(long.startsWith('x x ')).toBe(true)
     expect(long.endsWith(`...[+${2 * TRACE_MAX_STRING - TRACE_MAX_STRING} chars]`)).toBe(true)
+  })
+})
+
+describe('messages', () => {
+  test('a JSON parse error: its kind, and the fragments it quotes from the file become \u2026', () => {
+    const v8 = 'registry is not JSON: SyntaxError: Unexpected token \'s\', "secret note" is not valid JSON'
+    expect(messageFields(v8)).toEqual({ kind: 'json-parse', message: 'registry is not JSON: SyntaxError: Unexpected token \u2026, \u2026 is not valid JSON' })
+    const bun = 'registry is not JSON: SyntaxError: JSON Parse error: Unexpected identifier "hunter"'
+    expect(traceMessage(bun)).toBe('registry is not JSON: SyntaxError: JSON Parse error: Unexpected identifier \u2026')
+    expect(messageKind('open-points.json: the file does not parse')).toBe('json-parse')
+  })
+
+  test('the picker\'s output and a command\'s stderr echoed in a message become \u2026', () => {
+    expect(messageFields('no licence has room: main 95% used, resets 14:00', 'reason')).toEqual({ kind: 'picker-exit-3', reason: 'no licence has room: \u2026' })
+    expect(messageFields('the licence picker gave nothing usable (exit 2)')).toEqual({ kind: 'picker-exit-2', message: 'the licence picker gave nothing usable (exit 2)' })
+    expect(messageFields('the licence picker answered an unexpected value: relative/dir')).toEqual({ kind: 'picker-value', message: 'the licence picker answered an unexpected value: \u2026' })
+    expect(messageFields('rename failed (exit 1): mv: cannot move a to b')).toEqual({ kind: 'exit-1', message: 'rename failed (exit 1): \u2026' })
+    expect(traceMessage('refused: the picker command must start with an absolute path, not "pick --key k"')).toBe('refused: the picker command must start with an absolute path, not \u2026')
+    expect(traceMessage("ENOENT: no such file or directory, open '/x/y'")).toBe('ENOENT: no such file or directory, open \u2026')
+  })
+
+  test('the mod\'s own words stay, apostrophes included, cut at 120 characters', () => {
+    expect(messageFields('refused: cwd is the orchestrator dir')).toEqual({ message: 'refused: cwd is the orchestrator dir' })
+    expect(traceMessage("the session's file can't be read")).toBe("the session's file can't be read")
+    expect(traceMessage('x'.repeat(300))).toBe('x'.repeat(TRACE_MAX_MESSAGE))
+    expect(traceMessage('y'.repeat(300), 200)).toHaveLength(200)
+  })
+
+  test('the picker shows as its executable\'s name and the number of its arguments', () => {
+    expect(shownPicker(['/home/u/bin/pick', '--need', '40'])).toEqual({ picker: 'pick', args: 2 })
+    expect(shownPicker(['C:\\tools\\pick.exe'])).toEqual({ picker: 'pick.exe', args: 0 })
   })
 })
 
