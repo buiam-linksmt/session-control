@@ -394,24 +394,62 @@ export function resultReport(resultText: string): string {
 
 const GIT_STATUS = /git\s+status\s+-sb\b/gi
 const GIT_LOG = /git\s+log\s+--oneline\s+@\{(?:u|upstream)\}\.\.HEAD/gi
-/** An exit code as reports write it: `exit 0`, `exit=0`, `exit code: 0`, `rc=0`. */
-const EXIT_CODE = /\b(?:exit(?:\s+code)?|rc)\s*[:=]?\s*(\d+)/i
+/** Either command named: where one command's text ends and the next begins. */
+const GIT_COMMAND = /git\s+(?:status\s+-sb|log\s+--oneline)/i
+/** An exit code as reports write it: `exit 0`, `exit=0`, `exit code: 0`, `exit status 0`, `exited 0`, `rc=0`, `→ 0`. */
+const EXIT_CODE = /(?:\bexit(?:ed)?(?:\s+(?:code|status))?\s*[:=]?\s*|\brc\s*[:=]?\s*|→\s*)(\d+)/i
 /** A `git status -sb` branch line: `## main...origin/main [ahead 1]`, `## HEAD (no branch)`. */
 const BRANCH_LINE = /^[\s>]*##\s+\S/m
 /** A `git log --oneline` line: an abbreviated sha holding a digit, then the subject; a list mark or backticks may lead. */
-const COMMIT_LINE = /^[\s>]*(?:[-*]\s+)?`?(?=[0-9a-f]*\d)[0-9a-f]{7,40}`?\s+\S/gm
+const COMMIT_LINE = /^[\s>]*(?:[-*]\s+)?`?(?=[0-9a-f]*\d)[0-9a-f]{7,40}`?\s+\S/m
+/** Lines that end a command's output block: a heading, the next command, a code fence, a line opening with an exit marker. */
+const HEADING_LINE = /^[\s>]*#{1,6}\s/
+const COMMAND_LINE = /^[\s>]*(?:[-*]\s+)?[`$]*\s*git\s/i
+const FENCE_LINE = /^[\s>]*```/
+const EXIT_LINE = /^[\s>]*[([]?\s*(?:exit|exited|rc\b|→)/i
 
 /** The text after a command mention up to the next mention of either command, at most `max` characters. */
 function after(text: string, end: number, max: number): string {
   const rest = text.slice(end, end + max)
-  const next = rest.search(/git\s+(?:status\s+-sb|log\s+--oneline)/i)
+  const next = rest.search(GIT_COMMAND)
   return next < 0 ? rest : rest.slice(0, next)
+}
+
+/**
+ * The exit code and the number of commits of the `git log` read that ends at `end`: the rest of its line, then the
+ * output block below it, which stops at a blank line, a code-fence end, an exit marker, the next command or a heading.
+ * The exit code sits on the command's line, in the block, or on the exit marker or the line right after the fence that
+ * ends it; an `exit 0` further on in the report is not this log's.
+ */
+function logRead(report: string, end: number): { exit?: string; commits: number } {
+  const lines = report.slice(end).split('\n')
+  const first = lines.shift() ?? ''
+  const next = first.search(GIT_COMMAND)
+  let exit = EXIT_CODE.exec(next < 0 ? first : first.slice(0, next))?.[1]
+  let commits = 0
+  if (next >= 0) return { exit, commits }
+  for (const [at, line] of lines.entries()) {
+    if (line.trim() === '' || HEADING_LINE.test(line) || COMMAND_LINE.test(line)) break
+    if (FENCE_LINE.test(line)) {
+      const following = lines[at + 1] ?? ''
+      if (EXIT_LINE.test(following)) exit ??= EXIT_CODE.exec(following)?.[1]
+      break
+    }
+    if (EXIT_LINE.test(line)) {
+      exit ??= EXIT_CODE.exec(line)?.[1]
+      break
+    }
+    if (COMMIT_LINE.test(line)) commits += 1
+    else exit ??= EXIT_CODE.exec(line)?.[1]
+  }
+  return { exit, commits }
 }
 
 /**
  * The worker-report check: whether a final report carries the output of `git status -sb` and of
  * `git log --oneline @{u}..HEAD`, each with its exit code, as the worker prompts demand, and whether that log lists
- * commits that are not pushed. Tolerant of case, code fences, `$ ` prompts and the spellings EXIT_CODE takes.
+ * commits that are not pushed (counted only in the log's own output block). Tolerant of case, code fences, `$ `
+ * prompts and the spellings EXIT_CODE takes.
  * Undefined when the report is in order; else one short line. It is a note only: it never changes the outcome.
  */
 export function reportCheck(report: string): string | undefined {
@@ -424,12 +462,11 @@ export function reportCheck(report: string): string | undefined {
   let commits = 0
   const failed: string[] = []
   for (const match of report.matchAll(GIT_LOG)) {
-    const window = after(report, (match.index ?? 0) + match[0].length, 600)
-    const exit = EXIT_CODE.exec(window)
-    if (exit === null) continue
+    const read = logRead(report, (match.index ?? 0) + match[0].length)
+    if (read.exit === undefined) continue
     isLog = true
-    if (exit[1] !== '0') failed.push(exit[1] ?? '?')
-    commits += [...window.matchAll(COMMIT_LINE)].length
+    if (read.exit !== '0') failed.push(read.exit)
+    commits += read.commits
   }
   const lacks = [isStatus ? '' : 'git status -sb', isLog ? '' : 'git log --oneline @{u}..HEAD'].filter(one => one !== '')
   const notes: string[] = []

@@ -1014,6 +1014,38 @@ describe('worker-report check', () => {
     const words = '`git log --oneline @{u}..HEAD` (exit 0): no output.\n`git status -sb` (exit 0):\n```\n## main...origin/main\n```\ndefaced accepted 2026-10-10 deadbeef is not a commit line'
     expect(reportCheck(words)).toBeUndefined()
   })
+  test('commits are counted only in the log\'s own output block', () => {
+    const stray = '9b6e367 fix(toast): drop the plugin name'
+    // After a blank line, after a heading, after a fence end, after an exit marker, after the next command.
+    expect(reportCheck(`${REPORT_TEXTS.design}\n\nPushed earlier:\n${stray}`)).toBeUndefined()
+    expect(reportCheck(REPORT_TEXTS.probe.replace('(no output)\n```', `(no output)\n\`\`\`\n${stray}`))).toBeUndefined()
+    expect(reportCheck(REPORT_TEXTS.probe.replace('→ exit 0 (no output)', `→ exit 0\n## Pushed\n${stray}`))).toBeUndefined()
+    expect(reportCheck(REPORT_TEXTS.probe.replace('→ exit 0 (no output)', `exit 0\nexit 0\n${stray}`))).toBeUndefined()
+    expect(reportCheck(REPORT_TEXTS.probe.replace('→ exit 0 (no output)', `→ exit 0\n$ git show --oneline ${stray}`))).toBeUndefined()
+    // Inside the block they still count, up to the stop.
+    const two = REPORT_TEXTS.probe.replace('→ exit 0 (no output)', `→ exit 0\n${stray}\nc1ff342 fix(completion): label limit and login only from reliable signals\n\n${stray}`)
+    expect(reportCheck(two)).toBe('git log @{u}..HEAD lists 2 unpushed commits')
+  })
+  test('exit spellings: exit status 0, → 0, (exit 0), exited 0', () => {
+    const status = '`git status -sb` (exit 0):\n```\n## main...origin/main\n```\n'
+    for (const spelling of ['exit status 0', '→ 0', '(exit 0)', 'exited 0', 'exit code 0']) {
+      expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD ${spelling}`)).toBeUndefined()
+      expect(reportCheck(`$ git status -sb ${spelling}\n## main...origin/main\n$ git log --oneline @{u}..HEAD ${spelling}`)).toBeUndefined()
+    }
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD → 128`)).toBe('git log @{u}..HEAD exited 128')
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD exited 1`)).toBe('git log @{u}..HEAD exited 1')
+  })
+  test('the log\'s exit code sits in or right after its block, not later in the report', () => {
+    const status = '`git status -sb` (exit 0):\n```\n## main...origin/main\n```\n'
+    const lacking = 'report lacks git log --oneline @{u}..HEAD with its exit code'
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n\nThe build script ended with exit 0.`)).toBe(lacking)
+    expect(reportCheck(`${status}\`git log --oneline @{u}..HEAD\`: no output.\n\nLater: tests ran (exit 0).`)).toBe(lacking)
+    // After the output, on an exit marker line or the line after the fence that ends the block.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix(toast): drop the plugin name\nexit 0`)).toBe('git log @{u}..HEAD lists 1 unpushed commit')
+    expect(reportCheck(`${status}\`\`\`\n$ git log --oneline @{u}..HEAD\n\`\`\`\nexit 0`)).toBeUndefined()
+    // A commit subject holding an exit-like word is not the log's exit code.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix: exit 0 on cancel`)).toBe(lacking)
+  })
   test('resultReport: the result text of a result file, empty otherwise', () => {
     expect(resultReport(JSON.stringify({ result: 'x' }))).toBe('x')
     for (const text of ['', '{', 'null', '{"result":5}']) expect(resultReport(text)).toBe('')
