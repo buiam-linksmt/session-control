@@ -16,6 +16,19 @@ pass() { printf 'ok   %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; FAILED=1; }
 skip() { printf 'skip %s\n' "$1"; }
 info() { printf 'info %s\n' "$1"; }
+# Whether a file holds a text in any capitalisation: 0 it does, 1 it does not, 2 the check itself failed. Both sides
+# are lower-cased with tr and matched with a plain grep -F: grep -F -i aborts in the grep 3.0 of Git for Windows,
+# with every input and locale. The lower-cased copy goes next to the file, so a failing tr is told from a clean file.
+holds_ci() {
+  _want=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || return 2
+  [ -n "$_want" ] && [ -r "$2" ] || return 2
+  tr '[:upper:]' '[:lower:]' < "$2" > "$2.lower" || { rm -f "$2.lower"; return 2; }
+  grep -F -q -- "$_want" "$2.lower"
+  _r=$?
+  rm -f "$2.lower"
+  [ "$_r" -le 1 ] || return 2
+  return "$_r"
+}
 # A path as claude and the mod take it: native C:/... in Git Bash, unchanged elsewhere; msys() is its /c/... form.
 native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
 msys() { native "$1" | sed -E 's#^([A-Za-z]):/#/\1/#'; }
@@ -226,7 +239,18 @@ else
 fi
 
 # ---------------------------------------------------------------- (c) the prompt never in the trace; clean up
-if [ -s "$TRACE" ] && ! grep -F -q -- "$PROMPT_PHRASE" "$TRACE" && ! grep -F -q -- 'nothing to wait for in the foreground' "$TRACE"; then pass 'trace: no line contains the prompt text'; else fail 'trace: no line contains the prompt text'; fi
+# In any capitalisation; a check that cannot run is a failure, never a pass.
+holds_ci "$PROMPT_PHRASE" "$TRACE"; _p1=$?
+holds_ci 'nothing to wait for in the foreground' "$TRACE"; _p2=$?
+if [ ! -s "$TRACE" ]; then
+  fail 'trace: no line contains the prompt text (no trace)'
+elif [ "$_p1" -eq 2 ] || [ "$_p2" -eq 2 ]; then
+  fail 'trace: no line contains the prompt text (the check could not run)'
+elif [ "$_p1" -eq 0 ] || [ "$_p2" -eq 0 ]; then
+  fail 'trace: no line contains the prompt text'
+else
+  pass 'trace: no line contains the prompt text'
+fi
 # A process ended by the tmux server's exit may take a moment to go.
 _l=0
 while :; do
