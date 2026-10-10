@@ -342,7 +342,9 @@ describe('tool surface', () => {
     // Changed on purpose by feature/inspect-tools: six read-only inspection tools (list_sessions, read_result,
     // worker_tail, session_writes, panel_snapshot, audit_state) are registered after the six; the six are unchanged
     // (the next test pins their own fingerprint, 6072:68e1b3f1, this line's value before the change).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('9499:ccae8712')
+    // Changed on purpose again by feature/write-tools (9499:ccae8712 before): close_worker is registered after
+    // audit_state; the twelve tools before it are unchanged (the next test pins each).
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('11029:39536527')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -361,9 +363,27 @@ describe('tool surface', () => {
       'session_writes',
       'panel_snapshot',
       'audit_state',
+      'close_worker',
     ])
     // The six tools before feature/inspect-tools keep their names, descriptions and schemas byte for byte.
     expect(fingerprint(JSON.stringify(w.tools.slice(0, 6)))).toBe('6072:68e1b3f1')
+    // Each tool's own pin. The twelve tools before feature/write-tools are unchanged byte for byte; close_worker is new.
+    const pins = Object.fromEntries(w.tools.map(tool => [tool.name, fingerprint(JSON.stringify(tool))]))
+    expect(pins).toEqual({
+      launch_worker: '1382:a077d922',
+      acknowledge_workers: '875:8ed174c7',
+      retire_workers: '1530:18bbed4e',
+      open_point: '932:ad93390e',
+      queue_task: '702:d743828c',
+      record_decision: '644:568b5ef',
+      list_sessions: '564:8e142ecb',
+      read_result: '803:cd9e805f',
+      worker_tail: '632:2fdec597',
+      session_writes: '593:3ee3f38e',
+      panel_snapshot: '267:bb88911d',
+      audit_state: '562:67cf260d',
+      close_worker: '1529:9741bcb0',
+    })
   })
 })
 
@@ -2293,5 +2313,62 @@ describe('a log whose session leaves the registry', () => {
     await w.clock.advance(5000)
     await $.command.run({ command: 'session-control', args: 'side' } as never)
     expect(await boxesOf(await mountPane($))).toEqual(THREE)
+  })
+})
+
+describe('close_worker', () => {
+  const CLOSE = 'mcp__session-control__close_worker'
+  const finished = { title: 'finished clean', session_id: 'f1f1f1f1-0000-4000-8000-000000000001', config_dir: '/fixture/lic/a', reported: false, outcome: { kind: 'clean', summary: 'clean: done' } }
+  const login = { title: 'stuck login', session_id: '57575751-0000-4000-8000-000000000001', config_dir: '/fixture/lic/a', reported: false, outcome: { kind: 'login', summary: 'login: old label' } }
+  const kept = { title: 'kept clean', session_id: 'c3c3c3c3-0000-4000-8000-000000000003', config_dir: '/fixture/lic/a', reported: true, keep: true, outcome: { kind: 'clean', summary: 'clean: ok' } }
+  const registry = JSON.stringify([...JSON.parse(REGISTRY_TEXT), finished, login, kept])
+  const ids = ['f1f1f1f1', '57575751', 'c3c3c3c3', SID_ALIVE, '12345678']
+  const reviewed = { '57575751': 'the transcript shows the run succeeded' }
+
+  // The fixture's registry text does not change when the mod writes it: each call reads the fixture's entries, so the
+  // kept entry stays kept for the retire here (host.test.ts runs the same on a machine whose files do change).
+  const ACK = 'mcp__session-control__acknowledge_workers'
+  const RETIRE = 'mcp__session-control__retire_workers'
+  const EXPECTED =
+    'Acknowledged: f1f1f1f1, 57575751, c3c3c3c3. Refused: aaaaaaaa (its process is alive); 12345678 (no registry entry). ' +
+    'Retired: f1f1f1f1, 57575751. Retired with review: 57575751 (was login: the transcript shows the run succeeded). ' +
+    'Refused: c3c3c3c3 (marked keep: a resume or follow-up is expected); aaaaaaaa (its process is alive); 12345678 (no registry entry).'
+
+  test('keep false is acknowledge_workers then retire_workers: their answers one after the other, their writes', { options: OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, registry)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: CLOSE, session_ids: ids, reviewed } as never)
+    expect(String(out.result)).toBe(EXPECTED)
+    const after = lastRegistry(w)
+    expect(after.some(one => [finished.session_id, login.session_id].includes(String(one.session_id)))).toBe(false)
+    expect(after.some(one => one.session_id === SID_ALIVE)).toBe(true)
+    const cleared = w.writes.filter(one => one.path.endsWith('/cleared.jsonl')).map(one => one.text).join('')
+    expect(cleared).toContain('"reviewed_outcome":"login","reviewed_reason":"the transcript shows the run succeeded"')
+  })
+
+  test('the same two calls made one by one answer the same text', { options: OPTIONS }, async ($, on) => {
+    world(on, '/fixture/lic/a\n', true, registry)
+    await $.session.start(start(ORCH_DIR))
+    const acked = await $.tool.call({ tool: ACK, session_ids: ids } as never)
+    const retired = await $.tool.call({ tool: RETIRE, session_ids: ids, reviewed } as never)
+    expect(`${String(acked.result)} ${String(retired.result)}`).toBe(EXPECTED)
+  })
+
+  test('keep true only acknowledges and keeps; reviewed is then not used, and said so', { options: OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, registry)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: CLOSE, session_ids: ['f1f1f1f1'], keep: true } as never)
+    expect(String(out.result)).toBe('Acknowledged and kept: f1f1f1f1.')
+    expect(lastRegistry(w).find(one => one.session_id === finished.session_id)).toMatchObject({ reported: true, keep: true })
+    expect(w.writes.some(one => one.path.endsWith('/cleared.jsonl'))).toBe(false)
+    const noted = await $.tool.call({ tool: CLOSE, session_ids: ['f1f1f1f1'], keep: true, reviewed: { f1f1f1f1: 'x' } } as never)
+    expect(String(noted.result)).toBe('Acknowledged and kept: f1f1f1f1. reviewed was not used: keep true retires nothing.')
+  })
+
+  test('the retire refusals stay: an outcome that needs a resume without reviewed; the acknowledgement still happens', { options: OPTIONS }, async ($, on) => {
+    world(on, '/fixture/lic/a\n', true, registry)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: CLOSE, session_ids: ['57575751'] } as never)
+    expect(String(out.result)).toBe('Acknowledged: 57575751. Retired: none. Refused: 57575751 (outcome login needs a resume).')
   })
 })

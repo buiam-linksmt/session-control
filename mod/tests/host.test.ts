@@ -543,5 +543,74 @@ describe('write-side tools through the plugin, on both platforms', () => {
       expect(cleared).toEqual([{ ...entries[0], cost_usd: 0.12, duration_ms: 4500 }, { ...entries[2], cost_usd: 1, duration_ms: 1 }])
       expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([entries[1]])
     })
+
+    test(`${p.name}: close_worker acknowledges then retires; the run files of a clean session go, unless outside the runs directory or named by another entry; cost and duration stay in the cleared log`, { options }, async ($, on) => {
+      const m = machine(p.env)
+      boot(on, m)
+      const transcriptA = posixOrWindows(p.name).transcriptPath({ config_dir: cfg, cwd: `${p.root}/work`, session_id: SID_A }) ?? ''
+      const entries = [
+        // A: clean, all four run files in the runs directory; its error file is also C's, so it stays.
+        { title: 'a', session_id: SID_A, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'clean', summary: 'clean: a' }, result_file: `${runs}/20260921-a.json`, err_file: `${runs}/20260921-a.err`, prompt_file: `${runs}/20260921-a.prompt.md` },
+        // B: clean but kept: the acknowledgement clears keep, so the retire after it takes it.
+        { title: 'b', session_id: SID_B, config_dir: cfg, cwd: `${p.root}/work`, reported: true, keep: true, outcome: { kind: 'clean', summary: 'clean: b' }, result_file: `${runs}/20260921-b.json` },
+        { title: 'c', session_id: SID_C, config_dir: cfg, cwd: `${p.root}/work`, reported: false, err_file: `${runs}/20260921-a.err` },
+        // D: clean, its result file outside the runs directory.
+        { title: 'd', session_id: SID_D, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'clean', summary: 'clean: d' }, result_file: `${p.root}/elsewhere/d.json` },
+        // E: no outcome (an entry from before outcomes): retired, its files kept.
+        { title: 'e', session_id: SID_E, config_dir: cfg, cwd: `${p.root}/work`, reported: false, result_file: `${runs}/20260921-e.json` },
+      ]
+      put(m, reg, `${JSON.stringify(entries, null, 2)}\n`)
+      put(m, `${runs}/20260921-a.json`, result(0.12, 4500))
+      put(m, `${runs}/20260921-a.err`, '')
+      put(m, `${runs}/20260921-a.pid`, '4242\r\n')
+      put(m, `${runs}/20260921-a.prompt.md`, 'Reply PONG.')
+      put(m, `${runs}/20260921-b.json`, result(0.5, 60000))
+      put(m, `${runs}/20260921-e.json`, result(1, 1))
+      put(m, `${p.root}/elsewhere/d.json`, result(2, 2))
+      put(m, transcriptA, '{"type":"user"}\n')
+      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      const out = (await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: [SID_A, SID_B, SID_D, SID_E] } as never)) as { result?: unknown }
+      expect(String(out.result)).toBe(
+        'Acknowledged: aaaa0001, bbbb0002, dddd0004, eeee0005. Retired: aaaa0001, bbbb0002, dddd0004, eeee0005. ' +
+          `Run files deleted from ${runs}: aaaa0001 (20260921-a.json, 20260921-a.pid, 20260921-a.prompt.md); bbbb0002 (20260921-b.json).`,
+      )
+      for (const gone of ['20260921-a.json', '20260921-a.pid', '20260921-a.prompt.md', '20260921-b.json']) expect(get(m, `${runs}/${gone}`)).toBeUndefined()
+      expect(get(m, `${runs}/20260921-a.err`)).toBe('')
+      expect(get(m, `${runs}/20260921-e.json`)).toBe(result(1, 1))
+      expect(get(m, `${p.root}/elsewhere/d.json`)).toBe(result(2, 2))
+      expect(get(m, transcriptA)).toBe('{"type":"user"}\n')
+      const cleared = (get(m, `${runs}/cleared.jsonl`) ?? '').trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+      expect(cleared.map(one => one.session_id)).toEqual([SID_A, SID_B, SID_D, SID_E])
+      expect(cleared[0]).toMatchObject({ session_id: SID_A, outcome: { kind: 'clean' }, cost_usd: 0.12, duration_ms: 4500 })
+      expect(cleared[1]).toMatchObject({ session_id: SID_B, cost_usd: 0.5, duration_ms: 60000 })
+      expect(cleared[2]).toMatchObject({ session_id: SID_D, cost_usd: 2, duration_ms: 2 })
+      expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([entries[2]])
+    })
+
+    test(`${p.name}: a reviewed retire deletes the run files too; a kept close leaves every file`, { options }, async ($, on) => {
+      const m = machine(p.env)
+      boot(on, m)
+      const entries = [
+        { title: 'a', session_id: SID_A, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'login', summary: 'login: wrong' }, result_file: `${runs}/20260921-a.json`, err_file: `${runs}/20260921-a.err` },
+        { title: 'b', session_id: SID_B, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'clean', summary: 'clean: b' }, result_file: `${runs}/20260921-b.json` },
+      ]
+      put(m, reg, `${JSON.stringify(entries, null, 2)}\n`)
+      put(m, `${runs}/20260921-a.json`, result(0.3, 30))
+      put(m, `${runs}/20260921-a.err`, 'Please run /login\n')
+      put(m, `${runs}/20260921-b.json`, result(0.4, 40))
+      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      const reviewed = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [SID_A], reviewed: { aaaa0001: 'the run succeeded' } } as never)) as { result?: unknown }
+      expect(String(reviewed.result)).toBe(`Retired: aaaa0001. Retired with review: aaaa0001 (was login: the run succeeded). Run files deleted from ${runs}: aaaa0001 (20260921-a.json, 20260921-a.err).`)
+      const kept = (await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: [SID_B], keep: true } as never)) as { result?: unknown }
+      expect(String(kept.result)).toBe('Acknowledged and kept: bbbb0002.')
+      expect(get(m, `${runs}/20260921-b.json`)).toBe(result(0.4, 40))
+      expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([{ ...entries[1], reported: true, keep: true }])
+    })
+
   }
 })
+
+/** The adapter of a platform's name, for the paths the tests place files at. */
+function posixOrWindows(name: string): Host {
+  return name === 'Windows' ? windowsHost : posixHost
+}

@@ -49,6 +49,7 @@ import {
   LAUNCH_SCHEMA,
   ACK_SCHEMA,
   RETIRE_SCHEMA,
+  CLOSE_SCHEMA,
   runFigures,
   runFilesToDelete,
   withRunFigures,
@@ -117,6 +118,7 @@ const TAIL_TOOL = 'mcp__session-control__worker_tail'
 const WRITES_TOOL = 'mcp__session-control__session_writes'
 const SNAPSHOT_TOOL = 'mcp__session-control__panel_snapshot'
 const AUDIT_TOOL = 'mcp__session-control__audit_state'
+const CLOSE_TOOL = 'mcp__session-control__close_worker'
 
 /** How much of a transcript read_result reads when the whole is over the read cap: a final report can be one long row. */
 const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
@@ -855,6 +857,16 @@ async function cleanRunFiles($: EngineInterface, removed: readonly SessionEntry[
   return `${gone}${notGone}`
 }
 
+/** close_worker: acknowledge_workers, then (keep false) retire_workers, each as it answers on its own. */
+async function close($: EngineInterface, ids: readonly string[], keep: boolean, reviewed: Readonly<Record<string, unknown>>, isReviewedGiven: boolean) {
+  const acked = await acknowledge($, ids, keep)
+  if ('deny' in acked) return acked
+  if (keep) return { result: `${acked.result}${isReviewedGiven ? ' reviewed was not used: keep true retires nothing.' : ''}` }
+  const retired = await retire($, ids, reviewed)
+  if ('deny' in retired) return { deny: `${acked.result} ${String(retired.deny)}` }
+  return { result: `${acked.result} ${retired.result}` }
+}
+
 async function launch($: EngineInterface, given: LaunchArgs) {
   const machine = await hostOf($)
   // The launch's paths in the form the host stores, from here on and in the registry (on Windows C:/..., never /c/...).
@@ -1265,6 +1277,16 @@ async function activate($: EngineInterface): Promise<void> {
     ] as const) {
       await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
     }
+    // The write-side tools after them: the registry and the decisions file, each through the code of the tools above.
+    for (const [name, description, schema] of [
+      [
+        'close_worker',
+        'Acknowledge and retire finished workers in one call: exactly acknowledge_workers, then retire_workers, with their refusals and their answers one after the other (reviewed as retire_workers takes it). keep=true only acknowledges and keeps (a resume or follow-up is expected); nothing is retired. A retire of a clean or reviewed session deletes its result, error, pid and mod-written prompt files in the runs directory, its cost and duration kept in cleared.jsonl.',
+        CLOSE_SCHEMA,
+      ],
+    ] as const) {
+      await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
+    }
   }
   if (!isPolling) {
     isPolling = true
@@ -1506,6 +1528,16 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => {
     traceError($, 'retire_workers', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: retire_workers failed` }
+  })
+
+  on('tool.call', { tool: CLOSE_TOOL }, ($, e) => {
+    const input = e as unknown as { session_ids?: unknown; keep?: unknown; reviewed?: unknown }
+    const isReviewedGiven = typeof input.reviewed === 'object' && input.reviewed !== null && !Array.isArray(input.reviewed)
+    const reviewed = isReviewedGiven ? (input.reviewed as Record<string, unknown>) : {}
+    return tracedTool($, 'close_worker', e, ['session_ids', 'keep'], () => close($, (input.session_ids as string[] | undefined) ?? [], input.keep === true, reviewed, isReviewedGiven))
+  }).catch(($, e, next) => {
+    traceError($, 'close_worker', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: close_worker failed` }
   })
 
   // The inspection tools: read-only; their answers reach the trace as a length only.

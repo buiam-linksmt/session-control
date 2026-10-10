@@ -1224,6 +1224,20 @@ export function runFilesToDelete(entry: SessionEntry, others: readonly SessionEn
   return files.filter(file => isUnder(file.path, runsDir) && !file.path.endsWith('.jsonl') && !named.has(file.path))
 }
 
+export const CLOSE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['session_ids'],
+  properties: {
+    session_ids: sessionIds('Session ids (full, or the first 8 characters) of finished workers whose result the orchestrator has reported.'),
+    keep: {
+      type: 'boolean',
+      description: 'true: only acknowledge and keep (acknowledge_workers with keep true); nothing is retired. false (default): acknowledge, then retire (acknowledge_workers, then retire_workers, with their refusals).',
+    },
+    reviewed: RETIRE_SCHEMA.properties.reviewed,
+  },
+} as const
+
 // ---------------------------------------------------------------- native Windows
 
 // Native Windows (Claude Code on Windows, Git Bash as the Bash tool's shell) has no sh, jq, mv or /proc on the
