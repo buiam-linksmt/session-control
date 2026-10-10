@@ -179,7 +179,8 @@ try:
 
     # --- the launch line in Git Bash, the Bash tool's shell on Windows, with claude() a node.exe that echoes what it
     # gets: no claude starts. The line has the shape buildLaunchArgv returns (pinned by its golden tests); this checks
-    # what Git Bash makes of it: cd into a path with a blank and a quote, CLAUDE_CONFIG_DIR as written, $(cat) of the
+    # what Git Bash makes of it: cd into a path with a blank and a quote, CLAUDE_CONFIG_DIR as written, the -n name and
+    # the --settings JSON reaching the program as single arguments with their double quotes, $(cat) of the
     # prompt, the redirections, and which prompts MSYS rewrites (MSYS_PROMPTS in tests/fixtures.ts).
     def where(exe):
         r = subprocess.run([PS, '-NoProfile', '-NonInteractive', '-Command', f'(Get-Command {exe} -ErrorAction SilentlyContinue).Source'], capture_output=True, text=True, timeout=60, cwd=work)
@@ -194,6 +195,9 @@ try:
         block = fx.split('// MSYS_PROMPTS:BEGIN', 1)[1].split('// MSYS_PROMPTS:END', 1)[0]
         prompts = json.loads(block.split(' = ', 1)[1])
         shq = lambda v: "'" + v.replace("'", "'\\''") + "'"
+        # The session name and the settings JSON buildLaunchArgv adds (WORKER_SETTINGS in hooks/core.ts).
+        settings = SRC.split("export const WORKER_SETTINGS = '", 1)[1].split("'", 1)[0]
+        name = 'w-selftest-261010120000'
         proj, cfg, runs = (os.path.join(work, name) for name in ("proj o'k", 'cfg dir', 'runs dir'))
         for d in (proj, cfg, runs):
             os.makedirs(d)
@@ -203,16 +207,16 @@ try:
             prompt, result, err = os.path.join(work, f'prompt {n}.md'), os.path.join(runs, f'{n}.json'), os.path.join(runs, f'{n}.err')
             open(prompt, 'w', encoding='utf-8', newline='').write(one['text'] + '\n')
             line = (f"cd {shq(to_win(proj))} && CLAUDE_CONFIG_DIR={shq(to_win(cfg))} CLAUDE_CODE_EFFORT_LEVEL={shq('high')} "
-                    f"claude -p --model {shq('opus')} --dangerously-skip-permissions --output-format json "
+                    f"claude -p --model {shq('opus')} -n {shq(name)} --settings {shq(settings)} --dangerously-skip-permissions --output-format json "
                     f"-- \"$(cat {shq(to_win(prompt))})\" > {shq(to_win(result))} 2> {shq(to_win(err))}")
             script = os.path.join(work, f'launch {n}.sh')
             open(script, 'w', newline='').write(echo + line + '\n')
             r = subprocess.run([bash, to_win(script)], capture_output=True, timeout=60, cwd=work)
             assert r.returncode == 0 and r.stderr == b'' and open(err).read() == '', (one, r.returncode, r.stderr)
             got = json.load(open(result, encoding='utf-8'))
-            assert got['argv'][:7] == ['-p', '--model', 'opus', '--dangerously-skip-permissions', '--output-format', 'json', '--'], got
+            assert got['argv'][:11] == ['-p', '--model', 'opus', '-n', name, '--settings', settings, '--dangerously-skip-permissions', '--output-format', 'json', '--'], got
             assert got['cfg'] == to_win(cfg) and got['effort'] == 'high' and got['cwd'] == to_win(proj, '\\'), got
-            assert (got['argv'][7] != one['text']) == one['rewritten'], (one, got['argv'][7])
+            assert (got['argv'][11] != one['text']) == one['rewritten'], (one, got['argv'][11])
         print(f'windows-launch-selftest: ok ({len(prompts)} prompts through Git Bash)')
 finally:
     shutil.rmtree(work)

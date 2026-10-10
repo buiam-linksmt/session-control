@@ -565,13 +565,50 @@ export function pickArgv(command: string, need: number, home: string): string[] 
 }
 
 /**
+ * The settings every worker gets through `--settings`: messages from other sessions on this machine are accepted, so
+ * the orchestrator can reach a running worker by its name. Inline JSON with no blank and no single quote: shq quotes
+ * it as one argument for bash on Linux and for Git Bash on Windows, which passes it to claude.exe unchanged.
+ */
+export const WORKER_SETTINGS = '{"crossSessionInbound":"accept"}'
+
+/** A worker's session name: `w-`, a slug of the title, the launch time; letters, digits and dashes only. */
+export const WORKER_NAME = /^w-[a-z0-9]+(-[a-z0-9]+)*$/
+
+/**
+ * The unique session name of a launch: `w-<slug of the title, up to 24>-<yyMMddHHmmss UTC>` (at most 39 characters),
+ * with `-2`, `-3`... appended while the name is in `taken` (names in the registry or given out by this session).
+ */
+export function workerName(title: string, nowMs: number, taken: ReadonlySet<string> = new Set()): string {
+  const slug = slugify(title).slice(0, 24).replace(/-+$/, '')
+  const stamp = new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(2, 14)
+  const base = `w-${slug}-${stamp}`
+  let name = base
+  for (let n = 2; taken.has(name); n++) name = `${base}-${n}`
+  return name
+}
+
+/**
+ * The name a launch passes with `-n`. A resume keeps the entry's own name when it has a valid one, so the session
+ * answers to the same name across resumes (its earlier process is dead: checkLaunch refuses a live one); an entry
+ * without one (launched before names existed) gets a fresh unique name, as a fresh launch does.
+ */
+export function launchName(title: string, nowMs: number, entries: readonly SessionEntry[], resumeSid?: string, issued: ReadonlySet<string> = new Set()): string {
+  const own = resumeSid === undefined ? undefined : entries.find(one => one.session_id === resumeSid)?.name
+  if (typeof own === 'string' && WORKER_NAME.test(own) && own.length <= 64) return own
+  const taken = new Set(issued)
+  for (const one of entries) if (typeof one.name === 'string') taken.add(one.name)
+  return workerName(title, nowMs, taken)
+}
+
+/**
  * The argv the launch runs: result and error go to files the caller names (never inside the repo). A worker that
  * inherits the machine's default configuration (`isConfigInherited`) gets no CLAUDE_CONFIG_DIR: Claude Code then
- * reads its global config where it always does (~/.claude.json), not inside the config directory.
+ * reads its global config where it always does (~/.claude.json), not inside the config directory. Every worker gets
+ * its session name (`-n`) and WORKER_SETTINGS (`--settings`), a resume too.
  */
 export function buildLaunchArgv(
   args: LaunchArgs,
-  verdict: { configDir: string; resumeSid?: string; isConfigInherited?: boolean },
+  verdict: { configDir: string; resumeSid?: string; isConfigInherited?: boolean; name: string },
   resultFile: string,
   errFile?: string,
 ): string[] {
@@ -580,7 +617,8 @@ export function buildLaunchArgv(
   const config = verdict.isConfigInherited === true ? '' : `CLAUDE_CONFIG_DIR=${shq(verdict.configDir)} `
   const script =
     `cd ${shq(args.dir)} && ${config}CLAUDE_CODE_EFFORT_LEVEL=${shq(args.effort)} ` +
-    `claude -p --model ${shq(args.model)}${resume} --dangerously-skip-permissions --output-format json ` +
+    `claude -p --model ${shq(args.model)}${resume} -n ${shq(verdict.name)} --settings ${shq(WORKER_SETTINGS)} ` +
+    `--dangerously-skip-permissions --output-format json ` +
     `-- "$(cat ${shq(args.prompt_file)})" > ${shq(resultFile)}${err}`
   return ['sh', '-c', script]
 }

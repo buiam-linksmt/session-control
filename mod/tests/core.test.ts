@@ -2,6 +2,10 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   buildLaunchArgv,
+  launchName,
+  workerName,
+  WORKER_NAME,
+  WORKER_SETTINGS,
   ackPeerNote,
   addPeerNote,
   boxAt,
@@ -71,6 +75,7 @@ import {
   RESULTS,
   SID_ALIVE,
   SID_DEAD,
+  SID_DONE,
   SID_REUSED,
   SID_UNREPORTED,
   TASK_NOTIFICATION_KILLED,
@@ -225,6 +230,8 @@ describe('registry merge in place', () => {
   })
 })
 
+const N = 'w-new-261010120000'
+
 describe('launch guard', () => {
   const base: LaunchArgs = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 't' }
   const ctx = (over: Partial<LaunchFacts> = {}): LaunchFacts => ({
@@ -273,7 +280,7 @@ describe('launch guard', () => {
     expect(checkLaunch({ ...base, resume_sid: 'ffffffff-0000-4000-8000-000000000000' }, ctx()).ok).toBe(false)
   })
   test('the would-run command quotes every value', () => {
-    const argv = buildLaunchArgv({ ...base, title: "it's" , dir: "/work/it's" }, { configDir: '/fixture/lic/a' }, '/work/r.json')
+    const argv = buildLaunchArgv({ ...base, title: "it's" , dir: "/work/it's" }, { name: N, configDir: '/fixture/lic/a' }, '/work/r.json')
     expect(argv[0]).toBe('sh')
     expect(argv[2]).toContain(`cd '/work/it'\\''s'`)
     expect(argv[2]).toContain(`CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus'`)
@@ -761,34 +768,35 @@ describe('the new worker of a launch', () => {
 })
 
 describe('launch line', () => {
+  // N is the session name a launch passes with -n (workerName of the title 'new' at 2026-10-10 12:00:00 UTC).
   const linux: LaunchArgs = { dir: '/work/new', prompt_file: '/tmp/scratch/prompt.md', model: 'opus', effort: 'high', title: 'new' }
   test('Linux: the line it always was', () => {
-    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude' }, '/home/u/.claude/session-control/runs/r.json', '/home/u/.claude/session-control/runs/r.err')).toEqual([
+    expect(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude' }, '/home/u/.claude/session-control/runs/r.json', '/home/u/.claude/session-control/runs/r.err')).toEqual([
       'sh',
       '-c',
-      "cd '/work/new' && CLAUDE_CONFIG_DIR='/home/u/.claude' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/home/u/.claude/session-control/runs/r.json' 2> '/home/u/.claude/session-control/runs/r.err'",
+      "cd '/work/new' && CLAUDE_CONFIG_DIR='/home/u/.claude' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/home/u/.claude/session-control/runs/r.json' 2> '/home/u/.claude/session-control/runs/r.err'",
     ])
-    expect(buildLaunchArgv({ ...linux, dir: '/c/foo' }, { configDir: '/c/cfg', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111' }, '/r.json')[2]).toBe(
-      "cd '/c/foo' && CLAUDE_CONFIG_DIR='/c/cfg' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
+    expect(buildLaunchArgv({ ...linux, dir: '/c/foo' }, { name: N, configDir: '/c/cfg', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111' }, '/r.json')[2]).toBe(
+      "cd '/c/foo' && CLAUDE_CONFIG_DIR='/c/cfg' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
     )
   })
 
   test('an inherited configuration: no CLAUDE_CONFIG_DIR on the line, on Linux and on Windows; everything else as before', () => {
-    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude', isConfigInherited: true }, '/home/u/.claude/session-control/runs/r.json', '/home/u/.claude/session-control/runs/r.err')[2]).toBe(
-      "cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/home/u/.claude/session-control/runs/r.json' 2> '/home/u/.claude/session-control/runs/r.err'",
+    expect(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude', isConfigInherited: true }, '/home/u/.claude/session-control/runs/r.json', '/home/u/.claude/session-control/runs/r.err')[2]).toBe(
+      "cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/home/u/.claude/session-control/runs/r.json' 2> '/home/u/.claude/session-control/runs/r.err'",
     )
-    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111', isConfigInherited: true }, '/r.json')[2]).toBe(
-      "cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
+    expect(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111', isConfigInherited: true }, '/r.json')[2]).toBe(
+      "cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
     )
     // isConfigInherited false is the line with the variable, as when the field is absent.
-    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude', isConfigInherited: false }, '/r.json')).toEqual(buildLaunchArgv(linux, { configDir: '/home/u/.claude' }, '/r.json'))
+    expect(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude', isConfigInherited: false }, '/r.json')).toEqual(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude' }, '/r.json'))
     const win: LaunchArgs = { ...linux, dir: 'C:/Users/u/proj', prompt_file: 'C:/Users/u/AppData/Local/Temp/p.md' }
-    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude', isConfigInherited: true }, 'C:/Users/u/.claude/session-control/runs/r.json', 'C:/Users/u/.claude/session-control/runs/r.err')[2]).toBe(
-      "cd 'C:/Users/u/proj' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/u/AppData/Local/Temp/p.md')\" " +
+    expect(buildLaunchArgv(win, { name: N, configDir: 'C:/Users/u/.claude', isConfigInherited: true }, 'C:/Users/u/.claude/session-control/runs/r.json', 'C:/Users/u/.claude/session-control/runs/r.err')[2]).toBe(
+      "cd 'C:/Users/u/proj' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/u/AppData/Local/Temp/p.md')\" " +
         "> 'C:/Users/u/.claude/session-control/runs/r.json' 2> 'C:/Users/u/.claude/session-control/runs/r.err'",
     )
-    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude/lic/b' }, 'C:/r.json')[2]).toBe(
-      "cd 'C:/Users/u/proj' && CLAUDE_CONFIG_DIR='C:/Users/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/u/AppData/Local/Temp/p.md')\" > 'C:/r.json'",
+    expect(buildLaunchArgv(win, { name: N, configDir: 'C:/Users/u/.claude/lic/b' }, 'C:/r.json')[2]).toBe(
+      "cd 'C:/Users/u/proj' && CLAUDE_CONFIG_DIR='C:/Users/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/u/AppData/Local/Temp/p.md')\" > 'C:/r.json'",
     )
   })
 
@@ -808,11 +816,95 @@ describe('launch line', () => {
   test('Windows: the same line for Git Bash, every path native C:/... in single quotes', () => {
     const args: LaunchArgs = { ...linux, dir: winPath("/c/Users/John Smith/O'Brien proj/"), prompt_file: winPath('/c/Users/John Smith/AppData/Local/Temp/prompt.md') }
     const runs = 'C:/Users/John Smith/.claude/session-control/runs'
-    expect(buildLaunchArgv(args, { configDir: winPath('C:\\Users\\John Smith\\.claude') }, `${runs}/r.json`, `${runs}/r.err`)[2]).toBe(
+    expect(buildLaunchArgv(args, { name: N, configDir: winPath('C:\\Users\\John Smith\\.claude') }, `${runs}/r.json`, `${runs}/r.err`)[2]).toBe(
       "cd 'C:/Users/John Smith/O'\\''Brien proj' && CLAUDE_CONFIG_DIR='C:/Users/John Smith/.claude' CLAUDE_CODE_EFFORT_LEVEL='high' " +
-        "claude -p --model 'opus' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/John Smith/AppData/Local/Temp/prompt.md')\" " +
+        "claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/John Smith/AppData/Local/Temp/prompt.md')\" " +
         "> 'C:/Users/John Smith/.claude/session-control/runs/r.json' 2> 'C:/Users/John Smith/.claude/session-control/runs/r.err'",
     )
+  })
+})
+
+describe('session name and inbox of a launch', () => {
+  const at = Date.UTC(2026, 9, 10, 12, 0, 0)
+  const linux: LaunchArgs = { dir: '/work/new', prompt_file: '/tmp/scratch/prompt.md', model: 'opus', effort: 'high', title: 'new' }
+  const flags = `-n 'w-new-261010120000' --settings '{"crossSessionInbound":"accept"}'`
+  test('the name: w-, the title slug up to 24, the UTC launch time; letters, digits and dashes, at most 39 characters', () => {
+    expect(workerName('new', at)).toBe(N)
+    expect(workerName("Design: launch_worker with an inbox (claude -p) - it's long", at)).toBe('w-design-launch-worker-wit-261010120000')
+    expect(workerName('Ünïcode ☕ — only', at)).toBe('w-n-code-only-261010120000')
+    expect(workerName('☕☕', at)).toBe('w-worker-261010120000')
+    // A slug cut at 24 that ends on a dash loses the dash.
+    expect(workerName('abcdefghijklmnopqrstuvw-xyz', at)).toBe('w-abcdefghijklmnopqrstuvw-261010120000')
+    for (const title of ['x', 'a'.repeat(120), '--- ---', 'A B/C\\D"E\'F$G`H', 'tab\there\nnewline']) {
+      const name = workerName(title, at)
+      expect(name).toMatch(WORKER_NAME)
+      expect(name.length).toBeLessThanOrEqual(39)
+    }
+  })
+  test('unique: a name already taken gets -2, -3 ...', () => {
+    expect(workerName('new', at, new Set([N]))).toBe(`${N}-2`)
+    expect(workerName('new', at, new Set([N, `${N}-2`]))).toBe(`${N}-3`)
+    expect(`${N}-2`).toMatch(WORKER_NAME)
+  })
+  test('a fresh launch takes a fresh name, unique against the registry and the names this session gave out', () => {
+    const entries = [{ session_id: SID_DEAD, name: N }, { session_id: SID_DONE, name: `${N}-2` }]
+    expect(launchName('new', at, [], undefined)).toBe(N)
+    expect(launchName('new', at, entries, undefined)).toBe(`${N}-3`)
+    expect(launchName('new', at, [], undefined, new Set([N]))).toBe(`${N}-2`)
+  })
+  test('a resume keeps the entry name; an entry with no name or a name that is not one of ours gets a fresh one', () => {
+    const named = [{ session_id: SID_DEAD, name: 'w-old-title-261001080000' }]
+    expect(launchName('new', at, named, SID_DEAD)).toBe('w-old-title-261001080000')
+    expect(launchName('new', at, [{ session_id: SID_DEAD }], SID_DEAD)).toBe(N)
+    expect(launchName('new', at, [{ session_id: SID_DEAD, name: "x'; rm -rf /" }], SID_DEAD)).toBe(N)
+    expect(launchName('new', at, [{ session_id: SID_DEAD, name: 7 }], SID_DEAD)).toBe(N)
+  })
+  test('golden: Linux with a picker, without one, and a resume keeping its name', () => {
+    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude/lic/b', name: N }, '/runs/r.json', '/runs/r.err')[2]).toBe(
+      `cd '/work/new' && CLAUDE_CONFIG_DIR='/home/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ${flags} ` +
+        `--dangerously-skip-permissions --output-format json -- "$(cat '/tmp/scratch/prompt.md')" > '/runs/r.json' 2> '/runs/r.err'`,
+    )
+    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude', isConfigInherited: true, name: N }, '/runs/r.json', '/runs/r.err')[2]).toBe(
+      `cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ${flags} ` +
+        `--dangerously-skip-permissions --output-format json -- "$(cat '/tmp/scratch/prompt.md')" > '/runs/r.json' 2> '/runs/r.err'`,
+    )
+    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude/lic/b', resumeSid: SID_DEAD, name: 'w-old-title-261001080000' }, '/runs/r.json', '/runs/r.err')[2]).toBe(
+      `cd '/work/new' && CLAUDE_CONFIG_DIR='/home/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume '${SID_DEAD}' ` +
+        `-n 'w-old-title-261001080000' --settings '{"crossSessionInbound":"accept"}' ` +
+        `--dangerously-skip-permissions --output-format json -- "$(cat '/tmp/scratch/prompt.md')" > '/runs/r.json' 2> '/runs/r.err'`,
+    )
+  })
+  test('golden: Windows (Git Bash) with a picker, without one, and a resume', () => {
+    const win: LaunchArgs = { ...linux, dir: 'C:/Users/u/proj', prompt_file: 'C:/Users/u/AppData/Local/Temp/p.md' }
+    const tail = `--dangerously-skip-permissions --output-format json -- "$(cat 'C:/Users/u/AppData/Local/Temp/p.md')" > 'C:/runs/r.json' 2> 'C:/runs/r.err'`
+    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude/lic/b', name: N }, 'C:/runs/r.json', 'C:/runs/r.err')[2]).toBe(
+      `cd 'C:/Users/u/proj' && CLAUDE_CONFIG_DIR='C:/Users/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ${flags} ${tail}`,
+    )
+    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude', isConfigInherited: true, name: N }, 'C:/runs/r.json', 'C:/runs/r.err')[2]).toBe(
+      `cd 'C:/Users/u/proj' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ${flags} ${tail}`,
+    )
+    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude', resumeSid: SID_DEAD, isConfigInherited: true, name: N }, 'C:/runs/r.json', 'C:/runs/r.err')[2]).toBe(
+      `cd 'C:/Users/u/proj' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume '${SID_DEAD}' ${flags} ${tail}`,
+    )
+  })
+  test('the settings are one shell word with no blank and no quote shq would have to escape', () => {
+    expect(JSON.parse(WORKER_SETTINGS)).toEqual({ crossSessionInbound: 'accept' })
+    expect(WORKER_SETTINGS).not.toMatch(/[\s']/)
+  })
+  test('the worker matcher still finds the launched worker with the extra flags, on Linux and on Windows', () => {
+    const want = { dir: '/work/new', configDir: '/fixture/lic/a', model: 'opus' }
+    // /proc/<pid>/cmdline with its NULs turned to blanks, as PROBE_SCRIPT prints it.
+    const linuxCmd = `claude -p --model opus -n ${N} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- Goal: x`
+    const linuxResume = `claude -p --model opus --resume ${SID_DEAD} -n ${N} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- Goal: x`
+    for (const cmd of [linuxCmd, linuxResume]) {
+      expect(findNewWorker(parseProcFacts(['P', 7, 'claude', 2, '/work/new', '/fixture/lic/a', cmd].join('\t')), want, new Set())?.pid).toBe(7)
+    }
+    expect(findNewWorker(parseProcFacts(['P', 7, 'claude', 2, '/work/new', '/fixture/lic/a', linuxCmd].join('\t')), { ...want, model: 'sonnet' }, new Set())).toBeUndefined()
+    // Win32_Process.CommandLine as Git Bash builds it for claude.exe.
+    const winCmd = `"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus -n ${N} --settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json -- "Goal: x"`
+    const winWant = { dir: 'C:/work/new', configDir: 'C:/Users/u/.claude', model: 'opus' }
+    expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, 'C:\\work\\new', 'C:\\Users\\u\\.claude', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
+    expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, '', '', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
   })
 })
 

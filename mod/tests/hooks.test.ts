@@ -165,7 +165,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === 'sh' && e.argv[2] === PROBE_SCRIPT) {
       if (LINUX_FIXTURE.isProbeBroken) throw new Error('the probe timed out')
       const worker = w.spawned
-        ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus --dangerously-skip-permissions --output-format json -- prompt\n`
+        ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
         : ''
       return { value: { ...ok, stdout: PROBE_STDOUT + worker } }
     }
@@ -185,7 +185,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       if (WINDOWS.isProbeBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Invalid class' } }
       const placed = WINDOWS.isWorkerUnplaced ? ['', ''] : ['C:\\work\\new', WINDOWS.workerConfigDir]
       const worker = w.spawned
-        ? ['P', 7001, 'claude', 3, ...placed, '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus --dangerously-skip-permissions --output-format json -- prompt'].join('\t') + '\n'
+        ? ['P', 7001, 'claude', 3, ...placed, '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus -n w-new-260921141320 --settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json -- prompt'].join('\t') + '\n'
         : ''
       // PowerShell's own line ends.
       return { value: { ...ok, stdout: (WIN_PROBE_STDOUT + worker).replace(/\n/g, '\r\n') } }
@@ -470,6 +470,16 @@ describe('launch_worker', () => {
     expect(w.runs.some(argv => argv.join(' ') === '/fixture/bin/pick --need 40')).toBe(true)
   })
 
+  test('every launch has a unique session name and accepts messages from other sessions', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    await $.tool.call({ tool: TOOL, ...args } as never)
+    expect(String(w.bash[0]?.command)).toContain(`claude -p --model 'opus' -n 'w-new-260921141320' --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions`)
+    // A second launch in the same second gets another name.
+    await $.tool.call({ tool: TOOL, ...args, dir: '/work/new' } as never)
+    expect(String(w.bash[1]?.command)).toContain(`-n 'w-new-260921141320-2' --settings`)
+  })
+
   test('without a licence picker command a fresh launch runs no picker, sets no CLAUDE_CONFIG_DIR and records <home>/.claude', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
     WORKER.linuxConfigDir = ''
     try {
@@ -538,6 +548,19 @@ describe('launch_worker', () => {
       await $.session.start(start(ORCH_DIR))
       expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
       expect(String(w.bash[0]?.command)).toContain(`CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume '${SID_UNREPORTED}'`)
+    })
+    test('keeps the entry name; an entry without one gets a fresh name', { options: OPTIONS }, async ($, on) => {
+      const named = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? { ...one, name: 'w-first-run-260901080000' } : one)))
+      const w = world(on, '/fixture/lic/a\n', true, named)
+      await $.session.start(start(ORCH_DIR))
+      expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+      expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}' -n 'w-first-run-260901080000' --settings '{"crossSessionInbound":"accept"}' --dangerously`)
+    })
+    test('of an entry without a name: a fresh unique name', { options: OPTIONS }, async ($, on) => {
+      const w = world(on, '/fixture/lic/a\n')
+      await $.session.start(start(ORCH_DIR))
+      expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+      expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}' -n 'w-new-260921141320' --settings`)
     })
     test('with a picker, of an entry under the default directory, sets it as before', { options: OPTIONS }, async ($, on) => {
       WORKER.linuxConfigDir = `${HOME}/.claude`
@@ -1107,7 +1130,7 @@ describe('platform', () => {
         `Result: ${WIN_RUNS}/20260921141320-new.json; errors: ${WIN_RUNS}/20260921141320-new.err.`,
     )
     expect(w.bash[0]?.command).toBe(
-      `cd 'C:/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --dangerously-skip-permissions --output-format json ` +
+      `cd 'C:/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-260921141320' --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions --output-format json ` +
         `-- "$(cat 'C:/work/new/prompt.md')" > '${WIN_RUNS}/20260921141320-new.json' 2> '${WIN_RUNS}/20260921141320-new.err'`,
     )
     expect(lastRegistry(w).at(-1)).toEqual({

@@ -84,6 +84,7 @@ import {
   probeArgs,
   rowStatus,
   slugify,
+  launchName,
 } from './core'
 import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
 
@@ -140,6 +141,8 @@ let isPolling = false
 let lastError: string | undefined
 let isDirectWriteNoted = false
 const harvested = new Set<string>()
+/** Session names this session gave to launches: two launches in the same second still get different names. */
+const issuedNames = new Set<string>()
 
 // The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
 // wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
@@ -830,10 +833,13 @@ async function spawnWorker(
   // The launch's redirections need the runs directory: mkdir on Linux; on Windows writing the file script makes it.
   if (isWin) await ensureScript($, 'files.ps1', FILES_PS1)
   else await run($, ['mkdir', '-p', runsDir], { timeoutMs: 5_000 })
-  const stamp = new Date(await $.clock.now()).toISOString().replace(/[-:T]/g, '').slice(0, 14)
+  const nowMs = await $.clock.now()
+  const stamp = new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const base = `${runsDir}/${stamp}-${slugify(args.title)}`
   const files = { result: `${base}.json`, err: `${base}.err` }
-  const command = buildLaunchArgv(args, verdict, files.result, files.err)[2] ?? ''
+  const name = launchName(args.title, nowMs, entries, verdict.resumeSid, issuedNames)
+  issuedNames.add(name)
+  const command = buildLaunchArgv(args, { ...verdict, name }, files.result, files.err)[2] ?? ''
   const known = new Set(before.claude.map(one => one.pid))
   const launchedAt = await $.clock.now()
   trace($, 'worker.start', { configDir: verdict.configDir, isConfigDirSet: verdict.isConfigInherited !== true, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
