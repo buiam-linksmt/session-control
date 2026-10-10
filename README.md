@@ -78,6 +78,8 @@ The tools are registered when the mod becomes active and are named `mcp__session
 
 Inbox: every worker gets a session name with `-n` and accepts messages from other sessions on the machine (`crossSessionInbound` set to `accept` through `--settings`), so the orchestrator can send a running worker a message by its name. The name is `w-`, the slug of the title cut to 24 characters, and the launch time in UTC as `yyMMddHHmmss` (for example `w-fix-the-parser-261010143117`): letters, digits and dashes, at most 39 characters; a name already in the registry or given out by the same session gets `-2`, `-3` and so on. A resume passes the same two flags and keeps the entry's name, so a session answers to one name across resumes; an entry without a name (launched before names existed) gets a fresh one. The worker's exit is still detected through the background task's notification.
 
+Registry entry: `launch_worker` records `title`, `pid`, `session_id`, `name`, `socket_path`, `config_dir`, `cwd`, `model`, `effort`, `result_file` and `err_file`. `name` and `socket_path` come from the worker's sessions file `<config_dir>/sessions/<pid>.json` (`name` and `messagingSocketPath`), read with the session id; `name` falls back to the name the launch passed. A claude that writes no socket (an older version) gives an entry without `socket_path`, and a resume then writes `socket_path: null` so the previous run's socket is not kept. The socket is valid only while the pid lives. The launch answer names both.
+
 `acknowledge_workers` and `retire_workers` refuse a worker whose process is alive. `retire_workers` also refuses a worker that is marked keep, whose outcome is not `clean` or that a queued or running task names.
 
 ### Options

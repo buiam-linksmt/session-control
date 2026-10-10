@@ -3,6 +3,8 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   buildLaunchArgv,
   launchName,
+  newRegistryEntry,
+  sessionFileFacts,
   workerName,
   WORKER_NAME,
   WORKER_SETTINGS,
@@ -617,7 +619,7 @@ describe('registry edits: the differential cases the jq scripts are checked agai
 
   test('every kind of case is there', () => {
     const names = REGISTRY_GOLDEN.map(one => one.name).join('\n')
-    for (const word of ['register new', 'register resume', 'clear', 'ack keep', 'ack plain', 'missing', 'empty', 'surrogate', 'DEL', 'key order', 'not JSON']) {
+    for (const word of ['register new', 'register resume', 'clear', 'ack keep', 'ack plain', 'missing', 'empty', 'surrogate', 'DEL', 'key order', 'not JSON', 'inbox fields', 'socket_path null']) {
       expect(names).toContain(word)
     }
   })
@@ -905,6 +907,36 @@ describe('session name and inbox of a launch', () => {
     const winWant = { dir: 'C:/work/new', configDir: 'C:/Users/u/.claude', model: 'opus' }
     expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, 'C:\\work\\new', 'C:\\Users\\u\\.claude', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
     expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, '', '', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
+  })
+})
+
+describe('the inbox fields of the registry entry', () => {
+  const args: LaunchArgs = { dir: '/work/new/', prompt_file: '/tmp/p.md', model: 'haiku', effort: 'low', title: 'new' }
+  const files = { result: '/r/new.json', err: '/r/new.err' }
+  test('sessionFileFacts reads sessionId, name and messagingSocketPath; anything else is undefined', () => {
+    expect(sessionFileFacts(JSON.stringify({ pid: 7, sessionId: SID_DEAD, name: N, messagingSocketPath: '/run/user/1000/cc-socks/7.sock', kind: 'interactive' }))).toEqual({
+      sessionId: SID_DEAD,
+      name: N,
+      socketPath: '/run/user/1000/cc-socks/7.sock',
+    })
+    expect(sessionFileFacts(JSON.stringify({ sessionId: SID_DEAD, procStart: '1' }))).toEqual({ sessionId: SID_DEAD })
+    expect(sessionFileFacts(JSON.stringify({ sessionId: SID_DEAD, name: '', messagingSocketPath: 5 }))).toEqual({ sessionId: SID_DEAD })
+    for (const text of ['', '{', 'null', '[1]', '"x"']) expect(sessionFileFacts(text)).toEqual({})
+  })
+  test('a fresh entry: name after the session id, socket_path when known, none otherwise', () => {
+    expect(Object.keys(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }))).toEqual([
+      'title', 'pid', 'session_id', 'name', 'socket_path', 'config_dir', 'cwd', 'model', 'effort', 'result_file', 'err_file',
+    ])
+    expect(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N })).toEqual({
+      title: 'new', pid: 7, session_id: SID_DEAD, name: N, config_dir: '/c/a', cwd: '/work/new', model: 'haiku', effort: 'low', result_file: '/r/new.json', err_file: '/r/new.err',
+    })
+  })
+  test('a resume entry: socket_path null when the new sessions file has none, so the merge clears the dead socket', () => {
+    expect(newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }).socket_path).toBeNull()
+    expect(newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }).socket_path).toBe('/s.sock')
+    const before = JSON.stringify([{ session_id: SID_DEAD, name: N, socket_path: '/old.sock', reported: false }])
+    const merged = registerEntry(before, newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }), 'resume')
+    expect(merged.ok && JSON.parse(merged.text)[0].socket_path).toBeNull()
   })
 })
 

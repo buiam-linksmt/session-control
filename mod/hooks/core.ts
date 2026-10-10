@@ -687,18 +687,52 @@ export function findNewWindowsWorker(
   )
 }
 
-/** The registry entry for a fresh launch (a resume updates the existing entry in place). */
+/**
+ * What the mod reads from a worker's `<config_dir>/sessions/<pid>.json`: its session id, its session name and the
+ * socket other sessions message it through (`messagingSocketPath`). A field that is missing or not a non-empty string
+ * (a file not written yet, an older claude without the inbox) is undefined.
+ */
+export function sessionFileFacts(text: string): { sessionId?: string; name?: string; socketPath?: string } {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    return {}
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {}
+  const file = value as Record<string, unknown>
+  const field = (key: string) => (typeof file[key] === 'string' && file[key] !== '' ? (file[key] as string) : undefined)
+  const facts: { sessionId?: string; name?: string; socketPath?: string } = {}
+  const sessionId = field('sessionId')
+  const name = field('name')
+  const socketPath = field('messagingSocketPath')
+  if (sessionId !== undefined) facts.sessionId = sessionId
+  if (name !== undefined) facts.name = name
+  if (socketPath !== undefined) facts.socketPath = socketPath
+  return facts
+}
+
+/**
+ * The registry entry for a launch (a resume merges it over the existing entry in place). `name` is the session name
+ * (the sessions file's, else the one the launch passed); `socket_path` is the sessions file's `messagingSocketPath`,
+ * valid while the pid lives. Without one a fresh entry has no `socket_path` and a resume writes null, so the dead
+ * socket of the earlier run is not kept.
+ */
 export function newRegistryEntry(
   args: LaunchArgs,
   verdict: { configDir: string; resumeSid?: string },
   pid: number,
   sessionId: string,
   files: { result: string; err: string },
+  inbox: { name: string; socketPath?: string },
 ): SessionEntry {
+  const socket = inbox.socketPath !== undefined ? { socket_path: inbox.socketPath } : verdict.resumeSid ? { socket_path: null } : {}
   return {
     title: args.title,
     pid,
     session_id: sessionId,
+    name: inbox.name,
+    ...socket,
     config_dir: verdict.configDir,
     cwd: args.dir.replace(/\/+$/, ''),
     model: args.model,

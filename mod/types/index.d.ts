@@ -13,6 +13,10 @@ export type SessionEntry = {
   reported?: boolean
   result_file?: string
   err_file?: string
+  /** Session name given with -n; other sessions message the worker by it. */
+  name?: string
+  /** The worker's messaging socket (messagingSocketPath of its sessions file), valid while its pid lives; null after a resume whose file had none. */
+  socket_path?: string | null
   [field: string]: unknown
 }
 

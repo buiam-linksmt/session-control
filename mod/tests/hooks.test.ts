@@ -58,7 +58,11 @@ const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
 // The CLAUDE_CONFIG_DIR the Linux probe reads from the new worker's environment ('' when it has none).
-const WORKER = { linuxConfigDir: '/fixture/lic/a', isBashMissing: false }
+// isInboxless: the Linux worker's sessions file has no name and no messagingSocketPath, as an older claude writes it.
+// sid: the session id the Linux worker's sessions file names (a resume keeps the resumed one).
+const WORKER = { linuxConfigDir: '/fixture/lic/a', isBashMissing: false, isInboxless: false, sid: 'abcdabcd-0000-4000-8000-000000000001' }
+/** The inbox fields of the Linux worker's sessions file. */
+const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320', messagingSocketPath: '/run/user/1000/cc-socks/7001.sock' })
 // Knobs of the Windows fixture: a failing move or probe; the config dir the probe finds the new worker's sessions
 // file in, or none (unplaced).
 const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false }
@@ -117,8 +121,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
     const result = /^\/fixture\/results\/(\w+)\.json$/.exec(path)?.[1]
     if (result !== undefined && result in RESULTS) return { value: RESULTS[result as keyof typeof RESULTS] }
-    if (['/fixture/home/.claude/sessions/7001.json', '/fixture/lic/own/sessions/7001.json'].includes(path) && !isWin) return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
-    if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
+    if (['/fixture/home/.claude/sessions/7001.json', '/fixture/lic/own/sessions/7001.json'].includes(path) && !isWin) return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123', ...inboxFields() }) }
+    if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: WORKER.sid, procStart: '123', ...inboxFields() }) }
     if (seen(e.path) === 'C:/fixture/home/.claude/sessions/7001.json') return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
     if (path === '/work/new/big.md') return { value: BIG_PROMPT }
     // The mod's own scripts read back as written.
@@ -480,6 +484,31 @@ describe('launch_worker', () => {
     expect(String(w.bash[1]?.command)).toContain(`-n 'w-new-260921141320-2' --settings`)
   })
 
+  test('the registry records the session name and the messaging socket from the worker sessions file', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: TOOL, ...args } as never)
+    expect(String(out.result)).toContain('registered. Name: w-new-260921141320; socket: /run/user/1000/cc-socks/7001.sock. Result: ')
+    expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, name: 'w-new-260921141320', socket_path: '/run/user/1000/cc-socks/7001.sock' })
+  })
+
+  test('an older claude whose sessions file has no inbox fields: the launch name, no socket_path, still registered', { options: OPTIONS }, async ($, on) => {
+    WORKER.isInboxless = true
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toContain('registered. Name: w-new-260921141320; socket: none.')
+      const entry = lastRegistry(w).at(-1) as Record<string, unknown>
+      expect(entry).toMatchObject({ pid: 7001, session_id: 'abcdabcd-0000-4000-8000-000000000001', name: 'w-new-260921141320' })
+      expect('socket_path' in entry).toBe(false)
+      // Three more reads of the sessions file, a second apart, before it goes without the socket.
+      expect(w.runs.filter(argv => argv.join(' ') === 'sleep 1').length).toBe(3)
+    } finally {
+      WORKER.isInboxless = false
+    }
+  })
+
   test('without a licence picker command a fresh launch runs no picker, sets no CLAUDE_CONFIG_DIR and records <home>/.claude', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
     WORKER.linuxConfigDir = ''
     try {
@@ -555,6 +584,32 @@ describe('launch_worker', () => {
       await $.session.start(start(ORCH_DIR))
       expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
       expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}' -n 'w-first-run-260901080000' --settings '{"crossSessionInbound":"accept"}' --dangerously`)
+    })
+    const stale = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? { ...one, name: 'w-first-run-260901080000', socket_path: '/run/user/1000/cc-socks/1.sock' } : one)))
+    test('records the new socket over the old one', { options: OPTIONS }, async ($, on) => {
+      WORKER.sid = SID_UNREPORTED
+      try {
+        const w = world(on, '/fixture/lic/a\n', true, stale)
+        await $.session.start(start(ORCH_DIR))
+        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        // The name is the one the sessions file holds (the engine's own), the fixture's here.
+        expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ pid: 7001, name: 'w-new-260921141320', socket_path: '/run/user/1000/cc-socks/7001.sock' })
+      } finally {
+        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
+      }
+    })
+    test('a sessions file without a socket writes socket_path null over the dead one, the kept name stays', { options: OPTIONS }, async ($, on) => {
+      WORKER.sid = SID_UNREPORTED
+      WORKER.isInboxless = true
+      try {
+        const w = world(on, '/fixture/lic/a\n', true, stale)
+        await $.session.start(start(ORCH_DIR))
+        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ pid: 7001, name: 'w-first-run-260901080000', socket_path: null })
+      } finally {
+        WORKER.isInboxless = false
+        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
+      }
     })
     test('of an entry without a name: a fresh unique name', { options: OPTIONS }, async ($, on) => {
       const w = world(on, '/fixture/lic/a\n')
@@ -1127,6 +1182,7 @@ describe('platform', () => {
     const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
     expect(String(out.result)).toBe(
       `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${WIN_HOME_CLAUDE}, registered. ` +
+        `Name: w-new-260921141320; socket: none. ` +
         `Result: ${WIN_RUNS}/20260921141320-new.json; errors: ${WIN_RUNS}/20260921141320-new.err.`,
     )
     expect(w.bash[0]?.command).toBe(
@@ -1137,6 +1193,8 @@ describe('platform', () => {
       title: 'new',
       pid: 7001,
       session_id: 'abcdabcd-0000-4000-8000-000000000001',
+      // The Windows fixture's sessions file has no inbox fields: the launch's own name, no socket.
+      name: 'w-new-260921141320',
       config_dir: WIN_HOME_CLAUDE,
       cwd: 'C:/work/new',
       model: 'opus',
@@ -1361,7 +1419,7 @@ describe('debug trace', () => {
       { event: 'worker.start', configDir: '/fixture/lic/a', isConfigDirSet: true, resultFile: `${RUNS}/${stamp}-new.json`, errFile: `${RUNS}/${stamp}-new.err`, timeoutMs: 180 * 60_000 },
       ran(['sleep', '2']),
       PROBE,
-      { event: 'worker.found', pid: 7001, sessionId: sid },
+      { event: 'worker.found', pid: 7001, sessionId: sid, isNamed: true, isSocketSeen: true },
       registryWrite(w),
       ran(['mv', '-f', tmp, REGISTRY_PATH]),
       { event: 'worker.registered', pid: 7001, sessionId: sid, isRegistered: true },

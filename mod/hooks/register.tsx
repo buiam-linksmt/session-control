@@ -85,6 +85,7 @@ import {
   rowStatus,
   slugify,
   launchName,
+  sessionFileFacts,
 } from './core'
 import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
 
@@ -873,32 +874,37 @@ async function spawnWorker(
     trace($, 'worker.missing', { seconds: 30 })
     return { result: `Started in the background but no claude process appeared within 30 s; check ${files.err}. Not registered.` }
   }
-  // The engine writes the session file shortly after the process starts: read it again until it is there.
+  // The engine writes the session file shortly after the process starts: read it again until it is there. Its name
+  // and messaging socket are taken from the same file; an older claude writes no socket, and the entry then has none.
+  const sessionPath = `${verdict.configDir}/sessions/${worker.pid}.json`
   let sessionId = verdict.resumeSid ?? ''
+  let fromFile: ReturnType<typeof sessionFileFacts> = {}
   for (let attempt = 0; attempt < 10; attempt++) {
-    const sessionFile = await $.fs.read(`${verdict.configDir}/sessions/${worker.pid}.json`).catch(() => '')
-    try {
-      const fromFile = (JSON.parse(sessionFile) as { sessionId?: unknown }).sessionId
-      if (typeof fromFile === 'string' && fromFile !== '') {
-        sessionId = fromFile
-        break
-      }
-    } catch {
-      // not written yet
+    fromFile = sessionFileFacts(await $.fs.read(sessionPath).catch(() => ''))
+    if (fromFile.sessionId !== undefined) {
+      sessionId = fromFile.sessionId
+      break
     }
     if (sessionId !== '') break
     await pause($, 1)
   }
-  trace($, 'worker.found', { pid: worker.pid, sessionId })
+  // The socket can follow the session id by a moment: a few more reads, then the entry goes without it.
+  for (let attempt = 0; attempt < 3 && fromFile.sessionId !== undefined && fromFile.socketPath === undefined; attempt++) {
+    await pause($, 1)
+    const again = sessionFileFacts(await $.fs.read(sessionPath).catch(() => ''))
+    if (again.sessionId === fromFile.sessionId) fromFile = again
+  }
+  trace($, 'worker.found', { pid: worker.pid, sessionId, isNamed: fromFile.name !== undefined, isSocketSeen: fromFile.socketPath !== undefined })
   if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
-  const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files)
+  const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
+  const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox)
   // A missing registry starts as an empty one, as REGISTER_SCRIPT starts it.
   const failed = await editRegistry($, async text => registerEntry(text, entry, verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
   const note = failed === undefined ? 'registered' : writeFailed(failed)
   trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
   await refresh($)
   return {
-    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Result: ${files.result}; errors: ${files.err}.`,
+    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.`,
   }
 }
 
