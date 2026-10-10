@@ -670,6 +670,10 @@ describe('Windows probe', () => {
     expect(fingerprint(PROBE_SCRIPT)).toBe('1260:2204f4bb')
   })
 
+  test('the Windows probe text is pinned: a change to it is a change of this test too', () => {
+    expect(fingerprint(PROBE_PS1)).toBe('4738:13e4e8cf')
+  })
+
   test('its lines read as the Linux ones: alive, a reused pid, no sessions file', () => {
     expect(isPidAlive(byPid(4101), win)).toBe(true)
     expect(isPidAlive(byPid(4106), win)).toBe(false)
