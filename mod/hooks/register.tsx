@@ -1205,7 +1205,7 @@ export const register: Register = (on, options) => {
     ])
     const width = Math.max(20, columns - 4)
     const isLogOpen = sel !== null && view !== null
-    // Docked, a section expanded by its header icon takes the whole body; an open log wins over it.
+    // Docked, a section expanded by its header icon takes the body, the other two kept as one-line headers; an open log wins over it.
     const expandedId: ExpandableId | null = isLogOpen ? null : expandedState
     // Docked: three boxes, never below three content rows each. Seated low (inline): one box at a time behind a tab
     // strip, at most 11 rows, so the panel can never push the chat input off the screen.
@@ -1372,9 +1372,19 @@ export const register: Register = (on, options) => {
       queue: () => block('queue', 'QUEUED WORK', [], queueRows, offs.queue),
       points: () => block('points', 'OPEN POINTS', [], pointRows, offs.points),
     }
+    const titles: Record<ExpandableId, string> = { sessions: 'SESSIONS', queue: 'QUEUED WORK', points: 'OPEN POINTS' }
+    // A collapsed section while another is expanded: one row, its title and its icon in the columns the box draws them.
+    const header = (id: ExpandableId) => (
+      <Box key={`h:${id}`} flexDirection="row" height={1} paddingX={1}>
+        <Box flexGrow={1}>
+          <Text bold>{titles[id]}</Text>
+        </Box>
+        <Button key={`x:${id}`} label="[+]" plain dimColor onPress={expand(id)} />
+      </Box>
+    )
     return (
       <Box flexDirection="column" height={bodyRows} overflow="hidden">
-        {boxes.map(one => sections[one.id as ExpandableId]())}
+        {boxes.map(one => (one.isHeader === true ? header(one.id as ExpandableId) : sections[one.id as ExpandableId]()))}
       </Box>
     )
   })

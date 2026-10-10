@@ -763,13 +763,20 @@ describe('launch_worker', () => {
 
 describe('expanding a section', () => {
   type Ui = Awaited<ReturnType<typeof mountPane>>
-  /** The bordered boxes as drawn: each one's title and height, top to bottom. */
+  /** The sections as drawn, top to bottom: a bordered box by its title and height, a one-line header by its title and 1. */
   const layoutOf = async (ui: Ui) =>
     (await ui.findAll({ type: 'Box' }))
-      .filter(box => box.props.borderStyle === 'round')
+      .filter(box => box.props.borderStyle === 'round' || box.key?.startsWith('h:') === true)
       .map(box => [/^(SESSIONS|QUEUED WORK|OPEN POINTS|LOG)/.exec(box.text)?.[1], box.props.height])
+  /** The one-line headers drawn: each one's whole text (title and icon). */
+  const headersOf = async (ui: Ui) => (await ui.findAll({ type: 'Box' })).filter(box => box.key?.startsWith('h:') === true).map(box => box.text)
   const SID = 'aaaaaaaa-1111-4111-8111-111111111111'
   const THREE = [['SESSIONS', 12], ['QUEUED WORK', 12], ['OPEN POINTS', 12]]
+  const EXPANDED = {
+    sessions: [['SESSIONS', 34], ['QUEUED WORK', 1], ['OPEN POINTS', 1]],
+    queue: [['SESSIONS', 1], ['QUEUED WORK', 34], ['OPEN POINTS', 1]],
+    points: [['SESSIONS', 1], ['QUEUED WORK', 1], ['OPEN POINTS', 34]],
+  }
   const open = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On) => {
     world(on)
     stubPanel(on)
@@ -778,37 +785,45 @@ describe('expanding a section', () => {
     return mountPane($)
   }
 
-  test('the panel starts with three equal boxes, each header holding an expand icon', { options: OPTIONS }, async ($, on) => {
+  test('the panel starts with three equal boxes, each header holding an expand icon, and no one-line header', { options: OPTIONS }, async ($, on) => {
     const ui = await open($, on)
     expect(await layoutOf(ui)).toEqual(THREE)
+    expect(await headersOf(ui)).toEqual([])
     for (const id of ['sessions', 'queue', 'points']) expect((await ui.find({ key: `x:${id}` }))?.props.label).toBe('[+]')
   })
 
-  test('each icon expands its section to the whole panel and hides the others; pressed again it restores the three boxes', { options: OPTIONS }, async ($, on) => {
+  test('each icon expands its section, the other two stay in order as one-line headers with their icons; pressed again it restores the three boxes', { options: OPTIONS }, async ($, on) => {
     const ui = await open($, on)
-    const all = async () => String(((await ui.findAll({}))[0] as { text?: string }).text)
     for (const [id, title] of [['sessions', 'SESSIONS'], ['queue', 'QUEUED WORK'], ['points', 'OPEN POINTS']] as const) {
       await ui.press({ key: `x:${id}` })
-      expect(await layoutOf(ui)).toEqual([[title, 36]])
+      expect(await layoutOf(ui)).toEqual(EXPANDED[id])
       expect((await ui.find({ key: `x:${id}` }))?.props.label).toBe('[-]')
-      for (const other of THREE.map(one => one[0]).filter(one => one !== title)) expect(await all()).not.toContain(other)
+      const others = THREE.map(one => one[0] as string).filter(one => one !== title)
+      expect(await headersOf(ui)).toEqual(others.map(other => `${other}[+]`))
+      for (const other of (['sessions', 'queue', 'points'] as const).filter(one => one !== id)) {
+        expect((await ui.find({ key: `x:${other}` }))?.props.label).toBe('[+]')
+      }
       await ui.press({ key: `x:${id}` })
       expect(await layoutOf(ui)).toEqual(THREE)
+      expect(await headersOf(ui)).toEqual([])
     }
   })
 
-  test('one section is expanded at a time: the hidden sections draw no icon, and the next one pressed shows alone', { options: OPTIONS }, async ($, on) => {
+  test('a header icon expands its section directly: the expanded one collapses to its header, one section at a time', { options: OPTIONS }, async ($, on) => {
     const ui = await open($, on)
-    await ui.press({ key: 'x:queue' })
-    expect(await layoutOf(ui)).toEqual([['QUEUED WORK', 36]])
-    expect(await ui.find({ key: 'x:points' })).toBeUndefined()
-    // The hidden sections' icons are not drawn: collapsing, then pressing another, switches to it.
-    await ui.press({ key: 'x:queue' })
-    await ui.press({ key: 'x:points' })
-    expect(await layoutOf(ui)).toEqual([['OPEN POINTS', 36]])
-    await ui.press({ key: 'x:points' })
     await ui.press({ key: 'x:sessions' })
-    expect(await layoutOf(ui)).toEqual([['SESSIONS', 36]])
+    expect(await layoutOf(ui)).toEqual(EXPANDED.sessions)
+    await ui.press({ key: 'x:queue' })
+    expect(await layoutOf(ui)).toEqual(EXPANDED.queue)
+    expect((await ui.find({ key: 'x:queue' }))?.props.label).toBe('[-]')
+    expect((await ui.find({ key: 'x:sessions' }))?.props.label).toBe('[+]')
+    await ui.press({ key: 'x:points' })
+    expect(await layoutOf(ui)).toEqual(EXPANDED.points)
+    await ui.press({ key: 'x:sessions' })
+    expect(await layoutOf(ui)).toEqual(EXPANDED.sessions)
+    expect(await ui.findAll({ type: 'Button', text: '[-]' })).toHaveLength(1)
+    await ui.press({ key: 'x:sessions' })
+    expect(await layoutOf(ui)).toEqual(THREE)
   })
 
   test('opening a session log from the expanded sessions box resets to sessions one third, log two thirds', { options: OPTIONS }, async ($, on) => {
@@ -816,6 +831,7 @@ describe('expanding a section', () => {
     await ui.press({ key: 'x:sessions' })
     await ui.press({ key: `s:${SID}` })
     expect(await layoutOf(ui)).toEqual([['SESSIONS', 12], ['LOG', 24]])
+    expect(await headersOf(ui)).toEqual([])
     expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
     expect((await ui.find({ key: 'x:sessions' }))?.props.label).toBe('[+]')
     // The expanded state is cleared: closing the log shows the three boxes again.
@@ -828,8 +844,7 @@ describe('expanding a section', () => {
     await ui.press({ key: `s:${SID}` })
     expect(await layoutOf(ui)).toEqual([['SESSIONS', 12], ['LOG', 24]])
     await ui.press({ key: 'x:sessions' })
-    expect(await layoutOf(ui)).toEqual([['SESSIONS', 36]])
-    await ui.press({ key: 'x:sessions' })
+    expect(await layoutOf(ui)).toEqual(EXPANDED.sessions)
     await ui.press({ key: 'x:points' })
     await ui.press({ key: 'p:a:0' })
     expect(String(((await ui.findAll({}))[0] as { text?: string }).text)).toContain('Detail one')
@@ -847,7 +862,7 @@ describe('expanding a section', () => {
     await $.command.run({ command: 'session-control', args: 'side' } as never)
     const ui = await mountPane($)
     await ui.press({ key: 'x:points' })
-    expect(await layoutOf(ui)).toEqual([['OPEN POINTS', 36]])
+    expect(await layoutOf(ui)).toEqual(EXPANDED.points)
     expect((await $.command.run({ command: 'session-control', args: 'side' } as never)).text).toBe('Session-control panel hidden, session-control stays on.')
     await ui.unmount()
     isUp = false

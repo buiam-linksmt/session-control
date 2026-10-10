@@ -1353,7 +1353,8 @@ export function scrollbar(total: number, visible: number, offset: number): strin
 }
 
 export type SectionId = 'sessions' | 'queue' | 'points' | 'log'
-export type SectionBox = { id: SectionId; top: number; height: number }
+/** A box in the panel body; `isHeader` marks a collapsed section drawn as its one-line header. */
+export type SectionBox = { id: SectionId; top: number; height: number; isHeader?: true }
 
 /** Smallest box: two borders, the title, and three rows of content (the sessions box also holds a header row). */
 export const MIN_BOX = 6
@@ -1362,13 +1363,25 @@ export const MIN_SESSIONS_BOX = 7
 /** The sections a header icon expands to the whole panel body. */
 export type ExpandableId = 'sessions' | 'queue' | 'points'
 
+/** The sections in their order down the panel. */
+export const SECTION_ORDER: readonly ExpandableId[] = ['sessions', 'queue', 'points']
+
 /**
  * Heights of the boxes in the panel body: three equal thirds, or (log open) sessions one third and the log two thirds,
- * or (one section expanded, no log open) that section alone over the whole body; never below three content rows.
+ * or (one section expanded, no log open) that section over the body less one row for each of the other two, which
+ * stay in their order as one-line headers; never below three content rows.
  */
 export function sectionBoxes(bodyRows: number, isLogOpen: boolean, expanded: ExpandableId | null = null): SectionBox[] {
   const third = Math.max(MIN_SESSIONS_BOX, Math.floor(bodyRows / 3))
-  if (expanded !== null && !isLogOpen) return [{ id: expanded, top: 0, height: Math.max(expanded === 'sessions' ? MIN_SESSIONS_BOX : MIN_BOX, bodyRows) }]
+  if (expanded !== null && !isLogOpen) {
+    const height = Math.max(expanded === 'sessions' ? MIN_SESSIONS_BOX : MIN_BOX, bodyRows - (SECTION_ORDER.length - 1))
+    let top = 0
+    return SECTION_ORDER.map(id => {
+      const box: SectionBox = id === expanded ? { id, top, height } : { id, top, height: 1, isHeader: true }
+      top += box.height
+      return box
+    })
+  }
   if (isLogOpen) {
     return [
       { id: 'sessions', top: 0, height: third },

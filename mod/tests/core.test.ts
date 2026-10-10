@@ -458,13 +458,17 @@ describe('panel layout', () => {
     expect(boxAt(sectionBoxes(36, false), 13)?.id).toBe('queue')
     expect(clampOffset(99, 20, 5)).toBe(15)
   })
-  test('an expanded section takes the whole body alone; an open log wins over it', () => {
-    expect(sectionBoxes(36, false, 'sessions').map(b => [b.id, b.top, b.height])).toEqual([['sessions', 0, 36]])
-    expect(sectionBoxes(36, false, 'queue').map(b => [b.id, b.top, b.height])).toEqual([['queue', 0, 36]])
-    expect(sectionBoxes(36, false, 'points').map(b => [b.id, b.top, b.height])).toEqual([['points', 0, 36]])
+  test('an expanded section takes the body less one row per other section, kept in order as one-line headers; an open log wins over it', () => {
+    const shape = (expanded: 'sessions' | 'queue' | 'points') => sectionBoxes(36, false, expanded).map(b => [b.id, b.top, b.height, b.isHeader === true])
+    expect(shape('sessions')).toEqual([['sessions', 0, 34, false], ['queue', 34, 1, true], ['points', 35, 1, true]])
+    expect(shape('queue')).toEqual([['sessions', 0, 1, true], ['queue', 1, 34, false], ['points', 35, 1, true]])
+    expect(shape('points')).toEqual([['sessions', 0, 1, true], ['queue', 1, 1, true], ['points', 2, 34, false]])
     expect(sectionBoxes(36, false, null)).toEqual(sectionBoxes(36, false))
     expect(sectionBoxes(36, true, 'sessions')).toEqual(sectionBoxes(36, true))
     expect(boxAt(sectionBoxes(36, false, 'points'), 30)?.id).toBe('points')
+    expect(boxAt(sectionBoxes(36, false, 'points'), 1)).toEqual({ id: 'queue', top: 1, height: 1, isHeader: true })
+    // A tiny body still gives the expanded section its minimum.
+    expect(sectionBoxes(4, false, 'sessions').map(b => b.height)).toEqual([7, 1, 1])
   })
 })
 
