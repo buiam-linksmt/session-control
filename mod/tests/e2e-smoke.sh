@@ -4,8 +4,9 @@
 # foreground; (b) where tmux exists, an interactive claude opens the panel with /session-control (no model call).
 # Everything goes to the scratch directory (registry, runs directory, trace); the real registry, helper files and runs
 # directory are never touched, and the licence picker option is empty (the worker uses the default config directory).
-# POSIX sh, for Linux and Git Bash: sh mod/tests/e2e-smoke.sh. A few cents of haiku. One line per check; exit 1 on a
-# failure. KEEP_TRACE=<file> copies the trace there before the scratch directory goes.
+# POSIX sh, for Linux and Git Bash: sh mod/tests/e2e-smoke.sh. A few cents of haiku (the orchestrator is capped at
+# USD 0.25). One line per check; exit 1 on a failure. KEEP_TRACE=<file> copies the trace there before the scratch
+# directory goes.
 set -u
 
 MOD=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -33,9 +34,12 @@ OPID=''
 WPID=''
 TSOCK=''
 
+# Whether a pid is still one this test started: its command line names the scratch directory (a pid the system has
+# handed to another process since is never killed).
+ours() { [ -n "$1" ] && tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -F -q -e "$S" -e "$(native "$S")"; }
 cleanup() {
-  [ -n "$OPID" ] && kill "$OPID" 2>/dev/null
-  [ -n "$WPID" ] && kill "$WPID" 2>/dev/null
+  ours "$OPID" && kill "$OPID" 2>/dev/null
+  ours "$WPID" && kill "$WPID" 2>/dev/null
   [ -n "$TSOCK" ] && tmux -L "$TSOCK" kill-server 2>/dev/null
   rm -rf "$S"
 }
@@ -49,6 +53,8 @@ cat > "$PROMPT" <<'EOF'
 Smoke test of a worker launch: reply with the single word PONG and stop.
 Use no tool. There is nothing to wait for in the foreground, no git status -sb to report and no commit, so no AI attribution question arises.
 EOF
+# The worker's command line carries its prompt: with the scratch path in it, the exit trap can tell the worker is ours.
+printf 'Scratch directory of this smoke test: %s\n' "$S" >> "$PROMPT"
 PROMPT_PHRASE='reply with the single word PONG'
 cat > "$S/wait-outcome.sh" <<'EOF'
 n=0
@@ -65,7 +71,7 @@ EOF
 
 # ---------------------------------------------------------------- (a) headless orchestrator and worker
 (cd "$ORCH" && SESSION_CONTROL_DEBUG=1 exec claude -p --plugin-dir "$(native "$MOD")" --model haiku --dangerously-skip-permissions \
-  --output-format json --settings "$SETTINGS" < "$S/instruction.txt" > "$S/orchestrator.json" 2> "$S/orchestrator.err") &
+  --max-budget-usd 0.25 --output-format json --settings "$SETTINGS" < "$S/instruction.txt" > "$S/orchestrator.json" 2> "$S/orchestrator.err") &
 OPID=$!
 SEEN_PID=''
 elapsed=0
@@ -110,7 +116,7 @@ if has "\"event\":\"fs.write\",\"path\":\"$REGN.tmp." && grep -F '"event":"proce
 else
   fail 'trace has the register write: its temp file and the process.run of the rename'
 fi
-if has '"licencePickCommand":""' && has "\"registryPath\":\"$REGN\""; then pass 'trace shows the scratch options (scratch registry, no licence picker)'; else fail 'trace shows the scratch options (scratch registry, no licence picker)'; fi
+if has '"licencePickCommand":"empty"' && has "\"registryPath\":\"$REGN\""; then pass 'trace shows the scratch options (scratch registry, no licence picker)'; else fail 'trace shows the scratch options (scratch registry, no licence picker)'; fi
 SN=$(native "$S")
 OUTSIDE=$(grep -E -o '"event":"fs\.(write|append)","path":"[^"]*"' "$TRACE" 2>/dev/null | sed 's/.*"path":"//; s/"$//' | grep -v -F "$SN/" | head -n 3)
 if has '"event":"fs.write"' && [ -z "$OUTSIDE" ]; then pass 'trace: every file write is inside the scratch directory'; else fail "trace: every file write is inside the scratch directory (outside: $OUTSIDE)"; fi
