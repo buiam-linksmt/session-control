@@ -554,6 +554,20 @@ export type LaunchArgs = {
   timeout_minutes?: number
 }
 
+/**
+ * What launch_worker is given: LaunchArgs with every field optional, and the prompt as text instead of a file. A
+ * resume fills `dir`, `model`, `effort` and `title` from its registry entry (fillFromEntry); the mod writes an inline
+ * prompt, or a prompt it extends, to a file of its own (composePrompt) and launches with that path.
+ */
+export type LaunchInput = Partial<LaunchArgs> & {
+  /** The prompt as text; exactly one of `prompt` and `prompt_file`. */
+  prompt?: string
+  /** A section of agreed-decisions.md whose text is appended as binding. */
+  section?: string
+  /** Whether the standard rules block is appended when the prompt lacks the guard's items (RULES_DEFAULT). */
+  rules?: boolean
+}
+
 export type LaunchFacts = {
   home: string
   orchestratorDir: string
@@ -582,22 +596,121 @@ export type LaunchVerdict =
   | { ok: true; configDir: string; resumeSid?: string }
   | { ok: false; reason: string }
 
-/** The tool's JSON schema: what the model must give. */
+/**
+ * The tool's JSON schema: what the model may give. Nothing is required by the schema (a resume takes dir, model,
+ * effort and title from its entry, and the prompt comes as a file or as text); the guard refuses what is missing.
+ * The first eight properties are those of the schema before `prompt`, `section` and `rules`, word for word but for
+ * the descriptions of dir, model, effort and title, which say what a resume fills in, and of prompt_file, which says
+ * that it and prompt exclude each other.
+ */
 export const LAUNCH_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['dir', 'prompt_file', 'model', 'effort', 'title'],
   properties: {
-    dir: { type: 'string', description: 'Absolute working directory of the worker. Never the orchestrator dir nor $HOME.', pattern: '^/' },
-    prompt_file: { type: 'string', description: 'Absolute path of the file holding the worker prompt.', pattern: '^/' },
-    model: { type: 'string', minLength: 1, description: 'Model alias or id, e.g. opus, sonnet.' },
-    effort: { type: 'string', enum: [...EFFORTS], description: 'CLAUDE_CODE_EFFORT_LEVEL for the worker.' },
-    title: { type: 'string', minLength: 1, maxLength: 120, description: 'Registry title of the worker.' },
+    dir: { type: 'string', description: 'Absolute working directory of the worker. Never the orchestrator dir nor $HOME. A resume without it takes the entry\'s cwd.', pattern: '^/' },
+    prompt_file: { type: 'string', description: 'Absolute path of the file holding the worker prompt. Exactly one of prompt_file and prompt.', pattern: '^/' },
+    model: { type: 'string', minLength: 1, description: 'Model alias or id, e.g. opus, sonnet. A resume without it takes the entry\'s model.' },
+    effort: { type: 'string', enum: [...EFFORTS], description: 'CLAUDE_CODE_EFFORT_LEVEL for the worker. A resume without it takes the entry\'s effort.' },
+    title: { type: 'string', minLength: 1, maxLength: 120, description: 'Registry title of the worker. A resume without it takes the entry\'s title.' },
     need: { type: 'integer', minimum: 1, maximum: 100, description: 'Licence headroom percent to pass to the licence picker command, when one is configured (default 40).' },
     resume_sid: { type: 'string', pattern: '^[0-9a-f-]{36}$', description: 'Session id to resume; it runs under the config dir that created it.' },
     timeout_minutes: { type: 'integer', minimum: 5, maximum: 600, description: 'Background time limit of the worker in minutes (default 180).' },
+    prompt: {
+      type: 'string',
+      minLength: 1,
+      description: 'The worker prompt as text, instead of prompt_file (exactly one of the two): the mod writes it to a prompt file of its own in the runs directory, outside any repo, and launches with that file.',
+    },
+    section: {
+      type: 'string',
+      minLength: 1,
+      description: 'A section heading of agreed-decisions.md, without "## ": its text is appended to the prompt as a block titled "Binding decisions (section <heading>)". Refused when the file has no such section.',
+    },
+    rules: {
+      type: 'boolean',
+      description:
+        'Append the standard rules block (no AI attribution, no human answers, no credentials, foreground waits, never end the turn on a live run, the report with git status -sb and git log --oneline @{u}..HEAD and their exit codes) when the prompt lacks what the launch guard checks. Default true with prompt or section, false for a prompt_file given alone (that file is launched as it is). A prompt that already carries the items, or a skill test, gets no block.',
+    },
   },
 } as const
+
+/** Whether the rules block is wanted when `rules` is not given: when the mod writes the prompt (inline text or a section appended). */
+export function rulesWanted(input: LaunchInput): boolean {
+  return input.rules ?? (input.prompt !== undefined || input.section !== undefined)
+}
+
+/**
+ * The standard rules block a launch appends (rules), the items of the worker prompt CLAUDE.md lists: no attribution,
+ * no human answers, no credentials, foreground waits, the report. It carries each phrase the launch guard looks for
+ * (missingPromptItems: "foreground", "git status -sb", "attribution"), so a prompt with the block passes the guard.
+ */
+export const RULES_BLOCK = [
+  '## Standard rules (session-control)',
+  '',
+  '1. Commit messages follow the repo\'s rules, carry no AI attribution trailer (no Co-Authored-By or similar) and never mention an agent; nothing else you write mentions one either. Never stage `.claude.json*`, `projects/`, `memory/`, `.env` or key files.',
+  '2. No human answers during the run. Look up what you do not know (docs, issue trackers, config, official examples) before trial and error; then take a documented default and report it, never for a sign-off item; with none, write the question in the report and stop that part. Never invent an answer.',
+  '3. Never read, print or pass a credential; report, without quoting it, any secret seen in output.',
+  '4. Start a long run with `run_in_background: true`, an explicit `timeout` and output to a log, then wait in repeated foreground calls under ten minutes each (`until <check>; do sleep 30; done`, with the Bash `timeout` under 600000). Never end the turn while a run, watcher or lock of yours is live.',
+  '5. The report, as your last message: commits (sha, subject, branch); the output of `git status -sb` and of `git log --oneline @{u}..HEAD`, run last, each followed on the next line by its exit code; what was exercised, where, with what result; what was skipped; files written outside the repo; processes or locks left running; questions for the user.',
+].join('\n')
+
+/** The title line of the block a `section` appends. */
+export function sectionBlockTitle(section: string): string {
+  return `## Binding decisions (section ${section})`
+}
+
+export type ComposedPrompt = { text: string; isSectionAdded: boolean; isRulesAdded: boolean }
+
+/**
+ * The prompt a launch runs with: the text given (inline, or read from prompt_file), then the section's block when one
+ * is given (its title line, then the section's lines as the file holds them), then the rules block when wanted and the
+ * text so far lacks an item the launch guard checks (a skill test lacks none). Blocks are set off by a blank line.
+ */
+export function composePrompt(text: string, section: { heading: string; body: string } | undefined, isRulesWanted: boolean): ComposedPrompt {
+  const join = (head: string, block: string) => `${head.replace(/\s+$/, '')}\n\n${block.replace(/\s+$/, '')}\n`
+  let out = text
+  if (section !== undefined) out = join(out, `${sectionBlockTitle(section.heading)}\n\n${section.body}`)
+  const isRulesAdded = isRulesWanted && missingPromptItems(out).length > 0
+  if (isRulesAdded) out = join(out, RULES_BLOCK)
+  return { text: out, isSectionAdded: section !== undefined, isRulesAdded }
+}
+
+/** Why the prompt source is refused: launch_worker takes exactly one of `prompt` and `prompt_file`. */
+export function promptSourceRefusal(input: LaunchInput): string | undefined {
+  const hasText = input.prompt !== undefined
+  const hasFile = input.prompt_file !== undefined
+  if (hasText && hasFile) return 'refused: give exactly one of prompt and prompt_file, not both'
+  if (!hasText && !hasFile) return 'refused: give exactly one of prompt and prompt_file'
+  if (hasText && (typeof input.prompt !== 'string' || input.prompt.trim() === '')) return 'refused: prompt is empty'
+  return undefined
+}
+
+/**
+ * A resume's missing dir, model, effort and title taken from its registry entry (its cwd, model, effort, title); a
+ * value given wins. A fresh launch, or a resume of an id no entry has, comes back as given (checkLaunch refuses it).
+ */
+export function fillFromEntry(input: LaunchInput, entries: readonly SessionEntry[]): LaunchInput {
+  if (input.resume_sid === undefined) return input
+  const entry = entries.find(one => one.session_id === input.resume_sid)
+  if (entry === undefined) return input
+  const own = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined)
+  const filled: LaunchInput = { ...input }
+  if (filled.dir === undefined && own(entry.cwd) !== undefined) filled.dir = own(entry.cwd)
+  if (filled.model === undefined && own(entry.model) !== undefined) filled.model = own(entry.model)
+  if (filled.effort === undefined && own(entry.effort) !== undefined) filled.effort = own(entry.effort)
+  if (filled.title === undefined && own(entry.title) !== undefined) filled.title = own(entry.title)
+  return filled
+}
+
+/** Which of dir, model, effort and title a resume took from its entry, in that order. */
+export function filledFields(input: LaunchInput, filled: LaunchInput): string[] {
+  return (['dir', 'model', 'effort', 'title'] as const).filter(key => input[key] === undefined && filled[key] !== undefined)
+}
+
+/** The launch's arguments once the prompt file is known: a field still missing is empty, which checkLaunch refuses. */
+export function launchArgsOf(input: LaunchInput, promptFile: string): LaunchArgs {
+  const { prompt: _prompt, section: _section, rules: _rules, ...rest } = input
+  return { ...rest, dir: input.dir ?? '', prompt_file: promptFile, model: input.model ?? '', effort: input.effort ?? '', title: input.title ?? '' }
+}
 
 function normalize(path: string): string {
   const cut = path.replace(/\/+$/, '')
@@ -853,6 +966,8 @@ export function pidFromFile(text: string): number | undefined {
  * (the sessions file's, else the one the launch passed); `socket_path` is the sessions file's `messagingSocketPath`,
  * valid while the pid lives. Without one a fresh entry has no `socket_path` and a resume writes null, so the dead
  * socket of the earlier run is not kept. `started_at` is `startedSec`, when the launch started this run (epoch seconds).
+ * `prompt` names the prompt file the mod wrote for the run and the decisions section it appended, when it did: the
+ * entry then records `prompt_file` (deleted with the run's other files at a clean retire) and `section`.
  */
 export function newRegistryEntry(
   args: LaunchArgs,
@@ -862,6 +977,7 @@ export function newRegistryEntry(
   files: { result: string; err: string },
   inbox: { name: string; socketPath?: string },
   startedSec: number,
+  prompt: { promptFile?: string; section?: string } = {},
 ): SessionEntry {
   const socket = inbox.socketPath !== undefined ? { socket_path: inbox.socketPath } : verdict.resumeSid ? { socket_path: null } : {}
   return {
@@ -877,6 +993,8 @@ export function newRegistryEntry(
     result_file: files.result,
     err_file: files.err,
     started_at: startedSec,
+    ...(prompt.promptFile === undefined ? {} : { prompt_file: prompt.promptFile }),
+    ...(prompt.section === undefined ? {} : { section: prompt.section }),
   }
 }
 

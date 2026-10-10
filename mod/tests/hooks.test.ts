@@ -5,7 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { REGISTER_SCRIPT, probeArgs } from '../hooks/core'
+import { REGISTER_SCRIPT, RULES_BLOCK, missingPromptItems, probeArgs } from '../hooks/core'
 import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
 import { FILES_PS1, PROBE_PS1 } from '../hooks/host-windows'
 import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
@@ -78,6 +78,8 @@ const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: fal
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
 const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0 }
+// The orchestrator's agreed-decisions.md, when a test serves one (undefined: the file is missing).
+const DECISIONS: { text: string | undefined } = { text: undefined }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
 /** The rows of the transcript tail the fixture serves. */
 const TAIL = [
@@ -132,6 +134,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === '/work/new/thin.md') return { value: 'Just do the work.' }
     if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE_TEXT }
     if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
+    if (path === `${ORCH_DIR}/agreed-decisions.md` && DECISIONS.text !== undefined) return { value: DECISIONS.text }
     const result = /^\/fixture\/results\/(\w+)\.json$/.exec(path)?.[1]
     if (result !== undefined && result in RESULTS) return { value: RESULTS[result as keyof typeof RESULTS] }
     if (result !== undefined && result in REAL_RESULTS) return { value: REAL_RESULTS[result as keyof typeof REAL_RESULTS] }
@@ -340,11 +343,13 @@ describe('tool surface', () => {
     // the next test).
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     // Changed on purpose by feature/inspect-tools: six read-only inspection tools (list_sessions, read_result,
-    // worker_tail, session_writes, panel_snapshot, audit_state) are registered after the six; the six are unchanged
-    // (the next test pins their own fingerprint, 6072:68e1b3f1, this line's value before the change).
-    // Changed on purpose again by feature/write-tools (9499:ccae8712 before): close_worker and archive_decisions are registered after
-    // audit_state; the twelve tools before it are unchanged (the next test pins each).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('11909:ac870414')
+    // worker_tail, session_writes, panel_snapshot, audit_state) are registered after the six; the six were unchanged
+    // (6072:68e1b3f1, this line's value before that change).
+    // Changed on purpose again by feature/write-tools (9499:ccae8712 before): close_worker (11029:39536527) and
+    // archive_decisions (11909:ac870414) are registered after audit_state, then launch_worker's schema and description
+    // grow (prompt, section, rules; dir, model, effort and title optional for a resume). Every other tool is
+    // unchanged: the next test pins each.
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('13443:c93b222a')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -366,12 +371,13 @@ describe('tool surface', () => {
       'close_worker',
       'archive_decisions',
     ])
-    // The six tools before feature/inspect-tools keep their names, descriptions and schemas byte for byte.
-    expect(fingerprint(JSON.stringify(w.tools.slice(0, 6)))).toBe('6072:68e1b3f1')
-    // Each tool's own pin. The twelve tools before feature/write-tools are unchanged byte for byte; close_worker and archive_decisions are new.
+    // Each tool's own pin. Unchanged since before feature/write-tools, byte for byte: the five of the first six after
+    // launch_worker (together 4689:d2b85bc0) and the six inspection tools (together 3428:1484e7b6). The first six
+    // were 6072:68e1b3f1 together while launch_worker was 1382:a077d922; feature/write-tools moved launch_worker's on
+    // purpose (its new parameters) and added the two write-side tools.
     const pins = Object.fromEntries(w.tools.map(tool => [tool.name, fingerprint(JSON.stringify(tool))]))
     expect(pins).toEqual({
-      launch_worker: '1382:a077d922',
+      launch_worker: '2916:5bd96840',
       acknowledge_workers: '875:8ed174c7',
       retire_workers: '1530:18bbed4e',
       open_point: '932:ad93390e',
@@ -386,6 +392,8 @@ describe('tool surface', () => {
       close_worker: '1529:9741bcb0',
       archive_decisions: '879:39a97972',
     })
+    expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4689:d2b85bc0')
+    expect(fingerprint(JSON.stringify(w.tools.slice(6, 12)))).toBe('3428:1484e7b6')
   })
 })
 
@@ -1578,6 +1586,40 @@ describe('platform', () => {
     }
   })
 
+  test('Windows: an inline prompt goes to a prompt file of the mod in the native runs directory, the Bash route reads it, the entry records it', { options: NO_PICKER }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const { prompt_file: _file, ...inline } = winArgs
+    const out = await settled(w, $.tool.call({ tool: TOOL, ...inline, prompt: 'Reply PONG.' } as never))
+    const own = `${WIN_RUNS}/20260921141320-new.prompt.md`
+    expect(String(out.result)).toEndWith(`errors: ${WIN_RUNS}/20260921141320-new.err. Prompt: ${own} (written by the mod; rules block appended).`)
+    expect(w.writes.filter(one => one.path === own).map(one => one.text)).toEqual([`Reply PONG.\n\n${RULES_BLOCK}\n`])
+    expect(w.bash[0]?.command).toBe(
+      `cd 'C:/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-260921141320' --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions --output-format json ` +
+        `-- "$(cat '${own}')" > '${WIN_RUNS}/20260921141320-new.json' 2> '${WIN_RUNS}/20260921141320-new.err'`,
+    )
+    expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, cwd: 'C:/work/new', prompt_file: own })
+  })
+
+  test('Windows: an inline prompt that starts like a POSIX path is refused, as a prompt file would be, and nothing is written', { options: NO_PICKER }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const { prompt_file: _file, ...inline } = winArgs
+    const out = await $.tool.call({ tool: TOOL, ...inline, prompt: '/c/work/x: wait in the foreground, git status -sb, no attribution' } as never)
+    expect(String(out.deny)).toContain('Git Bash rewrites an argument that starts like a POSIX path')
+    expect(w.writes.some(one => one.path.endsWith('.prompt.md'))).toBe(false)
+  })
+
+  test('Windows, launchRoute powershell: an inline prompt goes to standard input from the prompt file of the mod', { options: PS_OPTIONS }, async ($, on) => {
+    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const { prompt_file: _file, ...inline } = winArgs
+    const out = await settled(w, $.tool.call({ tool: TOOL, ...inline, prompt: 'Goal: x. Wait in the foreground. Report git status -sb. No attribution.' } as never))
+    const own = `${WIN_RUNS}/20260921141320-new.prompt.md`
+    expect(String(out.result)).toContain(`Prompt: ${own} (written by the mod).`)
+    expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`, 'C:/work/new', own))
+  })
+
   test('Windows, launchRoute powershell: a prompt file or runs directory with brackets is refused before anything runs', { options: { ...PS_OPTIONS, licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
     await $.session.start(start(`C:${ORCH_DIR}`))
@@ -1928,6 +1970,30 @@ describe('debug trace', () => {
     ])
     // The entry's content is in the cleared log, never in the trace.
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('done worker'))).toBe(false)
+  })
+
+  test('the write-side tools in the trace: an inline prompt, a section heading and archived headings never reach it', { options: TRACED }, async ($, on) => {
+    DECISIONS.text = '# Agreed decisions\n\n## Secret unit heading\nsu-1. x\n'
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      await $.tool.call({ tool: TOOL, dir: '/work/new', model: 'opus', effort: 'high', title: 'new', prompt: 'Reply PONG about the zebra-canary.', section: 'Secret unit heading', rules: true } as never)
+      await $.tool.call({ tool: 'mcp__session-control__archive_decisions', sections: ['Secret unit heading'] } as never)
+      await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: ['dddddddd'], keep: true } as never)
+      const lines = from(bare(traceOf(w)), 'tool.call')
+      const calls = lines.filter(line => line.event === 'tool.call')
+      expect(calls).toEqual([
+        { event: 'tool.call', tool: 'launch_worker', dir: '/work/new', model: 'opus', effort: 'high', rules: true },
+        { event: 'tool.call', tool: 'archive_decisions' },
+        { event: 'tool.call', tool: 'close_worker', session_ids: ['dddddddd'], keep: true },
+      ])
+      expect(lines).toContainEqual({ event: 'launch.prompt', promptFile: `${HOME}/.claude/session-control/runs/20260921141320-new.prompt.md`, chars: expect.any(Number), isInline: true, isSectionAdded: true, isRulesAdded: true } as never)
+      const text = w.writes.filter(one => one.path === TRACE).map(one => one.text).join('')
+      expect(text).not.toContain('zebra-canary')
+      expect(text).not.toContain('Secret unit heading')
+    } finally {
+      DECISIONS.text = undefined
+    }
   })
 
   test('a reviewed retire: the guard line names the original outcome and the reason, the call line keeps free text out', { options: TRACED }, async ($, on) => {
@@ -2315,6 +2381,212 @@ describe('a log whose session leaves the registry', () => {
     await w.clock.advance(5000)
     await $.command.run({ command: 'session-control', args: 'side' } as never)
     expect(await boxesOf(await mountPane($))).toEqual(THREE)
+  })
+})
+
+describe('launch_worker: inline prompt, decisions section, rules block, resume fill', () => {
+  const RUNS = `${HOME}/.claude/session-control/runs`
+  const BASE = `${RUNS}/20260921141320-new`
+  const OWN = `${BASE}.prompt.md`
+  const fresh = { dir: '/work/new', model: 'opus', effort: 'high', title: 'new' }
+  /** A prompt that carries the three items the launch guard checks. */
+  const FULL = 'Goal: tidy the parser. Wait in the foreground. Report git status -sb. No AI attribution in commits.'
+  const DECISIONS_TEXT = [
+    '# Agreed decisions',
+    '',
+    'Intro.',
+    '',
+    '## Parser unit (user, 2026-10-11)',
+    'parser-1. Keep the grammar.',
+    'parser-2. No new dependency.',
+    '',
+    '## Standing',
+    'push-x. Pushes need no go-ahead.',
+    '',
+  ].join('\n')
+  /** What the mod wrote to its own prompt file, if anything. */
+  const ownPrompt = (w: World) => w.writes.filter(one => one.path === OWN).at(-1)?.text
+
+  test('the old launch, without the new parameters: the command, the answer and the entry as before, byte for byte', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt_file: '/work/new/prompt.md' } as never)
+    expect(String(out.result)).toBe(
+      `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir /fixture/lic/a, registered. Name: w-new-260921141320; socket: /run/user/1000/cc-socks/7001.sock. Result: ${BASE}.json; errors: ${BASE}.err.`,
+    )
+    expect(w.bash[0]?.command).toBe(
+      `cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-260921141320' --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions --output-format json ` +
+        `-- "$(cat '/work/new/prompt.md')" > '${BASE}.json' 2> '${BASE}.err'`,
+    )
+    expect(lastRegistry(w).at(-1)).toEqual({
+      title: 'new',
+      pid: 7001,
+      session_id: 'abcdabcd-0000-4000-8000-000000000001',
+      name: 'w-new-260921141320',
+      socket_path: '/run/user/1000/cc-socks/7001.sock',
+      config_dir: '/fixture/lic/a',
+      cwd: '/work/new',
+      model: 'opus',
+      effort: 'high',
+      result_file: `${BASE}.json`,
+      err_file: `${BASE}.err`,
+      started_at: NOW_MS / 1000,
+    })
+    expect(w.writes.some(one => one.path.endsWith('.prompt.md'))).toBe(false)
+  })
+
+  test('an inline prompt that carries the items: written as given to a prompt file of the mod in the runs directory, launched from it, recorded', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL } as never)
+    expect(String(out.result)).toEndWith(`Result: ${BASE}.json; errors: ${BASE}.err. Prompt: ${OWN} (written by the mod).`)
+    expect(ownPrompt(w)).toBe(FULL)
+    expect(String(w.bash[0]?.command)).toContain(`-- "$(cat '${OWN}')" > '${BASE}.json' 2> '${BASE}.err'`)
+    expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, prompt_file: OWN, result_file: `${BASE}.json` })
+    expect('section' in (lastRegistry(w).at(-1) as object)).toBe(false)
+    // The prompt is never traced nor written anywhere else.
+    expect(w.writes.filter(one => one.text.includes('tidy the parser')).map(one => one.path)).toEqual([OWN])
+  })
+
+  test('an inline prompt that lacks the items gets the rules block once, and then passes the guard', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: 'Reply PONG.' } as never)
+    expect(String(out.result)).toEndWith(`Prompt: ${OWN} (written by the mod; rules block appended).`)
+    expect(ownPrompt(w)).toBe(`Reply PONG.\n\n${RULES_BLOCK}\n`)
+    expect(missingPromptItems(ownPrompt(w) ?? '')).toEqual([])
+    // Each item of the block, as CLAUDE.md's worker prompt lists them.
+    for (const phrase of ['no AI attribution trailer', 'never mention an agent', 'No human answers during the run', 'never for a sign-off item', 'Never read, print or pass a credential', '`run_in_background: true`', 'explicit `timeout`', 'until <check>; do sleep 30; done', 'under ten minutes', 'Never end the turn while a run', '`git status -sb`', '`git log --oneline @{u}..HEAD`', 'exit code']) {
+      expect(RULES_BLOCK).toContain(phrase)
+    }
+  })
+
+  test('rules false: an inline prompt that lacks the items is refused as a prompt file would be, and nothing is written', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: 'Reply PONG.', rules: false } as never)
+    expect(String(out.deny)).toContain('the prompt lacks: foreground wait')
+    expect(ownPrompt(w)).toBeUndefined()
+    expect(w.bash.length).toBe(0)
+  })
+
+  test('a skill test gets no rules block, as the guard exempts it', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: 'skill test: run the procedure and report.' } as never)
+    expect(String(out.result)).toEndWith(`Prompt: ${OWN} (written by the mod).`)
+    expect(ownPrompt(w)).toBe('skill test: run the procedure and report.')
+  })
+
+  test('section: the section text appended as binding, the entry records it; with a full prompt no rules block', { options: OPTIONS }, async ($, on) => {
+    DECISIONS.text = DECISIONS_TEXT
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL, section: 'Parser unit (user, 2026-10-11)' } as never)
+      expect(String(out.result)).toEndWith(`Prompt: ${OWN} (written by the mod; section "Parser unit (user, 2026-10-11)" appended).`)
+      expect(ownPrompt(w)).toBe(`${FULL}\n\n## Binding decisions (section Parser unit (user, 2026-10-11))\n\nparser-1. Keep the grammar.\nparser-2. No new dependency.\n`)
+      expect(lastRegistry(w).at(-1)).toMatchObject({ prompt_file: OWN, section: 'Parser unit (user, 2026-10-11)' })
+    } finally {
+      DECISIONS.text = undefined
+    }
+  })
+
+  test('section with a prompt file: a copy of the file with the section and, as the file lacks the items, the rules block; the file itself untouched', { options: OPTIONS }, async ($, on) => {
+    DECISIONS.text = DECISIONS_TEXT
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...fresh, prompt_file: '/work/new/thin.md', section: 'Parser unit (user, 2026-10-11)' } as never)
+      expect(String(out.result)).toEndWith(`(written by the mod; section "Parser unit (user, 2026-10-11)" appended; rules block appended).`)
+      expect(ownPrompt(w)).toBe(`Just do the work.\n\n## Binding decisions (section Parser unit (user, 2026-10-11))\n\nparser-1. Keep the grammar.\nparser-2. No new dependency.\n\n${RULES_BLOCK}\n`)
+      expect(String(w.bash[0]?.command)).toContain(`"$(cat '${OWN}')"`)
+      expect(w.writes.some(one => one.path === '/work/new/thin.md')).toBe(false)
+    } finally {
+      DECISIONS.text = undefined
+    }
+  })
+
+  test('section refusals: a heading the file lacks, a missing decisions file, a prompt file that cannot be read; nothing written or started', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    DECISIONS.text = DECISIONS_TEXT
+    try {
+      const unknown = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL, section: 'Parser unit' } as never)
+      expect(String(unknown.deny)).toBe('session-control: refused: agreed-decisions.md has no section "Parser unit"; nothing was launched')
+      const unread = await $.tool.call({ tool: TOOL, ...fresh, prompt_file: '/work/new/prompt.md', section: 'Parser unit (user, 2026-10-11)' } as never)
+      expect(String(unread.deny)).toBe('session-control: refused: the prompt file /work/new/prompt.md cannot be read, so the section cannot be appended; nothing was launched')
+    } finally {
+      DECISIONS.text = undefined
+    }
+    const missing = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL, section: 'Parser unit (user, 2026-10-11)' } as never)
+    expect(String(missing.deny)).toBe('session-control: refused: agreed-decisions.md cannot be read; nothing was launched')
+    expect(w.writes.some(one => one.path.endsWith('.prompt.md'))).toBe(false)
+    expect(w.bash.length).toBe(0)
+  })
+
+  test('exactly one of prompt and prompt_file: both, or neither, is refused before anything runs', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const runs = w.runs.length
+    const both = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL, prompt_file: '/work/new/prompt.md' } as never)
+    expect(String(both.deny)).toBe('session-control: refused: give exactly one of prompt and prompt_file, not both')
+    const neither = await $.tool.call({ tool: TOOL, ...fresh } as never)
+    expect(String(neither.deny)).toBe('session-control: refused: give exactly one of prompt and prompt_file')
+    const blank = await $.tool.call({ tool: TOOL, ...fresh, prompt: '   ' } as never)
+    expect(String(blank.deny)).toBe('session-control: refused: prompt is empty')
+    expect(w.runs.length).toBe(runs)
+  })
+
+  test('a fresh launch without model, effort, title or dir is refused as before', { options: OPTIONS }, async ($, on) => {
+    world(on)
+    await $.session.start(start(ORCH_DIR))
+    expect(String((await $.tool.call({ tool: TOOL, dir: '/work/new', prompt: FULL, effort: 'high', title: 't' } as never)).deny)).toBe('session-control: model is required')
+    expect(String((await $.tool.call({ tool: TOOL, dir: '/work/new', prompt: FULL, model: 'opus', title: 't' } as never)).deny)).toContain('effort is required')
+    expect(String((await $.tool.call({ tool: TOOL, dir: '/work/new', prompt: FULL, model: 'opus', effort: 'high' } as never)).deny)).toBe('session-control: title is required')
+    expect(String((await $.tool.call({ tool: TOOL, prompt: FULL, model: 'opus', effort: 'high', title: 't' } as never)).deny)).toBe('session-control: dir must be absolute')
+  })
+
+  describe('a resume', () => {
+    // Its cwd and model are those of the fixture's new worker process, so the launch finds it.
+    const entry = { title: 'parser work', session_id: SID_UNREPORTED, name: 'w-parser-work-260920100000', config_dir: '/fixture/lic/a', cwd: '/work/new', model: 'opus', effort: 'medium', reported: false }
+    const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? entry : one)))
+    test('takes dir, model, effort and title from its entry, and says so', { options: OPTIONS }, async ($, on) => {
+      WORKER.sid = SID_UNREPORTED
+      try {
+        const w = world(on, '/fixture/lic/a\n', true, registry)
+        await $.session.start(start(ORCH_DIR))
+        const out = await $.tool.call({ tool: TOOL, resume_sid: SID_UNREPORTED, prompt: `${FULL} Continue.` } as never)
+        expect(String(out.result)).toEndWith('From the entry: dir, model, effort, title.')
+        expect(String(w.bash[0]?.command)).toStartWith(`cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='medium' claude -p --model 'opus' --resume '${SID_UNREPORTED}' -n 'w-parser-work-260920100000'`)
+        expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ title: 'parser work', cwd: '/work/new', model: 'opus', effort: 'medium', pid: 7001 })
+        expect(String(w.bash[0]?.command)).toContain(`"$(cat '${RUNS}/20260921141320-parser-work.prompt.md')"`)
+        expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
+      } finally {
+        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
+      }
+    })
+    test('a value given wins over the entry\'s', { options: OPTIONS }, async ($, on) => {
+      WORKER.sid = SID_UNREPORTED
+      try {
+        const w = world(on, '/fixture/lic/a\n', true, registry)
+        await $.session.start(start(ORCH_DIR))
+        const out = await $.tool.call({ tool: TOOL, resume_sid: SID_UNREPORTED, prompt: FULL, effort: 'max', title: 'parser again' } as never)
+        expect(String(out.result)).toEndWith('From the entry: dir, model.')
+        expect(String(w.bash[0]?.command)).toStartWith(`cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='max' claude -p --model 'opus' --resume '${SID_UNREPORTED}'`)
+        expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ title: 'parser again', effort: 'max' })
+      } finally {
+        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
+      }
+    })
+    test('of an entry without those fields, or of an unknown id, is refused as before', { options: OPTIONS }, async ($, on) => {
+      world(on)
+      await $.session.start(start(ORCH_DIR))
+      // The fixture's unreported entry has no cwd, model or effort.
+      expect(String((await $.tool.call({ tool: TOOL, resume_sid: SID_UNREPORTED, prompt: FULL } as never)).deny)).toBe('session-control: model is required')
+      const unknown = await $.tool.call({ tool: TOOL, resume_sid: '99999999-0000-4000-8000-000000000009', prompt: FULL, dir: '/work/new', model: 'opus', effort: 'high', title: 't' } as never)
+      expect(String(unknown.deny)).toBe('session-control: no registry entry for 99999999-0000-4000-8000-000000000009')
+    })
   })
 })
 

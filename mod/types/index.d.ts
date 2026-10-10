@@ -21,6 +21,10 @@ export type SessionEntry = {
   started_at?: number
   /** When the mod harvested the run's completion (epoch seconds); a resume drops it. */
   ended_at?: number
+  /** The prompt file the mod wrote for the run (an inline prompt, or one it extended), in the runs directory; absent when the launch used the orchestrator's file as it was. */
+  prompt_file?: string
+  /** The agreed-decisions.md section the launch appended to the prompt. */
+  section?: string
   [field: string]: unknown
 }
 

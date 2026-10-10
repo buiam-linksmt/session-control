@@ -17,7 +17,7 @@ import {
   windowsPickerRefusal,
   winPath,
 } from './core'
-import type { LaunchArgs, ProcFacts } from './core'
+import type { LaunchInput, ProcFacts } from './core'
 import type { Host, HostPort, NewerFiles, RotatePlan, TailShape, WorkerWant } from './host'
 import { NEWER_MAX, PANE_TAIL, bashLaunchCommand, clockPause, parseNewerListing, readTail, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
 
@@ -315,7 +315,11 @@ export const windowsHost: Host = {
   /** The engine's clock: Windows has no sleep to start. */
   pause: clockPause,
 
-  launchArgs: (given: LaunchArgs) => ({ ...given, dir: native(given.dir), prompt_file: native(given.prompt_file) }),
+  launchArgs: <T extends LaunchInput>(given: T): T => ({
+    ...given,
+    ...(given.dir === undefined ? {} : { dir: native(given.dir) }),
+    ...(given.prompt_file === undefined ? {} : { prompt_file: native(given.prompt_file) }),
+  }),
   launchChecks: statLaunchChecks,
   launchFacts: (promptText: string | undefined) => ({ isWindows: true, promptChars: promptText?.length, promptLead: promptText?.slice(0, 200) }),
   pickerArgv(argv: string[]) {

@@ -9,7 +9,7 @@
 import type { FsStat, ProcessRunInit, ProcessRunResult } from 'claude-code'
 
 import type { SessionEntry } from '../types'
-import type { LaunchArgs, LaunchFacts, ProcFact, ProcFacts } from './core'
+import type { LaunchArgs, LaunchFacts, LaunchInput, ProcFact, ProcFacts } from './core'
 import type { HelperNote } from './host-helper'
 import { posixHost } from './host-posix'
 import { windowsHost } from './host-windows'
@@ -91,8 +91,8 @@ export type Host = {
   pause(port: HostPort, seconds: number): Promise<void>
 
   // ---- launch
-  /** The launch's arguments with its paths in the stored form. */
-  launchArgs(given: LaunchArgs): LaunchArgs
+  /** The launch's arguments with its paths in the stored form (a path not given stays not given). */
+  launchArgs<T extends LaunchInput>(given: T): T
   /** Whether the prompt file is there and not empty, and the dir is a directory. */
   launchChecks(port: HostPort, args: LaunchArgs): Promise<{ promptFileOk: boolean; dirOk: boolean }>
   /** The platform's own facts for checkLaunch. */

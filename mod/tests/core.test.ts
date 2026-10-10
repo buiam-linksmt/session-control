@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  RULES_BLOCK,
+  composePrompt,
+  fillFromEntry,
+  filledFields,
+  launchArgsOf,
+  promptSourceRefusal,
+  rulesWanted,
   runFigures,
   runFilesToDelete,
   withRunFigures,
@@ -1319,6 +1326,49 @@ describe('launch guard on Windows', () => {
     expect(transcriptPath(entry, true)).toBe(`C:/Users/u/.claude/projects/C--Users-u-proj/${SID_ALIVE}.jsonl`)
     expect(transcriptPath({ ...entry, cwd: 'C:\\Users\\u\\proj\\' }, true)).toBe(`C:/Users/u/.claude/projects/C--Users-u-proj/${SID_ALIVE}.jsonl`)
     expect(transcriptPath(entry)).toBe(`C:/Users/u/.claude/projects/-c-Users-u-proj/${SID_ALIVE}.jsonl`)
+  })
+})
+
+describe('launch_worker: the prompt it builds and the resume fill', () => {
+  test('composePrompt: the section block, then the rules block only when an item the guard checks is missing', () => {
+    const section = { heading: 'Unit (user)', body: 'unit-1. a\nunit-2. b\n\n' }
+    expect(composePrompt('Do it.', undefined, true)).toEqual({ text: `Do it.\n\n${RULES_BLOCK}\n`, isSectionAdded: false, isRulesAdded: true })
+    expect(composePrompt('Do it.', undefined, false)).toEqual({ text: 'Do it.', isSectionAdded: false, isRulesAdded: false })
+    expect(composePrompt('Do it.\n\n', section, false).text).toBe('Do it.\n\n## Binding decisions (section Unit (user))\n\nunit-1. a\nunit-2. b\n')
+    const full = 'Foreground waits; git status -sb; no attribution.'
+    expect(composePrompt(full, undefined, true)).toEqual({ text: full, isSectionAdded: false, isRulesAdded: false })
+    expect(composePrompt('A skill test of x.', undefined, true).isRulesAdded).toBe(false)
+    // The block passes the guard by itself, and a prompt with it gets no second copy.
+    expect(missingPromptItems(RULES_BLOCK)).toEqual([])
+    const once = composePrompt('Do it.', undefined, true).text
+    expect(composePrompt(once, undefined, true).text).toBe(once)
+  })
+
+  test('rulesWanted: given wins; by default only when the mod writes the prompt (inline text or a section)', () => {
+    expect(rulesWanted({ prompt: 'x' })).toBe(true)
+    expect(rulesWanted({ prompt_file: '/p', section: 's' })).toBe(true)
+    expect(rulesWanted({ prompt_file: '/p' })).toBe(false)
+    expect(rulesWanted({ prompt: 'x', rules: false })).toBe(false)
+    expect(rulesWanted({ prompt_file: '/p', rules: true })).toBe(true)
+  })
+
+  test('promptSourceRefusal: exactly one of prompt and prompt_file, the text not blank', () => {
+    expect(promptSourceRefusal({ prompt: 'x' })).toBeUndefined()
+    expect(promptSourceRefusal({ prompt_file: '/p' })).toBeUndefined()
+    expect(promptSourceRefusal({ prompt: 'x', prompt_file: '/p' })).toBe('refused: give exactly one of prompt and prompt_file, not both')
+    expect(promptSourceRefusal({})).toBe('refused: give exactly one of prompt and prompt_file')
+    expect(promptSourceRefusal({ prompt: ' \n' })).toBe('refused: prompt is empty')
+  })
+
+  test('fillFromEntry: a resume takes dir, model, effort and title from its entry, a given value wins; a fresh launch or an unknown id is left as given', () => {
+    const entries = [{ session_id: 's1', cwd: '/w/a', model: 'sonnet', effort: 'low', title: 'Old title' }, { session_id: 's2', cwd: '', title: 'no cwd' }]
+    const filled = fillFromEntry({ resume_sid: 's1', prompt: 'x', model: 'opus' }, entries)
+    expect(filled).toEqual({ resume_sid: 's1', prompt: 'x', model: 'opus', dir: '/w/a', effort: 'low', title: 'Old title' })
+    expect(filledFields({ resume_sid: 's1', prompt: 'x', model: 'opus' }, filled)).toEqual(['dir', 'effort', 'title'])
+    expect(fillFromEntry({ resume_sid: 's2', prompt: 'x' }, entries)).toEqual({ resume_sid: 's2', prompt: 'x', title: 'no cwd' })
+    expect(fillFromEntry({ prompt: 'x' }, entries)).toEqual({ prompt: 'x' })
+    expect(fillFromEntry({ resume_sid: 'none', prompt: 'x' }, entries)).toEqual({ resume_sid: 'none', prompt: 'x' })
+    expect(launchArgsOf({ prompt: 'x', section: 's', rules: true, model: 'opus' }, '/r/p.prompt.md')).toEqual({ dir: '', prompt_file: '/r/p.prompt.md', model: 'opus', effort: '', title: '' })
   })
 })
 

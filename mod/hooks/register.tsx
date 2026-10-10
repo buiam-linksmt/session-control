@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessRunInit, ProcessRunResult, Register } from 'claude-code'
 
 import type { SessionEntry, SessionOutcome } from '../types'
-import { ARCHIVE_SCHEMA, ARCHIVED_HEADING, DECISIONS_ARCHIVE, DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, archiveDecisions, editOpenPoints, editQueue } from './bookkeeping'
+import { ARCHIVE_SCHEMA, ARCHIVED_HEADING, DECISIONS_ARCHIVE, DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, archiveDecisions, editOpenPoints, editQueue, findDecisionSection } from './bookkeeping'
 import type { Edit } from './bookkeeping'
 import { backupName, dirOf, freshText, localDate } from './store'
 import {
@@ -48,8 +48,14 @@ import {
 import {
   LAUNCH_SCHEMA,
   ACK_SCHEMA,
-  RETIRE_SCHEMA,
   CLOSE_SCHEMA,
+  RETIRE_SCHEMA,
+  composePrompt,
+  fillFromEntry,
+  filledFields,
+  launchArgsOf,
+  promptSourceRefusal,
+  rulesWanted,
   runFigures,
   runFilesToDelete,
   withRunFigures,
@@ -101,7 +107,7 @@ import {
   reportCheck,
   resultReport,
 } from './core'
-import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId } from './core'
+import type { ComposedPrompt, ExpandableId, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -914,27 +920,61 @@ async function archiveSections($: EngineInterface, sections: unknown) {
   return { deny: `${PLUGIN}: ${file} changed while it was being edited; ${DECISIONS_ARCHIVE} holds the sections, ${file} still does too: try again` }
 }
 
-async function launch($: EngineInterface, given: LaunchArgs) {
+/** The prompt a launch built itself, and where it goes: an inline prompt, or a prompt_file the launch extended. */
+type OwnPrompt = { path: string; composed: ComposedPrompt; section?: string }
+
+async function launch($: EngineInterface, given: LaunchInput) {
   const machine = await hostOf($)
   // The launch's paths in the form the host stores, from here on and in the registry (on Windows C:/..., never /c/...).
-  const args = machine.launchArgs(given)
+  const input = machine.launchArgs(given)
   const home = await homeDir($)
   // A path the launch route cannot pass on is refused before anything runs (the PowerShell route's wildcard paths).
-  const routeRefusal = machine.launchRefusal(args, machine.nativePath(expandHome(config.runsDir, home)))
-  if (routeRefusal !== undefined) {
-    trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(routeRefusal, 'reason') })
-    return { deny: `${PLUGIN}: ${routeRefusal}` }
+  const routeRefusal = machine.launchRefusal(input as LaunchArgs, machine.nativePath(expandHome(config.runsDir, home)))
+  const sourceRefusal = routeRefusal ?? promptSourceRefusal(input)
+  if (sourceRefusal !== undefined) {
+    trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(sourceRefusal, 'reason') })
+    return { deny: `${PLUGIN}: ${sourceRefusal}` }
   }
   const reg = await registryAndFacts($)
   if ('deny' in reg) return reg
-  const { promptFileOk, dirOk } = await machine.launchChecks(portOf($), args)
-  const promptText = await $.fs.read(args.prompt_file).catch(() => undefined)
+  // A resume takes what it is not given from its entry; a value given wins.
+  const filled = fillFromEntry(input, reg.entries)
+  const fromEntry = filledFields(input, filled)
+  // The prompt: the file given, or the text given; a section's block and the rules block appended when asked.
+  let section: { heading: string; body: string } | undefined
+  if (filled.section !== undefined) {
+    const decisions = await $.fs.read(orchPath('agreed-decisions.md')).catch(() => undefined)
+    const found = decisions === undefined ? { error: 'agreed-decisions.md cannot be read' } : findDecisionSection(decisions, filled.section)
+    if ('error' in found) {
+      trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(found.error, 'reason') })
+      return { deny: `${PLUGIN}: refused: ${found.error}; nothing was launched` }
+    }
+    section = { heading: found.section.heading, body: found.section.body }
+  }
+  const sourceText = filled.prompt ?? (filled.prompt_file === undefined ? undefined : await $.fs.read(filled.prompt_file).catch(() => undefined))
+  const composed = sourceText === undefined ? undefined : composePrompt(sourceText, section, rulesWanted(filled))
+  // A file that cannot be read cannot be extended: launching it as it is would drop the section or the rules asked for.
+  if (sourceText === undefined && (section !== undefined || filled.rules === true)) {
+    const reason = `refused: the prompt file ${filled.prompt_file} cannot be read, so ${section !== undefined ? 'the section' : 'the rules block'} cannot be appended; nothing was launched`
+    trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(reason, 'reason') })
+    return { deny: `${PLUGIN}: ${reason}` }
+  }
+  const runsDir = await runsPath($)
+  const nowMs = await $.clock.now()
+  const base = `${runsDir}/${new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(0, 14)}-${slugify(filled.title ?? '')}`
+  const own: OwnPrompt | undefined =
+    composed !== undefined && (filled.prompt !== undefined || composed.text !== sourceText) ? { path: `${base}.prompt.md`, composed, ...(section === undefined ? {} : { section: section.heading }) } : undefined
+  const args = launchArgsOf(filled, own?.path ?? filled.prompt_file ?? '')
+  const checks = await machine.launchChecks(portOf($), args)
+  // The prompt file the mod writes is checked as text: it is written once the guards have passed.
+  const promptFileOk = own === undefined ? checks.promptFileOk : own.composed.text.trim() !== ''
+  const promptText = composed?.text
   const resumeSid = typeof args.resume_sid === 'string' ? args.resume_sid : undefined
   // Without a picker command a fresh launch inherits the machine's default configuration: the orchestrator's own
   // CLAUDE_CONFIG_DIR when it has one, else <home>/.claude, which is what the registry records.
   const picker = config.licencePickCommand.trim()
-  const own = await ownConfigDir($)
-  const defaultDir = machine.defaultConfigDir(home, own)
+  const ownDir = await ownConfigDir($)
+  const defaultDir = machine.defaultConfigDir(home, ownDir)
   let pick: { exitCode: number; stdout: string; stderr?: string } | undefined
   if (resumeSid === undefined && picker === '') pick = { exitCode: 0, stdout: defaultDir }
   else if (resumeSid === undefined) {
@@ -953,15 +993,25 @@ async function launch($: EngineInterface, given: LaunchArgs) {
     pick,
     transcriptExists: resumeSid === undefined ? undefined : reg.facts.transcriptMtime.has(resumeSid),
     promptFileOk,
-    dirOk,
+    dirOk: checks.dirOk,
     missingItems: promptText === undefined ? undefined : missingPromptItems(promptText),
     ...machine.launchFacts(promptText),
   })
   trace($, 'guard', verdict.ok ? { tool: 'launch_worker', isOk: true, configDir: verdict.configDir, resumeSid: verdict.resumeSid } : { tool: 'launch_worker', isOk: false, ...messageFields(verdict.reason, 'reason') })
   if (!verdict.ok) return { deny: `${PLUGIN}: ${verdict.reason}` }
+  if (own !== undefined) {
+    trace($, 'launch.prompt', { promptFile: own.path, chars: own.composed.text.length, isInline: filled.prompt !== undefined, isSectionAdded: own.composed.isSectionAdded, isRulesAdded: own.composed.isRulesAdded })
+    try {
+      await machine.prepareRunsDir(portOf($), runsDir)
+      await write($, own.path, own.composed.text)
+    } catch (err) {
+      traceError($, 'launch.prompt', err)
+      return { deny: `${PLUGIN}: the prompt file ${own.path} could not be written (${errorText(err).slice(0, 160)}); nothing was launched.` }
+    }
+  }
   // No CLAUDE_CONFIG_DIR on the line: a fresh launch without a picker, or a resume under the default directory.
   const isConfigInherited = picker === '' && (verdict.resumeSid === undefined || machine.isDefaultConfigDir(verdict.configDir, defaultDir))
-  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, own)
+  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, own, fromEntry })
 }
 
 /** Start the worker as a background task of the host's launch tool, find its real pid and session, register it. */
@@ -972,16 +1022,14 @@ async function spawnWorker(
   entries: readonly SessionEntry[],
   before: ProcFacts,
   own: string | undefined,
+  launchRun: { base: string; own?: OwnPrompt; fromEntry: readonly string[] },
 ) {
   const machine = await hostOf($)
   const port = portOf($)
-  const runsDir = await runsPath($)
   // The launch's redirections need the runs directory.
-  await machine.prepareRunsDir(port, runsDir)
+  await machine.prepareRunsDir(port, await runsPath($))
   const nowMs = await $.clock.now()
-  const stamp = new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(0, 14)
-  const base = `${runsDir}/${stamp}-${slugify(args.title)}`
-  const files = { result: `${base}.json`, err: `${base}.err` }
+  const files = { result: `${launchRun.base}.json`, err: `${launchRun.base}.err` }
   const name = launchName(args.title, nowMs, entries, verdict.resumeSid, issuedNames)
   issuedNames.add(name)
   const command = machine.launchCommand(args, { ...verdict, name }, files.result, files.err)
@@ -1042,15 +1090,21 @@ async function spawnWorker(
   trace($, 'worker.found', { pid: worker.pid, sessionId, isNamed: fromFile.name !== undefined, isSocketSeen: fromFile.socketPath !== undefined, ...pidFileFact })
   if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
   const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
-  const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox, Math.floor(launchedAt / 1000))
+  const prompt = launchRun.own === undefined ? {} : { promptFile: launchRun.own.path, ...(launchRun.own.section === undefined ? {} : { section: launchRun.own.section }) }
+  const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox, Math.floor(launchedAt / 1000), prompt)
   // A missing registry starts as an empty one, as REGISTER_SCRIPT starts it.
   const failed = await editRegistry($, async text => registerEntry(text, entry, verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
   const note = failed === undefined ? 'registered' : writeFailed(failed)
   trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
   await refresh($)
   const pidNote = filePid !== undefined && filePid !== worker.pid ? ` The launch's pid file names pid ${filePid}, not the one the probe found.` : ''
+  // Said only when the launch's new parameters were used: an old launch's answer is as it was.
+  const { own: ownPrompt, fromEntry } = launchRun
+  const added = ownPrompt === undefined ? [] : [...(ownPrompt.composed.isSectionAdded ? [`section "${ownPrompt.section}" appended`] : []), ...(ownPrompt.composed.isRulesAdded ? ['rules block appended'] : [])]
+  const promptNote = ownPrompt === undefined ? '' : ` Prompt: ${ownPrompt.path} (written by the mod${added.length === 0 ? '' : `; ${added.join('; ')}`}).`
+  const entryNote = fromEntry.length === 0 ? '' : ` From the entry: ${fromEntry.join(', ')}.`
   return {
-    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}`,
+    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}${promptNote}${entryNote}`,
   }
 }
 
@@ -1265,7 +1319,10 @@ async function activate($: EngineInterface): Promise<void> {
       name: 'launch_worker',
       description:
         'Launch (or resume) a headless claude -p worker with licence pick, cwd and resume guards. ' +
-        'Runs it as a background task, finds the real pid and session id and registers the worker.',
+        'Runs it as a background task, finds the real pid and session id and registers the worker. ' +
+        'A fresh launch needs dir, model, effort, title and exactly one of prompt_file and prompt (inline text the mod writes to a prompt file of its own); ' +
+        'a resume (resume_sid) takes dir, model, effort and title from its entry unless given. section appends a decisions section as binding; ' +
+        'rules appends the standard rules block when the prompt lacks the items the guard checks.',
       inputSchema: LAUNCH_SCHEMA as unknown as Record<string, unknown>,
     })
     await $.tool.register({
@@ -1629,10 +1686,10 @@ export const register: Register = (on, options) => {
     return next.called ? next(e) : { deny: `${PLUGIN}: audit_state failed` }
   })
 
-  // The launch's fields are paths, names and numbers; the title is free text and stays out (its slug is in the run's
-  // file names); the prompt is in its file, which the trace never reads.
-  const LAUNCH_FIELDS = ['dir', 'prompt_file', 'model', 'effort', 'need', 'resume_sid', 'timeout_minutes'] as const
-  on('tool.call', { tool: TOOL }, ($, e) => tracedTool($, 'launch_worker', e, LAUNCH_FIELDS, () => launch($, e as unknown as LaunchArgs))).catch(($, e, next) => {
+  // The launch's fields are paths, names, numbers and switches; the title and the section are free text and stay out
+  // (the title's slug is in the run's file names); the prompt, inline or in its file, never reaches the trace.
+  const LAUNCH_FIELDS = ['dir', 'prompt_file', 'model', 'effort', 'need', 'resume_sid', 'timeout_minutes', 'rules'] as const
+  on('tool.call', { tool: TOOL }, ($, e) => tracedTool($, 'launch_worker', e, LAUNCH_FIELDS, () => launch($, e as unknown as LaunchInput))).catch(($, e, next) => {
     traceError($, 'launch_worker', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: launch_worker guard failed` }
   })

@@ -5,7 +5,7 @@
 
 import type { SessionEntry } from '../types'
 import { findNewWorker, isDefaultConfigDir, defaultConfigDir, parseProcFacts, probeArgs, transcriptPath } from './core'
-import type { LaunchArgs, ProcFacts } from './core'
+import type { LaunchArgs, LaunchInput, ProcFacts } from './core'
 import type { Host, HostPort, NewerFiles, RotatePlan, TailShape, WorkerWant } from './host'
 import { NEWER_MAX, TAIL_SHAPED_MAX_BYTES, bashLaunchCommand, parseNewerListing, rotateAndAppendWith, writeAtomicWith } from './host-shared'
 import { dirOf } from './store'
@@ -125,7 +125,7 @@ export const posixHost: Host = {
     await port.run(['sleep', String(seconds)], { timeoutMs: 5_000 })
   },
 
-  launchArgs: (given: LaunchArgs) => given,
+  launchArgs: <T extends LaunchInput>(given: T): T => given,
   /** `test -s` on the prompt file and `test -d` on the dir. */
   async launchChecks(port: HostPort, args: LaunchArgs) {
     const promptCheck = await port.run(['test', '-s', args.prompt_file], { timeoutMs: 5_000 })
