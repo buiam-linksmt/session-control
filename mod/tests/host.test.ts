@@ -17,6 +17,7 @@ import { withPowerShellLaunch } from '../hooks/host-powershell'
 import { NEWER_MAX } from '../hooks/host-shared'
 import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, TAIL_SHAPED_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, NEWER_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
+import { localDate } from '../hooks/store'
 import { helperAnswer, newerInMap } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
@@ -482,6 +483,65 @@ describe('host selection', () => {
       const probes = m.runs.filter(argv => argv[2] === PROBE_SCRIPT || String(argv[6]).endsWith('/probe.ps1'))
       expect(probes.length).toBeGreaterThan(0)
       expect(probes.every(argv => (adapter === 'Linux' ? argv[0] === 'sh' : argv[0]?.endsWith('\\powershell.exe')))).toBe(true)
+    })
+  }
+})
+
+// The write-side tools through the plugin on the simulated machine, Linux and Windows: files that really change, so an
+// acknowledgement's write is what the retire after it reads, and a deleted run file is gone.
+describe('write-side tools through the plugin, on both platforms', () => {
+  const PLATFORMS: { name: string; env: Record<string, string>; root: string }[] = [
+    { name: 'Linux', env: LINUX_ENV, root: '/m' },
+    { name: 'Windows', env: WINDOWS_ENV, root: 'C:/m' },
+  ]
+  const SID_A = 'aaaa0001-1111-4111-8111-111111111111'
+  const SID_B = 'bbbb0002-2222-4222-8222-222222222222'
+  const SID_C = 'cccc0003-3333-4333-8333-333333333333'
+  const SID_D = 'dddd0004-4444-4444-8444-444444444444'
+  const SID_E = 'eeee0005-5555-4555-8555-555555555555'
+  const today = localDate(NOW_MS)
+
+  for (const p of PLATFORMS) {
+    const orch = `${p.root}/orch`
+    const home = `${p.root}/home`
+    const runs = `${home}/.claude/session-control/runs`
+    const reg = `${home}/.claude/headless-sessions.json`
+    const cfg = `${home}/.claude`
+    const options = { orchestratorDir: orch, registryPath: '~/.claude/headless-sessions.json', helper: 'off', completionWrites: false }
+    const boot = (on: On, m: Machine) => {
+      mount(on, m)
+      on('session.start', ($, e) => ({ cwd: e.cwd }))
+      on('command.register', ($, e) => ({ value: { command: e.name } }))
+      on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
+      on('ui.toast', () => ({ value: undefined }))
+    }
+    const put = (m: Machine, path: string, text: string) => m.files.set(keyOf(path), text)
+    const get = (m: Machine, path: string) => m.files.get(keyOf(path))
+    const result = (cost: number, ms: number) => JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', total_cost_usd: cost, duration_ms: ms })
+
+    test(`${p.name}: retire_workers deletes the run files of a clean session it removes, in the runs directory and named by no other entry, and keeps cost and duration in the cleared log`, { options }, async ($, on) => {
+      const m = machine(p.env)
+      boot(on, m)
+      const entries = [
+        { title: 'a', session_id: SID_A, config_dir: cfg, cwd: `${p.root}/work`, reported: true, outcome: { kind: 'clean', summary: 'clean: a' }, result_file: `${runs}/20260921-a.json`, err_file: `${runs}/20260921-a.err`, prompt_file: `${runs}/20260921-a.prompt.md` },
+        { title: 'c', session_id: SID_C, config_dir: cfg, cwd: `${p.root}/work`, reported: false, err_file: `${runs}/20260921-a.err` },
+        { title: 'e', session_id: SID_E, config_dir: cfg, cwd: `${p.root}/work`, reported: true, result_file: `${runs}/20260921-e.json` },
+      ]
+      put(m, reg, `${JSON.stringify(entries, null, 2)}\n`)
+      put(m, `${runs}/20260921-a.json`, result(0.12, 4500))
+      put(m, `${runs}/20260921-a.err`, '')
+      put(m, `${runs}/20260921-a.pid`, '4242\r\n')
+      put(m, `${runs}/20260921-a.prompt.md`, 'Reply PONG.')
+      put(m, `${runs}/20260921-e.json`, result(1, 1))
+      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      const out = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [SID_A, SID_E] } as never)) as { result?: unknown }
+      expect(String(out.result)).toBe(`Retired: aaaa0001, eeee0005. Run files deleted from ${runs}: aaaa0001 (20260921-a.json, 20260921-a.pid, 20260921-a.prompt.md).`)
+      for (const gone of ['20260921-a.json', '20260921-a.pid', '20260921-a.prompt.md']) expect(get(m, `${runs}/${gone}`)).toBeUndefined()
+      expect(get(m, `${runs}/20260921-a.err`)).toBe('')
+      expect(get(m, `${runs}/20260921-e.json`)).toBe(result(1, 1))
+      const cleared = (get(m, `${runs}/cleared.jsonl`) ?? '').trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+      expect(cleared).toEqual([{ ...entries[0], cost_usd: 0.12, duration_ms: 4500 }, { ...entries[2], cost_usd: 1, duration_ms: 1 }])
+      expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([entries[1]])
     })
   }
 })

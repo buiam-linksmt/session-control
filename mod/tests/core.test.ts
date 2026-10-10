@@ -1,6 +1,9 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  runFigures,
+  runFilesToDelete,
+  withRunFigures,
   annotateCleared,
   buildLaunchArgv,
   launchName,
@@ -1316,5 +1319,30 @@ describe('launch guard on Windows', () => {
     expect(transcriptPath(entry, true)).toBe(`C:/Users/u/.claude/projects/C--Users-u-proj/${SID_ALIVE}.jsonl`)
     expect(transcriptPath({ ...entry, cwd: 'C:\\Users\\u\\proj\\' }, true)).toBe(`C:/Users/u/.claude/projects/C--Users-u-proj/${SID_ALIVE}.jsonl`)
     expect(transcriptPath(entry)).toBe(`C:/Users/u/.claude/projects/-c-Users-u-proj/${SID_ALIVE}.jsonl`)
+  })
+})
+
+describe('retire cleanup', () => {
+  const RUNS = '/h/.claude/session-control/runs'
+  const under = (path: string, dir: string) => path.startsWith(`${dir}/`)
+  test('runFilesToDelete: result, error, pid, prompt in the runs directory, never one another entry names, never outside, never a transcript', () => {
+    const entry = { session_id: 'a', result_file: `${RUNS}/x.json`, err_file: `${RUNS}/x.err`, prompt_file: `${RUNS}/x.prompt.md` }
+    expect(runFilesToDelete(entry, [], RUNS, under)).toEqual([
+      { kind: 'result', path: `${RUNS}/x.json` },
+      { kind: 'error', path: `${RUNS}/x.err` },
+      { kind: 'pid', path: `${RUNS}/x.pid` },
+      { kind: 'prompt', path: `${RUNS}/x.prompt.md` },
+    ])
+    expect(runFilesToDelete(entry, [{ session_id: 'b', note: `${RUNS}/x.err` }], RUNS, under).map(one => one.kind)).toEqual(['result', 'pid', 'prompt'])
+    expect(runFilesToDelete({ result_file: '/elsewhere/x.json', err_file: `${RUNS}/t.jsonl`, prompt_file: '/scratch/p.md' }, [], RUNS, under)).toEqual([])
+  })
+  test('runFigures and withRunFigures: cost and duration from the result file, added to the cleared-log line when it lacks them', () => {
+    expect(runFigures(JSON.stringify({ total_cost_usd: 0.25, duration_ms: 1200, result: 'x' }))).toEqual({ cost_usd: 0.25, duration_ms: 1200 })
+    expect(runFigures('not json')).toEqual({})
+    expect(runFigures(JSON.stringify({ result: 'x' }))).toEqual({})
+    const lines = '{"session_id":"a","title":"t"}\n{"session_id":"b","cost_usd":9}\n'
+    const figures = new Map([['a', { cost_usd: 0.25, duration_ms: 1200 }], ['b', { cost_usd: 1, duration_ms: 5 }]])
+    expect(withRunFigures(lines, figures)).toBe('{"session_id":"a","title":"t","cost_usd":0.25,"duration_ms":1200}\n{"session_id":"b","cost_usd":9,"duration_ms":5}\n')
+    expect(withRunFigures(lines, new Map())).toBe(lines)
   })
 })

@@ -1164,6 +1164,66 @@ export function annotateCleared(removed: string, reviews: readonly RetireReview[
     .join('\n')
 }
 
+/** A retired run's figures from its result file: `total_cost_usd` and `duration_ms`, when they are numbers. */
+export type RunFigures = { cost_usd?: number; duration_ms?: number }
+
+/** The figures of a result file's text; empty when it is no JSON object or holds neither number. */
+export function runFigures(resultText: string): RunFigures {
+  try {
+    const value = JSON.parse(resultText) as Rec | null
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
+    return {
+      ...(typeof value.total_cost_usd === 'number' ? { cost_usd: value.total_cost_usd } : {}),
+      ...(typeof value.duration_ms === 'number' ? { duration_ms: value.duration_ms } : {}),
+    }
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Cleared-log lines with the run's figures: a line whose session has figures gets `cost_usd` and `duration_ms` at the
+ * end, each only when the line lacks it; every other line stays as it is.
+ */
+export function withRunFigures(lines: string, figures: ReadonlyMap<string, RunFigures>): string {
+  if (figures.size === 0) return lines
+  return lines
+    .split('\n')
+    .map(line => {
+      if (line === '') return line
+      const entry = JSON.parse(line) as Rec
+      const found = typeof entry.session_id === 'string' ? figures.get(entry.session_id) : undefined
+      if (found === undefined) return line
+      const added = Object.fromEntries(Object.entries(found).filter(([key, value]) => value !== undefined && !(key in entry)))
+      return Object.keys(added).length === 0 ? line : jqText({ ...entry, ...added })
+    })
+    .join('\n')
+}
+
+/** The run files of an entry the retire cleanup may delete: what it names, by kind. */
+export type RunFile = { kind: 'result' | 'error' | 'pid' | 'prompt'; path: string }
+
+/**
+ * The run files a retire deletes for a session it removed whose outcome is clean or whose retire was reviewed: its
+ * result file, its error file, the pid file beside the result file (the PowerShell route's, `<result less .json>.pid`)
+ * and the prompt file the mod wrote for it. Never a file outside the runs directory, never a transcript (`.jsonl`),
+ * never one that another registry entry names in any of its fields. `isUnder` compares as the platform does.
+ */
+export function runFilesToDelete(entry: SessionEntry, others: readonly SessionEntry[], runsDir: string, isUnder: (path: string, dir: string) => boolean): RunFile[] {
+  const named = new Set<string>()
+  for (const other of others) for (const value of Object.values(other)) if (typeof value === 'string') named.add(value)
+  const str = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined)
+  const result = str(entry.result_file)
+  const files: RunFile[] = []
+  if (result !== undefined) files.push({ kind: 'result', path: result })
+  const err = str(entry.err_file)
+  if (err !== undefined) files.push({ kind: 'error', path: err })
+  if (result !== undefined && result.endsWith('.json')) files.push({ kind: 'pid', path: `${result.slice(0, -'.json'.length)}.pid` })
+  const prompt = str(entry.prompt_file)
+  if (prompt !== undefined) files.push({ kind: 'prompt', path: prompt })
+  return files.filter(file => isUnder(file.path, runsDir) && !file.path.endsWith('.jsonl') && !named.has(file.path))
+}
+
 // ---------------------------------------------------------------- native Windows
 
 // Native Windows (Claude Code on Windows, Git Bash as the Bash tool's shell) has no sh, jq, mv or /proc on the

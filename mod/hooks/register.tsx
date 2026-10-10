@@ -37,6 +37,7 @@ import {
   TAIL_LINES,
   WORKER_TAIL_SCHEMA,
   firstTimestamp,
+  isUnder,
   listSessionsText,
   matchSession,
   panelSnapshotText,
@@ -48,6 +49,9 @@ import {
   LAUNCH_SCHEMA,
   ACK_SCHEMA,
   RETIRE_SCHEMA,
+  runFigures,
+  runFilesToDelete,
+  withRunFigures,
   ackEntries,
   registerEntry,
   removeEntries,
@@ -96,7 +100,7 @@ import {
   reportCheck,
   resultReport,
 } from './core'
-import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
+import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -781,14 +785,23 @@ async function retire($: EngineInterface, ids: readonly string[], reviewed: Read
     refused: verdict.refused,
     ...(reviews.length === 0 ? {} : { reviewed: reviews.map(one => ({ ...one, reason: traceMessage(one.reason, TRACE_MAX_STRING) })) }),
   })
+  const runs = await runsPath($)
+  // The figures of each removed run, from its result file before any file goes: the cleared log keeps them.
+  const removedEntries = verdict.removable.map(sid => reg.entries.find(one => one.session_id === sid)).filter((one): one is SessionEntry => one !== undefined)
+  const figures = new Map<string, RunFigures>()
+  for (const entry of removedEntries) {
+    const resultText = typeof entry.result_file === 'string' && entry.result_file !== '' ? await $.fs.read(entry.result_file).catch(() => undefined) : undefined
+    const found = resultText === undefined ? {} : runFigures(resultText)
+    if (Object.keys(found).length > 0) figures.set(String(entry.session_id), found)
+  }
   if (verdict.removable.length > 0) {
-    const log = `${await runsPath($)}/cleared.jsonl`
+    const log = `${runs}/cleared.jsonl`
     // The removed entries are logged before the registry is written; a second attempt logs only what is new.
     const logged = new Set<string>()
     const failed = await editRegistry($, async text => {
       const edited = removeEntries(text, verdict.removable)
       if (!edited.ok) return edited
-      const lines = annotateCleared(edited.removed, reviews).split('\n').filter(line => line !== '' && !logged.has(line))
+      const lines = withRunFigures(annotateCleared(edited.removed, reviews), figures).split('\n').filter(line => line !== '' && !logged.has(line))
       if (lines.length > 0) {
         const problem = await appendLog($, log, lines)
         if (problem !== undefined) return { ok: false, error: `${problem}; nothing removed` }
@@ -802,7 +815,44 @@ async function retire($: EngineInterface, ids: readonly string[], reviewed: Read
   const removed = shortIds(verdict.removable)
   const refused = verdict.refused.length === 0 ? '' : ` Refused: ${verdict.refused.map(one => `${one.id.slice(0, 8)} (${one.reason})`).join('; ')}.`
   const review = reviews.length === 0 ? '' : ` Retired with review: ${reviews.map(one => `${one.session_id.slice(0, 8)} (was ${one.was}: ${one.reason})`).join('; ')}.`
-  return { result: `Retired: ${removed}.${review}${refused}` }
+  const cleanup = removedEntries.length === 0 ? '' : await cleanRunFiles($, removedEntries, reviews.map(one => one.session_id), runs)
+  return { result: `Retired: ${removed}.${review}${refused}${cleanup}` }
+}
+
+/**
+ * Deletes the run files of retired sessions whose outcome was clean or whose retire was reviewed: result, error and
+ * pid files and the prompt file the mod wrote, inside the runs directory and named by no other registry entry
+ * (runFilesToDelete); never a transcript. Answers the sentence the retire's answer ends with ('' when nothing was there
+ * to delete). Nothing here refuses: a file that will not go is named.
+ */
+async function cleanRunFiles($: EngineInterface, removed: readonly SessionEntry[], reviewedSids: readonly string[], runs: string): Promise<string> {
+  const eligible = removed.filter(entry => (entry.outcome as { kind?: unknown } | undefined)?.kind === 'clean' || reviewedSids.includes(String(entry.session_id)))
+  if (eligible.length === 0) return ''
+  const machine = await hostOf($)
+  const isWindows = machine.platform === 'windows'
+  const remaining = parseRegistry(await readRegistryText($))
+  const left = remaining.ok ? remaining.entries : []
+  const deleted: string[] = []
+  const kept: string[] = []
+  for (const entry of eligible) {
+    const others = [...left, ...removed.filter(one => one !== entry)]
+    const names: string[] = []
+    const stuck: string[] = []
+    for (const file of runFilesToDelete(entry, others, runs, (path, dir) => isUnder(path, dir, isWindows))) {
+      if (!(await $.fs.exists(file.path).catch(() => false))) continue
+      const isGone = await machine.removeFile(portOf($), file.path).catch(() => false)
+      const name = file.path.slice(Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\')) + 1)
+      if (isGone && !(await $.fs.exists(file.path).catch(() => false))) names.push(name)
+      else stuck.push(name)
+    }
+    const sid = String(entry.session_id).slice(0, 8)
+    if (names.length > 0) deleted.push(`${sid} (${names.join(', ')})`)
+    if (stuck.length > 0) kept.push(`${sid} (${stuck.join(', ')})`)
+  }
+  if (deleted.length + kept.length > 0) trace($, 'retire.cleanup', { deleted: deleted.length, failed: kept.length })
+  const gone = deleted.length === 0 ? '' : ` Run files deleted from ${runs}: ${deleted.join('; ')}.`
+  const notGone = kept.length === 0 ? '' : ` Run files that could not be deleted: ${kept.join('; ')}.`
+  return `${gone}${notGone}`
 }
 
 async function launch($: EngineInterface, given: LaunchArgs) {
