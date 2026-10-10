@@ -146,3 +146,18 @@ try:
 finally:
     shutil.rmtree(gold_dir)
 print(f'registry-golden-selftest: ok ({len(golden)} cases)')
+
+# --- APPEND_SCRIPT adds lines to the cleared log without reading it, whatever its size
+append = src.split("export const APPEND_SCRIPT = `", 1)[1].split("`\n", 1)[0].replace('\\\\', '\\')
+append_dir = tempfile.mkdtemp(prefix='session-append-')
+try:
+    log = f'{append_dir}/cleared.jsonl'
+    big = '{"x":"' + 'y' * (5 * 1024 * 1024) + '"}\n'
+    open(log, 'w').write(big)
+    lines = '{"session_id":"a","t":"caf\u00e9"}\n{"session_id":"b"}'
+    r = subprocess.run(['sh', '-c', append, 'session-log', lines, log], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stderr == '', r
+    assert open(log, encoding='utf-8').read() == big + lines + '\n'
+finally:
+    shutil.rmtree(append_dir)
+print('append-selftest: ok')

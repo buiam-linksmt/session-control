@@ -86,6 +86,17 @@ try:
     assert code == 0, err
     want = ''.join(line[:20000] + '\n' for line in lines[-600:])
     assert out == want, (len(out), len(want), out[:200])
+    # append: the text of one file goes to the end of another, which is not read; the first is removed
+    put('log.jsonl', 'old line\n')
+    put('add.tmp', '{"t":"caf\u00e9 \u2615"}\n{"t":"b"}\n')
+    code, out, err = run('files.ps1', files, 'append', f'{win}/add.tmp', f'{win}/log.jsonl')
+    assert code == 0 and err == '', (code, err)
+    assert get('log.jsonl') == 'old line\n{"t":"caf\u00e9 \u2615"}\n{"t":"b"}\n' and get('add.tmp') is None
+    put('add.tmp', 'x\n')
+    code, out, err = run('files.ps1', files, 'append', f'{win}/add.tmp', f'{win}/new dir/fresh.jsonl')
+    assert code == 0 and get('new dir/fresh.jsonl') == 'x\n', (code, err)
+    code, out, err = run('files.ps1', files, 'append', f'{win}/missing.tmp', f'{win}/log.jsonl')
+    assert code == 1 and get('log.jsonl').startswith('old line'), (code, err)
     code, out, err = run('files.ps1', files, 'nonsense')
     assert code == 1 and 'unknown operation' in err, (code, err)
     print('windows-files-selftest: ok')

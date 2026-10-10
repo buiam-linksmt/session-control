@@ -6,6 +6,7 @@ import { DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, editOpenPo
 import type { Edit } from './bookkeeping'
 import { backupName, dirOf, freshText, localDate, tmpPath } from './store'
 import {
+  APPEND_SCRIPT,
   FILES_PS1,
   LAUNCH_SCHEMA,
   PROBE_PS1,
@@ -198,10 +199,14 @@ async function writeAtomic($: EngineInterface, path: string, text: string, expec
   return true
 }
 
-/** Removes a file: `rm -f` on Linux; on Windows the file script, best effort. */
-async function removeFile($: EngineInterface, path: string): Promise<void> {
-  if (await isWindows($)) await runScript($, 'files.ps1', FILES_PS1, ['remove', path]).catch(() => undefined)
-  else await $.process.run(['rm', '-f', path], { timeoutMs: 5_000 })
+/** Removes a file: `rm -f` on Linux; on Windows the file script, best effort. Answers whether it went. */
+async function removeFile($: EngineInterface, path: string): Promise<boolean> {
+  if (await isWindows($)) {
+    const ran = await runScript($, 'files.ps1', FILES_PS1, ['remove', path]).catch(() => undefined)
+    return ran?.exitCode === 0
+  }
+  await $.process.run(['rm', '-f', path], { timeoutMs: 5_000 })
+  return true
 }
 
 /**
@@ -218,10 +223,13 @@ async function renameOver($: EngineInterface, tmp: string, path: string, text: s
   const ran = await runScript($, 'files.ps1', FILES_PS1, ['move', tmp, path]).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
   if (ran.exitCode === 0) return
   await $.fs.write(path, text)
-  await removeFile($, tmp)
+  // The script's own remove; when that cannot run either, $.fs (which cannot remove) empties the temp file instead.
+  const isRemoved = await removeFile($, tmp)
+  if (!isRemoved) await $.fs.write(tmp, '')
   if (!isDirectWriteNoted) {
     isDirectWriteNoted = true
-    $.ui.toast(`session-control: the rename failed (${ran.stderr.trim().slice(0, 100)}); ${path} was written directly, not atomically`, { timeoutMs: 10000 })
+    const leftover = isRemoved ? '' : `; the temp file ${tmp} could not be removed and was emptied`
+    $.ui.toast(`session-control: the rename failed (${ran.stderr.trim().slice(0, 100)}); ${path} was written directly, not atomically${leftover}`, { timeoutMs: 10000 })
   }
 }
 
@@ -249,12 +257,21 @@ async function editRegistry($: EngineInterface, edit: (text: string) => Promise<
   return 'the registry changed while it was being edited; nothing written'
 }
 
-/** Appends lines to a log file; one that is there but cannot be read is never overwritten. */
-async function appendLog($: EngineInterface, path: string, lines: string): Promise<string | undefined> {
-  const old = await $.fs.read(path).catch(() => undefined)
-  if (old === undefined && (await $.fs.exists(path).catch(() => true))) return `${path} cannot be read`
-  await $.fs.write(path, (old ?? '') + lines)
-  return undefined
+/**
+ * Appends lines to a log file without reading it, so a log of any size takes them: APPEND_SCRIPT on Linux; on
+ * Windows the lines go to a file of their own, which the file script appends and removes. Answers what went wrong.
+ */
+async function appendLog($: EngineInterface, path: string, lines: readonly string[]): Promise<string | undefined> {
+  if (!(await isWindows($))) {
+    const ran = await $.process.run(['sh', '-c', APPEND_SCRIPT, 'session-log', lines.join('\n'), path], { timeoutMs: 10_000 })
+    return ran.exitCode === 0 ? undefined : `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`
+  }
+  const added = `${path}.add.${await $.clock.now()}`
+  await $.fs.write(added, lines.map(line => `${line}\n`).join(''))
+  const ran = await runScript($, 'files.ps1', FILES_PS1, ['append', added, path]).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
+  if (ran.exitCode === 0) return undefined
+  await removeFile($, added)
+  return `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`
 }
 
 /** Backups are written once per file, tool and day, before the first change of that day. */
@@ -510,7 +527,7 @@ async function retire($: EngineInterface, ids: readonly string[]) {
       if (!edited.ok) return edited
       const lines = edited.removed.split('\n').filter(line => line !== '' && !logged.has(line))
       if (lines.length > 0) {
-        const problem = await appendLog($, log, lines.map(line => `${line}\n`).join(''))
+        const problem = await appendLog($, log, lines)
         if (problem !== undefined) return { ok: false, error: `${problem}; nothing removed` }
         for (const line of lines) logged.add(line)
       }

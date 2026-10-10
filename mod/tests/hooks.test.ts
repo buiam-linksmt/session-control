@@ -5,7 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { FILES_PS1, PROBE_PS1, PROBE_SCRIPT, REGISTER_SCRIPT, probeArgs } from '../hooks/core'
+import { APPEND_SCRIPT, FILES_PS1, PROBE_PS1, PROBE_SCRIPT, REGISTER_SCRIPT, probeArgs } from '../hooks/core'
 
 import {
   HOME,
@@ -17,6 +17,7 @@ import {
   RESULTS,
   SID_ALIVE,
   SID_DEAD,
+  SID_DONE,
   TASK_NOTIFICATION_KILLED,
   WIN_PROBE_STDOUT,
 } from './fixtures'
@@ -54,7 +55,7 @@ const LATE = new Set<string>()
 const UNREADABLE = new Set<string>()
 // Knobs of the Windows fixture: a failing move or probe; the config dir the probe finds the new worker's sessions
 // file in, or none (unplaced).
-const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false }
+const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
 /** The rows of the transcript tail the fixture serves. */
 const TAIL = [
@@ -136,6 +137,11 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       return { value: { ...ok, stdout: rows.map(r => JSON.stringify(r)).join('\n') } }
     }
     if (e.argv[0] === 'sh' && e.argv[2] === REGISTER_SCRIPT) return { value: { ...ok, stdout: '' } }
+    // An append is recorded as a write of what it adds.
+    if (e.argv[0] === 'sh' && e.argv[2] === APPEND_SCRIPT) {
+      w.writes.push({ path: String(e.argv[5]), text: `${e.argv[4]}\n` })
+      return { value: { ...ok, stdout: '' } }
+    }
     if (e.argv[0] === 'sh' && e.argv[2] === PROBE_SCRIPT) {
       const worker = w.spawned
         ? `\nP\t7001\tclaude\t3\t/work/new\t/fixture/lic/a\tclaude -p --model opus --dangerously-skip-permissions --output-format json -- prompt\n`
@@ -165,8 +171,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     }
     if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/files.ps1')) {
       const [op, from, to] = e.argv.slice(7).map(String)
-      if (op === 'move' && WINDOWS.isMoveBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Access denied.' } }
-      if (op === 'move') {
+      if (WINDOWS.isScriptBroken || (op === 'move' && WINDOWS.isMoveBroken)) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Access denied.' } }
+      if (op === 'move' || op === 'append') {
         const text = w.writes.filter(one => fixture(one.path) === fixture(String(from))).at(-1)?.text
         if (text !== undefined) w.writes.push({ path: String(to), text })
       }
@@ -678,6 +684,7 @@ describe('platform', () => {
     rename,
     probe,
     probe,
+    ['sh', '-c', APPEND_SCRIPT, 'session-log', JSON.stringify(JSON.parse(REGISTRY_TEXT).find((one: { session_id?: string }) => one.session_id === SID_DONE)), `${RUNS}/cleared.jsonl`],
     rename,
     probe,
   ]
@@ -842,6 +849,75 @@ describe('platform', () => {
     await ui.press({ key: `s:${SID_ALIVE}` })
     expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
     expect(w.runs).toContainEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'tail', `/fixture/lic/a/projects/-work-a/${SID_ALIVE}.jsonl`, '600', '20000'])
+  })
+
+  const retireDone = async ($: Parameters<Parameters<typeof test>[2]>[0]) =>
+    String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['dddddddd'] } as never)).result)
+  const doneLine = JSON.stringify(JSON.parse(REGISTRY_TEXT).find((one: { session_id?: string }) => one.session_id === SID_DONE))
+
+  test('Linux: a retire appends to the cleared log in one append, and a log over the read cap does not stop it', { options: OPTIONS }, async ($, on) => {
+    const log = `${RUNS}/cleared.jsonl`
+    UNREADABLE.add(log)
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      expect(await retireDone($)).toBe('Retired: dddddddd.')
+      expect(w.runs.filter(argv => argv[2] === APPEND_SCRIPT)).toEqual([['sh', '-c', APPEND_SCRIPT, 'session-log', doneLine, log]])
+      expect(APPEND_SCRIPT).toBe(`printf '%s\\n' "$1" >> "$2"`)
+      // Logged first, then the registry without the entry.
+      const at = (match: (argv: string[]) => boolean) => w.runs.findIndex(match)
+      expect(at(argv => argv[2] === APPEND_SCRIPT)).toBeLessThan(w.runs.findLastIndex(argv => argv[0] === 'mv'))
+      expect(lastRegistry(w).some(one => one.session_id === SID_DONE)).toBe(false)
+    } finally {
+      UNREADABLE.clear()
+    }
+  })
+
+  test('Windows: a retire appends through the file script, never reading the log, even one over the read cap', { options: WIN_OPTIONS }, async ($, on) => {
+    const log = `${WIN_RUNS}/cleared.jsonl`
+    UNREADABLE.add(fixture(log))
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      expect(await retireDone($)).toBe('Retired: dddddddd.')
+      const added = `${log}.add.${NOW_MS}`
+      expect(w.runs.filter(argv => argv[7] === 'append')).toEqual([[POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'append', added, log]])
+      expect(w.writes.find(one => one.path === added)?.text).toBe(`${doneLine}\n`)
+      expect(w.writes.filter(one => one.path === log).map(one => one.text)).toEqual([`${doneLine}\n`])
+      expect(lastRegistry(w).some(one => one.session_id === SID_DONE)).toBe(false)
+    } finally {
+      UNREADABLE.clear()
+    }
+  })
+
+  test('Windows: after a failed rename the temp file is removed by the script\'s remove', { options: WIN_OPTIONS }, async ($, on) => {
+    WINDOWS.isMoveBroken = true
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const tmp = `${WIN_REGISTRY}.tmp.${NOW_MS}`
+      expect(w.runs).toContainEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'remove', tmp])
+      expect(w.writes.filter(one => one.path === tmp).map(one => one.text === '')).toEqual([false])
+    } finally {
+      WINDOWS.isMoveBroken = false
+    }
+  })
+
+  test('Windows: when the file script cannot run at all, the registry is written directly and the temp file emptied, and the toast says so', { options: WIN_OPTIONS }, async ($, on) => {
+    WINDOWS.isScriptBroken = true
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const tmp = `${WIN_REGISTRY}.tmp.${NOW_MS}`
+      expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
+      const order = w.writes.map(one => (one.path === WIN_REGISTRY ? 'registry' : one.path === tmp ? (one.text === '' ? 'emptied' : 'temp') : '')).filter(Boolean)
+      expect(order).toEqual(['temp', 'registry', 'emptied'])
+      expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([
+        `session-control: the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically; the temp file ${tmp} could not be removed and was emptied`,
+      ])
+    } finally {
+      WINDOWS.isScriptBroken = false
+    }
   })
 
   test('Windows: a HOME that Git Bash handed on (/c/...) is home, in native form', { options: WIN_OPTIONS }, async ($, on) => {

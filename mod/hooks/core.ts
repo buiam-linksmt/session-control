@@ -655,6 +655,9 @@ jq -c --argjson ids "$ids" '.[] | select(.session_id as $s | $ids | index($s))' 
 tmp="$R.tmp.$$"
 jq --argjson ids "$ids" '[.[] | select((.session_id as $s | $ids | index($s)) | not)]' "$R" > "$tmp" && mv "$tmp" "$R"`
 
+/** Appends a text and a newline to a log, as CLEAR_SCRIPT appended the cleared entries: args are the text and the log path. */
+export const APPEND_SCRIPT = `printf '%s\\n' "$1" >> "$2"`
+
 const sessionIds = (description: string) => ({
   type: 'array',
   minItems: 1,
@@ -913,11 +916,13 @@ export function tailLines(text: string, count: number, width: number): string {
 /**
  * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
  * (never as -Command text, whose quoting does not survive). `move <from> <to>` replaces an existing file in one
- * step (File.Replace: a reader never finds it missing) or moves it there; `remove <path>`; `tail <path> <lines>
- * <width>` for a transcript over the 4 MiB read cap. Output is UTF-8; a failure exits 1 with the reason.
+ * step (File.Replace: a reader never finds it missing) or moves it there; `remove <path>`; `append <from> <to>`
+ * adds the text of a file to the end of another and removes the first, never reading what the second holds;
+ * `tail <path> <lines> <width>` for a transcript over the 4 MiB read cap. Output is UTF-8; a failure exits 1 with
+ * the reason.
  */
 export const FILES_PS1 = [
-  '# session-control: file operations for Windows PowerShell 5.1 (move, remove, tail)',
+  '# session-control: file operations for Windows PowerShell 5.1 (move, remove, append, tail)',
   'param([string]$Op, [string]$A, [string]$B, [string]$C)',
   // A PowerShell 7 parent leaves its own module folders first; Windows PowerShell must load its own.
   '$env:PSModulePath = "$PSHOME\\Modules"',
@@ -930,6 +935,12 @@ export const FILES_PS1 = [
   '      else { [System.IO.File]::Move($A, $B) }',
   '    }',
   "    'remove' { if ([System.IO.File]::Exists($A)) { [System.IO.File]::Delete($A) } }",
+  "    'append' {",
+  '      $utf8 = New-Object System.Text.UTF8Encoding $false',
+  '      [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($B))',
+  '      [System.IO.File]::AppendAllText($B, [System.IO.File]::ReadAllText($A, $utf8), $utf8)',
+  '      [System.IO.File]::Delete($A)',
+  '    }',
   "    'tail' {",
   '      $width = [int]$C',
   '      foreach ($line in @(Get-Content -LiteralPath $A -Tail ([int]$B) -Encoding UTF8)) {',
