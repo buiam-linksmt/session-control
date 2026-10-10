@@ -292,6 +292,27 @@ function shortDir(dir: string): string {
 
 // ---------------------------------------------------------------- completion
 
+/** The notification type a toast shows as its title: a completion by its outcome, the mod's other events by name. */
+export const TOAST_TITLES = {
+  clean: 'Session finished',
+  limit: 'Usage limit reached',
+  login: 'Login needed',
+  killed: 'Session killed',
+  error: 'Session failed',
+  chatter: 'Session ended without a report',
+  tracking: 'Tracking problem',
+  directWrite: 'Write not atomic',
+  trace: 'Debug trace failed',
+} as const satisfies Record<SessionOutcomeKind | 'tracking' | 'directWrite' | 'trace', string>
+
+/**
+ * A toast's text: the title, a separator, then the message. A toast is one line of text (the engine draws a line break
+ * in it as U+FFFD and wraps the rest), so the title leads the line rather than sitting on a line of its own.
+ */
+export function toastText(title: string, message: string): string {
+  return `${title} \u00B7 ${message}`
+}
+
 /**
  * Classifies a finished worker from its `--output-format json` result file's
  * text (may be empty or truncated) and, when known, the background task's

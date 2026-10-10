@@ -115,7 +115,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === '/work/new/thin.md') return { value: 'Just do the work.' }
     if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE_TEXT }
     if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
-    if (path === '/fixture/results/limit.json') return { value: RESULTS.limit }
+    const result = /^\/fixture\/results\/(\w+)\.json$/.exec(path)?.[1]
+    if (result !== undefined && result in RESULTS) return { value: RESULTS[result as keyof typeof RESULTS] }
     if (['/fixture/home/.claude/sessions/7001.json', '/fixture/lic/own/sessions/7001.json'].includes(path) && !isWin) return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
     if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
     if (seen(e.path) === 'C:/fixture/home/.claude/sessions/7001.json') return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
@@ -332,9 +333,9 @@ describe('errors', () => {
     const w = world(on, '/fixture/lic/a\n', true, 'not json')
     stubPanel(on)
     await $.session.start(start(ORCH_DIR))
-    expect(w.toasts.filter(text => text.startsWith('session-control:')).length).toBe(1)
+    expect(w.toasts.filter(text => text.startsWith('Tracking problem \u00B7 session-control: ')).length).toBe(1)
     await $.command.run({ command: 'session-control', args: '' } as never)
-    expect(w.toasts.filter(text => text.startsWith('session-control:')).length).toBe(1)
+    expect(w.toasts.filter(text => text.startsWith('Tracking problem \u00B7 session-control: ')).length).toBe(1)
     const ui = await mountPane($)
     const all = String(((await ui.findAll({}))[0] as { text?: string }).text ?? '')
     expect(all).toContain('! session-control:')
@@ -405,11 +406,27 @@ describe('completion', () => {
     expect('pid' in entry).toBe(false)
     expect(entry.reported).toBe(false)
     expect(entry.resume).toEqual({ parked_until: '2026-10-06T12:00:00Z', strikes: 2, escalated: true })
-    expect(w.toasts).toEqual(['session-control: limited worker: limit: rate limit hit'])
+    expect(w.toasts).toEqual(['Usage limit reached \u00B7 session-control: limited worker: limit: rate limit hit'])
     await w.clock.advance(5000)
     expect(regWrites().length).toBe(1)
     expect(w.writes.some(one => one.path.includes('/backups/headless-sessions-before-completion-'))).toBe(true)
   })
+
+  // The toast leads with the notification type, then the message as before.
+  for (const [result, title, summary] of [
+    ['clean', 'Session finished', 'clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.'],
+    ['limit', 'Usage limit reached', 'limit: rate limit hit'],
+    ['login', 'Login needed', 'login: licence needs a re-login'],
+    ['oom', 'Session killed', 'killed: killed (memory)'],
+    ['error', 'Session failed', 'error: Tool execution failed: ENOSPC while writing the output.'],
+    ['chatter', 'Session ended without a report', 'chatter: short result "Let me look at that." after a substantial run'],
+  ] as const) {
+    test(`a completion toast carries its type as the title: ${title}`, { options: OPTIONS }, async ($, on) => {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT.replace('/fixture/results/limit.json', `/fixture/results/${result}.json`))
+      await $.session.start(start(ORCH_DIR))
+      expect(w.toasts).toEqual([`${title} \u00B7 session-control: limited worker: ${summary}`])
+    })
+  }
 
   test('with completionWrites off nothing is written, the toast still shows', { options: { ...OPTIONS, completionWrites: false } }, async ($, on) => {
     const w = world(on)
@@ -973,7 +990,7 @@ describe('platform', () => {
     expect(w.writes.find(one => one.path.endsWith(`${WIN_RUNS}/probe.ps1`))?.text).toBe(PROBE_PS1)
     expect(w.runs.filter(argv => argv[0] === 'sh')).toEqual([])
     // The dead worker is harvested, the live one shows as running with its elapsed time.
-    expect(w.toasts).toEqual(['session-control: limited worker: limit: rate limit hit'])
+    expect(w.toasts).toEqual(['Usage limit reached \u00B7 session-control: limited worker: limit: rate limit hit'])
     await $.command.run({ command: 'session-control', args: '' } as never)
     const all = String(((await (await mountPane($)).findAll({}))[0] as { text?: string }).text ?? '')
     expect(all).toMatch(/alive worker\s+aaaaaaaa\s+running\s+opus\s+high\s+2m/)
@@ -1010,7 +1027,7 @@ describe('platform', () => {
     try {
       const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
       await $.session.start(start(`C:${ORCH_DIR}`))
-      expect(w.toasts).toEqual(['session-control: Error: the process probe failed (exit 1): Invalid class'])
+      expect(w.toasts).toEqual(['Tracking problem \u00B7 session-control: Error: the process probe failed (exit 1): Invalid class'])
       expect(w.writes.some(one => fixture(one.path).startsWith(REGISTRY_PATH))).toBe(false)
     } finally {
       WINDOWS.isProbeBroken = false
@@ -1214,7 +1231,7 @@ describe('platform', () => {
       const order = w.writes.map(one => (one.path === WIN_REGISTRY ? 'registry' : one.path === tmp ? (one.text === '' ? 'emptied' : 'temp') : '')).filter(Boolean)
       expect(order).toEqual(['temp', 'registry', 'emptied'])
       expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([
-        `session-control: the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically; the temp file ${tmp} could not be removed and was emptied`,
+        `Write not atomic \u00B7 session-control: the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically; the temp file ${tmp} could not be removed and was emptied`,
       ])
     } finally {
       WINDOWS.isScriptBroken = false
@@ -1235,7 +1252,7 @@ describe('platform', () => {
       expect(w.writes.some(one => one.path.endsWith(WIN_REGISTRY))).toBe(true)
       expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
       await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['cccccccc'] } as never)
-      expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([`session-control: the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically`])
+      expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([`Write not atomic \u00B7 session-control: the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically`])
     } finally {
       WINDOWS.isMoveBroken = false
     }
@@ -1439,7 +1456,7 @@ describe('debug trace', () => {
       const out = await $.tool.call({ tool: TOOL, ...args } as never)
       expect(String(out.result)).toContain('Launched pid 7001')
       expect(w.toasts.filter(text => text.includes('debug trace cannot be written'))).toEqual([
-        'session-control: the debug trace cannot be written (/fixture/home/.claude/session-control/runs/trace.log cannot be appended to (exit 1): sh: cannot create: Read-only file system); the mod goes on without it',
+        'Debug trace failed \u00B7 session-control: the debug trace cannot be written (/fixture/home/.claude/session-control/runs/trace.log cannot be appended to (exit 1): sh: cannot create: Read-only file system); the mod goes on without it',
       ])
       // The runs directory is made once more before the second try of each append.
       expect(w.runs.filter(argv => argv[0] === 'mkdir' && argv[2] === RUNS).length).toBeGreaterThanOrEqual(2)

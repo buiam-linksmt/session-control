@@ -8,6 +8,8 @@ import {
   clampOffset,
   scrollbar,
   sectionBoxes,
+  TOAST_TITLES,
+  toastText,
   wrapText,
   retireVerdict,
   buildRows,
@@ -184,6 +186,12 @@ describe('completion classifier', () => {
     expect(classifyResult(RESULTS.clean, 'killed').kind).toBe('killed')
   })
   test('other is_error is error', () => expect(classifyResult(RESULTS.error).kind).toBe('error'))
+  test('every outcome has a toast title, and the toast is the title, a separator, then the message', () => {
+    const titles = (['clean', 'limit', 'login', 'killed', 'error', 'chatter'] as const).map(kind => TOAST_TITLES[kind])
+    expect(titles).toEqual(['Session finished', 'Usage limit reached', 'Login needed', 'Session killed', 'Session failed', 'Session ended without a report'])
+    expect([TOAST_TITLES.tracking, TOAST_TITLES.directWrite, TOAST_TITLES.trace]).toEqual(['Tracking problem', 'Write not atomic', 'Debug trace failed'])
+    expect(toastText(TOAST_TITLES[classifyResult(RESULTS.oom).kind], 'session-control: w: killed (memory)')).toBe('Session killed \u00B7 session-control: w: killed (memory)')
+  })
   test('task notification parse', () => {
     expect(parseTaskNotification(TASK_NOTIFICATION_KILLED)).toEqual({
       taskId: 'b7x1',

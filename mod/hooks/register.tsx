@@ -62,6 +62,8 @@ import {
   nextBack,
   scrollbar,
   sectionBoxes,
+  TOAST_TITLES,
+  toastText,
   wrapText,
   formatRow,
   paneWidths,
@@ -250,7 +252,7 @@ async function flushTrace($: EngineInterface): Promise<void> {
       const problem = await writeTrace($, lines).catch((err: unknown) => errorText(err))
       if (problem !== undefined && !isTraceFailNoted) {
         isTraceFailNoted = true
-        $.ui.toast(`session-control: the debug trace cannot be written (${problem.slice(0, 200)}); the mod goes on without it`, { timeoutMs: 10000 })
+        $.ui.toast(toastText(TOAST_TITLES.trace, `session-control: the debug trace cannot be written (${problem.slice(0, 200)}); the mod goes on without it`), { timeoutMs: 10000 })
       }
     }
   } catch {
@@ -408,7 +410,7 @@ async function renameOver($: EngineInterface, tmp: string, path: string, text: s
   if (!isDirectWriteNoted) {
     isDirectWriteNoted = true
     const leftover = isRemoved ? '' : `; the temp file ${tmp} could not be removed and was emptied`
-    $.ui.toast(`session-control: the rename failed (${ran.stderr.trim().slice(0, 100)}); ${path} was written directly, not atomically${leftover}`, { timeoutMs: 10000 })
+    $.ui.toast(toastText(TOAST_TITLES.directWrite, `session-control: the rename failed (${ran.stderr.trim().slice(0, 100)}); ${path} was written directly, not atomically${leftover}`), { timeoutMs: 10000 })
   }
 }
 
@@ -548,7 +550,7 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
       if (await writeAtomic($, path, merged.text, fresh)) break
     }
   }
-  $.ui.toast(`session-control: ${label}`, { timeoutMs: 8000 })
+  $.ui.toast(toastText(TOAST_TITLES[outcome.kind], `session-control: ${label}`), { timeoutMs: 8000 })
   await update($, pendingNotes, list => [...list, label].slice(-20))
 }
 
@@ -588,7 +590,7 @@ function noteError($: EngineInterface, error: string | undefined): void {
   if (error === lastError) return
   lastError = error
   if (error !== undefined) trace($, 'error', { where: 'panel', ...messageFields(error) })
-  if (error !== undefined) $.ui.toast(`session-control: ${error}`, { timeoutMs: 10000 })
+  if (error !== undefined) $.ui.toast(toastText(TOAST_TITLES.tracking, `session-control: ${error}`), { timeoutMs: 10000 })
 }
 
 async function showError($: EngineInterface, error: string, now: number): Promise<void> {
