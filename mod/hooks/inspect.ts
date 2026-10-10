@@ -7,7 +7,7 @@
 // Every answer is bounded.
 
 import type { SessionEntry, SessionRow, SessionRowStatus, SessionSnapshot } from '../types'
-import { WORKER_NAME, classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, paneWidths, statusLabel, rowStatus, winPath, wrapText } from './core'
+import { classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, isGeneratedName, paneWidths, statusLabel, rowStatus, winPath, wrapText } from './core'
 import type { PresentedPoint, ProcFacts, QueuedTask } from './core'
 import type { NewerFiles } from './host'
 import { REDACTED, redact } from './trace'
@@ -116,12 +116,13 @@ export function shownSessionId(value: string): string {
 }
 
 /**
- * A registry entry's session name as an answer shows it: a name of the form the launch gives (`w-<slug>-<yyMMddHHmmss>`,
- * WORKER_NAME, at most 64 characters) as it is, never redacted: the redaction takes such a long run of letters and
- * digits for a token. Anything else in the field is free text, cleaned and cut.
+ * A registry entry's session name as an answer shows it: a name of the form the launch generates, whole
+ * (`w-<slug>-<yyMMddHHmmss>` with its `-2` suffix when taken: GENERATED_NAME, at most 64 characters) as it is, never
+ * redacted: the redaction takes such a long run of letters and digits for a token. Anything else in the field, a name
+ * without the generated stamp included, is free text, cleaned and cut.
  */
 export function shownName(value: string): string {
-  return WORKER_NAME.test(value) && value.length <= 64 ? value : oneLine(value, 300)
+  return isGeneratedName(value) ? value : oneLine(value, 300)
 }
 
 /** The head of a text: at most `max` characters, and how many were cut. */

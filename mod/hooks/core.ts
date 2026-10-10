@@ -818,6 +818,19 @@ export const WORKER_SETTINGS = '{"crossSessionInbound":"accept"}'
 export const WORKER_NAME = /^w-[a-z0-9]+(-[a-z0-9]+)*$/
 
 /**
+ * The name a launch generates, whole: `w-`, a slug (lower-case letters, digits and dashes, maybe empty), the launch time
+ * as twelve digits (yyMMddHHmmss) and the `-2`, `-3` ... suffix a taken name gets. Without the twelve-digit stamp a
+ * name is not one the mod generated.
+ */
+export const GENERATED_NAME = /^w-[a-z0-9-]*-\d{12}(-\d+)?$/
+
+/** The most characters of a generated name that is shown as it is: a name is `w-`, 24 slug characters, the stamp and a suffix. */
+export const GENERATED_NAME_MAX = 64
+
+/** Whether a value is a name of the generated form (GENERATED_NAME) and at most GENERATED_NAME_MAX characters. */
+export const isGeneratedName = (value: string): boolean => value.length <= GENERATED_NAME_MAX && GENERATED_NAME.test(value)
+
+/**
  * The unique session name of a launch: `w-<slug of the title, up to 24>-<yyMMddHHmmss UTC>` (at most 39 characters),
  * with `-2`, `-3`... appended while the name is in `taken` (names in the registry or given out by this session).
  */

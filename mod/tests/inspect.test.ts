@@ -316,6 +316,51 @@ describe('list_sessions', () => {
     expect(shownSessionId(`x ${CANARIES.github}`)).toBe(`x ${REDACTED}`)
   })
 
+  test('shownName: only the generated form with its stamp is exempt; a name without the stamp, a secret-shaped one behind w-, upper case and over 64 characters are redacted', () => {
+    const at = Date.UTC(2026, 9, 11, 12, 0, 0)
+    // Real-shaped names: what workerName gives, with a title of every kind, and with its -2 and -13 suffixes.
+    for (const title of ['T2a write tools', 'a'.repeat(120), '--- ---', 'Ünïcode \u2615', 'x', '']) {
+      const name = workerName(title, at)
+      expect(shownName(name)).toBe(name)
+      expect(shownName(`${name}-2`)).toBe(`${name}-2`)
+      expect(shownName(`${name}-13`)).toBe(`${name}-13`)
+    }
+    expect(shownName('w--261011120000')).toBe('w--261011120000')
+    // No stamp: a slug alone, a stamp of eleven or thirteen digits, a stamp not at the end, a suffix that is no number.
+    expect(shownName('w-session-control')).toBe('w-session-control')
+    for (const name of ['w-1', 'w-a1b2-26101112000', 'w-a1b2-2610111200000', 'w-a1b2-261011120000-x', 'w-261011120000x', 'w-a-261011120000-', 'w-a-261011120000--2', 'w-a-261011120000-2-3']) {
+      expect(shownName(name)).toBe(redact(name))
+    }
+    // A secret-shaped lower-case string behind w-: hex, letters and digits, a key with dashes; none passes, with or without a stamp lookalike.
+    const hex = '3f2a9c1b7d4e8a6f0b5c2d9e1a7f4b3c8d6e0a2f'
+    const mixed = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6'
+    for (const secret of [hex, mixed, `sk-live-${mixed}`, `ghp${mixed}`, `${mixed}-${mixed}`]) {
+      const shown = shownName(`w-${secret}`)
+      expect(shown).not.toContain(secret)
+      expect(shown).not.toContain(mixed)
+      expect(shown).toContain(REDACTED)
+    }
+    expect(shownName(`w-${hex}`)).toBe(`w-${REDACTED}`)
+    // Upper case anywhere (the same text in lower case is exempt), a blank, a control character.
+    const body = 'a1'.repeat(20)
+    expect(shownName(`w-${body}-261011120000`)).toBe(`w-${body}-261011120000`)
+    for (const name of [`W-${body}-261011120000`, `w-${body.toUpperCase()}-261011120000`, `w-${body}-261011120000 `, `w-${body} x-261011120000`, `w-${body}\u001b[31m-261011120000`]) {
+      const shown = shownName(name)
+      expect(shown).toContain(REDACTED)
+      expect(shown).not.toContain(body)
+      expect(shown).not.toContain(body.toUpperCase())
+    }
+    // Over 64 characters, even in the generated form: not exempt, so the redaction takes the long run. 64 is still shown.
+    const ofLength = (length: number) => `w-${'a1b2c3d4e5-'.repeat(8).slice(0, length - 15)}-261011120000`
+    expect(ofLength(64)).toHaveLength(64)
+    expect(shownName(ofLength(64))).toBe(ofLength(64))
+    expect(ofLength(65)).toHaveLength(65)
+    expect(shownName(ofLength(65))).not.toBe(ofLength(65))
+    expect(shownName(ofLength(65))).toContain(REDACTED)
+    expect(shownName(`${ofLength(62)}-2`)).toBe(`${ofLength(62)}-2`)
+    expect(shownName(`${ofLength(63)}-2`)).toContain(REDACTED)
+  })
+
   test('a registry that does not parse is a refusal, nothing written', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     w.files.set(REG, '[{"title": ')
