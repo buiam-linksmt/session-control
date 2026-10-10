@@ -1,0 +1,46 @@
+// The helper's operations by name: one request's answer, and a batch of file operations run in order.
+
+import { FILE_OPS } from './files.mjs'
+import { probe } from './linux.mjs'
+import { HelperError, failure } from './protocol.mjs'
+
+/** The most operations one batch carries. */
+export const MAX_BATCH = 1000
+
+/** One file operation of a batch, or of a request of its own. */
+function runFileOp(op, request) {
+  const work = Object.hasOwn(FILE_OPS, op) ? FILE_OPS[op] : undefined
+  if (work === undefined) throw new HelperError('BAD_OP')
+  return work(request)
+}
+
+/** The steps of a batch in order; the first that fails ends it, with its position and the answers before it. */
+function batch(request) {
+  const ops = request.ops
+  if (!Array.isArray(ops) || ops.length > MAX_BATCH || !ops.every(one => one !== null && typeof one === 'object' && !Array.isArray(one) && typeof one.op === 'string')) {
+    throw new HelperError('BAD_REQUEST')
+  }
+  const results = []
+  for (const [at, one] of ops.entries()) {
+    try {
+      results.push({ ok: true, ...runFileOp(one.op, one) })
+    } catch (err) {
+      return failure(err, { at, results })
+    }
+  }
+  return { ok: true, results }
+}
+
+/** The answer to one request. */
+export function answer(op, request) {
+  try {
+    if (op === 'batch') return batch(request)
+    if (op === 'probe') {
+      if (process.platform !== 'linux') throw new HelperError('UNSUPPORTED')
+      return { ok: true, ...probe(request) }
+    }
+    return { ok: true, ...runFileOp(op, request) }
+  } catch (err) {
+    return failure(err)
+  }
+}

@@ -1,0 +1,236 @@
+// The file operations, alike on Linux and Windows: an atomic write through a sibling temp file, a rename over an
+// existing file, a removal, a true OS append, the tail of a file read from its end, and the trace rotation.
+
+import { randomBytes } from 'node:crypto'
+import * as fs from 'node:fs'
+import { dirname } from 'node:path'
+
+import { HelperError, count, path, text } from './protocol.mjs'
+
+const IS_WINDOWS = process.platform === 'win32'
+
+/** How long a rename on Windows is tried again while another process holds the target open (a reader, an antivirus). */
+const RENAME_RETRY_MS = 1000
+
+/** Windows refuses to replace a file another process has open without delete sharing: those errors pass, the rest stay. */
+const isTransient = err => IS_WINDOWS && ['EPERM', 'EACCES', 'EBUSY'].includes(err?.code)
+
+/** Waits a few milliseconds without a timer (the helper is one short synchronous run). */
+function pause(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * Renames over an existing file. On Linux rename(2) replaces the target in one step. On Windows Node's rename is
+ * MoveFileEx with MOVEFILE_REPLACE_EXISTING, also one step, which fails while another process holds the target open
+ * without delete sharing: that is tried again for up to RENAME_RETRY_MS.
+ */
+export function renameReplacing(from, to) {
+  const until = Date.now() + RENAME_RETRY_MS
+  for (let wait = 10; ; wait = Math.min(wait * 2, 100)) {
+    try {
+      fs.renameSync(from, to)
+      return
+    } catch (err) {
+      if (!isTransient(err) || Date.now() >= until) throw err
+      pause(wait)
+    }
+  }
+}
+
+/** Flushes a directory's entry table, so a rename survives a crash (Linux only; Windows cannot open a directory). */
+function syncDir(dir) {
+  if (IS_WINDOWS) return
+  let fd
+  try {
+    fd = fs.openSync(dir, 'r')
+    fs.fsyncSync(fd)
+  } catch {
+    // best effort: the rename itself has happened
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+  }
+}
+
+/** Writes all of a buffer to a file descriptor. */
+function writeAll(fd, bytes) {
+  for (let at = 0; at < bytes.length; ) at += fs.writeSync(fd, bytes, at, bytes.length - at)
+}
+
+/**
+ * `{path, text, expected?}`: the text goes to a new temp file in the same directory (made when missing, as `$.fs.write`
+ * makes it), flushed, then renamed over the file. With `expected`, the file is read again right before the rename and
+ * nothing is written when it no longer holds that text (a missing file holds none): `{written: false}`.
+ */
+export function writeAtomic(request) {
+  const target = path(request, 'path')
+  const body = text(request, 'text')
+  const expected = text(request, 'expected', true)
+  fs.mkdirSync(dirname(target), { recursive: true })
+  const tmp = `${target}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`
+  const fd = fs.openSync(tmp, 'wx')
+  try {
+    writeAll(fd, Buffer.from(body, 'utf8'))
+    fs.fsyncSync(fd)
+  } catch (err) {
+    fs.closeSync(fd)
+    fs.rmSync(tmp, { force: true })
+    throw err
+  }
+  fs.closeSync(fd)
+  try {
+    if (expected !== undefined && readOrUndefined(target) !== expected) {
+      fs.rmSync(tmp, { force: true })
+      return { written: false }
+    }
+    renameReplacing(tmp, target)
+  } catch (err) {
+    fs.rmSync(tmp, { force: true })
+    throw err
+  }
+  syncDir(dirname(target))
+  return { written: true }
+}
+
+/** A file's text, or undefined when it is not there. */
+function readOrUndefined(file) {
+  try {
+    return fs.readFileSync(file, 'utf8')
+  } catch (err) {
+    if (err?.code === 'ENOENT') return undefined
+    throw err
+  }
+}
+
+/** `{from, to}`: the first file takes the second's place, replacing it in one step. */
+export function renameOver(request) {
+  renameReplacing(path(request, 'from'), path(request, 'to'))
+  return {}
+}
+
+/** `{path}`: the file goes; one that is not there is no failure (`removed: false`). */
+export function removeFile(request) {
+  try {
+    fs.unlinkSync(path(request, 'path'))
+    return { removed: true }
+  } catch (err) {
+    if (err?.code === 'ENOENT') return { removed: false }
+    throw err
+  }
+}
+
+/**
+ * `{path, text}`: the text is added to the end of the file in one write on a descriptor opened for append (O_APPEND,
+ * FILE_APPEND_DATA on Windows), so two writers never overwrite each other; the file is never read. The directory is
+ * made when missing.
+ */
+export function append(request) {
+  const target = path(request, 'path')
+  const bytes = Buffer.from(text(request, 'text'), 'utf8')
+  fs.mkdirSync(dirname(target), { recursive: true })
+  const fd = fs.openSync(target, 'a')
+  try {
+    writeAll(fd, bytes)
+  } finally {
+    fs.closeSync(fd)
+  }
+  return { bytes: bytes.length }
+}
+
+/** The bytes read at a time from the end of a file. */
+const CHUNK = 1024 * 1024
+
+/** The answer of a tail stays under the engine's 4 MiB stdout cap: older lines go first. */
+export const TAIL_MAX_BYTES = 3 * 1024 * 1024
+
+/**
+ * `{path, lines, width, maxBytes?}`: what `tail -n <lines> | cut -c1-<width>` prints (as tailLines in hooks/core.ts
+ * computes it: lines split at \n, each cut to `width` UTF-16 units and ended with \n), read from the end of the file
+ * without reading it all: of each line only its first bytes are read. When the answer would pass `maxBytes`, the
+ * oldest lines are left out and counted in `dropped`.
+ */
+export function tail(request) {
+  const file = path(request, 'path')
+  const want = count(request, 'lines', 1)
+  const width = count(request, 'width', 1)
+  const budget = request.maxBytes === undefined ? TAIL_MAX_BYTES : count(request, 'maxBytes', 1)
+  const fd = fs.openSync(file, 'r')
+  try {
+    const size = fs.fstatSync(fd).size
+    // The lines as byte ranges, newest first. A last \n closes the last line and opens none (as tailLines drops the
+    // empty piece after it); an empty file has no line.
+    const ranges = []
+    if (size > 0) {
+      const last = Buffer.alloc(1)
+      fs.readSync(fd, last, 0, 1, size - 1)
+      let lineEnd = last[0] === 0x0a ? size - 1 : size
+      let scanTo = lineEnd
+      const buf = Buffer.alloc(CHUNK)
+      while (ranges.length < want && scanTo > 0) {
+        const from = Math.max(0, scanTo - CHUNK)
+        fs.readSync(fd, buf, 0, scanTo - from, from)
+        for (let at = scanTo - from; ranges.length < want && at > 0; ) {
+          const nl = buf.lastIndexOf(0x0a, at - 1)
+          if (nl < 0) break
+          ranges.push([from + nl + 1, lineEnd])
+          lineEnd = from + nl
+          at = nl
+        }
+        scanTo = from
+      }
+      // The start of the file reached: the first line.
+      if (ranges.length < want) ranges.push([0, lineEnd])
+    }
+    // Oldest first; each line read only as far as its cut can reach (4 bytes per UTF-16 unit is more than enough).
+    const lines = ranges.reverse().map(([start, end]) => {
+      const length = Math.min(end - start, width * 4 + 4)
+      const bytes = Buffer.alloc(length)
+      if (length > 0) fs.readSync(fd, bytes, 0, length, start)
+      return `${bytes.toString('utf8').slice(0, width)}\n`
+    })
+    let total = lines.reduce((sum, line) => sum + Buffer.byteLength(JSON.stringify(line)), 0)
+    let dropped = 0
+    while (total > budget && dropped < lines.length) {
+      total -= Buffer.byteLength(JSON.stringify(lines[dropped]))
+      dropped++
+    }
+    return { text: lines.slice(dropped).join(''), dropped }
+  } finally {
+    fs.closeSync(fd)
+  }
+}
+
+/**
+ * `{path, adding, maxBytes, moves}`: the trace rotation of ROTATE_SCRIPT in hooks/host-posix.ts. The size is read here,
+ * right before the renames, so of several processes sharing the trace only the first to find it too big rotates it.
+ * Each move whose source is there is made in order (the oldest file is overwritten); a move another process made
+ * first is no failure, and only the last move (the trace itself) failing while its source is still there is one.
+ */
+export function rotate(request) {
+  const trace = path(request, 'path')
+  const adding = count(request, 'adding')
+  const max = count(request, 'maxBytes', 1)
+  const moves = request.moves
+  if (!Array.isArray(moves) || !moves.every(move => Array.isArray(move) && move.length === 2 && move.every(part => typeof part === 'string' && part !== '' && !part.includes('\0')))) {
+    throw new HelperError('BAD_REQUEST')
+  }
+  let size
+  try {
+    size = fs.statSync(trace).size
+  } catch {
+    return { rotated: false }
+  }
+  if (!(size > 0 && size + adding > max)) return { rotated: false }
+  moves.forEach(([from, to], at) => {
+    if (!fs.existsSync(from)) return
+    try {
+      renameReplacing(from, to)
+    } catch (err) {
+      if (at === moves.length - 1 && fs.existsSync(from)) throw err
+    }
+  })
+  return { rotated: true }
+}
+
+/** The file operations by name, for a request of its own or one step of a batch. */
+export const FILE_OPS = Object.freeze({ writeAtomic, renameOver, removeFile, append, tail, rotate })
