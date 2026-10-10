@@ -26,6 +26,8 @@ import type { Host, HostEnvName, HostPort, TailShape } from './host'
 import { HELPER_SCRIPT, fallbackFields, fallbackToast, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
+import { AUDIT_SCHEMA, auditText } from './audit'
+import type { GitState, ListedFile } from './audit'
 import {
   LIST_SESSIONS_SCHEMA,
   PANEL_SNAPSHOT_SCHEMA,
@@ -110,6 +112,7 @@ const RESULT_TOOL = 'mcp__session-control__read_result'
 const TAIL_TOOL = 'mcp__session-control__worker_tail'
 const WRITES_TOOL = 'mcp__session-control__session_writes'
 const SNAPSHOT_TOOL = 'mcp__session-control__panel_snapshot'
+const AUDIT_TOOL = 'mcp__session-control__audit_state'
 
 /** How much of a transcript read_result reads when the whole is over the read cap: a final report can be one long row. */
 const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
@@ -1060,6 +1063,87 @@ async function panelSnapshot($: EngineInterface) {
   return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, log, expanded: log === null ? exp : null, nowMs: await $.clock.now() }) }
 }
 
+/** A directory's entries ($.fs.list), a folder's mtime from $.fs.stat; undefined when it is not there. */
+async function listed($: EngineInterface, dir: string): Promise<ListedFile[] | undefined> {
+  const entries = await $.fs.list(dir).catch(() => undefined)
+  if (entries === undefined) return undefined
+  return Promise.all(
+    entries.map(async one => ({
+      name: one.name,
+      kind: one.kind,
+      size: one.size,
+      mtimeMs: one.kind === 'dir' ? ((await $.fs.stat(`${dir}/${one.name}`).catch(() => undefined))?.mtimeMs ?? 0) : one.mtimeMs,
+    })),
+  )
+}
+
+/**
+ * The orchestrator directory's git state, by git run as a process with read commands only (status without optional
+ * locks, so the index is not refreshed); undefined when git cannot start or the directory is no repository.
+ */
+async function gitState($: EngineInterface, dir: string): Promise<GitState | undefined> {
+  if (dir === '') return undefined
+  const git = (args: readonly string[]) => run($, ['git', '--no-optional-locks', '-C', dir, ...args], { timeoutMs: 10_000 }).catch(() => undefined)
+  const inside = await git(['rev-parse', '--is-inside-work-tree'])
+  if (inside === undefined || inside.exitCode !== 0 || inside.stdout.trim() !== 'true') return undefined
+  const head = await git(['symbolic-ref', '--short', '-q', 'HEAD'])
+  const branch = head?.exitCode === 0 && head.stdout.trim() !== '' ? head.stdout.trim() : undefined
+  const origin = await git(['symbolic-ref', '--short', '-q', 'refs/remotes/origin/HEAD'])
+  let defaultBranch = origin?.exitCode === 0 && origin.stdout.trim() !== '' ? origin.stdout.trim().replace(/^origin\//, '') : undefined
+  for (const name of ['main', 'master']) {
+    if (defaultBranch !== undefined) break
+    if ((await git(['show-ref', '--verify', '-q', `refs/heads/${name}`]))?.exitCode === 0) defaultBranch = name
+  }
+  const status = await git(['status', '--porcelain=v1', '-z', '--untracked-files=no'])
+  const paths = status?.exitCode === 0 ? porcelainPaths(status.stdout) : []
+  const top = await git(['rev-parse', '--show-toplevel'])
+  const root = top?.exitCode === 0 && top.stdout.trim() !== '' ? (await hostOf($)).nativePath(top.stdout.trim()) : dir
+  const changed = await Promise.all(paths.slice(0, 50).map(async path => ({ path, mtimeMs: (await $.fs.stat(`${root}/${path}`).catch(() => undefined))?.mtimeMs })))
+  return { ...(branch === undefined ? {} : { branch }), ...(defaultBranch === undefined ? {} : { defaultBranch }), changed: changed.map(one => (one.mtimeMs === undefined ? { path: one.path } : { path: one.path, mtimeMs: one.mtimeMs })) }
+}
+
+/** The paths of `git status --porcelain=v1 -z`: each record `XY path`, a rename's source the record after it. */
+function porcelainPaths(stdout: string): string[] {
+  const records = stdout.split('\0')
+  const paths: string[] = []
+  for (let at = 0; at < records.length; at++) {
+    const record = records[at] ?? ''
+    if (record.length < 4) continue
+    paths.push(record.slice(3))
+    if (record[0] === 'R' || record[0] === 'C') at++
+  }
+  return paths
+}
+
+/** audit_state: everything the end-of-unit audit reads, read; the findings told; nothing changed. */
+async function auditState($: EngineInterface) {
+  const parsed = parseRegistry(await readRegistryText($))
+  const entries = parsed.ok ? parsed.entries : []
+  const facts = await probe($, entries)
+  const runs = await runsPath($)
+  const text = (path: string) => $.fs.read(path).catch(() => undefined)
+  const [queueText, pointsText, decisionsText, clearedText] = await Promise.all([text(orchPath('task-queue.json')), text(orchPath('open-points.json')), text(orchPath('agreed-decisions.md')), text(`${runs}/cleared.jsonl`)])
+  const retired = clearedText === undefined ? undefined : new Set([...clearedText.matchAll(/"session_id":\s*"([0-9a-fA-F-]{36})"/g)].map(found => (found[1] ?? '').toLowerCase()))
+  const [backups, runFiles, reports] = await Promise.all([listed($, orchPath('backups')), listed($, runs), listed($, orchPath('reports'))])
+  const git = await gitState($, config.orchestratorDir)
+  return {
+    result: auditText({
+      entries,
+      facts,
+      ...(parsed.ok ? {} : { registryError: parsed.error }),
+      nowMs: await $.clock.now(),
+      ...(queueText === undefined ? {} : { queueText }),
+      ...(pointsText === undefined ? {} : { pointsText }),
+      ...(decisionsText === undefined ? {} : { decisionsText }),
+      ...(retired === undefined ? {} : { retired }),
+      ...(backups === undefined ? {} : { backups }),
+      ...(runFiles === undefined ? {} : { runs: runFiles }),
+      ...(reports === undefined ? {} : { reports }),
+      ...(git === undefined ? {} : { git }),
+    }),
+  }
+}
+
 /** Turn the board on: register the launch tool, start the poll once, gather. */
 async function activate($: EngineInterface): Promise<void> {
   isActive = true
@@ -1123,6 +1207,11 @@ async function activate($: EngineInterface): Promise<void> {
         SESSION_WRITES_SCHEMA,
       ],
       ['panel_snapshot', 'Read-only. The text the side panel shows now: the sessions rows, the queued work and the open points (and the log, when one is open), as plain text.', PANEL_SNAPSHOT_SCHEMA],
+      [
+        'audit_state',
+        'Read-only. The end-of-unit audit of the helper files as findings (kind, subject, evidence, suggested action), the most important first: queue statuses, running tasks with no live session, queued tasks waiting on a finished session, done tasks, sessions to retire or acknowledge, old kept sessions, held or old open points, spent backups, run files and reports, stale decision sections, and the orchestrator directory\'s git state. Changes nothing.',
+        AUDIT_SCHEMA,
+      ],
     ] as const) {
       await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
     }
@@ -1393,6 +1482,11 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: SNAPSHOT_TOOL }, ($, e) => tracedTool($, 'panel_snapshot', e, [], () => panelSnapshot($), true)).catch(($, e, next) => {
     traceError($, 'panel_snapshot', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: panel_snapshot failed` }
+  })
+
+  on('tool.call', { tool: AUDIT_TOOL }, ($, e) => tracedTool($, 'audit_state', e, [], () => auditState($), true)).catch(($, e, next) => {
+    traceError($, 'audit_state', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: audit_state failed` }
   })
 
   // The launch's fields are paths, names and numbers; the title is free text and stays out (its slug is in the run's

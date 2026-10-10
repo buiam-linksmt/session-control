@@ -339,10 +339,10 @@ describe('tool surface', () => {
     // The first six as they were; feature/inspect-tools registers its read-only tools after them (the full list:
     // the next test).
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
-    // Changed on purpose by feature/inspect-tools: five read-only inspection tools (list_sessions, read_result,
-    // worker_tail, session_writes, panel_snapshot) are registered after the six; the six are unchanged (the next test
-    // pins their own fingerprint, 6072:68e1b3f1, this line's value before the change).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('8936:7c7b35fc')
+    // Changed on purpose by feature/inspect-tools: six read-only inspection tools (list_sessions, read_result,
+    // worker_tail, session_writes, panel_snapshot, audit_state) are registered after the six; the six are unchanged
+    // (the next test pins their own fingerprint, 6072:68e1b3f1, this line's value before the change).
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('9499:ccae8712')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -360,6 +360,7 @@ describe('tool surface', () => {
       'worker_tail',
       'session_writes',
       'panel_snapshot',
+      'audit_state',
     ])
     // The six tools before feature/inspect-tools keep their names, descriptions and schemas byte for byte.
     expect(fingerprint(JSON.stringify(w.tools.slice(0, 6)))).toBe('6072:68e1b3f1')
