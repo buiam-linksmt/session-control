@@ -17,7 +17,7 @@ An orchestrator kit for Claude Code. One interactive session, the orchestrator, 
 - `git`, to clone the repository and, for workers, to create worktrees.
 - A Claude Code build that supports mods. Tested on 2.1.292 and 2.1.295.
 - Python 3 (standard library only), only to run the self-tests `mod/tests/probe-selftest.py`. The mod itself runs no Python.
-- Node.js is not required. The mod runs inside Claude Code's plugin sandbox, which has no Node.js API; Node.js is needed only if Claude Code itself is installed through npm.
+- Optional: Node.js 22 or newer, as `node` on the PATH or named by the `nodePath` option. With it the mod runs its file operations, and on Linux its process probe, through its own helper (`mod/helper/`, see Node helper); without it, or with the `helper` option set to `off`, the built-in `sh` (Linux) and PowerShell (Windows) operations run as before, with nothing to configure. The mod's hooks themselves run inside Claude Code's plugin sandbox, which has no Node.js API. Node.js 22 or newer is also what runs the helper's own tests.
 - Optional: a licence picker command, set with the `licencePickCommand` option. `launch_worker` runs it for a fresh launch with `{need}` replaced by the headroom percent (a leading `~/` is expanded); it must print one absolute config directory on stdout and exit 0, or exit 3 when no licence has room. The command is split on blanks (no quoting; a path with spaces is not supported). Without the option a fresh worker gets no `CLAUDE_CONFIG_DIR` of its own and inherits the machine's default configuration: the orchestrator's `CLAUDE_CONFIG_DIR` when that is set, else `~/.claude` with the global config in `~/.claude.json`; the registry records that directory. `CLAUDE.md` leaves licence handling (headroom, reset times, event log) to the user-level instructions in `~/.claude/CLAUDE.md`. On a machine without licence tooling nothing needs configuring: every worker runs under the default config directory, `launch_worker` never refuses for licence room, and the licence steps in `CLAUDE.md` do not apply.
 
 ## Setup
@@ -95,6 +95,8 @@ Defaults are those of `mod/.claude-plugin/plugin.json`.
 | `runsDir` | `~/.claude/session-control/runs` | Directory for the result and error files of launched workers. A leading `~` is the home directory. |
 | `licencePickCommand` | empty | Command that picks the licence for a fresh worker launch; `{need}` is replaced by the headroom percent. It prints one absolute config directory and exits 0, or exits 3 when no licence has room. Empty: workers start with the default config directory. |
 | `debug` | `false` | Append a debug trace to `trace.log` in the runs directory (see Development). `SESSION_CONTROL_DEBUG=1` in the environment switches it on too. |
+| `helper` | `auto` | `auto`: the file operations (and on Linux the process probe) run through the Node helper when Node 22 or newer is found, each call falling back to the built-in operation when the helper fails. `off`: the built-in operations only. Any other value counts as `auto`. |
+| `nodePath` | empty | The node executable the helper runs with; a leading `~/` is the home directory. Empty: `node` from the PATH. |
 
 Set them in the settings under `pluginConfigs`. A mod loaded with `--plugin-dir` is keyed `session-control@inline`:
 
@@ -117,14 +119,15 @@ Run from the clone's root:
 ```sh
 claude plugin validate ./mod
 claude plugin test ./mod
+node --test mod/tests/helper.test.mjs
 python3 -I mod/tests/probe-selftest.py
 ```
 
-`claude plugin test` runs the `*.test.ts` files in `mod/tests/`. `probe-selftest.py` extracts the process probe from `mod/hooks/host-posix.ts`, checks that it parses under `sh -n` and runs it against a fixture configuration directory.
+`claude plugin test` runs the `*.test.ts` files in `mod/tests/` (the Node helper there simulated, see `fake-helper.ts`). `node --test mod/tests/helper.test.mjs` (Node 22 or newer) runs the helper itself as the mod does, one process per request: every operation, the protocol errors and their fixed codes, appends from many processes at once, the tail of a large file against `tail | cut`, and the probe of a fake `/proc` tree against the shell probe's recorded output, with a canary in the fake environment that must never reach an answer. `probe-selftest.py` extracts the process probe from `mod/hooks/host-posix.ts`, checks that it parses under `sh -n` and runs it against a fixture configuration directory. On WSL, `python3 -I mod/tests/windows-selftest.py` runs the Windows PowerShell scripts, the launch line in Git Bash and, with `C:\Program Files\nodejs\node.exe` (or `SC_WIN_NODE`), the helper's file operations in a Windows temp folder.
 
 To see what the mod does, set `SESSION_CONTROL_DEBUG=1` in the environment (or the `debug` option). A session where the board is on (the orchestrator directory, or after `/session-control`) then appends one JSON line per event to `trace.log` in the runs directory: commands run (argv with the mod's scripts by name, exit code, duration, stderr size), file writes (path and size), guard verdicts and caught errors (a kind and a message whose quoted text and echoed output become `…`). It never logs credentials, file contents, command output, prompt or transcript text, the environment, a worker's title or the licence picker's command (only whether one is set, and at a launch its executable's name and argument count); text that looks like a token becomes `[redacted]`. Any other session, a worker included, writes nothing. The trace is rotated at about 2 MiB (sessions share it), three files kept.
 
-`sh mod/tests/e2e-smoke.sh` smoke-tests the real `claude` from a scratch directory it removes afterwards: a haiku orchestrator (capped at `--max-budget-usd 0.25`) launches one haiku worker (its launch line with `-n` and the inbox settings, its registry entry with `name` and `socket_path`, and the socket while the worker lives are checked) and, where tmux exists, an interactive session opens the panel; it prints one line per check. It runs under the default configuration (`~/.claude`, `~/.claude.json`): the transcripts, the session files and the trust entry for its scratch folder stay there, and it spends a few cents of the default licence's quota.
+`sh mod/tests/e2e-smoke.sh` smoke-tests the real `claude` from a scratch directory it removes afterwards: a haiku orchestrator (capped at `--max-budget-usd 0.25`) launches one haiku worker (its launch line with `-n` and the inbox settings, its registry entry with `name` and `socket_path`, and the socket while the worker lives are checked) and, where tmux exists, an interactive session opens the panel; it prints one line per check. It runs under the default configuration (`~/.claude`, `~/.claude.json`): the transcripts, the session files and the trust entry for its scratch folder stay there, and it spends a few cents of the default licence's quota. With Node 22 or newer on the PATH it checks that the trace shows the Node helper in use and no `helper.fallback` line; `HIDE_NODE=1 sh mod/tests/e2e-smoke.sh` starts the claude sessions with every PATH directory holding `node` left out, and checks that the mod found no Node and ran its built-in operations.
 
 After a change to the mod, run the validation and the tests before relying on it.
 
@@ -132,7 +135,7 @@ After a change to the mod, run the validation and the tests before relying on it
 
 Everything the mod does that differs per operating system, or needs a process, goes through one interface, `Host` in `mod/hooks/host.ts`, with two adapters: `host-posix.ts` (Linux and WSL: `sh`, `mv`, `rm`, `tail`, `mkdir`, `sleep`, `/proc`) and `host-windows.ts` (native Windows: Windows PowerShell 5.1 scripts run with `-File`, paths in the `C:/...` form). `selectHost` in `host.ts` is the one platform choice: `OS=Windows_NT` with a drive-letter `USERPROFILE` takes the Windows adapter, anything else the Linux one. `register.tsx` calls it once per load and never branches on the platform itself. Each adapter's scripts sit in its own file; operations both do alike with `$.fs` and plain TypeScript are in `host-shared.ts`.
 
-An adapter never holds `$` (the validator follows `$` only into functions of `register.tsx`): it gets a `HostPort`, the engine facilities `register.tsx` builds over the hook's `$` (`run` and `write`, traced as before; `read`, `exists`, `stat`, `now`, `sleep`, `env` for `HOME`, `USERPROFILE` and `SystemRoot`; the runs directory; `traceError`; `noteDirectWrite`, the once-per-load toast).
+An adapter never holds `$` (the validator follows `$` only into functions of `register.tsx`): it gets a `HostPort`, the engine facilities `register.tsx` builds over the hook's `$` (`run` and `write`, traced as before; `read`, `exists`, `stat`, `now`, `sleep`, `env` for `HOME`, `USERPROFILE` and `SystemRoot`; the runs directory; `traceError`; `noteDirectWrite`, the once-per-load toast; `noteHelper`, the Node helper's detection and fallbacks). With the `helper` option at `auto` the chosen adapter is wrapped by `withHelper` (`host-helper.ts`, see Node helper).
 
 | Member | What it does |
 |---|---|
@@ -153,8 +156,35 @@ An adapter never holds `$` (the validator follows `$` only into functions of `re
 | `append` | lines added to a log without reading it |
 | `tail` | the last 600 lines of a transcript, each cut to 20000 characters |
 | `rotate` | the trace's rotation |
+| `rotateAndAppend` | the trace's write: the rotation when one is due, then the append (one process with the helper) |
 
-`mod/tests/host.test.ts` runs one contract against both adapters and checks the selection.
+`mod/tests/host.test.ts` runs one contract against both adapters, alone and behind the Node helper, and checks the selection.
+
+## Node helper
+
+`mod/helper/host.mjs` (with `protocol.mjs`, `ops.mjs`, `files.mjs` and `linux.mjs`) does the host operations the engine's `$.fs` lacks in one Node.js process per call: Node 22 or newer, standard library only, no build step. The mod finds it under its own folder (`$.plugin.root`). Its protocol:
+
+1. The mod runs `node <plugin>/helper/host.mjs <op>` by argv, no shell, with one JSON request on stdin.
+2. The helper prints one JSON object: `{"ok":true,...}` with the answer's fields, or `{"ok":false,"code":"<CODE>"}`, and exits 0 or 1.
+3. Codes are fixed words (`BAD_OP`, `BAD_REQUEST`, `TOO_LARGE`, `UNSUPPORTED`, `NOT_FOUND`, `ACCESS`, `BUSY`, `EXISTS`, `IS_DIR`, `NOT_DIR`, `NO_SPACE`, `READ_ONLY`, `CROSS_DEVICE`, `IO`, `INTERNAL`): no Node error message, path or file content is ever part of an answer.
+4. Operations: `probe` (Linux: `/proc` read natively, printed as `PROBE_SCRIPT` prints it, `CLAUDE_CONFIG_DIR` the only value taken from a process environment, `procStart` and `sessionId` the only fields taken from a sessions file), `writeAtomic`, `renameOver`, `removeFile`, `append` (one write on an append descriptor), `tail` (the last 600 lines from the end of the file, each cut to 20000 characters, the answer kept under the engine's 4 MiB output cap by leaving out the oldest lines), `rotate`.
+5. `batch` runs a list of file operations in order in one process and stops at the first failure, answering its position.
+
+`withHelper` in `mod/hooks/host-helper.ts` puts the helper in front of the chosen adapter. Node is looked for once per load, at the first operation that needs it (`node --version`, untraced): without Node, or with one older than 22, the adapter's own operations run for the whole load, with one `helper` trace line and no error. A call that fails (Node cannot start or times out, its output is cut, is not one JSON object, or answers `ok:false`) falls back to the adapter's own operation for that call: the trace gets a `helper.fallback` line with the operation and the code, and the first fallback of the load raises one toast (`helper fallback: <op>`). On Windows the process probe stays `PROBE_PS1` (Node's standard library cannot list processes) and a transcript under the read cap is still read in the engine; the helper replaces the PowerShell file script. The trace's own write goes as one batch (rotation, then append). The built-in adapters stay as the fallback.
+
+Cost measured on the machines it targets (medians: of 100 runs on Linux; on Windows of 20 single operations, 5 batches and one tail, timed from WSL through interop):
+
+| Machine | Operation | Helper | Built-in |
+| --- | --- | --- | --- |
+| Linux (WSL 2, Node 24.14.0) | process probe, 2 arguments | 31.1 ms (27.6 ms in an earlier run) | 32.9 ms `sh` `PROBE_SCRIPT` (23.7 ms in the earlier run) |
+| Linux | registry write | 39.0 ms `writeAtomic` (with fsync) | 1.7 ms for the one `mv -f`, plus the engine's own write of the temp file (not timed) |
+| Linux | append | 25.9 ms | 1.3 ms (`sh` `APPEND_SCRIPT`) |
+| Linux | bare `node -e 0` | 14.8 ms | |
+| Windows (Node 22.10.0) | one file operation | 90 ms | 233 ms (PowerShell file script) |
+| Windows | a batch of 20 file operations | 122 ms per batch | |
+| Windows | tail of a 3.1 MB file | 100 ms | |
+
+On Linux the helper costs one Node start per call where the built-in operations cost a few milliseconds (the probe is about even); on Windows it is about 2.5 times faster per operation than PowerShell, and a batch costs one Node start for all of its operations.
 
 ## Layout
 
@@ -172,8 +202,11 @@ mod/
   hooks/host-shared.ts          host operations both adapters do alike
   hooks/host-posix.ts           Linux and WSL adapter and its sh scripts
   hooks/host-windows.ts         native Windows adapter and its PowerShell scripts
+  hooks/host-helper.ts          withHelper: the Node helper in front of an adapter, with fallback
+  helper/host.mjs               the Node helper's entry point (protocol.mjs, ops.mjs, files.mjs, linux.mjs)
   hooks/bookkeeping.ts          edits of open points, queue and decisions
   hooks/store.ts                initial helper-file text, dates, paths
-  tests/                        *.test.ts, fixtures.ts, probe-selftest.py
+  tests/                        *.test.ts, fixtures.ts, fake-helper.ts, helper.test.mjs, probe-selftest.py,
+                                windows-selftest.py, e2e-smoke.sh
   types/index.d.ts              state contract of the panel
 ```
