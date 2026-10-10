@@ -69,6 +69,40 @@ describe('redaction', () => {
     expect(redact('ssh://deploy@host:22/x')).toBe(`ssh://${REDACTED}@host:22/x`)
   })
 
+  test("curl's credential flag: -u user:pass, --user user:pass and --user=user:pass, quoted or not, in one string or as two arguments", () => {
+    expect(redact('curl -u alice:s3cretPW https://example.com/api')).toBe(`curl -u ${REDACTED} https://example.com/api`)
+    expect(redact('curl --user alice:pw -s https://x')).toBe(`curl --user ${REDACTED} -s https://x`)
+    expect(redact('curl --user=alice:pw https://x')).toBe(`curl --user=${REDACTED} https://x`)
+    expect(redact(`curl -u 'alice:p@ss' x`)).toBe(`curl -u '${REDACTED}' x`)
+    expect(redact('curl -u "alice:pw" x')).toBe(`curl -u "${REDACTED}" x`)
+    expect(redact('-u alice:pw')).toBe(`-u ${REDACTED}`)
+    expect(redact('curl -u alice:pw:with:colons x')).toBe(`curl -u ${REDACTED} x`)
+    expect(redactValue(['curl', '-u', 'alice:pw', '--user', 'bob:x', 'https://x'])).toEqual(['curl', '-u', REDACTED, '--user', REDACTED, 'https://x'])
+  })
+
+  test('ordinary command lines with -u or --user stay as they are', () => {
+    const kept = [
+      'git push -u origin feature/write-tools',
+      'git push -u linksmt feature/write-tools',
+      'sort -u names.txt',
+      'git log -u HEAD~1',
+      'ps -u root',
+      'useradd --user bob',
+      'diff -u C:/a/old.txt C:/a/new.txt',
+      'diff -u /tmp/a.txt /tmp/b.txt',
+      'docker run -u 1000:1000 image',
+      'docker run --user 0:0 image',
+      // curl prompts for the password: there is none on the line.
+      'curl -u alice: https://x',
+      'ssh -u x http://host:8080/path',
+      'the -u flag of curl takes user:password',
+      'meet at 12:30',
+      'timestamps 2026-10-11T12:00:00Z and a ratio 3:4',
+    ]
+    for (const text of kept) expect(redact(text)).toBe(text)
+    expect(redactValue(['git', 'push', '-u', 'origin', 'main', 'docker', '-u', '1000:1000'])).toEqual(['git', 'push', '-u', 'origin', 'main', 'docker', '-u', '1000:1000'])
+  })
+
   test('AWS access key ids', () => {
     expect(redact('id AKIAABCDEFGHIJKLMNOP end')).toBe(`id ${REDACTED} end`)
     expect(redact('ASIA1234567890ABCDEF')).toBe(REDACTED)

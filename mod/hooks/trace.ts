@@ -70,6 +70,20 @@ const SECRET_FLAG_ARG = new RegExp(`^--?${NAME_CHAR}*${SECRET_WORD}${NAME_CHAR}*
 const URL_USERINFO = /\b([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@'"]+@/g
 
 /**
+ * A `user:password` value as curl takes it: a user, a colon, a password that is not empty. Not one that is all digits
+ * on both sides (docker's `-u 1000:1000` is a uid and a gid), nor one whose second part starts with a slash or a
+ * backslash (a Windows path `C:/x`, a URL `http://x`).
+ */
+const USER_PASS = String.raw`(?!\d+:\d+(?![^\s'"]))[^\s:'"/\\]+:(?![/\\])[^\s'"]+`
+
+/** curl's credential flag, `-u user:pass`, `--user user:pass` or `--user=user:pass`, quoted or not: the value goes, the flag stays. */
+const USER_FLAG = new RegExp(String.raw`(?<![^\s"'=])(-u\s+|--user(?:\s+|=))(["']?)${USER_PASS}\2(?![^\s'"])`, 'g')
+
+/** The value of `-u` or `--user` as one argument of an argv. */
+const USER_PASS_ARG = new RegExp(`^${USER_PASS}$`)
+const USER_FLAG_ARG = /^(?:-u|--user)$/
+
+/**
  * An absolute path (`/...`, `~/...`, `C:/...`, `C:\...`) or a run of 32 or more letters, digits, - _ / + = (a run
  * with a letter and a digit in it is a token). A path is matched first so it can be kept whole.
  */
@@ -95,6 +109,7 @@ export function redact(text: string): string {
   let out = text
     .replace(AUTHORIZATION, (_, name: string) => `${name}${REDACTED}`)
     .replace(URL_USERINFO, (_, scheme: string) => `${scheme}${REDACTED}@`)
+    .replace(USER_FLAG, (_, flag: string, quote: string) => `${flag}${quote}${REDACTED}${quote}`)
     .replace(SECRET_ASSIGNMENT, (_, name: string) => `${name}${REDACTED}`)
     .replace(SECRET_FLAG, (_, flag: string) => `${flag}${REDACTED}`)
   for (const pattern of TOKEN_PATTERNS) out = out.replace(pattern, REDACTED)
@@ -110,8 +125,15 @@ export function redactValue(value: unknown): unknown {
     const clean = redact(value)
     return clean.length <= TRACE_MAX_STRING ? clean : `${clean.slice(0, TRACE_MAX_STRING)}...[+${clean.length - TRACE_MAX_STRING} chars]`
   }
-  // In an argv a flag that says secret takes the next argument as its value.
-  if (Array.isArray(value)) return value.map((part, at) => (at > 0 && typeof value[at - 1] === 'string' && SECRET_FLAG_ARG.test(value[at - 1]) ? REDACTED : redactValue(part)))
+  // In an argv a flag that says secret takes the next argument as its value, and so does `-u` or `--user` a user:password.
+  if (Array.isArray(value)) {
+    return value.map((part, at) => {
+      const flag = at > 0 ? value[at - 1] : undefined
+      if (typeof flag === 'string' && SECRET_FLAG_ARG.test(flag)) return REDACTED
+      if (typeof flag === 'string' && USER_FLAG_ARG.test(flag) && typeof part === 'string' && USER_PASS_ARG.test(part)) return REDACTED
+      return redactValue(part)
+    })
+  }
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, part]) => [key, redactValue(part)]))
   }
