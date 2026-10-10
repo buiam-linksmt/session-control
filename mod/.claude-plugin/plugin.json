@@ -48,6 +48,18 @@
       "title": "Debug trace",
       "description": "Write a JSON-lines trace of the mod's events, commands, file writes, verdicts and errors to trace.log in the runs directory (rotated at 2 MiB, 3 files kept; no file contents, prompts or credentials). The environment variable SESSION_CONTROL_DEBUG=1 switches it on too.",
       "default": false
+    },
+    "helper": {
+      "type": "string",
+      "title": "Node helper",
+      "description": "auto: the mod's file operations (and on Linux its process probe) run through the Node.js helper in mod/helper when Node 22 or newer is found, falling back to the built-in sh or PowerShell operations per call when the helper fails. off: the built-in operations only. Node is optional: without it the mod works as with off.",
+      "default": "auto"
+    },
+    "nodePath": {
+      "type": "string",
+      "title": "Node executable",
+      "description": "The node executable the helper runs with (a leading ~/ is the home directory). Empty: node from the PATH.",
+      "default": ""
     }
   }
 }

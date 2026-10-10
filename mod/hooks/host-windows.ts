@@ -19,7 +19,7 @@ import {
 } from './core'
 import type { LaunchArgs, ProcFacts } from './core'
 import type { Host, HostPort, RotatePlan, WorkerWant } from './host'
-import { bashLaunchCommand, clockPause, readTail, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
+import { bashLaunchCommand, clockPause, readTail, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
 
 /**
  * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
@@ -324,4 +324,5 @@ export const windowsHost: Host = {
       if (ran.exitCode !== 0 && (await port.exists(from).catch(() => true))) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`)
     }
   },
+  rotateAndAppend: (port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan) => rotateAndAppendWith(windowsHost, port, path, lines, rotation),
 }

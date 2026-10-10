@@ -315,7 +315,8 @@ export const TOAST_TITLES = {
   tracking: 'Tracking problem',
   directWrite: 'Write not atomic',
   trace: 'Debug trace failed',
-} as const satisfies Record<SessionOutcomeKind | 'tracking' | 'directWrite' | 'trace', string>
+  helper: 'Node helper',
+} as const satisfies Record<SessionOutcomeKind | 'tracking' | 'directWrite' | 'trace' | 'helper', string>
 
 /**
  * A toast's text: the title, a separator, then the message. A toast is one line of text (the engine draws a line break

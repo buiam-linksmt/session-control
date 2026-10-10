@@ -152,6 +152,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   on('process.run', ($, e) => {
     w.runs.push([...e.argv])
     const ok = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+    // The fixture machine has no Node: the helper's lookup cannot start, and the adapters' own operations run.
+    if (e.argv[0] === 'node' && e.argv[1] === '--version') throw new Error('spawn node ENOENT')
     if (e.argv[0] === 'sh' && String(e.argv[2]).startsWith('tail ')) {
       const rows = [
         { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the suite files.' }, { type: 'tool_use', name: 'Bash', input: { command: 'git status -sb' } }] } },
@@ -1171,6 +1173,8 @@ describe('platform', () => {
   }
   const probe = ['sh', '-c', '<probe>', 'session-probe', ...probeArgs(JSON.parse(REGISTRY_TEXT))]
   const rename = ['mv', '-f', `${REGISTRY_PATH}.tmp.${NOW_MS}`, REGISTRY_PATH]
+  /** The Node helper's one lookup, at the first operation it would take (the fixture machine has no Node). */
+  const NODE_LOOKUP = ['node', '--version']
   const RUNS = `${HOME}/.claude/session-control/runs`
   /** The commands the Linux flow runs, as recorded before the Windows branches existed (the jq calls aside). */
   const LINUX = [
@@ -1179,6 +1183,7 @@ describe('platform', () => {
     ['test', '-e', `${ORCH_DIR}/open-points-archive.md`],
     ['mkdir', '-p', ORCH_DIR],
     ['mkdir', '-p', `${ORCH_DIR}/backups`, RUNS],
+    NODE_LOOKUP,
     probe,
     rename,
     probe,
@@ -1339,8 +1344,10 @@ describe('platform', () => {
       err_file: `${WIN_RUNS}/20260921141320-new.err`,
       started_at: NOW_MS / 1000,
     })
-    // Every command is Windows PowerShell running one of the mod's scripts; the launch's probes also search its config dir.
-    expect(w.runs.every(argv => argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6])))).toBe(true)
+    // Every command is Windows PowerShell running one of the mod's scripts, but for the Node helper's one lookup; the
+    // launch's probes also search its config dir.
+    expect(w.runs.filter(argv => argv[0] === 'node')).toEqual([NODE_LOOKUP])
+    expect(w.runs.every(argv => argv === w.runs.find(one => one[0] === 'node') || (argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6]))))).toBe(true)
     expect(w.runs.some(argv => String(argv[6]).endsWith('/probe.ps1') && argv.at(-1) === `c:${WIN_HOME_CLAUDE}`)).toBe(true)
   })
 
@@ -1606,7 +1613,17 @@ describe('debug trace', () => {
       cwd: ORCH_DIR,
       platform: 'linux',
       isOrchestratorDir: true,
-      options: { orchestratorDir: ORCH_DIR, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, pollSeconds: 5, runsDir: '~/.claude/session-control/runs', licencePickCommand: 'set', debug: true },
+      options: {
+        orchestratorDir: ORCH_DIR,
+        registryPath: '~/.claude/headless-sessions.json',
+        completionWrites: true,
+        pollSeconds: 5,
+        runsDir: '~/.claude/session-control/runs',
+        licencePickCommand: 'set',
+        debug: true,
+        helper: 'auto',
+        nodePath: '',
+      },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
   })

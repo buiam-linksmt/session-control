@@ -5,7 +5,7 @@ import type { FsStat } from 'claude-code'
 
 import type { LaunchArgs } from './core'
 import { buildLaunchArgv, tailLines } from './core'
-import type { Host, HostPort, LaunchTarget } from './host'
+import type { Host, HostPort, LaunchTarget, RotatePlan } from './host'
 import { tmpPath } from './store'
 
 /**
@@ -40,6 +40,12 @@ export async function statLaunchChecks(port: HostPort, args: LaunchArgs): Promis
 export async function readTail(port: HostPort, path: string, count: number, width: number): Promise<string | undefined> {
   const text = await port.read(path).catch(() => undefined)
   return text === undefined ? undefined : tailLines(text, count, width)
+}
+
+/** The trace's write: the rotation when one is given, then a quiet append. */
+export async function rotateAndAppendWith(host: Pick<Host, 'rotate' | 'append'>, port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan): Promise<string | undefined> {
+  if (rotation !== undefined) await host.rotate(port, rotation)
+  return host.append(port, path, lines, true, () => undefined)
 }
 
 /** Waits on the engine's clock. */

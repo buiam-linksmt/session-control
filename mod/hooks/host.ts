@@ -10,6 +10,7 @@ import type { FsStat, ProcessRunInit, ProcessRunResult } from 'claude-code'
 
 import type { SessionEntry } from '../types'
 import type { LaunchArgs, LaunchFacts, ProcFact, ProcFacts } from './core'
+import type { HelperNote } from './host-helper'
 import { posixHost } from './host-posix'
 import { windowsHost } from './host-windows'
 
@@ -40,6 +41,8 @@ export type HostPort = {
   traceError(where: string, err: unknown): void
   /** Tells the user, once per load, that a file was written over directly instead of through a rename. */
   noteDirectWrite(text: string): void
+  /** The Node helper's detection (traced once) and each fallback to the adapter's own operation (traced, toasted once per load). */
+  noteHelper(note: HelperNote): void
 }
 
 /** What a launch looks for among the probe's claude processes. */
@@ -118,6 +121,8 @@ export type Host = {
   tail(port: HostPort, path: string): Promise<string | undefined>
   /** Rotates the trace. */
   rotate(port: HostPort, plan: RotatePlan): Promise<void>
+  /** The trace's write, untraced: the rotation when one is given, then the append; answers what went wrong with the append. */
+  rotateAndAppend(port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan): Promise<string | undefined>
 }
 
 /** Every operation and field of Host: the contract test checks both adapters against this list. */
@@ -151,6 +156,7 @@ export const HOST_MEMBERS = [
   'append',
   'tail',
   'rotate',
+  'rotateAndAppend',
 ] as const satisfies readonly (keyof Host)[]
 
 // A member added to Host and not to the list fails to compile here.

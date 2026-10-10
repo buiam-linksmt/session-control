@@ -23,6 +23,8 @@ import {
 } from './trace'
 import { selectHost } from './host'
 import type { Host, HostEnvName, HostPort } from './host'
+import { HELPER_SCRIPT, withHelper } from './host-helper'
+import type { HelperNote } from './host-helper'
 import {
   LAUNCH_SCHEMA,
   ACK_SCHEMA,
@@ -108,6 +110,10 @@ type Config = {
   runsDir: string
   licencePickCommand: string
   debug: boolean
+  /** `auto`: the Node helper runs the host's file operations (and the Linux probe) when Node 22+ is found; `off`: the adapters' own. */
+  helper: 'auto' | 'off'
+  /** The node executable; empty: `node` from the PATH. */
+  nodePath: string
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -119,6 +125,8 @@ let config: Config = {
   runsDir: '~/.claude/session-control/runs',
   licencePickCommand: '',
   debug: false,
+  helper: 'auto',
+  nodePath: '',
 }
 let isActive = false
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
@@ -133,8 +141,11 @@ let displayTick: { cancel: () => void } | undefined
 const DISPLAY_TICK_MS = 1000
 let lastError: string | undefined
 let isDirectWriteNoted = false
+let isHelperFallbackNoted = false
+/** The operations whose untraced fallback has been traced this load: once each, as each later line would be written by the write that failed. */
+const quietFallbacksTraced = new Set<string>()
 /** The host adapter of this load (hostOf); a hot reload, or a test's fresh register, chooses again. */
-let host: Host | undefined
+let host: Promise<Host> | undefined
 const harvested = new Set<string>()
 /** Session names this session gave to launches: two launches in the same second still get different names. */
 const issuedNames = new Set<string>()
@@ -268,8 +279,9 @@ async function writeTrace($: EngineInterface, lines: readonly string[]): Promise
   const path = traceFile ?? (traceFile = `${await runsPath($)}/${TRACE_FILE}`)
   for (const chunk of chunkLines(lines)) {
     const adding = utf8Bytes(chunk.join('\n')) + 1
-    if (needsRotation((await $.fs.stat(path).catch(() => undefined))?.size ?? 0, adding)) await rotateTrace($, path, adding)
-    let problem = await appendLog($, path, chunk, true)
+    const isRotationDue = needsRotation((await $.fs.stat(path).catch(() => undefined))?.size ?? 0, adding)
+    const rotation = isRotationDue ? { path, adding, keep: TRACE_KEEP, maxBytes: TRACE_MAX_BYTES, moves: rotationMoves(path) } : undefined
+    let problem = await (await hostOf($)).rotateAndAppend(portOf($), path, chunk, rotation)
     // Outside the orchestrator directory nothing may have made the runs directory yet (Windows' append makes it).
     if (problem !== undefined && (await (await hostOf($)).makeDir(portOf($), dirOf(path)))) {
       problem = await appendLog($, path, chunk, true)
@@ -277,11 +289,6 @@ async function writeTrace($: EngineInterface, lines: readonly string[]): Promise
     if (problem !== undefined) return problem
   }
   return undefined
-}
-
-/** Rotates the trace through the host: it keeps TRACE_KEEP files under TRACE_MAX_BYTES each. */
-async function rotateTrace($: EngineInterface, path: string, adding: number): Promise<void> {
-  await (await hostOf($)).rotate(portOf($), { path, adding, keep: TRACE_KEEP, maxBytes: TRACE_MAX_BYTES, moves: rotationMoves(path) })
 }
 
 /** Runs a hook's work and then writes the trace lines it made. */
@@ -296,10 +303,25 @@ async function traced<T>($: EngineInterface, work: () => Promise<T>): Promise<T>
 // Every machine call goes through the host adapter (host.ts): host-posix.ts on Linux and WSL, host-windows.ts on
 // native Windows. hostOf is the one place the platform is chosen; nothing else here branches on it.
 
-/** The adapter of this load, chosen once by selectHost from OS and USERPROFILE at the first hook that needs it (session.start). */
+/**
+ * The adapter of this load, chosen once by selectHost from OS and USERPROFILE at the first hook that needs it
+ * (session.start); with the helper option `auto` its file operations go through the Node helper (host-helper.ts),
+ * which looks for Node at its first operation.
+ */
 async function hostOf($: EngineInterface): Promise<Host> {
-  if (host === undefined) host = selectHost({ OS: await $.env.get('OS'), USERPROFILE: await $.env.get('USERPROFILE') })
+  // A choice that failed (the environment unreadable) is made again by the next hook.
+  host ??= chooseHost($).catch((err: unknown) => {
+    host = undefined
+    throw err
+  })
   return host
+}
+
+async function chooseHost($: EngineInterface): Promise<Host> {
+  const base = selectHost({ OS: await $.env.get('OS'), USERPROFILE: await $.env.get('USERPROFILE') })
+  if (config.helper === 'off') return base
+  const node = config.nodePath.trim() === '' ? 'node' : expandHome(config.nodePath.trim(), await base.homeDir(portOf($)))
+  return withHelper(base, { node, script: `${$.plugin.root.replace(/[\\/]+$/, '')}/${HELPER_SCRIPT}` })
 }
 
 /** The engine facilities the adapter may use, over this hook's `$`: the adapter never holds `$` itself. */
@@ -316,6 +338,7 @@ function portOf($: EngineInterface): HostPort {
     runsDir: () => runsPath($),
     traceError: (where, err) => traceError($, where, err),
     noteDirectWrite: text => noteDirectWrite($, text),
+    noteHelper: note => noteHelper($, note),
   }
 }
 
@@ -331,6 +354,24 @@ function noteDirectWrite($: EngineInterface, text: string): void {
   if (isDirectWriteNoted) return
   isDirectWriteNoted = true
   $.ui.toast(toastText(TOAST_TITLES.directWrite, text), { timeoutMs: 10000 })
+}
+
+/**
+ * The Node helper's word: its detection is one trace line; a fallback is a trace line with the operation and the code
+ * and, once per load, a toast. The fallback of an untraced operation (the trace's own write) is traced once per
+ * operation: a line for each would be written by the write that failed, and the flush would never end.
+ */
+function noteHelper($: EngineInterface, note: HelperNote): void {
+  if (note.kind === 'node') {
+    const { kind, ...fields } = note
+    trace($, 'helper', fields)
+    return
+  }
+  if (!note.isQuiet || !quietFallbacksTraced.has(note.op)) trace($, 'helper.fallback', { op: note.op, code: note.code })
+  if (note.isQuiet) quietFallbacksTraced.add(note.op)
+  if (isHelperFallbackNoted) return
+  isHelperFallbackNoted = true
+  $.ui.toast(toastText(TOAST_TITLES.helper, `helper fallback: ${note.op}`), { timeoutMs: 10000 })
 }
 
 async function homeDir($: EngineInterface): Promise<string> {
@@ -961,6 +1002,8 @@ function pickFields(e: unknown, names: readonly string[]): Record<string, unknow
 
 export const register: Register = (on, options) => {
   isDirectWriteNoted = false
+  isHelperFallbackNoted = false
+  quietFallbacksTraced.clear()
   host = undefined
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
@@ -970,6 +1013,8 @@ export const register: Register = (on, options) => {
     runsDir: String(options.runsDir ?? config.runsDir),
     licencePickCommand: String(options.licencePickCommand ?? ''),
     debug: options.debug === true,
+    helper: options.helper === 'off' ? 'off' : 'auto',
+    nodePath: String(options.nodePath ?? ''),
   }
   isTraceWanted = config.debug
   isTracing = false

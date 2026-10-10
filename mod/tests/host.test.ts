@@ -12,8 +12,10 @@ import type { FsStat, On } from 'claude-code'
 import { tailLines } from '../hooks/core'
 import { HOST_MEMBERS, selectHost } from '../hooks/host'
 import type { Host, HostPort } from '../hooks/host'
+import { withHelper } from '../hooks/host-helper'
 import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
+import { helperAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
 type Ran = { exitCode: number; stdout: string; stderr: string; isStdoutTruncated: boolean; isStderrTruncated: boolean }
@@ -36,7 +38,7 @@ type Machine = {
   read(path: string): string
   exists(path: string): boolean
   stat(path: string): FsStat
-  run(argv: readonly string[]): Ran
+  run(argv: readonly string[], stdin?: string): Ran
 }
 
 /** The simulated machine: its files and the commands both adapters run, answered as the system would. */
@@ -63,10 +65,18 @@ function machine(env: Record<string, string>): Machine {
     if (isDir(path)) return { ...base, kind: 'dir', size: 0 } as FsStat
     throw new Error(`ENOENT ${path}`)
   }
-  const run = (given: readonly string[]): Ran => {
+  const run = (given: readonly string[], stdin?: string): Ran => {
     const argv = given.map(String)
     runs.push(argv)
     const [cmd, , script] = argv
+    // Node 24 and the helper (tests/fake-helper.ts), whose probe prints what the system's own probe prints.
+    if (cmd === NODE && argv[1] === '--version') return ran('v24.14.0\n')
+    if (cmd === NODE && argv[1] === HELPER) {
+      const isWin = env.OS === 'Windows_NT'
+      const out = isWin ? '' : probeOutput('/m/work', '/m/cfg', 'claude -p --model opus --output-format json -- Goal: x')
+      const answer = helperAnswer(files, String(argv[2]), JSON.parse(stdin ?? '') as Record<string, unknown>, out, keyOf)
+      return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
+    }
     if (cmd === 'rm') {
       files.delete(keyOf(argv[2] ?? ''))
       return ran()
@@ -139,7 +149,7 @@ function mount(on: On, m: Machine): void {
 /** A HostPort on the machine, as register.tsx's port is on the engine (untraced). */
 function portOf(m: Machine, runsDir: string, notes: string[] = []): HostPort {
   return {
-    run: async argv => m.run(argv),
+    run: async (argv, init) => m.run(argv, init?.stdin),
     read: async path => m.read(path),
     write: async (path, text) => {
       m.files.set(keyOf(path), text)
@@ -156,15 +166,27 @@ function portOf(m: Machine, runsDir: string, notes: string[] = []): HostPort {
     noteDirectWrite: text => {
       notes.push(text)
     },
+    noteHelper: note => {
+      if (note.kind === 'fallback') notes.push(`helper fallback: ${note.op} ${note.code}`)
+    },
   }
 }
 
-type Case = { host: Host; platform: 'linux' | 'windows'; env: Record<string, string>; root: string; home: string }
+/** The node and the helper of the composed adapters (withHelper), as the machine knows them. */
+const NODE = 'node'
+const HELPER = '/m/mod/helper/host.mjs'
 
+type Case = { host: Host; name: string; platform: 'linux' | 'windows'; env: Record<string, string>; root: string; home: string }
+
+const LINUX_ENV = { HOME: '/m/home' }
+// Git Bash's HOME in its /c/... form; the adapter stores C:/...
+const WINDOWS_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\m\\home', HOME: '/c/m/home', SystemRoot: 'C:\\Windows' }
 const CASES: Case[] = [
-  { host: posixHost, platform: 'linux', env: { HOME: '/m/home' }, root: '/m', home: '/m/home' },
-  // Git Bash's HOME in its /c/... form; the adapter stores C:/...
-  { host: windowsHost, platform: 'windows', env: { OS: 'Windows_NT', USERPROFILE: 'C:\\m\\home', HOME: '/c/m/home', SystemRoot: 'C:\\Windows' }, root: 'C:/m', home: 'C:/m/home' },
+  { host: posixHost, name: 'linux', platform: 'linux', env: LINUX_ENV, root: '/m', home: '/m/home' },
+  { host: windowsHost, name: 'windows', platform: 'windows', env: WINDOWS_ENV, root: 'C:/m', home: 'C:/m/home' },
+  // The same contract with the Node helper in front of each adapter.
+  { host: withHelper(posixHost, { node: NODE, script: HELPER }), name: 'linux with the helper', platform: 'linux', env: LINUX_ENV, root: '/m', home: '/m/home' },
+  { host: withHelper(windowsHost, { node: NODE, script: HELPER }), name: 'windows with the helper', platform: 'windows', env: WINDOWS_ENV, root: 'C:/m', home: 'C:/m/home' },
 ]
 
 describe('host contract', () => {
@@ -173,7 +195,7 @@ describe('host contract', () => {
     const runs = `${root}/runs`
     const at = (m: Machine, path: string) => m.files.get(keyOf(path))
 
-    test(`${one.platform}: the adapter has every member of Host, of the right kind`, () => {
+    test(`${one.name}: the adapter has every member of Host, of the right kind`, () => {
       for (const name of HOST_MEMBERS) expect(host[name] === undefined).toBe(false)
       for (const name of HOST_MEMBERS.filter(name => !['platform', 'launchTool', 'launchToolHint'].includes(name))) expect(typeof host[name]).toBe('function')
       expect(host.platform).toBe(one.platform)
@@ -181,7 +203,7 @@ describe('host contract', () => {
       expect(typeof host.launchToolHint).toBe('string')
     })
 
-    test(`${one.platform}: paths: home, the stored form, the session directory, the config dir and the transcript`, async () => {
+    test(`${one.name}: paths: home, the stored form, the session directory, the config dir and the transcript`, async () => {
       const port = portOf(machine(one.env), runs)
       const home = await host.homeDir(port)
       expect(home).toBe(one.home)
@@ -195,7 +217,7 @@ describe('host contract', () => {
       expect(host.transcriptPath({ title: 'no cwd' })).toBeUndefined()
     })
 
-    test(`${one.platform}: writeAtomic replaces a file through a rename and leaves no temp file; a changed file is not written`, async () => {
+    test(`${one.name}: writeAtomic replaces a file through a rename and leaves no temp file; a changed file is not written`, async () => {
       const m = machine(one.env)
       const port = portOf(m, runs)
       const path = `${root}/orch/headless-sessions.json`
@@ -209,7 +231,7 @@ describe('host contract', () => {
       expect([...m.files.keys()].filter(file => file.includes('.tmp.'))).toEqual([])
     })
 
-    test(`${one.platform}: removeFile and renameOver`, async () => {
+    test(`${one.name}: removeFile and renameOver`, async () => {
       const m = machine(one.env)
       const notes: string[] = []
       const port = portOf(m, runs, notes)
@@ -223,7 +245,7 @@ describe('host contract', () => {
       expect(notes).toEqual([])
     })
 
-    test(`${one.platform}: append adds lines to a log without reading it, and says the exit code`, async () => {
+    test(`${one.name}: append adds lines to a log without reading it, and says the exit code`, async () => {
       const m = machine(one.env)
       const port = portOf(m, runs)
       const log = `${runs}/cleared.jsonl`
@@ -235,7 +257,7 @@ describe('host contract', () => {
       expect([...m.files.keys()].filter(file => file.includes('.add.'))).toEqual([])
     })
 
-    test(`${one.platform}: tail gives the last 600 lines, each cut to 20000 characters; a missing file is undefined`, async () => {
+    test(`${one.name}: tail gives the last 600 lines, each cut to 20000 characters; a missing file is undefined`, async () => {
       const m = machine(one.env)
       const port = portOf(m, runs)
       const lines = Array.from({ length: 700 }, (_, line) => (line === 699 ? 'x'.repeat(25000) : `line ${line}`))
@@ -245,7 +267,7 @@ describe('host contract', () => {
       expect(await host.tail(port, `${root}/missing.jsonl`)).toBeUndefined()
     })
 
-    test(`${one.platform}: createFile and the directories a fresh environment and a launch need`, async () => {
+    test(`${one.name}: createFile and the directories a fresh environment and a launch need`, async () => {
       const m = machine(one.env)
       const port = portOf(m, runs)
       await host.createFile(port, `${root}/orch/task-queue.json`, '{"tasks":[]}\n')
@@ -255,7 +277,7 @@ describe('host contract', () => {
       expect(typeof (await host.makeDir(port, runs))).toBe('boolean')
     })
 
-    test(`${one.platform}: probe, then findNewWorker finds the new headless worker and not a known one`, async () => {
+    test(`${one.name}: probe, then findNewWorker finds the new headless worker and not a known one`, async () => {
       const port = portOf(machine(one.env), runs)
       const facts = await host.probe(port, [{ session_id: SID, config_dir: `${root}/cfg` }], [`${root}/cfg`])
       expect(facts.claude.map(proc => proc.pid)).toEqual([4242])
@@ -266,14 +288,14 @@ describe('host contract', () => {
       expect(await host.findNewWorker(port, facts, { ...want, model: 'sonnet' }, new Set(), NOW_MS)).toBeUndefined()
     })
 
-    test(`${one.platform}: pause waits the seconds asked`, async () => {
+    test(`${one.name}: pause waits the seconds asked`, async () => {
       const m = machine(one.env)
       await host.pause(portOf(m, runs), 2)
       const waited = m.sleeps.reduce((sum, ms) => sum + ms, 0) + m.runs.filter(argv => argv[0] === 'sleep').reduce((sum, argv) => sum + Number(argv[1]) * 1000, 0)
       expect(waited).toBe(2000)
     })
 
-    test(`${one.platform}: the launch: its paths, its checks, its facts, the picker and the command for the Bash tool`, async () => {
+    test(`${one.name}: the launch: its paths, its checks, its facts, the picker and the command for the Bash tool`, async () => {
       const m = machine(one.env)
       const port = portOf(m, runs)
       m.files.set(keyOf(`${root}/work/prompt.md`), 'Goal: x')
@@ -288,7 +310,7 @@ describe('host contract', () => {
       expect(command).toEndWith(`-- "$(cat '${root}/work/prompt.md')" > '${runs}/r.json' 2> '${runs}/r.err'`)
     })
 
-    test(`${one.platform}: rotate turns the trace into .1 and .1 into .2`, async () => {
+    test(`${one.name}: rotate turns the trace into .1 and .1 into .2`, async () => {
       const m = machine(one.env)
       const port = portOf(m, runs)
       const trace = `${runs}/trace.log`
@@ -296,6 +318,36 @@ describe('host contract', () => {
       m.files.set(keyOf(`${trace}.1`), 'mid\n')
       await host.rotate(port, { path: trace, adding: 10, keep: 3, maxBytes: 8, moves: [[`${trace}.1`, `${trace}.2`], [trace, `${trace}.1`]] })
       expect([at(m, trace), at(m, `${trace}.1`), at(m, `${trace}.2`)]).toEqual([undefined, 'new\n', 'mid\n'])
+    })
+
+    test(`${one.name}: rotateAndAppend rotates when a plan is given, then appends; without one it only appends`, async () => {
+      const m = machine(one.env)
+      const notes: string[] = []
+      const port = portOf(m, runs, notes)
+      const trace = `${runs}/trace.log`
+      m.files.set(keyOf(trace), 'new\n')
+      m.files.set(keyOf(`${trace}.1`), 'mid\n')
+      const plan = { path: trace, adding: 10, keep: 3, maxBytes: 8, moves: [[`${trace}.1`, `${trace}.2`], [trace, `${trace}.1`]] as [string, string][] }
+      expect(await host.rotateAndAppend(port, trace, ['{"a":1}'], plan)).toBeUndefined()
+      expect([at(m, trace), at(m, `${trace}.1`), at(m, `${trace}.2`)]).toEqual(['{"a":1}\n', 'new\n', 'mid\n'])
+      expect(await host.rotateAndAppend(port, trace, ['{"b":2}'])).toBeUndefined()
+      expect([at(m, trace), at(m, `${trace}.1`)]).toEqual(['{"a":1}\n{"b":2}\n', 'new\n'])
+      expect(notes).toEqual([])
+    })
+
+    test(`${one.name}: no operation falls back (the helper, where there is one, answers every call)`, async () => {
+      const m = machine(one.env)
+      const notes: string[] = []
+      const port = portOf(m, runs, notes)
+      m.files.set(keyOf(`${root}/orch/reg.json`), '[]\n')
+      m.files.set(keyOf(`${root}/t.jsonl`), 'a\n')
+      await host.probe(port, [], [])
+      await host.writeAtomic(port, `${root}/orch/reg.json`, '[1]\n', '[]\n')
+      await host.append(port, `${runs}/log`, ['x'], false, () => undefined)
+      await host.tail(port, `${root}/t.jsonl`)
+      expect(notes).toEqual([])
+      const isHelped = one.name.endsWith('with the helper')
+      expect(m.runs.some(argv => argv[0] === NODE && argv[1] === HELPER)).toBe(isHelped)
     })
   }
 })

@@ -7,7 +7,7 @@ import type { SessionEntry } from '../types'
 import { findNewWorker, isDefaultConfigDir, defaultConfigDir, parseProcFacts, probeArgs, transcriptPath } from './core'
 import type { LaunchArgs, ProcFacts } from './core'
 import type { Host, HostPort, RotatePlan, WorkerWant } from './host'
-import { bashLaunchCommand, writeAtomicWith } from './host-shared'
+import { bashLaunchCommand, rotateAndAppendWith, writeAtomicWith } from './host-shared'
 import { dirOf } from './store'
 
 /**
@@ -154,4 +154,5 @@ export const posixHost: Host = {
     const ran = await port.run(argv, { timeoutMs: 10_000 }, true)
     if (ran.exitCode !== 0) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
   },
+  rotateAndAppend: (port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan) => rotateAndAppendWith(posixHost, port, path, lines, rotation),
 }
