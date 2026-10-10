@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, ProcessRunInit, ProcessRunResult, Register } from 'claude-code'
 
 import type { SessionEntry, SessionOutcome } from '../types'
 import { DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, editOpenPoints, editQueue } from './bookkeeping'
 import type { Edit } from './bookkeeping'
 import { backupName, dirOf, freshText, localDate, tmpPath } from './store'
+import { ROTATE_SCRIPT, TRACE_FILE, TRACE_KEEP, chunkLines, isTraceSwitch, needsRotation, rotationMoves, shownArgv, traceLine, utf8Bytes } from './trace'
 import {
   APPEND_SCRIPT,
   FILES_PS1,
@@ -95,6 +96,7 @@ type Config = {
   pollMs: number
   runsDir: string
   licencePickCommand: string
+  debug: boolean
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -105,6 +107,7 @@ let config: Config = {
   pollMs: 5000,
   runsDir: '~/.claude/session-control/runs',
   licencePickCommand: '',
+  debug: false,
 }
 let isActive = false
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
@@ -116,6 +119,18 @@ let isPolling = false
 let lastError: string | undefined
 let isDirectWriteNoted = false
 const harvested = new Set<string>()
+
+// The debug trace (the debug option or SESSION_CONTROL_DEBUG): lines wait here until the hook that made them ends or
+// the next poll tick, whichever comes first. Off, every trace call returns at its first check.
+type TraceEntry = { seq: number; at?: number; stamp: Promise<void>; event: string; fields: Record<string, unknown> }
+let isTracing = false
+let traceSeq = 0
+let traceRenders = 0
+let traceFile: string | undefined
+let traceBytes: number | undefined
+let isTraceFlushing = false
+let isTraceFailNoted = false
+const traceBuffer: TraceEntry[] = []
 
 // The validator requires `$` to be handed only to functions declared at the
 // top of the file, so every helper that touches `$` lives here.
@@ -134,6 +149,130 @@ function isSame(a: unknown, b: unknown, ignore?: string): boolean {
 /** A tool call's input as a plain record. */
 const plain = (e: unknown) => e as Record<string, unknown>
 
+/** An error's message, for a trace line. */
+const errorText = (err: unknown) => (err instanceof Error ? err.message : String(err)).slice(0, 300)
+
+/** Records one trace line; off, it returns at its first check. The time is asked now and waited for at the flush. */
+function trace($: EngineInterface, event: string, fields: Record<string, unknown> = {}): void {
+  if (!isTracing) return
+  const entry: TraceEntry = { seq: ++traceSeq, event, fields, stamp: Promise.resolve() }
+  try {
+    entry.stamp = $.clock.now().then(
+      ms => {
+        entry.at = ms
+      },
+      () => undefined,
+    )
+  } catch {
+    // the line keeps no time
+  }
+  traceBuffer.push(entry)
+}
+
+/** A caught error, traced with where it was caught. */
+function traceError($: EngineInterface, where: string, err: unknown): void {
+  if (!isTracing) return
+  trace($, 'error', { where, message: errorText(err) })
+}
+
+/** `$.process.run`; with the trace on also a line: the argv as shownArgv shows it, the exit code, the time taken, the start of stderr. */
+async function run($: EngineInterface, argv: readonly string[], init?: ProcessRunInit, isQuiet = false): Promise<ProcessRunResult> {
+  if (!isTracing || isQuiet) return $.process.run(argv, init)
+  const now = () => $.clock.now().catch(() => 0)
+  const startedAt = await now()
+  try {
+    const ran = await $.process.run(argv, init)
+    const stderr = ran.stderr === '' ? {} : { stderr: ran.stderr.slice(0, 200) }
+    trace($, 'process.run', { argv: shownArgv(argv), exitCode: ran.exitCode, ms: (await now()) - startedAt, ...stderr })
+    return ran
+  } catch (err) {
+    trace($, 'process.run', { argv: shownArgv(argv), ms: (await now()) - startedAt, error: errorText(err) })
+    throw err
+  }
+}
+
+/** `$.fs.write`; with the trace on also a line with the path and the byte count. */
+async function write($: EngineInterface, path: string, text: string, isQuiet = false): Promise<void> {
+  if (!isTracing || isQuiet) return $.fs.write(path, text)
+  try {
+    await $.fs.write(path, text)
+    trace($, 'fs.write', { path, bytes: utf8Bytes(text) })
+  } catch (err) {
+    trace($, 'fs.write', { path, bytes: utf8Bytes(text), error: errorText(err) })
+    throw err
+  }
+}
+
+/**
+ * Writes the buffered trace lines; a flush already running takes the lines that arrive meanwhile. A failure is
+ * swallowed and toasted once: the trace never stops the mod.
+ */
+async function flushTrace($: EngineInterface): Promise<void> {
+  if (!isTracing || isTraceFlushing || traceBuffer.length === 0) return
+  isTraceFlushing = true
+  try {
+    while (traceBuffer.length > 0) {
+      const entries = traceBuffer.splice(0)
+      await Promise.all(entries.map(entry => entry.stamp))
+      const lines = entries.map(entry => traceLine(entry.seq, entry.at ?? 0, entry.event, entry.fields))
+      const problem = await writeTrace($, lines).catch((err: unknown) => errorText(err))
+      if (problem !== undefined && !isTraceFailNoted) {
+        isTraceFailNoted = true
+        $.ui.toast(`session-control: the debug trace cannot be written (${problem.slice(0, 200)}); the mod goes on without it`, { timeoutMs: 10000 })
+      }
+    }
+  } catch {
+    // never let the trace break a hook
+  } finally {
+    isTraceFlushing = false
+  }
+}
+
+/** Appends lines to trace.log in the runs directory, rotating it first when it would grow past its limit. */
+async function writeTrace($: EngineInterface, lines: readonly string[]): Promise<string | undefined> {
+  const path = traceFile ?? (traceFile = `${await runsPath($)}/${TRACE_FILE}`)
+  for (const chunk of chunkLines(lines)) {
+    const adding = utf8Bytes(chunk.join('\n')) + 1
+    if (traceBytes === undefined) traceBytes = (await $.fs.stat(path).catch(() => undefined))?.size ?? 0
+    if (needsRotation(traceBytes, adding)) {
+      await rotateTrace($, path)
+      traceBytes = 0
+    }
+    let problem = await appendLog($, path, chunk, true)
+    // Outside the orchestrator directory nothing may have made the runs directory yet (Windows' append makes it).
+    if (problem !== undefined && !(await isWindows($))) {
+      await $.process.run(['mkdir', '-p', dirOf(path)], { timeoutMs: 5_000 })
+      problem = await appendLog($, path, chunk, true)
+    }
+    if (problem !== undefined) return problem
+    traceBytes += adding
+  }
+  return undefined
+}
+
+/** Rotates the trace: ROTATE_SCRIPT on Linux; on Windows each rename of rotationMoves by the file script. */
+async function rotateTrace($: EngineInterface, path: string): Promise<void> {
+  if (!(await isWindows($))) {
+    const ran = await $.process.run(['sh', '-c', ROTATE_SCRIPT, 'session-trace', path, String(TRACE_KEEP - 1)], { timeoutMs: 10_000 })
+    if (ran.exitCode !== 0) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
+    return
+  }
+  for (const [from, to] of rotationMoves(path)) {
+    if (!(await $.fs.exists(from).catch(() => false))) continue
+    const ran = await runScript($, 'files.ps1', FILES_PS1, ['move', from, to], 10_000, true)
+    if (ran.exitCode !== 0) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`)
+  }
+}
+
+/** Runs a hook's work and then writes the trace lines it made. */
+async function traced<T>($: EngineInterface, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work()
+  } finally {
+    await flushTrace($)
+  }
+}
+
 // Native Windows takes its own branch of each machine call below; anything else, WSL included, takes the Linux one,
 // whose commands stay what they were.
 
@@ -149,16 +288,16 @@ async function powershell($: EngineInterface): Promise<string> {
 }
 
 /** One of the mod's PowerShell scripts in the runs directory, written when it is not there as it should be (which makes the directory). */
-async function ensureScript($: EngineInterface, name: string, text: string): Promise<string> {
+async function ensureScript($: EngineInterface, name: string, text: string, isQuiet = false): Promise<string> {
   const path = `${await runsPath($)}/${name}`
-  if ((await $.fs.read(path).catch(() => undefined)) !== text) await $.fs.write(path, text)
+  if ((await $.fs.read(path).catch(() => undefined)) !== text) await write($, path, text, isQuiet)
   return path
 }
 
 /** Runs one of the mod's PowerShell scripts with -File: its text never crosses a command line. */
-async function runScript($: EngineInterface, name: string, text: string, args: readonly string[], timeoutMs = 10_000) {
-  const path = await ensureScript($, name, text)
-  return $.process.run([await powershell($), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path, ...args], { timeoutMs })
+async function runScript($: EngineInterface, name: string, text: string, args: readonly string[], timeoutMs = 10_000, isQuiet = false) {
+  const path = await ensureScript($, name, text, isQuiet)
+  return run($, [await powershell($), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path, ...args], { timeoutMs }, isQuiet)
 }
 
 async function homeDir($: EngineInterface): Promise<string> {
@@ -190,7 +329,7 @@ async function readRegistryText($: EngineInterface): Promise<string> {
  */
 async function writeAtomic($: EngineInterface, path: string, text: string, expected?: string): Promise<boolean> {
   const tmp = tmpPath(path, await $.clock.now())
-  await $.fs.write(tmp, text)
+  await write($, tmp, text)
   if (expected !== undefined && (await $.fs.read(path).catch(() => undefined)) !== expected) {
     await removeFile($, tmp)
     return false
@@ -200,12 +339,15 @@ async function writeAtomic($: EngineInterface, path: string, text: string, expec
 }
 
 /** Removes a file: `rm -f` on Linux; on Windows the file script, best effort. Answers whether it went. */
-async function removeFile($: EngineInterface, path: string): Promise<boolean> {
+async function removeFile($: EngineInterface, path: string, isQuiet = false): Promise<boolean> {
   if (await isWindows($)) {
-    const ran = await runScript($, 'files.ps1', FILES_PS1, ['remove', path]).catch(() => undefined)
+    const ran = await runScript($, 'files.ps1', FILES_PS1, ['remove', path], 10_000, isQuiet).catch((err: unknown) => {
+      if (!isQuiet) traceError($, 'remove', err)
+      return undefined
+    })
     return ran?.exitCode === 0
   }
-  await $.process.run(['rm', '-f', path], { timeoutMs: 5_000 })
+  await run($, ['rm', '-f', path], { timeoutMs: 5_000 }, isQuiet)
   return true
 }
 
@@ -216,16 +358,19 @@ async function removeFile($: EngineInterface, path: string): Promise<boolean> {
  */
 async function renameOver($: EngineInterface, tmp: string, path: string, text: string): Promise<void> {
   if (!(await isWindows($))) {
-    const ran = await $.process.run(['mv', '-f', tmp, path], { timeoutMs: 5_000 })
+    const ran = await run($, ['mv', '-f', tmp, path], { timeoutMs: 5_000 })
     if (ran.exitCode !== 0) throw new Error(`rename failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
     return
   }
-  const ran = await runScript($, 'files.ps1', FILES_PS1, ['move', tmp, path]).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
+  const ran = await runScript($, 'files.ps1', FILES_PS1, ['move', tmp, path]).catch((err: unknown) => {
+    traceError($, 'rename', err)
+    return { exitCode: -1, stderr: String(err) }
+  })
   if (ran.exitCode === 0) return
-  await $.fs.write(path, text)
+  await write($, path, text)
   // The script's own remove; when that cannot run either, $.fs (which cannot remove) empties the temp file instead.
   const isRemoved = await removeFile($, tmp)
-  if (!isRemoved) await $.fs.write(tmp, '')
+  if (!isRemoved) await write($, tmp, '')
   if (!isDirectWriteNoted) {
     isDirectWriteNoted = true
     const leftover = isRemoved ? '' : `; the temp file ${tmp} could not be removed and was emptied`
@@ -251,6 +396,7 @@ async function editRegistry($: EngineInterface, edit: (text: string) => Promise<
     try {
       if (await writeAtomic($, path, edited.text, text)) return undefined
     } catch (err) {
+      traceError($, 'registry write', err)
       return String(err)
     }
   }
@@ -261,23 +407,28 @@ async function editRegistry($: EngineInterface, edit: (text: string) => Promise<
  * Appends lines to a log file without reading it, so a log of any size takes them: APPEND_SCRIPT on Linux; on
  * Windows the lines go to a file of their own, which the file script appends and removes. Answers what went wrong.
  */
-async function appendLog($: EngineInterface, path: string, lines: readonly string[]): Promise<string | undefined> {
+async function appendLog($: EngineInterface, path: string, lines: readonly string[], isQuiet = false): Promise<string | undefined> {
+  const traceAppend = (exitCode: number) => {
+    if (isTracing && !isQuiet) trace($, 'fs.append', { path, bytes: utf8Bytes(lines.join('\n')) + 1, lines: lines.length, exitCode })
+  }
   if (!(await isWindows($))) {
-    const ran = await $.process.run(['sh', '-c', APPEND_SCRIPT, 'session-log', lines.join('\n'), path], { timeoutMs: 10_000 })
+    const ran = await run($, ['sh', '-c', APPEND_SCRIPT, 'session-log', lines.join('\n'), path], { timeoutMs: 10_000 }, isQuiet)
+    traceAppend(ran.exitCode)
     return ran.exitCode === 0 ? undefined : `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`
   }
   const added = `${path}.add.${await $.clock.now()}`
-  await $.fs.write(added, lines.map(line => `${line}\n`).join(''))
-  const ran = await runScript($, 'files.ps1', FILES_PS1, ['append', added, path]).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
+  await write($, added, lines.map(line => `${line}\n`).join(''), isQuiet)
+  const ran = await runScript($, 'files.ps1', FILES_PS1, ['append', added, path], 10_000, isQuiet).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
+  traceAppend(ran.exitCode)
   if (ran.exitCode === 0) return undefined
-  await removeFile($, added)
+  await removeFile($, added, isQuiet)
   return `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`
 }
 
 /** Backups are written once per file, tool and day, before the first change of that day. */
 async function backupOnce($: EngineInterface, file: string, tool: string, today: string, text: string): Promise<void> {
   const backup = orchPath(`backups/${backupName(file, tool, today)}`)
-  if ((await $.fs.read(backup).catch(() => undefined)) === undefined) await $.fs.write(backup, text)
+  if ((await $.fs.read(backup).catch(() => undefined)) === undefined) await write($, backup, text)
 }
 
 /** A missing helper file is created from scratch, with its directory; an existing file is never touched. */
@@ -287,12 +438,12 @@ async function ensureFile($: EngineInterface, path: string, file: string): Promi
   if ((await $.fs.read(path).catch(() => undefined)) !== undefined) return
   if (await isWindows($)) {
     // $.fs.write makes the directories; a file that is there but cannot be read is left alone.
-    if (!(await $.fs.exists(path).catch(() => true))) await $.fs.write(path, initial)
+    if (!(await $.fs.exists(path).catch(() => true))) await write($, path, initial)
     return
   }
-  if ((await $.process.run(['test', '-e', path], { timeoutMs: 5_000 })).exitCode === 0) return
-  await $.process.run(['mkdir', '-p', dirOf(path)], { timeoutMs: 5_000 })
-  await $.fs.write(path, initial)
+  if ((await run($, ['test', '-e', path], { timeoutMs: 5_000 })).exitCode === 0) return
+  await run($, ['mkdir', '-p', dirOf(path)], { timeoutMs: 5_000 })
+  await write($, path, initial)
 }
 
 /** Fresh environment: the helper files, the backup directory and the runs directory exist before anything reads them. */
@@ -303,7 +454,7 @@ async function ensureHelperFiles($: EngineInterface): Promise<void> {
   await ensureFile($, await registryPath($), 'headless-sessions.json')
   // On Windows writing the file script makes the runs directory; the backups directory comes with the first backup.
   if (await isWindows($)) await ensureScript($, 'files.ps1', FILES_PS1)
-  else await $.process.run(['mkdir', '-p', orchPath('backups'), await runsPath($)], { timeoutMs: 5_000 })
+  else await run($, ['mkdir', '-p', orchPath('backups'), await runsPath($)], { timeoutMs: 5_000 })
 }
 
 /**
@@ -316,7 +467,7 @@ async function probe($: EngineInterface, entries: readonly SessionEntry[], confi
     if (ran.exitCode !== 0) throw new Error(`the process probe failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 160)}`)
     return parseProcFacts(ran.stdout.replace(/\r/g, ''))
   }
-  const ran = await $.process.run(['sh', '-c', PROBE_SCRIPT, 'session-probe', ...probeArgs(entries)], {
+  const ran = await run($, ['sh', '-c', PROBE_SCRIPT, 'session-probe', ...probeArgs(entries)], {
     timeoutMs: 10_000,
   })
   return parseProcFacts(ran.stdout)
@@ -349,6 +500,7 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   const resultText = await $.fs.read(entry.result_file).catch(() => '')
   const outcome: SessionOutcome = classifyResult(resultText, taskStatus)
   harvested.add(key)
+  trace($, 'completion', { session_id: sid, pid: entry.pid, outcome: outcome.kind, isWritten: config.completionWrites })
   const label = `${entry.title ?? sid.slice(0, 8)}: ${outcome.summary}`
   if (config.completionWrites) {
     // Read again right before writing, so the window against the licence
@@ -401,6 +553,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined): Promi
 function noteError($: EngineInterface, error: string | undefined): void {
   if (error === lastError) return
   lastError = error
+  if (error !== undefined) trace($, 'error', { where: 'panel', message: error })
   if (error !== undefined) $.ui.toast(`session-control: ${error}`, { timeoutMs: 10000 })
 }
 
@@ -415,6 +568,7 @@ async function refresh($: EngineInterface, taskStatus?: string): Promise<void> {
   try {
     await gather($, taskStatus)
   } catch (err) {
+    traceError($, 'refresh', err)
     await showError($, String(err).slice(0, 200), await $.clock.now())
   } finally {
     isBusy = false
@@ -445,18 +599,34 @@ async function refreshWatch($: EngineInterface): Promise<void> {
  */
 async function transcriptTail($: EngineInterface, path: string): Promise<string | undefined> {
   if (!(await isWindows($))) {
-    const ran = await $.process.run(['sh', '-c', 'tail -n 600 "$1" | cut -c1-20000', 'session-tail', path], { timeoutMs: 5_000 })
+    const ran = await run($, ['sh', '-c', 'tail -n 600 "$1" | cut -c1-20000', 'session-tail', path], { timeoutMs: 5_000 })
     return ran.exitCode === 0 ? ran.stdout : undefined
   }
   const text = await $.fs.read(path).catch(() => undefined)
   if (text !== undefined) return tailLines(text, 600, 20000)
-  const ran = await runScript($, 'files.ps1', FILES_PS1, ['tail', path, '600', '20000']).catch(() => undefined)
+  const ran = await runScript($, 'files.ps1', FILES_PS1, ['tail', path, '600', '20000']).catch((err: unknown) => {
+    traceError($, 'transcript tail', err)
+    return undefined
+  })
   return ran?.exitCode === 0 ? ran.stdout : undefined
 }
 
 function tick($: EngineInterface): void {
-  void refresh($)
-  void refreshWatch($)
+  if (!isTracing) {
+    void refresh($)
+    void refreshWatch($)
+    return
+  }
+  void tracedTick($)
+}
+
+/** A poll tick with the trace on: its line, the renders counted since the last one, then the lines the tick made. */
+async function tracedTick($: EngineInterface): Promise<void> {
+  if (traceRenders > 0) trace($, 'ui.render', { count: traceRenders })
+  traceRenders = 0
+  trace($, 'poll.tick')
+  await Promise.allSettled([refresh($), refreshWatch($)])
+  await flushTrace($)
 }
 
 /** One edit of a helper file: read, back up once per day, write; open points also rotate into the archive. */
@@ -482,7 +652,7 @@ async function editHelper(
       await ensureFile($, archive, 'open-points-archive.md')
       const old = await $.fs.read(archive).catch(() => undefined)
       if (old === undefined) return { deny: `${PLUGIN}: open-points-archive.md cannot be read; nothing written` }
-      await $.fs.write(archive, old + edited.archive)
+      await write($, archive, old + edited.archive)
     }
     if (await writeAtomic($, path, edited.text, text)) {
       await refresh($)
@@ -504,6 +674,7 @@ async function acknowledge($: EngineInterface, ids: readonly string[], keep: boo
     else if (rowStatus(entry, reg.facts) === 'alive') refused.push(`${id.slice(0, 8)} (its process is alive)`)
     else done.push(entry.session_id)
   }
+  trace($, 'guard', { tool: 'acknowledge_workers', done, refused, keep })
   if (done.length > 0) {
     const failed = await editRegistry($, async text => ackEntries(text, done, keep))
     if (failed !== undefined) return { deny: `${PLUGIN}: ${writeFailed(failed)}` }
@@ -518,6 +689,7 @@ async function retire($: EngineInterface, ids: readonly string[]) {
   if ('deny' in reg) return reg
   const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => '')
   const verdict = retireVerdict(reg.entries, reg.facts, queueText, ids)
+  trace($, 'guard', { tool: 'retire_workers', removable: verdict.removable, refused: verdict.refused })
   if (verdict.removable.length > 0) {
     const log = `${await runsPath($)}/cleared.jsonl`
     // The removed entries are logged before the registry is written; a second attempt logs only what is new.
@@ -560,10 +732,13 @@ async function launch($: EngineInterface, given: LaunchArgs) {
     const argv = pickArgv(picker, args.need ?? 40, home)
     if (isWin) {
       const refusal = windowsPickerRefusal(argv)
-      if (refusal !== undefined) return { deny: `${PLUGIN}: ${refusal}` }
+      if (refusal !== undefined) {
+        trace($, 'guard', { tool: 'launch_worker', isOk: false, reason: refusal })
+        return { deny: `${PLUGIN}: ${refusal}` }
+      }
       argv[0] = winPath(argv[0] ?? '')
     }
-    pick = await $.process.run(argv, { timeoutMs: 20_000 })
+    pick = await run($, argv, { timeoutMs: 20_000 })
   }
   const verdict = checkLaunch(args, {
     home,
@@ -577,6 +752,7 @@ async function launch($: EngineInterface, given: LaunchArgs) {
     missingItems: promptText === undefined ? undefined : missingPromptItems(promptText),
     ...(isWin ? { isWindows: true, promptChars: promptText?.length, promptLead: promptText?.slice(0, 200) } : {}),
   })
+  trace($, 'guard', verdict.ok ? { tool: 'launch_worker', isOk: true, configDir: verdict.configDir, resumeSid: verdict.resumeSid } : { tool: 'launch_worker', isOk: false, reason: verdict.reason })
   if (!verdict.ok) return { deny: `${PLUGIN}: ${verdict.reason}` }
   return spawnWorker($, args, verdict, reg.entries, reg.facts)
 }
@@ -588,15 +764,15 @@ async function launchChecks($: EngineInterface, args: LaunchArgs, isWin: boolean
     const dir = await $.fs.stat(args.dir).catch(() => undefined)
     return { promptFileOk: prompt?.kind === 'file' && prompt.size > 0, dirOk: dir?.kind === 'dir' }
   }
-  const promptCheck = await $.process.run(['test', '-s', args.prompt_file], { timeoutMs: 5_000 })
-  const dirCheck = await $.process.run(['test', '-d', args.dir], { timeoutMs: 5_000 })
+  const promptCheck = await run($, ['test', '-s', args.prompt_file], { timeoutMs: 5_000 })
+  const dirCheck = await run($, ['test', '-d', args.dir], { timeoutMs: 5_000 })
   return { promptFileOk: promptCheck.exitCode === 0, dirOk: dirCheck.exitCode === 0 }
 }
 
 /** Waits a few seconds: `sleep` on Linux, the engine's clock on Windows, which has no sleep to start. */
 async function pause($: EngineInterface, seconds: number): Promise<void> {
   if (await isWindows($)) await $.clock.sleep(seconds * 1000)
-  else await $.process.run(['sleep', String(seconds)], { timeoutMs: 5_000 })
+  else await run($, ['sleep', String(seconds)], { timeoutMs: 5_000 })
 }
 
 /** Start the worker as a background Bash task, find its real pid and session, register it. */
@@ -611,13 +787,14 @@ async function spawnWorker(
   const runsDir = await runsPath($)
   // The launch's redirections need the runs directory: mkdir on Linux; on Windows writing the file script makes it.
   if (isWin) await ensureScript($, 'files.ps1', FILES_PS1)
-  else await $.process.run(['mkdir', '-p', runsDir], { timeoutMs: 5_000 })
+  else await run($, ['mkdir', '-p', runsDir], { timeoutMs: 5_000 })
   const stamp = new Date(await $.clock.now()).toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const base = `${runsDir}/${stamp}-${slugify(args.title)}`
   const files = { result: `${base}.json`, err: `${base}.err` }
   const command = buildLaunchArgv(args, verdict, files.result, files.err)[2] ?? ''
   const known = new Set(before.claude.map(one => one.pid))
   const launchedAt = await $.clock.now()
+  trace($, 'worker.start', { title: args.title, configDir: verdict.configDir, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
   // The engine's own background task: its exit notification reaches the session.
   await $.tool.call({
     tool: 'Bash',
@@ -634,6 +811,7 @@ async function spawnWorker(
     worker = isWin ? findNewWindowsWorker(facts, want, known, ((await $.clock.now()) - launchedAt) / 1000) : findNewWorker(facts, want, known)
   }
   if (worker === undefined) {
+    trace($, 'worker.missing', { title: args.title, seconds: 30 })
     return { result: `Started in the background but no claude process appeared within 30 s; check ${files.err}. Not registered.` }
   }
   // The engine writes the session file shortly after the process starts: read it again until it is there.
@@ -652,11 +830,13 @@ async function spawnWorker(
     if (sessionId !== '') break
     await pause($, 1)
   }
+  trace($, 'worker.found', { pid: worker.pid, sessionId })
   if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
   const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files)
   // A missing registry starts as an empty one, as REGISTER_SCRIPT starts it.
   const failed = await editRegistry($, async text => registerEntry(text, entry, verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
   const note = failed === undefined ? 'registered' : writeFailed(failed)
+  trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, ...(failed === undefined ? {} : { reason: failed }) })
   await refresh($)
   return {
     result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Result: ${files.result}; errors: ${files.err}.`,
@@ -707,6 +887,70 @@ async function activate($: EngineInterface): Promise<void> {
   await refresh($)
 }
 
+/** session.start: register the command; in the orchestrator directory turn the board on. */
+async function startSession($: EngineInterface, sessionCwd: string): Promise<void> {
+  // /session-control is registered everywhere; the board starts by itself only in the orchestrator dir.
+  await $.command.register({
+    name: 'session-control',
+    description: 'Session-control panel: open or close the side panel (sessions, queued work, open points)',
+  })
+  // Without the option, the orchestrator directory is the one whose CLAUDE.md is the orchestrator's.
+  // On Windows both are taken in the native form and compared as Windows compares paths.
+  const isWin = await isWindows($)
+  const cwd = isWin ? winPath(sessionCwd) : sessionCwd.replace(/\/+$/, '')
+  if (config.orchestratorDir === '' && (await $.fs.read(`${cwd}/CLAUDE.md`).catch(() => '')).startsWith(ORCHESTRATOR_HEADING)) {
+    config.orchestratorDir = cwd
+  }
+  if (isWin && config.orchestratorDir !== '') config.orchestratorDir = winPath(config.orchestratorDir)
+  const isHere = isWin ? isSameWinPath(cwd, config.orchestratorDir) : cwd === config.orchestratorDir.replace(/\/+$/, '')
+  if (isTracing) {
+    const { pollMs, registrySetting, ...rest } = config
+    const options = { ...rest, registryPath: registrySetting, pollSeconds: pollMs / 1000 }
+    trace($, 'session.start', { cwd, platform: isWin ? 'windows' : 'linux', isOrchestratorDir: config.orchestratorDir !== '' && isHere, options })
+  }
+  if (config.orchestratorDir !== '' && isHere) await activate($)
+}
+
+/** /session-control: refused outside an orchestrator directory; else the board on and the panel shown or hidden. */
+async function togglePanel($: EngineInterface): Promise<{ text: string }> {
+  trace($, 'command.run', { command: 'session-control' })
+  if (config.orchestratorDir === '') {
+    trace($, 'guard', { command: 'session-control', isOk: false, reason: 'not an orchestrator directory and no orchestratorDir option' })
+    return { text: `session-control: this directory is not an orchestrator directory (its CLAUDE.md does not start with "${ORCHESTRATOR_HEADING}") and no orchestratorDir option is set.` }
+  }
+  await activate($)
+  const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
+  if (isUp) {
+    await $.ui.close({ id: PANE })
+    await update($, selected, () => null)
+    trace($, 'panel', { isShown: false })
+    return { text: 'Session-control panel hidden, session-control stays on.' }
+  }
+  await refresh($)
+  const opened = await $.ui.open({ id: PANE, title: 'Session control' })
+  trace($, 'panel', { isShown: true, isPlaced: opened.isPlaced })
+  return { text: opened.isPlaced ? 'Session-control panel opened.' : `Session-control panel waits: ${opened.reason}` }
+}
+
+/**
+ * A tool hook's work: the call's line with the named fields of its input, the work, the answer's line (the refusal or
+ * the mod's own result text), then the lines written.
+ */
+async function tracedTool<T extends object>($: EngineInterface, tool: string, e: unknown, fields: readonly string[], work: () => Promise<T>): Promise<T> {
+  if (isTracing) trace($, 'tool.call', { tool, ...pickFields(e, fields) })
+  return traced($, async () => {
+    const answer = await work()
+    if (isTracing) trace($, 'tool.result', { tool, ...('deny' in answer ? { deny: answer.deny } : 'result' in answer ? { result: answer.result } : {}) })
+    return answer
+  })
+}
+
+/** The fields of a tool call the trace shows: the named ones that are set, never free text. */
+function pickFields(e: unknown, names: readonly string[]): Record<string, unknown> {
+  const input = plain(e)
+  return Object.fromEntries(names.filter(name => input[name] !== undefined).map(name => [name, input[name]]))
+}
+
 export const register: Register = (on, options) => {
   isDirectWriteNoted = false
   config = {
@@ -716,45 +960,21 @@ export const register: Register = (on, options) => {
     pollMs: Math.max(1, Number(options.pollSeconds ?? 5)) * 1000,
     runsDir: String(options.runsDir ?? config.runsDir),
     licencePickCommand: String(options.licencePickCommand ?? ''),
+    debug: options.debug === true,
   }
+  isTracing = config.debug
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    // /session-control is registered everywhere; the board starts by itself only in the orchestrator dir.
-    await $.command.register({
-      name: 'session-control',
-      description: 'Session-control panel: open or close the side panel (sessions, queued work, open points)',
-    })
-    // Without the option, the orchestrator directory is the one whose CLAUDE.md is the orchestrator's.
-    // On Windows both are taken in the native form and compared as Windows compares paths.
-    const isWin = await isWindows($)
-    const cwd = isWin ? winPath(e.cwd) : e.cwd.replace(/\/+$/, '')
-    if (config.orchestratorDir === '' && (await $.fs.read(`${cwd}/CLAUDE.md`).catch(() => '')).startsWith(ORCHESTRATOR_HEADING)) {
-      config.orchestratorDir = cwd
-    }
-    if (isWin && config.orchestratorDir !== '') config.orchestratorDir = winPath(config.orchestratorDir)
-    const isHere = isWin ? isSameWinPath(cwd, config.orchestratorDir) : cwd === config.orchestratorDir.replace(/\/+$/, '')
-    if (config.orchestratorDir !== '' && isHere) await activate($)
+    // The trace is switched on at launch, by the debug option or by the environment.
+    if (!config.debug && isTraceSwitch(await $.env.get('SESSION_CONTROL_DEBUG'))) isTracing = true
+    await traced($, () => startSession($, e.cwd))
     return started
   })
 
   // /session-control shows or hides the panel. Either way the board is on (activate is idempotent): hiding the panel
   // stops no tracking, the report check or the poll.
-  on('command.run', { command: 'session-control' }, async ($) => {
-    if (config.orchestratorDir === '') {
-      return { text: `session-control: this directory is not an orchestrator directory (its CLAUDE.md does not start with "${ORCHESTRATOR_HEADING}") and no orchestratorDir option is set.` }
-    }
-    await activate($)
-    const isUp = (await $.ui.panes()).some(pane => pane.id === PANE)
-    if (isUp) {
-      await $.ui.close({ id: PANE })
-      await update($, selected, () => null)
-      return { text: 'Session-control panel hidden, session-control stays on.' }
-    }
-    await refresh($)
-    const opened = await $.ui.open({ id: PANE, title: 'Session control' })
-    return { text: opened.isPlaced ? 'Session-control panel opened.' : `Session-control panel waits: ${opened.reason}` }
-  })
+  on('command.run', { command: 'session-control' }, async ($) => traced($, () => togglePanel($)))
 
   // Completion: a background task's notification reaches the session.
   // After a compaction the summary replaces what the model knew: the next prompt
@@ -782,7 +1002,11 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (!isActive) return next(e)
+    trace($, 'prompt.submit', { origin: e.origin.kind })
+    if (!isActive) {
+      await flushTrace($)
+      return next(e)
+    }
     const extra: string[] = []
     if (e.origin.kind === 'task-notification') {
       await refresh($, parseTaskNotification(e.text).status)
@@ -798,6 +1022,7 @@ export const register: Register = (on, options) => {
       const [snap, list] = await Promise.all([read($, snapshot), read($, points)])
       extra.push(compactionDigest(snap?.rows ?? [], list, unackedPeers(await read($, ledger))))
     }
+    await flushTrace($)
     if (extra.length === 0) return next(e)
     return next({ ...e, context: [...(e.context ?? []), ...extra] })
   })
@@ -807,35 +1032,61 @@ export const register: Register = (on, options) => {
   on('classic.Stop', async ($, e, next) => {
     const done = await next(e)
     const answer = e.last_assistant_message ?? ''
-    if (!isActive || e.stop_hook_active || answer === '') return done
+    trace($, 'classic.Stop', { isChecked: isActive && !e.stop_hook_active && answer !== '' })
+    if (!isActive || e.stop_hook_active || answer === '') {
+      await flushTrace($)
+      return done
+    }
     const findings = lintReport(answer, { unackedPeers: unackedPeers(await read($, ledger)) })
+    if (findings.length > 0) trace($, 'guard', { check: 'report', isOk: false, findings })
+    await flushTrace($)
     if (findings.length === 0) return done
     return { ...done, block: `Report check failed: ${findings.join('; ')}. Resend the corrected report; say nothing about this check.` }
   })
 
   on('tool.call', { tool: POINT_TOOL }, ($, e) =>
-    editHelper($, 'open-points.json', 'open-point', (text, today) => editOpenPoints(text, plain(e), today)),
-  ).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: open_point failed` }))
+    tracedTool($, 'open_point', e, ['action', 'id'], () => editHelper($, 'open-points.json', 'open-point', (text, today) => editOpenPoints(text, plain(e), today))),
+  ).catch(($, e, next) => {
+    traceError($, 'open_point', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: open_point failed` }
+  })
 
   on('tool.call', { tool: QUEUE_TOOL }, ($, e) =>
-    editHelper($, 'task-queue.json', 'queue-task', text => editQueue(text, plain(e))),
-  ).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: queue_task failed` }))
+    tracedTool($, 'queue_task', e, ['action', 'id', 'status'], () => editHelper($, 'task-queue.json', 'queue-task', text => editQueue(text, plain(e)))),
+  ).catch(($, e, next) => {
+    traceError($, 'queue_task', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: queue_task failed` }
+  })
 
   on('tool.call', { tool: DECISION_TOOL }, ($, e) =>
-    editHelper($, 'agreed-decisions.md', 'record-decision', text => appendDecision(text, plain(e))),
-  ).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: record_decision failed` }))
+    tracedTool($, 'record_decision', e, ['section', 'id'], () => editHelper($, 'agreed-decisions.md', 'record-decision', text => appendDecision(text, plain(e)))),
+  ).catch(($, e, next) => {
+    traceError($, 'record_decision', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: record_decision failed` }
+  })
 
   on('tool.call', { tool: ACK_TOOL }, ($, e) => {
     const input = e as unknown as { session_ids?: unknown; keep?: unknown }
-    return acknowledge($, (input.session_ids as string[] | undefined) ?? [], input.keep === true)
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: acknowledge_workers failed` }))
+    return tracedTool($, 'acknowledge_workers', e, ['session_ids', 'keep'], () => acknowledge($, (input.session_ids as string[] | undefined) ?? [], input.keep === true))
+  }).catch(($, e, next) => {
+    traceError($, 'acknowledge_workers', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: acknowledge_workers failed` }
+  })
 
   on('tool.call', { tool: RETIRE_TOOL }, ($, e) => {
     const input = e as unknown as { session_ids?: unknown }
-    return retire($, (input.session_ids as string[] | undefined) ?? [])
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: retire_workers failed` }))
+    return tracedTool($, 'retire_workers', e, ['session_ids'], () => retire($, (input.session_ids as string[] | undefined) ?? []))
+  }).catch(($, e, next) => {
+    traceError($, 'retire_workers', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: retire_workers failed` }
+  })
 
-  on('tool.call', { tool: TOOL }, ($, e) => launch($, e as unknown as LaunchArgs)).catch(($, e, next) => (next.called ? next(e) : { deny: `${PLUGIN}: launch_worker guard failed` }))
+  // The launch's fields are paths, names and numbers; the prompt is in its file, which the trace never reads.
+  const LAUNCH_FIELDS = ['dir', 'prompt_file', 'model', 'effort', 'title', 'need', 'resume_sid', 'timeout_minutes'] as const
+  on('tool.call', { tool: TOOL }, ($, e) => tracedTool($, 'launch_worker', e, LAUNCH_FIELDS, () => launch($, e as unknown as LaunchArgs))).catch(($, e, next) => {
+    traceError($, 'launch_worker', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: launch_worker guard failed` }
+  })
 
   // A wheel tick over a box that has more rows scrolls that box. The panel itself scrolls only when the room is
   // too small to hold the three boxes at their minimum height (a pane seated low, inline).
@@ -855,6 +1106,7 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    if (isTracing) traceRenders++
     const { Box, Button, Text } = $.ui.resolve(e)
     const snap = await read($, snapshot)
     const columns = e.props.bodyColumns

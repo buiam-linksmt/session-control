@@ -42,6 +42,12 @@
       "title": "Licence picker command",
       "description": "Command that chooses the licence for a fresh worker launch. {need} is replaced by the headroom percent; a leading ~/ is expanded. It prints one absolute config directory and exits 0, or exits 3 when no licence has room. Empty: workers start with the machine's default config directory (~/.claude).",
       "default": ""
+    },
+    "debug": {
+      "type": "boolean",
+      "title": "Debug trace",
+      "description": "Write a JSON-lines trace of the mod's events, commands, file writes, verdicts and errors to trace.log in the runs directory (rotated at 2 MiB, 3 files kept; no file contents, prompts or credentials). The environment variable SESSION_CONTROL_DEBUG=1 switches it on too.",
+      "default": false
     }
   }
 }

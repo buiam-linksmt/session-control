@@ -6,6 +6,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { APPEND_SCRIPT, FILES_PS1, PROBE_PS1, PROBE_SCRIPT, REGISTER_SCRIPT, probeArgs } from '../hooks/core'
+import { ROTATE_SCRIPT, TRACE_MAX_BYTES, localIso } from '../hooks/trace'
 
 import {
   HOME,
@@ -41,6 +42,8 @@ type World = {
   /** Set once the fake worker "started": later probes show its process. */
   spawned: boolean
   writes: { path: string; text: string }[]
+  /** Paths the plugin read through $.fs.read, in order. */
+  reads: string[]
   toasts: string[]
   runs: string[][]
   registered: string[]
@@ -56,6 +59,9 @@ const UNREADABLE = new Set<string>()
 // Knobs of the Windows fixture: a failing move or probe; the config dir the probe finds the new worker's sessions
 // file in, or none (unplaced).
 const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false }
+// Knobs of the Linux fixture: a probe that cannot run; an append that fails.
+// A trace.log of traceSize bytes is there (0: none).
+const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0 }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
 /** The rows of the transcript tail the fixture serves. */
 const TAIL = [
@@ -81,7 +87,7 @@ const given = (path: string, isWin: boolean) => {
 }
 
 function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT, env: Record<string, string> = { HOME }): World {
-  const w: World = { bash: [], spawned: false, writes: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
+  const w: World = { bash: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
   mock.env(on, env)
   const isWin = env.OS === 'Windows_NT' && /^[A-Za-z]:[\\/]/.test(env.USERPROFILE ?? '')
   const seen = (path: string) => given(path, isWin)
@@ -97,6 +103,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   })
   on('fs.read', ($, e) => {
     const path = fixture(seen(e.path))
+    w.reads.push(seen(e.path))
     if (MISSING.has(path) || LATE.has(path)) throw new Error(`ENOENT ${e.path}`)
     if (UNREADABLE.has(path)) throw new Error(`EFBIG ${e.path}`)
     if (path === REGISTRY_PATH) return { value: registryText }
@@ -122,6 +129,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   on('fs.stat', ($, e) => {
     const path = fixture(seen(e.path))
     const stat = { size: 0, mtimeMs: NOW_MS, isLink: false }
+    if (path.endsWith('/trace.log') && LINUX_FIXTURE.traceSize > 0) return { value: { ...stat, kind: 'file', size: LINUX_FIXTURE.traceSize } }
     if (['/work/new/prompt.md', '/work/new/big.md'].includes(path)) return { value: { ...stat, kind: 'file', size: promptFileExists ? 100 : 0 } }
     if (['/work/new', '/work/orch', ORCH_DIR].includes(path)) return { value: { ...stat, kind: 'dir' } }
     throw new Error(`ENOENT ${e.path}`)
@@ -139,10 +147,12 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === 'sh' && e.argv[2] === REGISTER_SCRIPT) return { value: { ...ok, stdout: '' } }
     // An append is recorded as a write of what it adds.
     if (e.argv[0] === 'sh' && e.argv[2] === APPEND_SCRIPT) {
+      if (LINUX_FIXTURE.isAppendBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'sh: cannot create: Read-only file system' } }
       w.writes.push({ path: String(e.argv[5]), text: `${e.argv[4]}\n` })
       return { value: { ...ok, stdout: '' } }
     }
     if (e.argv[0] === 'sh' && e.argv[2] === PROBE_SCRIPT) {
+      if (LINUX_FIXTURE.isProbeBroken) throw new Error('the probe timed out')
       const worker = w.spawned
         ? `\nP\t7001\tclaude\t3\t/work/new\t/fixture/lic/a\tclaude -p --model opus --dangerously-skip-permissions --output-format json -- prompt\n`
         : ''
@@ -208,6 +218,23 @@ const stubPanel = (on: On) => {
 }
 const mountPane = ($: Parameters<Parameters<typeof test>[2]>[0]) =>
   $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: PANE_PROPS as never })
+
+const TRACE = `${HOME}/.claude/session-control/runs/trace.log`
+type TraceLine = Record<string, unknown>
+/** The trace lines the plugin appended to a trace file, parsed. */
+const traceOf = (w: World, path = TRACE): TraceLine[] =>
+  w.writes.filter(one => one.path === path).flatMap(one => one.text.trimEnd().split('\n')).map(line => JSON.parse(line) as TraceLine)
+/** Lines without their time and number (checked by themselves): each time is the fixture clock's at the line, the numbers count up from 1. */
+const bare = (lines: TraceLine[]): TraceLine[] => {
+  expect(lines.every(line => [0, 5000].some(later => line.ts === localIso(NOW_MS + later)))).toBe(true)
+  expect(lines.map(line => line.seq)).toEqual(lines.map((_, at) => at + 1))
+  return lines.map(line => Object.fromEntries(Object.entries(line).filter(([key]) => key !== 'ts' && key !== 'seq')))
+}
+/** The lines from the first one of an event on. */
+const from = (lines: TraceLine[], event: string) => lines.slice(lines.findIndex(line => line.event === event))
+/** A trace append or rotation: the commands the trace adds to what the mod runs. */
+const isTraceRun = (argv: readonly string[]) =>
+  (argv[2] === APPEND_SCRIPT && String(argv[5]).endsWith('/trace.log')) || argv[2] === ROTATE_SCRIPT || (argv[7] === 'append' && String(argv[9]).endsWith('/trace.log'))
 
 describe('scope', () => {
   test('a no-op outside the orchestrator dir', { options: OPTIONS }, async ($, on) => {
@@ -701,6 +728,25 @@ describe('platform', () => {
     })
   }
 
+  // The flow recorded with the trace off, for the test after it.
+  const recorded: { off?: { runs: string[][]; writes: World['writes']; reads: string[] } } = {}
+  test('Linux, the trace off: a launch, an acknowledgement and a retirement, recorded', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    expect(await flow($, w)).toEqual(LINUX)
+    recorded.off = { runs: w.runs, writes: w.writes, reads: w.reads }
+  })
+
+  test('Linux, the trace on: the same commands, writes and reads as with it off, less the trace appends', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
+    const w = world(on)
+    const runs = await flow($, w)
+    expect(runs.filter(isTraceRun).length).toBeGreaterThan(0)
+    expect(runs.filter(argv => !isTraceRun(argv))).toEqual(LINUX)
+    expect(recorded.off).toBeDefined()
+    expect(w.runs.filter(argv => !isTraceRun(argv))).toEqual(recorded.off?.runs ?? [])
+    expect(w.writes.filter(one => !one.path.endsWith('/trace.log'))).toEqual(recorded.off?.writes ?? [])
+    expect(w.reads).toEqual(recorded.off?.reads ?? [])
+  })
+
   const WINDOWS_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' }
   const WIN_OPTIONS = { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}` }
   const WIN_REGISTRY = `C:${REGISTRY_PATH}`
@@ -729,6 +775,30 @@ describe('platform', () => {
     await $.command.run({ command: 'session-control', args: '' } as never)
     const all = String(((await (await mountPane($)).findAll({}))[0] as { text?: string }).text ?? '')
     expect(all).toMatch(/alive worker\s+aaaaaaaa\s+running\s+opus\s+high\s+2m/)
+  })
+
+  test('Windows, the trace on: a poll tick with a failing probe writes its lines through the file script', { options: { ...WIN_OPTIONS, debug: true } }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const trace = `${WIN_RUNS}/trace.log`
+    expect(traceOf(w, trace)[0]).toMatchObject({ event: 'session.start', platform: 'windows' })
+    WINDOWS.isProbeBroken = true
+    try {
+      const before = traceOf(w, trace).length
+      await w.clock.advance(5000)
+      const message = 'the process probe failed (exit 1): Invalid class'
+      const probe = [POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT))]
+      expect(bare(traceOf(w, trace)).slice(before)).toEqual([
+        { event: 'poll.tick' },
+        { event: 'process.run', argv: probe, exitCode: 1, ms: 0, stderr: 'Invalid class' },
+        { event: 'error', where: 'refresh', message },
+        { event: 'error', where: 'panel', message: `Error: ${message}` },
+      ])
+      // Each flush is one append of the file script, from a file of its own.
+      expect(w.runs.filter(isTraceRun).every(argv => String(argv[8]).startsWith(`${trace}.add.`))).toBe(true)
+    } finally {
+      WINDOWS.isProbeBroken = false
+    }
   })
 
   test('Windows: a probe that fails is an error on the panel, and no worker is taken for dead', { options: WIN_OPTIONS }, async ($, on) => {
@@ -937,6 +1007,164 @@ describe('platform', () => {
       expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([`session-control: the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically`])
     } finally {
       WINDOWS.isMoveBroken = false
+    }
+  })
+})
+
+describe('debug trace', () => {
+  const args = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
+  const TRACED = { ...OPTIONS, debug: true }
+  const RUNS = `${HOME}/.claude/session-control/runs`
+  const tmp = `${REGISTRY_PATH}.tmp.${NOW_MS}`
+  const ran = (argv: string[], exitCode = 0) => ({ event: 'process.run', argv, exitCode, ms: 0 })
+  const PROBE = ran(['sh', '-c', '<PROBE_SCRIPT>', 'session-probe', ...probeArgs(JSON.parse(REGISTRY_TEXT))])
+  const registryWrite = (w: World) => ({ event: 'fs.write', path: tmp, bytes: w.writes.filter(one => one.path === tmp).at(-1)?.text.length })
+
+  test('a launch: the call, the probe, the checks, the verdict, the worker and its registration, the answer', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: TOOL, ...args } as never)
+    const stamp = new Date(NOW_MS).toISOString().replace(/[-:T]/g, '').slice(0, 14)
+    const sid = 'abcdabcd-0000-4000-8000-000000000001'
+    expect(from(bare(traceOf(w)), 'tool.call')).toEqual([
+      { event: 'tool.call', tool: 'launch_worker', ...args },
+      PROBE,
+      ran(['test', '-s', '/work/new/prompt.md']),
+      ran(['test', '-d', '/work/new']),
+      ran(['/fixture/bin/pick', '--need', '40']),
+      { event: 'guard', tool: 'launch_worker', isOk: true, configDir: '/fixture/lic/a' },
+      ran(['mkdir', '-p', RUNS]),
+      { event: 'worker.start', title: 'new', configDir: '/fixture/lic/a', resultFile: `${RUNS}/${stamp}-new.json`, errFile: `${RUNS}/${stamp}-new.err`, timeoutMs: 180 * 60_000 },
+      ran(['sleep', '2']),
+      PROBE,
+      { event: 'worker.found', pid: 7001, sessionId: sid },
+      registryWrite(w),
+      ran(['mv', '-f', tmp, REGISTRY_PATH]),
+      { event: 'worker.registered', pid: 7001, sessionId: sid, isRegistered: true },
+      PROBE,
+      { event: 'tool.result', tool: 'launch_worker', result: String(out.result) },
+    ])
+    // The trace is written in one append per hook: session.start's and the launch's.
+    expect(w.runs.filter(isTraceRun).length).toBe(2)
+  })
+
+  test('the start: platform, options and the activation, no environment', { options: TRACED }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SECRET_THING: 'sk-should-never-appear-1234' })
+    await $.session.start(start(ORCH_DIR))
+    const [first] = bare(traceOf(w))
+    expect(first).toEqual({
+      event: 'session.start',
+      cwd: ORCH_DIR,
+      platform: 'linux',
+      isOrchestratorDir: true,
+      options: { orchestratorDir: ORCH_DIR, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, pollSeconds: 5, runsDir: '~/.claude/session-control/runs', licencePickCommand: PICKER, debug: true },
+    })
+    expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"'))).toBe(false)
+  })
+
+  test('a refused launch: the verdict with its reason, and the refusal the model gets', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    await $.tool.call({ tool: TOOL, ...args, dir: ORCH_DIR } as never)
+    expect(from(bare(traceOf(w)), 'tool.call')).toEqual([
+      { event: 'tool.call', tool: 'launch_worker', ...args, dir: ORCH_DIR },
+      PROBE,
+      ran(['test', '-s', '/work/new/prompt.md']),
+      ran(['test', '-d', ORCH_DIR]),
+      ran(['/fixture/bin/pick', '--need', '40']),
+      { event: 'guard', tool: 'launch_worker', isOk: false, reason: 'refused: cwd is the orchestrator dir' },
+      { event: 'tool.result', tool: 'launch_worker', deny: 'session-control: refused: cwd is the orchestrator dir' },
+    ])
+  })
+
+  test('a retire: the verdict, the cleared-log append by size, the registry write, the answer', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['dddddddd'] } as never)
+    const doneLine = JSON.stringify(JSON.parse(REGISTRY_TEXT).find((one: { session_id?: string }) => one.session_id === SID_DONE))
+    expect(from(bare(traceOf(w)), 'tool.call')).toEqual([
+      { event: 'tool.call', tool: 'retire_workers', session_ids: ['dddddddd'] },
+      PROBE,
+      { event: 'guard', tool: 'retire_workers', removable: [SID_DONE], refused: [] },
+      ran(['sh', '-c', '<APPEND_SCRIPT>', 'session-log', `<${doneLine.length + 1} bytes>`, `${RUNS}/cleared.jsonl`]),
+      { event: 'fs.append', path: `${RUNS}/cleared.jsonl`, bytes: doneLine.length + 1, lines: 1, exitCode: 0 },
+      registryWrite(w),
+      ran(['mv', '-f', tmp, REGISTRY_PATH]),
+      PROBE,
+      { event: 'tool.result', tool: 'retire_workers', result: 'Retired: dddddddd.' },
+    ])
+    // The entry's content is in the cleared log, never in the trace.
+    expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('done worker'))).toBe(false)
+  })
+
+  test('a poll tick with a failing probe: the tick, the failed run, the error caught, the warning; renders are counted', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    stubPanel(on)
+    await $.session.start(start(ORCH_DIR))
+    await $.command.run({ command: 'session-control', args: '' } as never)
+    const ui = await mountPane($)
+    await ui.findAll({})
+    LINUX_FIXTURE.isProbeBroken = true
+    try {
+      const before = traceOf(w).length
+      await w.clock.advance(5000)
+      const tick = bare(traceOf(w)).slice(before)
+      // The kit rejects the run of a fixture hook that throws as having no implementation: that is what the mod sees.
+      const message = 'no implementation for process.run'
+      expect(tick).toEqual([
+        { event: 'ui.render', count: 1 },
+        { event: 'poll.tick' },
+        { event: 'process.run', argv: PROBE.argv, ms: 0, error: message },
+        { event: 'error', where: 'refresh', message },
+        { event: 'error', where: 'panel', message: `HooksError: ${message}` },
+      ])
+    } finally {
+      LINUX_FIXTURE.isProbeBroken = false
+    }
+  })
+
+  test('SESSION_CONTROL_DEBUG=1 switches it on; otherwise nothing is written and no trace command runs', { options: OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SESSION_CONTROL_DEBUG: '1' })
+    await $.session.start(start(ORCH_DIR))
+    expect(traceOf(w)[0]?.event).toBe('session.start')
+  })
+
+  test('off by default: no trace file, no trace command', { options: OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SESSION_CONTROL_DEBUG: '0' })
+    await $.session.start(start(ORCH_DIR))
+    await $.tool.call({ tool: TOOL, ...args } as never)
+    expect(w.writes.some(one => one.path.includes('trace.log'))).toBe(false)
+    expect(w.runs.some(isTraceRun)).toBe(false)
+  })
+
+  test('a trace that cannot be written breaks nothing and is toasted once', { options: TRACED }, async ($, on) => {
+    LINUX_FIXTURE.isAppendBroken = true
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toContain('Launched pid 7001')
+      expect(w.toasts.filter(text => text.includes('debug trace cannot be written'))).toEqual([
+        'session-control: the debug trace cannot be written (/fixture/home/.claude/session-control/runs/trace.log cannot be appended to (exit 1): sh: cannot create: Read-only file system); the mod goes on without it',
+      ])
+      // The runs directory is made once more before the second try of each append.
+      expect(w.runs.filter(argv => argv[0] === 'mkdir' && argv[2] === RUNS).length).toBeGreaterThanOrEqual(2)
+    } finally {
+      LINUX_FIXTURE.isAppendBroken = false
+    }
+  })
+
+  test('a trace near 2 MiB is rotated once before the next append', { options: TRACED }, async ($, on) => {
+    LINUX_FIXTURE.traceSize = TRACE_MAX_BYTES - 10
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      await $.tool.call({ tool: TOOL, ...args } as never)
+      const rotations = w.runs.filter(argv => argv[2] === ROTATE_SCRIPT)
+      expect(rotations).toEqual([['sh', '-c', ROTATE_SCRIPT, 'session-trace', TRACE, '2']])
+      expect(w.runs.findIndex(argv => argv[2] === ROTATE_SCRIPT)).toBeLessThan(w.runs.findIndex(argv => argv[2] === APPEND_SCRIPT))
+    } finally {
+      LINUX_FIXTURE.traceSize = 0
     }
   })
 })

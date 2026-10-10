@@ -161,3 +161,25 @@ try:
 finally:
     shutil.rmtree(append_dir)
 print('append-selftest: ok')
+
+# --- ROTATE_SCRIPT keeps three trace files: .1 moves to .2 (the oldest goes), the trace becomes .1
+trace_src = open(os.path.join(os.path.dirname(__file__), '..', 'hooks', 'trace.ts')).read()
+rotate = trace_src.split("export const ROTATE_SCRIPT = String.raw`", 1)[1].split("`", 1)[0]
+assert subprocess.run(['sh', '-n', '-c', rotate], capture_output=True).returncode == 0
+rotate_dir = tempfile.mkdtemp(prefix='session-rotate-')
+try:
+    trace = f'{rotate_dir}/trace.log'
+    for name, text in [('trace.log', 'new\n'), ('trace.log.1', 'mid\n'), ('trace.log.2', 'old\n')]:
+        open(f'{rotate_dir}/{name}', 'w').write(text)
+    r = subprocess.run(['sh', '-c', rotate, 'session-trace', trace, '2'], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stderr == '', r
+    assert sorted(os.listdir(rotate_dir)) == ['trace.log.1', 'trace.log.2'], os.listdir(rotate_dir)
+    assert open(f'{trace}.1').read() == 'new\n' and open(f'{trace}.2').read() == 'mid\n'
+    # The first rotation: only the trace is there.
+    open(trace, 'w').write('first\n'); os.remove(f'{trace}.1'); os.remove(f'{trace}.2')
+    r = subprocess.run(['sh', '-c', rotate, 'session-trace', trace, '2'], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stderr == '', r
+    assert sorted(os.listdir(rotate_dir)) == ['trace.log.1'] and open(f'{trace}.1').read() == 'first\n'
+finally:
+    shutil.rmtree(rotate_dir)
+print('rotate-selftest: ok')
