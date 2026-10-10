@@ -323,9 +323,11 @@ const MEMORY_TEXT = /low on memory|out of memory|oom-?kill/i
 /**
  * Classifies a finished worker from its `--output-format json` result file's text (may be empty or truncated), the
  * background task's status when known (`completed`, `failed`, `killed`) and its error file's text when there is one.
- * `limit`, `login` and a memory kill come only from reliable signals: the error file, a result that is not JSON, the
- * result text of a run that failed (`is_error` true or a subtype other than `success`) and the API error status (429,
- * 401). The words of a normal report never count: a report may quote those messages.
+ * `limit`, `login` and a memory kill come only from reliable signals: the API error status (429, 401), the result
+ * text and `errors` of a run that failed (`is_error` true or a subtype other than `success`), a result that is not
+ * JSON, and the error file. A run whose result is a success is clean whatever its error file says (stderr may hold a
+ * benign "usage limit reached, retrying"): the error file counts only when the result is not a success. The words of
+ * a normal report never count: a report may quote those messages.
  */
 export function classifyResult(resultText: string, taskStatus?: string, errText = ''): SessionOutcome {
   let parsed: Record<string, unknown> | undefined
@@ -342,6 +344,7 @@ export function classifyResult(resultText: string, taskStatus?: string, errText 
   const subtype = typeof parsed?.subtype === 'string' ? parsed.subtype : undefined
   const isFailed = isError || (subtype !== undefined && subtype !== 'success')
   const apiStatus = typeof parsed?.api_error_status === 'number' ? parsed.api_error_status : undefined
+  const isSuccess = parsed?.is_error === false && subtype === 'success' && apiStatus !== 429 && apiStatus !== 401
   const costUsd = typeof parsed?.total_cost_usd === 'number' ? parsed.total_cost_usd : undefined
   const sessionId = typeof parsed?.session_id === 'string' ? parsed.session_id : undefined
   const make = (kind: SessionOutcomeKind, why: string): SessionOutcome => ({
@@ -350,7 +353,14 @@ export function classifyResult(resultText: string, taskStatus?: string, errText 
     ...(costUsd === undefined ? {} : { costUsd }),
     ...(sessionId === undefined ? {} : { sessionId }),
   })
-  const signal = [errText, parsed === undefined ? resultText : '', isFailed ? text : ''].join('\n')
+  // A failed run may carry its message only in `errors` (an array of strings) or `error` instead of `result`.
+  const failure = [
+    text,
+    ...(Array.isArray(parsed?.errors) ? parsed.errors.filter((one): one is string => typeof one === 'string') : []),
+    typeof parsed?.error === 'string' ? parsed.error : '',
+  ].join('\n')
+  // The engine sets `is_error` on a real failure, so a success carrying limit words is a report that quotes them.
+  const signal = [isSuccess ? '' : errText, parsed === undefined ? resultText : '', isFailed ? failure : ''].join('\n')
   if (apiStatus === 429 || LIMIT_TEXT.test(signal)) return make('limit', 'rate limit hit')
   if (apiStatus === 401 || LOGIN_TEXT.test(signal)) return make('login', 'licence needs a re-login')
   if (taskStatus === 'killed' || MEMORY_TEXT.test(signal)) {

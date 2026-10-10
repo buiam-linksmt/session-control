@@ -213,12 +213,38 @@ describe('completion classifier', () => {
     expect(classifyResult(REAL_RESULTS.loginExpired).kind).toBe('login')
     expect(classifyResult(REAL_RESULTS.loginStatus).kind).toBe('login')
   })
-  test('the error file is a reliable signal: login, limit or memory there wins over a normal result', () => {
+  test('the error file is a reliable signal when the result is not a success: login, limit or memory there decide', () => {
     expect(classifyResult('', undefined, 'Invalid API key · Please run /login\n').kind).toBe('login')
-    expect(classifyResult(REAL_RESULTS.designReport, undefined, "Error: You've hit your weekly limit\n").kind).toBe('limit')
+    expect(classifyResult(REAL_RESULTS.maxTurns, undefined, "Error: You've hit your weekly limit\n").kind).toBe('limit')
     expect(classifyResult('', 'failed', 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n').summary).toBe('killed: killed (memory)')
     // An error file with other text changes nothing.
     expect(classifyResult(REAL_RESULTS.designReport, undefined, 'warning: something unrelated\n').kind).toBe('clean')
+  })
+  test('a success result is clean whatever its error file says: stderr may hold a benign limit-like line', () => {
+    expect(classifyResult(REAL_RESULTS.designReport, undefined, 'usage limit reached, retrying in 5s\n').kind).toBe('clean')
+    expect(classifyResult(REAL_RESULTS.designReport, 'completed', 'Invalid API key · Please run /login\n').kind).toBe('clean')
+    // The task status still counts: a killed task is killed.
+    expect(classifyResult(REAL_RESULTS.designReport, 'killed', 'usage limit reached, retrying\n').kind).toBe('killed')
+  })
+  test('a failed run, a truncated or a missing result: the error file decides', () => {
+    expect(classifyResult(REAL_RESULTS.maxTurns, undefined, "Error: You've hit your session limit\n").kind).toBe('limit')
+    expect(classifyResult(REAL_RESULTS.limitError.replace(/hit your session limit/, 'did not finish'), undefined, 'usage limit reached\n').kind).toBe('limit')
+    const truncated = REAL_RESULTS.designReport.slice(0, 120)
+    expect(classifyResult(truncated, undefined, 'Invalid API key · Please run /login\n').kind).toBe('login')
+    expect(classifyResult('', 'failed', "Error: You've hit your weekly limit\n").kind).toBe('limit')
+  })
+  test('a failed run whose message is only in errors[] or error is labelled from it', () => {
+    const failed = (fields: Record<string, unknown>) => JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, ...fields })
+    expect(classifyResult(failed({ errors: ["You've hit your session limit · resets 3pm"] })).kind).toBe('limit')
+    expect(classifyResult(failed({ errors: ['one', 5, 'Please run /login'] })).kind).toBe('login')
+    expect(classifyResult(failed({ error: 'Failed to authenticate: OAuth session expired' })).kind).toBe('login')
+    expect(classifyResult(failed({ errors: ['tool crashed'] })).kind).toBe('error')
+    // A run that is not a failure never takes its label from errors[].
+    expect(classifyResult(JSON.stringify({ subtype: 'success', is_error: false, result: 'Done. All twelve tests pass.', errors: ['usage limit reached'] })).kind).toBe('clean')
+  })
+  test('a success with is_error false that carries a bare limit text stays clean on purpose', () => {
+    // The engine sets is_error on a real failure, so this is a report quoting the message, not a limit.
+    expect(classifyResult(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: "You've hit your session limit · resets 3pm" })).kind).toBe('clean')
   })
   test('a subtype other than success is an error, with the subtype when there is no text', () => {
     expect(classifyResult(REAL_RESULTS.maxTurns).summary).toBe('error: error_max_turns')

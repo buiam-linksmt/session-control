@@ -442,12 +442,18 @@ describe('completion', () => {
     expect(w.toasts[0]).toStartWith('Session finished · limited worker: clean: ')
     expect(w.reads).not.toContain('/fixture/results/login.err')
   })
-  test('the err file of the entry decides a login', { options: OPTIONS }, async ($, on) => {
-    const withErr = REGISTRY_TEXT.replace('"result_file": "/fixture/results/limit.json"', '"result_file": "/fixture/results/designReport.json",\n    "err_file": "/fixture/results/login.err"')
+  test('the err file of the entry decides a login when the run did not succeed', { options: OPTIONS }, async ($, on) => {
+    const withErr = REGISTRY_TEXT.replace('"result_file": "/fixture/results/limit.json"', '"result_file": "/fixture/results/maxTurns.json",\n    "err_file": "/fixture/results/login.err"')
     const w = world(on, '/fixture/lic/a\n', true, withErr)
     await $.session.start(start(ORCH_DIR))
     expect(w.reads).toContain('/fixture/results/login.err')
     expect(w.toasts).toEqual(['Login needed · limited worker: login: licence needs a re-login'])
+  })
+  test('the err file of the entry does not turn a successful run into a login', { options: OPTIONS }, async ($, on) => {
+    const withErr = REGISTRY_TEXT.replace('"result_file": "/fixture/results/limit.json"', '"result_file": "/fixture/results/designReport.json",\n    "err_file": "/fixture/results/login.err"')
+    const w = world(on, '/fixture/lic/a\n', true, withErr)
+    await $.session.start(start(ORCH_DIR))
+    expect(w.toasts[0]).toStartWith('Session finished · limited worker: clean: ')
   })
 
   test('the report check adds one line to the completion notice of a clean report without the git reads; the toast and the outcome stay', { options: OPTIONS }, async ($, on) => {
