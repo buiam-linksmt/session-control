@@ -5,7 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { PROBE_SCRIPT, REGISTER_SCRIPT } from '../hooks/core'
+import { FILES_PS1, PROBE_SCRIPT, REGISTER_SCRIPT, probeArgs } from '../hooks/core'
 
 import {
   HOME,
@@ -51,10 +51,20 @@ const MISSING = new Set<string>()
 const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
+// Set to make the Windows file script's move fail.
+const WINDOWS = { isMoveBroken: false }
 
-function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT): World {
+/** Windows PowerShell as the mod runs it when SystemRoot is unset. */
+const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+/**
+ * The fixture on Windows: C:/fixture/... and C:/work/... are the fixture's /fixture/... and /work/... The Linux test
+ * kit resolves C:/x as a relative path, so the fs hooks see it after the session's directory.
+ */
+const fixture = (path: string) => path.replace(/^(.*\/)?C:(?=\/(fixture|work)\/)/, '')
+
+function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT, env: Record<string, string> = { HOME }): World {
   const w: World = { bash: [], spawned: false, writes: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
-  mock.env(on, { HOME })
+  mock.env(on, env)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => {
     w.registered.push(`/${e.name}`)
@@ -66,15 +76,19 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     return { value: { tool: `mcp__session-control__${e.name}` } }
   })
   on('fs.read', ($, e) => {
-    if (MISSING.has(e.path) || LATE.has(e.path)) throw new Error(`ENOENT ${e.path}`)
-    if (UNREADABLE.has(e.path)) throw new Error(`EFBIG ${e.path}`)
-    if (e.path === REGISTRY_PATH) return { value: registryText }
-    if (e.path === '/work/orch/CLAUDE.md') return { value: '# Role: Session Orchestrator\n' }
-    if (e.path === '/work/new/thin.md') return { value: 'Just do the work.' }
-    if (e.path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE_TEXT }
-    if (e.path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
-    if (e.path === '/fixture/results/limit.json') return { value: RESULTS.limit }
-    if (e.path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
+    const path = fixture(e.path)
+    if (MISSING.has(path) || LATE.has(path)) throw new Error(`ENOENT ${e.path}`)
+    if (UNREADABLE.has(path)) throw new Error(`EFBIG ${e.path}`)
+    if (path === REGISTRY_PATH) return { value: registryText }
+    if (path === '/work/orch/CLAUDE.md') return { value: '# Role: Session Orchestrator\n' }
+    if (path === '/work/new/thin.md') return { value: 'Just do the work.' }
+    if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE_TEXT }
+    if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
+    if (path === '/fixture/results/limit.json') return { value: RESULTS.limit }
+    if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
+    // The mod's own scripts read back as written.
+    const written = w.writes.filter(one => one.path === e.path && one.path.endsWith('.ps1')).at(-1)
+    if (written !== undefined) return { value: written.text }
     throw new Error(`ENOENT ${e.path}`)
   })
   on('fs.write', ($, e) => {
@@ -82,7 +96,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     return { value: undefined }
   })
   // A path the read above refuses is missing, unless it is one that cannot be read.
-  on('fs.exists', ($, e) => ({ value: UNREADABLE.has(e.path) }))
+  on('fs.exists', ($, e) => ({ value: UNREADABLE.has(fixture(e.path)) }))
   on('process.run', ($, e) => {
     w.runs.push([...e.argv])
     const ok = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
@@ -112,6 +126,15 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === 'test' && e.argv[1] === '-e') return { value: { ...ok, stdout: '', exitCode: 1 } }
     if (e.argv[0] === 'test') return { value: { ...ok, stdout: '', exitCode: promptFileExists ? 0 : 1 } }
     if (e.argv[0] === '/fixture/bin/pick') return { value: { ...ok, stdout: pickStdout, exitCode: pickStdout ? 0 : 3 } }
+    if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/files.ps1')) {
+      const [op, from, to] = e.argv.slice(7).map(String)
+      if (op === 'move' && WINDOWS.isMoveBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Access denied.' } }
+      if (op === 'move') {
+        const text = w.writes.filter(one => fixture(one.path) === fixture(String(from))).at(-1)?.text
+        if (text !== undefined) w.writes.push({ path: String(to), text })
+      }
+      return { value: { ...ok, stdout: '' } }
+    }
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
   })
   on('tool.call', { tool: 'Bash' }, ($, e) => {
@@ -130,7 +153,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
 
 const start = (cwd: string, isInteractive = true) => ({ cwd, surface: null, isInteractive })
 /** The registry as the plugin last wrote it. */
-const lastRegistry = (w: World) => JSON.parse(w.writes.filter(one => one.path === REGISTRY_PATH).at(-1)?.text ?? '[]') as Record<string, unknown>[]
+const lastRegistry = (w: World) => JSON.parse(w.writes.filter(one => fixture(one.path) === REGISTRY_PATH).at(-1)?.text ?? '[]') as Record<string, unknown>[]
 const PANE_PROPS = { title: 'Session control', isFocused: false, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 36 } }
 
 const stubPanel = (on: On) => {
@@ -577,5 +600,93 @@ describe('launch_worker', () => {
     await ui.press({ key: 'tab:sessions' })
     expect(await all()).not.toContain('Reading the suite files')
     expect(await all()).toContain('alive worker')
+  })
+})
+
+describe('platform', () => {
+  const args = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
+  /** A launch, an acknowledgement and a retirement, the probe text shown as <probe>. */
+  const flow = async ($: Parameters<Parameters<typeof test>[2]>[0], w: World) => {
+    await $.session.start(start(ORCH_DIR))
+    expect(String((await $.tool.call({ tool: TOOL, ...args } as never)).result)).toContain('Launched pid 7001')
+    expect(String((await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['cccccccc'] } as never)).result)).toContain('Acknowledged: cccccccc.')
+    expect(String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['dddddddd'] } as never)).result)).toContain('Retired: dddddddd.')
+    return w.runs.map(argv => argv.map(one => (one === PROBE_SCRIPT ? '<probe>' : one)))
+  }
+  const probe = ['sh', '-c', '<probe>', 'session-probe', ...probeArgs(JSON.parse(REGISTRY_TEXT))]
+  const rename = ['mv', '-f', `${REGISTRY_PATH}.tmp.${NOW_MS}`, REGISTRY_PATH]
+  const RUNS = `${HOME}/.claude/session-control/runs`
+  /** The commands the Linux flow runs, as recorded before the Windows branches existed (the jq calls aside). */
+  const LINUX = [
+    ['test', '-e', `${ORCH_DIR}/agreed-decisions.md`],
+    ['mkdir', '-p', ORCH_DIR],
+    ['test', '-e', `${ORCH_DIR}/open-points-archive.md`],
+    ['mkdir', '-p', ORCH_DIR],
+    ['mkdir', '-p', `${ORCH_DIR}/backups`, RUNS],
+    probe,
+    rename,
+    probe,
+    ['test', '-s', '/work/new/prompt.md'],
+    ['test', '-d', '/work/new'],
+    ['/fixture/bin/pick', '--need', '40'],
+    ['mkdir', '-p', RUNS],
+    ['sleep', '2'],
+    probe,
+    rename,
+    probe,
+    probe,
+    rename,
+    probe,
+    probe,
+    rename,
+    probe,
+  ]
+  const linuxLike: [string, Record<string, string>][] = [
+    ['HOME only', { HOME }],
+    ['HOME and a Windows USERPROFILE (WSL)', { HOME, USERPROFILE: 'C:\\Users\\u' }],
+    ['OS=Windows_NT without USERPROFILE', { HOME, OS: 'Windows_NT' }],
+    ['OS=Windows_NT with a USERPROFILE that is no drive path', { HOME, OS: 'Windows_NT', USERPROFILE: '/mnt/c/Users/u' }],
+  ]
+  for (const [name, env] of linuxLike) {
+    test(`Linux commands, unchanged: ${name}`, { options: OPTIONS }, async ($, on) => {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, env)
+      expect(await flow($, w)).toEqual(LINUX)
+    })
+  }
+
+  const WINDOWS_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' }
+  const WIN_OPTIONS = { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}` }
+  const WIN_REGISTRY = `C:${REGISTRY_PATH}`
+  const WIN_RUNS = `C:${RUNS}`
+
+  test('Windows: home is the profile folder in native form, and a rename runs the file script', { options: WIN_OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    expect(w.runs).toContainEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'move', `${WIN_REGISTRY}.tmp.${NOW_MS}`, WIN_REGISTRY])
+    expect(w.writes.find(one => one.path.endsWith(`${WIN_RUNS}/files.ps1`))?.text).toBe(FILES_PS1)
+    expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
+    // No POSIX tool is started for the files: they are written through $.fs, which makes their directories.
+    expect(w.runs.filter(argv => ['mv', 'rm', 'test', 'mkdir'].includes(String(argv[0])))).toEqual([])
+    expect(w.writes.some(one => one.path.endsWith(`C:${ORCH_DIR}/agreed-decisions.md`))).toBe(true)
+  })
+
+  test('Windows: a HOME that Git Bash handed on (/c/...) is home, in native form', { options: WIN_OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { ...WINDOWS_ENV, USERPROFILE: 'C:\\Users\\other', HOME: '/c/fixture/home' })
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    expect(w.runs.some(argv => argv[0] === POWERSHELL && argv.at(-1) === WIN_REGISTRY)).toBe(true)
+  })
+
+  test('Windows: a rename that fails writes the file directly and says so once', { options: WIN_OPTIONS }, async ($, on) => {
+    WINDOWS.isMoveBroken = true
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      expect(w.writes.some(one => one.path.endsWith(WIN_REGISTRY))).toBe(true)
+      expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
+      await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['cccccccc'] } as never)
+      expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([`session-control: the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically`])
+    } finally {
+      WINDOWS.isMoveBroken = false
+    }
   })
 })

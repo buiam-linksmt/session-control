@@ -6,8 +6,12 @@ import { DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, editOpenPo
 import type { Edit } from './bookkeeping'
 import { backupName, dirOf, freshText, localDate, tmpPath } from './store'
 import {
+  FILES_PS1,
   LAUNCH_SCHEMA,
   PROBE_SCRIPT,
+  isWinAbsolute,
+  tailLines,
+  winPath,
   ACK_SCHEMA,
   RETIRE_SCHEMA,
   ackEntries,
@@ -105,6 +109,7 @@ let isBusy = false
 let isArmed = false
 let isPolling = false
 let lastError: string | undefined
+let isDirectWriteNoted = false
 const harvested = new Set<string>()
 
 // The validator requires `$` to be handed only to functions declared at the
@@ -124,12 +129,48 @@ function isSame(a: unknown, b: unknown, ignore?: string): boolean {
 /** A tool call's input as a plain record. */
 const plain = (e: unknown) => e as Record<string, unknown>
 
+// Native Windows takes its own branch of each machine call below; anything else, WSL included, takes the Linux one,
+// whose commands stay what they were.
+
+/** Native Windows, told by positive signs only: OS is Windows_NT and USERPROFILE a drive-letter path. Anything else is Linux. */
+async function isWindows($: EngineInterface): Promise<boolean> {
+  return (await $.env.get('OS')) === 'Windows_NT' && /^[A-Za-z]:[\\/]/.test((await $.env.get('USERPROFILE')) ?? '')
+}
+
+/** Windows PowerShell 5.1 by absolute path: on Windows `bash` is the WSL launcher, and sh, mv and pwsh are not on the PATH a command gets. */
+async function powershell($: EngineInterface): Promise<string> {
+  const root = (await $.env.get('SystemRoot')) ?? 'C:\\Windows'
+  return `${root.replace(/[\\/]+$/, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+}
+
+/** One of the mod's PowerShell scripts in the runs directory, written when it is not there as it should be (which makes the directory). */
+async function ensureScript($: EngineInterface, name: string, text: string): Promise<string> {
+  const path = `${await runsPath($)}/${name}`
+  if ((await $.fs.read(path).catch(() => undefined)) !== text) await $.fs.write(path, text)
+  return path
+}
+
+/** Runs one of the mod's PowerShell scripts with -File: its text never crosses a command line. */
+async function runScript($: EngineInterface, name: string, text: string, args: readonly string[], timeoutMs = 10_000) {
+  const path = await ensureScript($, name, text)
+  return $.process.run([await powershell($), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path, ...args], { timeoutMs })
+}
+
 async function homeDir($: EngineInterface): Promise<string> {
-  return (await $.env.get('HOME')) ?? '/root'
+  const home = await $.env.get('HOME')
+  if (!(await isWindows($))) return home ?? '/root'
+  // Git Bash hands on HOME as /c/Users/...; without a usable one the profile folder is home. Native form either way.
+  return winPath(home !== undefined && isWinAbsolute(home) ? home : ((await $.env.get('USERPROFILE')) ?? ''))
+}
+
+/** A path from the settings with `~` expanded; on Windows in the native form the mod stores. */
+async function settingPath($: EngineInterface, setting: string): Promise<string> {
+  const path = expandHome(setting, await homeDir($))
+  return (await isWindows($)) ? winPath(path) : path
 }
 
 async function registryPath($: EngineInterface): Promise<string> {
-  return expandHome(config.registrySetting, await homeDir($))
+  return settingPath($, config.registrySetting)
 }
 
 async function readRegistryText($: EngineInterface): Promise<string> {
@@ -146,12 +187,38 @@ async function writeAtomic($: EngineInterface, path: string, text: string, expec
   const tmp = tmpPath(path, await $.clock.now())
   await $.fs.write(tmp, text)
   if (expected !== undefined && (await $.fs.read(path).catch(() => undefined)) !== expected) {
-    await $.process.run(['rm', '-f', tmp], { timeoutMs: 5_000 })
+    await removeFile($, tmp)
     return false
   }
-  const ran = await $.process.run(['mv', '-f', tmp, path], { timeoutMs: 5_000 })
-  if (ran.exitCode !== 0) throw new Error(`rename failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
+  await renameOver($, tmp, path, text)
   return true
+}
+
+/** Removes a file: `rm -f` on Linux; on Windows the file script, best effort. */
+async function removeFile($: EngineInterface, path: string): Promise<void> {
+  if (await isWindows($)) await runScript($, 'files.ps1', FILES_PS1, ['remove', path]).catch(() => undefined)
+  else await $.process.run(['rm', '-f', path], { timeoutMs: 5_000 })
+}
+
+/**
+ * Puts the temp file in the file's place: `mv -f` on Linux. On Windows the file script; when it cannot run or fails,
+ * the text is written over the file directly (the caller has checked it is still the one expected), and that write,
+ * which a reader can see half done, is reported once.
+ */
+async function renameOver($: EngineInterface, tmp: string, path: string, text: string): Promise<void> {
+  if (!(await isWindows($))) {
+    const ran = await $.process.run(['mv', '-f', tmp, path], { timeoutMs: 5_000 })
+    if (ran.exitCode !== 0) throw new Error(`rename failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
+    return
+  }
+  const ran = await runScript($, 'files.ps1', FILES_PS1, ['move', tmp, path]).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
+  if (ran.exitCode === 0) return
+  await $.fs.write(path, text)
+  await removeFile($, tmp)
+  if (!isDirectWriteNoted) {
+    isDirectWriteNoted = true
+    $.ui.toast(`session-control: the rename failed (${ran.stderr.trim().slice(0, 100)}); ${path} was written directly, not atomically`, { timeoutMs: 10000 })
+  }
 }
 
 /**
@@ -197,6 +264,11 @@ async function ensureFile($: EngineInterface, path: string, file: string): Promi
   const initial = freshText(file)
   if (initial === undefined) return
   if ((await $.fs.read(path).catch(() => undefined)) !== undefined) return
+  if (await isWindows($)) {
+    // $.fs.write makes the directories; a file that is there but cannot be read is left alone.
+    if (!(await $.fs.exists(path).catch(() => true))) await $.fs.write(path, initial)
+    return
+  }
   if ((await $.process.run(['test', '-e', path], { timeoutMs: 5_000 })).exitCode === 0) return
   await $.process.run(['mkdir', '-p', dirOf(path)], { timeoutMs: 5_000 })
   await $.fs.write(path, initial)
@@ -208,7 +280,9 @@ async function ensureHelperFiles($: EngineInterface): Promise<void> {
     await ensureFile($, orchPath(file), file)
   }
   await ensureFile($, await registryPath($), 'headless-sessions.json')
-  await $.process.run(['mkdir', '-p', orchPath('backups'), await runsPath($)], { timeoutMs: 5_000 })
+  // On Windows writing the file script makes the runs directory; the backups directory comes with the first backup.
+  if (await isWindows($)) await ensureScript($, 'files.ps1', FILES_PS1)
+  else await $.process.run(['mkdir', '-p', orchPath('backups'), await runsPath($)], { timeoutMs: 5_000 })
 }
 
 async function probe($: EngineInterface, entries: readonly SessionEntry[]): Promise<ProcFacts> {
@@ -227,7 +301,7 @@ async function registryAndFacts($: EngineInterface): Promise<{ entries: SessionE
 
 /** The runs directory (worker results, errors and the cleared log). */
 async function runsPath($: EngineInterface): Promise<string> {
-  return expandHome(config.runsDir, await homeDir($))
+  return settingPath($, config.runsDir)
 }
 
 const shortIds = (ids: readonly string[]) => (ids.length === 0 ? 'none' : ids.map(id => id.slice(0, 8)).join(', '))
@@ -329,11 +403,25 @@ async function refreshWatch($: EngineInterface): Promise<void> {
     await update($, watch, () => ({ title, lines: ['no transcript path for this entry'] }))
     return
   }
-  // Cap each line: one huge tool result must not push the newest rows out of the output.
-  const ran = await $.process.run(['sh', '-c', 'tail -n 600 "$1" | cut -c1-20000', 'session-tail', path], { timeoutMs: 5_000 })
-  const lines = ran.exitCode === 0 ? summarizeTranscript(ran.stdout, 300) : [`cannot read ${path}`]
+  const tail = await transcriptTail($, path)
+  const lines = tail === undefined ? [`cannot read ${path}`] : summarizeTranscript(tail, 300)
   const next = { title, lines }
   if (!isSame(await read($, watch), next)) await update($, watch, () => next)
+}
+
+/**
+ * The last 600 lines of a transcript, each cut to 20000 characters, so one huge tool result cannot push the newest
+ * rows out: tail and cut on Linux; on Windows a read, or the file script for a transcript over the read cap.
+ */
+async function transcriptTail($: EngineInterface, path: string): Promise<string | undefined> {
+  if (!(await isWindows($))) {
+    const ran = await $.process.run(['sh', '-c', 'tail -n 600 "$1" | cut -c1-20000', 'session-tail', path], { timeoutMs: 5_000 })
+    return ran.exitCode === 0 ? ran.stdout : undefined
+  }
+  const text = await $.fs.read(path).catch(() => undefined)
+  if (text !== undefined) return tailLines(text, 600, 20000)
+  const ran = await runScript($, 'files.ps1', FILES_PS1, ['tail', path, '600', '20000']).catch(() => undefined)
+  return ran?.exitCode === 0 ? ran.stdout : undefined
 }
 
 function tick($: EngineInterface): void {
@@ -557,6 +645,7 @@ async function activate($: EngineInterface): Promise<void> {
 }
 
 export const register: Register = (on, options) => {
+  isDirectWriteNoted = false
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),

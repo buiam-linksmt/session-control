@@ -808,6 +808,84 @@ export function retireVerdict(entries: readonly SessionEntry[], facts: ProcFacts
   return verdict
 }
 
+// ---------------------------------------------------------------- native Windows
+
+// Native Windows (Claude Code on Windows, Git Bash as the Bash tool's shell) has no sh, jq, mv or /proc on the
+// PATH a command starts with. register.tsx detects it from the environment and only then takes the Windows
+// branches below; on Linux and WSL none of them runs.
+
+/**
+ * A Windows path in the one form the mod stores and passes on: drive letter upper case, `/` separators, no
+ * trailing separator (a drive root keeps its own). Takes `C:\x`, `C:/x` and Git Bash's `/c/x`; a UNC path
+ * (`\\host\share`) becomes `//host/share`. Any other path comes back with its separators turned only.
+ */
+export function winPath(path: string): string {
+  const slashed = path.replace(/\\/g, '/')
+  const isUnc = /^\/\/[^/]/.test(slashed)
+  const msys = /^\/([A-Za-z])(\/|$)/.exec(slashed)
+  const drive = msys ? `${(msys[1] ?? '').toUpperCase()}:/${slashed.slice(3)}` : slashed.replace(/^([a-z]):/, (_, letter: string) => `${letter.toUpperCase()}:`)
+  const cut = ((isUnc ? '/' : '') + drive.replace(/\/{2,}/g, '/')).replace(/\/+$/, '')
+  if (/^[A-Z]:$/.test(cut)) return `${cut}/`
+  return cut === '' ? '/' : cut
+}
+
+/** Whether a path is absolute on Windows: a drive (`C:/x`, `C:\x`, `/c/x`) or a UNC share. */
+export function isWinAbsolute(path: string): boolean {
+  const native = winPath(path)
+  return /^[A-Z]:\//.test(native) || /^\/\/[^/]+\/[^/]/.test(native)
+}
+
+/** Whether two paths name the same place on Windows, whose file names ignore case. */
+export function isSameWinPath(a: string, b: string): boolean {
+  return winPath(a).toLowerCase() === winPath(b).toLowerCase()
+}
+
+/** What `tail -n <count> | cut -c1-<width>` prints of a text: its last lines, each cut to the width. */
+export function tailLines(text: string, count: number, width: number): string {
+  const lines = text.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines
+    .slice(-count)
+    .map(line => line.slice(0, width) + '\n')
+    .join('')
+}
+
+/**
+ * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
+ * (never as -Command text, whose quoting does not survive). `move <from> <to>` replaces an existing file in one
+ * step (File.Replace: a reader never finds it missing) or moves it there; `remove <path>`; `tail <path> <lines>
+ * <width>` for a transcript over the 4 MiB read cap. Output is UTF-8; a failure exits 1 with the reason.
+ */
+export const FILES_PS1 = [
+  '# session-control: file operations for Windows PowerShell 5.1 (move, remove, tail)',
+  'param([string]$Op, [string]$A, [string]$B, [string]$C)',
+  // A PowerShell 7 parent leaves its own module folders first; Windows PowerShell must load its own.
+  '$env:PSModulePath = "$PSHOME\\Modules"',
+  "$ErrorActionPreference = 'Stop'",
+  '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
+  'try {',
+  '  switch ($Op) {',
+  "    'move' {",
+  '      if ([System.IO.File]::Exists($B)) { [System.IO.File]::Replace($A, $B, [NullString]::Value) }',
+  '      else { [System.IO.File]::Move($A, $B) }',
+  '    }',
+  "    'remove' { if ([System.IO.File]::Exists($A)) { [System.IO.File]::Delete($A) } }",
+  "    'tail' {",
+  '      $width = [int]$C',
+  '      foreach ($line in @(Get-Content -LiteralPath $A -Tail ([int]$B) -Encoding UTF8)) {',
+  '        if ($line.Length -gt $width) { $line = $line.Substring(0, $width) }',
+  '        [Console]::Out.Write($line + "`n")',
+  '      }',
+  '    }',
+  '    default { throw "unknown operation: $Op" }',
+  '  }',
+  '} catch {',
+  '  [Console]::Error.WriteLine($_.Exception.Message)',
+  '  exit 1',
+  '}',
+  'exit 0',
+].join('\r\n')
+
 function shq(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }

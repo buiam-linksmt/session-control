@@ -41,6 +41,11 @@ import {
   registerEntry,
   removeEntries,
   ackEntries,
+  FILES_PS1,
+  isSameWinPath,
+  isWinAbsolute,
+  tailLines,
+  winPath,
 } from '../hooks/core'
 import type { LaunchArgs, LaunchFacts } from '../hooks/core'
 import { freshText } from '../hooks/store'
@@ -583,5 +588,60 @@ describe('registry edits: the differential cases the jq scripts are checked agai
     const bad = registerEntry('not json', {}, 'new')
     expect(bad.ok === false && bad.error.startsWith('registry is not JSON')).toBe(true)
     expect(ackEntries('{"a":1}', ['x'], false)).toEqual({ ok: false, error: 'registry is not a JSON array' })
+  })
+})
+
+describe('Windows paths', () => {
+  test('one native form from every spelling', () => {
+    const table: [string, string][] = [
+      ['C:\\Users\\u', 'C:/Users/u'],
+      ['C:/Users/u', 'C:/Users/u'],
+      ['/c/Users/u', 'C:/Users/u'],
+      ['c:\\users\\u', 'C:/users/u'],
+      ['/d/work', 'D:/work'],
+      ['C:\\Users\\u\\', 'C:/Users/u'],
+      ['C:/Users/u///', 'C:/Users/u'],
+      ['/c/Users/u/', 'C:/Users/u'],
+      ['C:\\', 'C:/'],
+      ['C:', 'C:/'],
+      ['/c', 'C:/'],
+      ['/c/', 'C:/'],
+      ['C:\\Users\\John Smith\\My Project', 'C:/Users/John Smith/My Project'],
+      ['/c/Users/John Smith/', 'C:/Users/John Smith'],
+      ['C:\\Users\\\\u\\/x', 'C:/Users/u/x'],
+      ['\\\\wsl.localhost\\Ubuntu-24.04\\home\\u', '//wsl.localhost/Ubuntu-24.04/home/u'],
+      ['\\\\wsl.localhost\\Ubuntu-24.04\\home\\u\\', '//wsl.localhost/Ubuntu-24.04/home/u'],
+      ['//server/share/dir', '//server/share/dir'],
+      ['/mnt/c/Users/u', '/mnt/c/Users/u'],
+      ['/tmp/x', '/tmp/x'],
+      ['relative\\dir', 'relative/dir'],
+    ]
+    for (const [given, want] of table) expect([given, winPath(given)]).toEqual([given, want])
+  })
+
+  test('absolute is a drive or a share; comparisons ignore case and the spelling', () => {
+    for (const path of ['C:\\x', 'C:/x', '/c/x', 'd:/', '\\\\wsl.localhost\\Ubuntu\\home', '//server/share']) expect([path, isWinAbsolute(path)]).toEqual([path, true])
+    for (const path of ['/tmp/x', '/mnt/c/x', 'C:x', 'x\\y', '//server', '']) expect([path, isWinAbsolute(path)]).toEqual([path, false])
+    expect(isSameWinPath('/c/Users/U/proj/', 'C:\\users\\u\\Proj')).toBe(true)
+    expect(isSameWinPath('C:/Users/u/a', 'C:/Users/u/b')).toBe(false)
+    expect(isSameWinPath('D:/x', 'C:/x')).toBe(false)
+  })
+})
+
+describe('Windows file script', () => {
+  test('tailLines is tail -n with cut -c: the last lines, each cut', () => {
+    expect(tailLines('a\nb\nc\n', 2, 10)).toBe('b\nc\n')
+    expect(tailLines('a\nb\nc', 5, 10)).toBe('a\nb\nc\n')
+    expect(tailLines('abcdef\n', 1, 3)).toBe('abc\n')
+    expect(tailLines('', 600, 20000)).toBe('')
+  })
+
+  test('the script takes its own modules, replaces in one step and is run as a file', () => {
+    expect(FILES_PS1).toContain('$env:PSModulePath = "$PSHOME\\Modules"')
+    expect(FILES_PS1).toContain('[System.IO.File]::Replace($A, $B, [NullString]::Value)')
+    expect(FILES_PS1).toContain("Get-Content -LiteralPath $A -Tail ([int]$B) -Encoding UTF8")
+    expect(FILES_PS1).toContain('exit 1')
+    // Windows line ends throughout.
+    expect(FILES_PS1.replace(/\r\n/g, '').includes('\n')).toBe(false)
   })
 })
