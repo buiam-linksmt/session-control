@@ -23,7 +23,7 @@ import {
 } from './trace'
 import { selectHost } from './host'
 import type { Host, HostEnvName, HostPort } from './host'
-import { HELPER_SCRIPT, withHelper } from './host-helper'
+import { HELPER_SCRIPT, fallbackFields, fallbackToast, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
 import {
@@ -366,7 +366,7 @@ function noteDirectWrite($: EngineInterface, text: string): void {
 
 /**
  * The Node helper's word: its detection is one trace line; a fallback is a trace line with the operation and the code
- * and, once per load, a toast. The fallback of an untraced operation (the trace's own write) is traced once per
+ * (and `isRepeated` false for an append that timed out and was not made again) and, once per load, a toast. The fallback of an untraced operation (the trace's own write) is traced once per
  * operation: a line for each would be written by the write that failed, and the flush would never end.
  */
 function noteHelper($: EngineInterface, note: HelperNote): void {
@@ -375,11 +375,11 @@ function noteHelper($: EngineInterface, note: HelperNote): void {
     trace($, 'helper', fields)
     return
   }
-  if (!note.isQuiet || !quietFallbacksTraced.has(note.op)) trace($, 'helper.fallback', { op: note.op, code: note.code })
+  if (!note.isQuiet || !quietFallbacksTraced.has(note.op)) trace($, 'helper.fallback', fallbackFields(note))
   if (note.isQuiet) quietFallbacksTraced.add(note.op)
   if (isHelperFallbackNoted) return
   isHelperFallbackNoted = true
-  $.ui.toast(toastText(TOAST_TITLES.helper, `helper fallback: ${note.op}`), { timeoutMs: 10000 })
+  $.ui.toast(toastText(TOAST_TITLES.helper, fallbackToast(note)), { timeoutMs: 10000 })
 }
 
 async function homeDir($: EngineInterface): Promise<string> {

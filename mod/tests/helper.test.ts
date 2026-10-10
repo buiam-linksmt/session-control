@@ -8,7 +8,7 @@ import type { On, ProcessRunResult } from 'claude-code'
 
 import { parseProcFacts, tailLines } from '../hooks/core'
 import type { Host, HostPort, RotatePlan } from '../hooks/host'
-import { CALL_CODES, HELPER_MIN_NODE, appendText, nodeMajor, readAnswer, rejectionCode, withHelper } from '../hooks/host-helper'
+import { CALL_CODES, HELPER_MIN_NODE, appendNotRepeated, appendText, fallbackFields, fallbackToast, nodeMajor, readAnswer, rejectionCode, withHelper } from '../hooks/host-helper'
 import type { HelperNote } from '../hooks/host-helper'
 import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
@@ -269,7 +269,11 @@ describe('withHelper on Linux', () => {
   /** The files of the machine a failure case runs on, for an answering that does part of the work. */
   const SIM_FILES: { files: Map<string, string> } = { files: new Map() }
   for (const [name, answering, code] of FAILURES) {
-    test(`${name}: every operation falls back to the adapter's own, with the code ${code} and nothing else`, async () => {
+    // A timeout is the one failure after which the helper may have written: the append and the trace's batch are not
+    // made again (appendNotRepeated), every other operation falls back as with any failure.
+    const isTimeout = code === 'TIMEOUT'
+    const title = isTimeout ? 'every operation but the appends falls back' : 'every operation falls back'
+    test(`${name}: ${title} to the adapter's own, with the code ${code} and nothing else`, async () => {
       const sim = machine(answering)
       SIM_FILES.files = sim.files
       const host = helped()
@@ -295,17 +299,78 @@ describe('withHelper on Linux', () => {
       // Each call tried the helper first, and fell back for that call alone.
       expect(calls(sim).map(one => one.op)).toEqual(ops)
       const quiet = ['rotate', 'batch']
-      expect(fallbacks(sim)).toEqual(ops.filter(op => !(isRenamed && op === 'renameOver')).map(op => ({ kind: 'fallback', op, code, isQuiet: quiet.includes(op) })))
+      const unrepeated = (op: string) => (isTimeout && ['append', 'batch'].includes(op) ? { isRepeated: false } : {})
+      expect(fallbacks(sim)).toEqual(ops.filter(op => !(isRenamed && op === 'renameOver')).map(op => ({ kind: 'fallback', op, code, isQuiet: quiet.includes(op), ...unrepeated(op) })))
       const adapter = [PROBE_SCRIPT, 'mv', 'mv', 'rm', APPEND_SCRIPT, 'tail -n 600 "$1" | cut -c1-20000', ROTATE_SCRIPT, APPEND_SCRIPT]
-      expect(sim.runs.filter(one => one.argv[0] !== NODE).map(one => (one.argv[0] === 'sh' ? one.argv[2] : one.argv[0]))).toEqual(isRenamed ? adapter.filter((_, at) => at !== 2) : adapter)
-      // The adapter did the work: the files are as the helper would have left them.
-      expect([sim.files.get('/m/reg.json'), sim.files.get('/m/a'), sim.files.has('/m/gone'), sim.files.get('/m/runs/log.jsonl')]).toEqual(['[1]\n', 'A', false, 'x\n'])
-      expect([sim.files.get('/m/runs/trace.log.1'), sim.files.get('/m/runs/trace.log')]).toEqual(['old\n', 'new\n'])
-      expect(codes).toEqual([0])
+      const ran = (isRenamed ? adapter.filter((_, at) => at !== 2) : adapter).filter(one => !(isTimeout && one === APPEND_SCRIPT))
+      expect(sim.runs.filter(one => one.argv[0] !== NODE).map(one => (one.argv[0] === 'sh' ? one.argv[2] : one.argv[0]))).toEqual(ran)
+      // The adapter did the work: the files are as the helper would have left them (the simulated timeout wrote nothing,
+      // and nothing appended it again).
+      expect([sim.files.get('/m/reg.json'), sim.files.get('/m/a'), sim.files.has('/m/gone'), sim.files.get('/m/runs/log.jsonl')]).toEqual(['[1]\n', 'A', false, isTimeout ? undefined : 'x\n'])
+      expect([sim.files.get('/m/runs/trace.log.1'), sim.files.get('/m/runs/trace.log')]).toEqual(['old\n', isTimeout ? undefined : 'new\n'])
+      expect(codes).toEqual(isTimeout ? [] : [0])
       // A note holds an operation and a code only.
-      expect(sim.notes.every(note => Object.keys(note).every(key => ['kind', 'op', 'code', 'isQuiet', 'isActive', 'version'].includes(key)))).toBe(true)
+      expect(sim.notes.every(note => Object.keys(note).every(key => ['kind', 'op', 'code', 'isQuiet', 'isRepeated', 'isActive', 'version'].includes(key)))).toBe(true)
     })
   }
+
+  /** A helper that does the operation, then outlasts its timeout (the write went through, the answer never came). */
+  const writesThenTimesOut = (sim: Sim) => (op: string, request: Request): ProcessRunResult => {
+    if (op === 'append' || op === 'batch') {
+      helperAnswer(sim.files, op, request)
+      throw new Error('the command timed out after 10000 ms')
+    }
+    const answer = helperAnswer(sim.files, op, request)
+    return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
+  }
+
+  test('an append that timed out after writing is not made again: one line in the log, a note that says so, no exit code', async () => {
+    const sim = machine('real')
+    sim.answering = writesThenTimesOut(sim)
+    const port = portOf(sim)
+    sim.files.set('/m/runs/cleared.jsonl', 'old\n')
+    const codes: number[] = []
+    expect(await helped().append(port, '/m/runs/cleared.jsonl', ['{"session_id":"x"}'], false, exit => codes.push(exit))).toBeUndefined()
+    expect(sim.files.get('/m/runs/cleared.jsonl')).toBe('old\n{"session_id":"x"}\n')
+    expect(sim.runs.filter(one => one.argv[0] === 'sh')).toEqual([])
+    expect(codes).toEqual([])
+    expect(fallbacks(sim)).toEqual([{ kind: 'fallback', op: 'append', code: 'TIMEOUT', isQuiet: false, isRepeated: false }])
+  })
+
+  test('the trace\'s batch that timed out after writing is not made again: rotated once, the lines once', async () => {
+    const sim = machine('real')
+    sim.answering = writesThenTimesOut(sim)
+    const port = portOf(sim)
+    sim.files.set('/m/runs/trace.log', 'old\n')
+    expect(await helped().rotateAndAppend(port, '/m/runs/trace.log', ['new'], PLAN)).toBeUndefined()
+    expect([sim.files.get('/m/runs/trace.log'), sim.files.get('/m/runs/trace.log.1'), sim.files.get('/m/runs/trace.log.2')]).toEqual(['new\n', 'old\n', undefined])
+    expect(sim.runs.filter(one => one.argv[0] === 'sh')).toEqual([])
+    expect(fallbacks(sim)).toEqual([{ kind: 'fallback', op: 'batch', code: 'TIMEOUT', isQuiet: true, isRepeated: false }])
+  })
+
+  test('an append that failed with nothing written (an exit code, no JSON, ok:false, Node not starting) still falls back: one line', async () => {
+    const kinds: [string, Answering][] = [
+      ['an exit code with no answer', () => ran('', 1)],
+      ['an answer that is not JSON', () => ran('Segmentation fault', 139)],
+      ['ok:false', () => ran('{"ok":false,"code":"NO_SPACE"}', 1)],
+      ['Node not starting', 'spawn'],
+    ]
+    for (const [, answering] of kinds) {
+      const sim = machine(answering)
+      const codes: number[] = []
+      expect(await helped().append(portOf(sim), '/m/runs/cleared.jsonl', ['{"session_id":"x"}'], false, exit => codes.push(exit))).toBeUndefined()
+      expect(sim.files.get('/m/runs/cleared.jsonl')).toBe('{"session_id":"x"}\n')
+      expect(sim.runs.filter(one => one.argv[0] === 'sh').map(one => one.argv[2])).toEqual([APPEND_SCRIPT])
+      expect(codes).toEqual([0])
+      expect(fallbacks(sim).map(note => 'isRepeated' in note)).toEqual([false])
+    }
+    // What the trace line and the toast say (register.tsx's noteHelper writes them).
+    expect(fallbackFields({ kind: 'fallback', op: 'append', code: 'TIMEOUT', isQuiet: false, isRepeated: false })).toEqual({ op: 'append', code: 'TIMEOUT', isRepeated: false })
+    expect(fallbackFields({ kind: 'fallback', op: 'append', code: 'SPAWN', isQuiet: false })).toEqual({ op: 'append', code: 'SPAWN' })
+    expect(fallbackToast({ kind: 'fallback', op: 'append', code: 'TIMEOUT', isQuiet: false, isRepeated: false })).toBe('helper fallback: append (timed out, not repeated)')
+    expect(fallbackToast({ kind: 'fallback', op: 'probe', code: 'ACCESS', isQuiet: false })).toBe('helper fallback: probe')
+    expect([appendNotRepeated({ code: 'TIMEOUT' }), ...['SPAWN', 'BAD_JSON', 'TRUNCATED', 'BAD_ANSWER', 'NO_SPACE', 'IO'].map(code => appendNotRepeated({ code }))]).toEqual([true, false, false, false, false, false, false])
+  })
 
   test('the batch: the rotation, then the append, in that order, in one helper process', async () => {
     const sim = machine()

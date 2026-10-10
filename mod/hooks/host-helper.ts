@@ -3,7 +3,8 @@
 // is looked for once, at the first operation that needs it: none, or one older than HELPER_MIN_NODE, leaves the
 // adapter's own operations in place for the whole load. A call that fails (Node cannot start, times out, answers
 // what is not one JSON object or answers ok:false) falls back to the adapter's own operation for that call, and the
-// port is told the operation and a fixed code, never a message or content.
+// port is told the operation and a fixed code, never a message or content; an append that timed out is the exception
+// (appendNotRepeated).
 
 import type { ProcessRunResult } from 'claude-code'
 
@@ -31,8 +32,13 @@ export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'batch'> } & Record<s
 /** What a helper call came to: its answer's fields, or the fixed code it failed with. */
 export type HelperAnswer = { ok: true; fields: Record<string, unknown> } | { ok: false; code: string; at?: number }
 
-/** What the port is told: Node's detection once per load, and each fallback (`isQuiet`: of an untraced operation, the trace's own write among them). */
-export type HelperNote = { kind: 'node'; isActive: boolean; version?: string; reason?: string } | { kind: 'fallback'; op: HelperOp; code: string; isQuiet: boolean }
+/**
+ * What the port is told: Node's detection once per load, and each fallback (`isQuiet`: of an untraced operation, the
+ * trace's own write among them; `isRepeated` false: an append that timed out, not made again).
+ */
+export type HelperNote =
+  | { kind: 'node'; isActive: boolean; version?: string; reason?: string }
+  | { kind: 'fallback'; op: HelperOp; code: string; isQuiet: boolean; isRepeated?: false }
 
 /** The codes this side gives a failed call; the helper's own codes (protocol.mjs) pass through when well formed. */
 export const CALL_CODES = ['SPAWN', 'TIMEOUT', 'BAD_JSON', 'TRUNCATED', 'BAD_ANSWER'] as const
@@ -80,6 +86,24 @@ export function readAnswer(ran: ProcessRunResult): HelperAnswer {
 /** The text an append adds: each line and a newline (APPEND_SCRIPT's `printf '%s\n'` of the lines joined by newlines). */
 export const appendText = (lines: readonly string[]) => lines.map(line => `${line}\n`).join('')
 
+/**
+ * Whether a failed call that appended (an append, or the trace's batch) is left as it is: after a TIMEOUT the helper may
+ * have written the lines already, and the adapter's own append would write them a second time. Every other failure
+ * (Node did not start, an exit code with no answer, an answer that is not JSON, ok:false) means nothing was written,
+ * and the adapter appends. The lines may then be missing from the log; they are never in it twice.
+ */
+export const appendNotRepeated = (failed: { code: string }) => failed.code === 'TIMEOUT'
+
+/** A fallback's trace fields: the operation and the code, and `isRepeated` false for an append that was not made again. */
+export function fallbackFields(note: HelperNote & { kind: 'fallback' }): Record<string, unknown> {
+  return note.isRepeated === false ? { op: note.op, code: note.code, isRepeated: false } : { op: note.op, code: note.code }
+}
+
+/** A fallback's toast text. */
+export function fallbackToast(note: HelperNote & { kind: 'fallback' }): string {
+  return `helper fallback: ${note.op}${note.isRepeated === false ? ' (timed out, not repeated)' : ''}`
+}
+
 /** The rotation request of a plan. */
 const rotateRequest = (plan: RotatePlan) => ({ path: plan.path, adding: plan.adding, maxBytes: plan.maxBytes, moves: plan.moves.map(([from, to]) => [from, to]) })
 
@@ -124,6 +148,7 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
   /**
    * An operation through the helper: `use` reads the answer's fields (undefined: not the answer expected), `fallback`
    * is the adapter's own operation, run when Node is missing or the call fails; a failed call is told to the port.
+   * `unrepeated`, for a call that appends, is what a failure appendNotRepeated leaves in place of the fallback.
    */
   async function through<T>(
     port: HostPort,
@@ -133,6 +158,7 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
     shown: Record<string, unknown>,
     use: (fields: Record<string, unknown>) => T | undefined,
     fallback: (failed: HelperAnswer & { ok: false }) => Promise<T>,
+    unrepeated?: T,
   ): Promise<T> {
     ready ??= detect(port)
     if (!(await ready)) return fallback({ ok: false, code: 'NO_NODE' })
@@ -140,6 +166,10 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
     const value = answer.ok ? use(answer.fields) : undefined
     if (value !== undefined) return value
     const failed = answer.ok ? ({ ok: false, code: 'BAD_ANSWER' } as const) : answer
+    if (unrepeated !== undefined && appendNotRepeated(failed)) {
+      port.noteHelper({ kind: 'fallback', op, code: failed.code, isQuiet, isRepeated: false })
+      return unrepeated
+    }
     port.noteHelper({ kind: 'fallback', op, code: failed.code, isQuiet })
     return fallback(failed)
   }
@@ -207,10 +237,12 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         { path, text: appendText(lines) },
         isQuiet,
         { path },
-        fields => (typeof fields.bytes === 'number' ? { problem: undefined } : undefined),
+        fields => (typeof fields.bytes === 'number' ? { problem: undefined, isFallback: false } : undefined),
         async () => ({ problem: await base.append(port, path, lines, isQuiet, onRan), isFallback: true }),
+        // Timed out: the lines may be in the log already. Not repeated, no exit code to give, nothing for the caller to retry.
+        { problem: undefined, isFallback: true },
       )
-      if (!('isFallback' in appended)) onRan(0)
+      if (!appended.isFallback) onRan(0)
       return appended.problem
     },
 
@@ -260,6 +292,8 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         async failed => ({
           problem: await (rotation !== undefined && failed.at !== undefined && failed.at >= 1 ? base.rotateAndAppend(port, path, lines) : base.rotateAndAppend(port, path, lines, rotation)),
         }),
+        // A batch that timed out may have rotated and appended already: neither is made again (appendNotRepeated).
+        { problem: undefined },
       ).then(done => done.problem)
     },
   }
