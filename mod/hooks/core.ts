@@ -1334,25 +1334,74 @@ export function withRunFigures(lines: string, figures: ReadonlyMap<string, RunFi
 /** The run files of an entry the retire cleanup may delete: what it names, by kind. */
 export type RunFile = { kind: 'result' | 'error' | 'pid' | 'prompt'; path: string }
 
+/** A run file a retire will not delete, with the reason (a fixed text) and the entry field's kind. */
+export type RunFileRefusal = { kind: RunFile['kind']; path: string; name: string; reason: string }
+
+const lastSegment = (path: string) => path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1)
+
+/** Whether a path has a `.` or `..` segment (either slash). */
+const hasDotSegment = (path: string) => path.split(/[\\/]/).some(segment => segment === '.' || segment === '..')
+
+/**
+ * Why a path under the runs directory is not a file that sits directly in it, or undefined when it is: the path with
+ * its slashes normalised (and, on Windows, its case) minus the runs directory and a slash is one name, no further
+ * segment. On Windows a name with a colon (a stream) or one ending in a dot or a blank is no plain file name either.
+ * The caller has checked the path starts with the runs directory and has no `.` or `..` segment.
+ */
+export function runFileLocationProblem(path: string, runsDir: string, isWindows: boolean): string | undefined {
+  const norm = (value: string) => (isWindows ? winPath(value).toLowerCase() : value).replace(/\/+$/, '')
+  const base = norm(runsDir)
+  const one = norm(path)
+  const rest = base !== '' && one.startsWith(`${base}/`) ? one.slice(base.length + 1) : undefined
+  if (rest === undefined || rest === '' || rest.includes('/')) return 'not directly in the runs folder'
+  if (isWindows && /[:]|[. ]$/.test(rest)) return 'not a plain file name'
+  return undefined
+}
+
 /**
  * The run files a retire deletes for a session it removed whose outcome is clean or whose retire was reviewed: its
  * result file, its error file, the pid file beside the result file (the PowerShell route's, `<result less .json>.pid`)
- * and the prompt file the mod wrote for it. Never a file outside the runs directory, never a transcript (`.jsonl`),
- * never one that another registry entry names in any of its fields. `isUnder` compares as the platform does.
+ * and the prompt file the mod wrote for it. Only a file that sits directly in the runs directory: the path under the
+ * runs directory is one name, with no `.` or `..` segment and no further folder (runFileLocationProblem). Never a
+ * transcript (`.jsonl`), never one that another registry entry names in any field. `isUnder` says whether a path is
+ * plainly inside the runs directory (compared as the platform does): one that is not is no run file of the mod and
+ * is left alone without a word, as before; a path with a `.` or `..` segment, or under the runs directory but not
+ * directly in it, is refused with its reason. Whether a file is a symbolic link is for the host's removeRegularFile.
  */
-export function runFilesToDelete(entry: SessionEntry, others: readonly SessionEntry[], runsDir: string, isUnder: (path: string, dir: string) => boolean): RunFile[] {
+export function planRunFiles(
+  entry: SessionEntry,
+  others: readonly SessionEntry[],
+  runsDir: string,
+  isUnder: (path: string, dir: string) => boolean,
+  isWindows = false,
+): { files: RunFile[]; refused: RunFileRefusal[] } {
+  const key = (value: string) => (isWindows ? winPath(value).toLowerCase() : value)
   const named = new Set<string>()
-  for (const other of others) for (const value of Object.values(other)) if (typeof value === 'string') named.add(value)
+  for (const other of others) for (const value of Object.values(other)) if (typeof value === 'string') named.add(key(value))
   const str = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined)
   const result = str(entry.result_file)
-  const files: RunFile[] = []
-  if (result !== undefined) files.push({ kind: 'result', path: result })
+  const candidates: RunFile[] = []
+  if (result !== undefined) candidates.push({ kind: 'result', path: result })
   const err = str(entry.err_file)
-  if (err !== undefined) files.push({ kind: 'error', path: err })
-  if (result !== undefined && result.endsWith('.json')) files.push({ kind: 'pid', path: `${result.slice(0, -'.json'.length)}.pid` })
+  if (err !== undefined) candidates.push({ kind: 'error', path: err })
+  if (result !== undefined && result.endsWith('.json')) candidates.push({ kind: 'pid', path: `${result.slice(0, -'.json'.length)}.pid` })
   const prompt = str(entry.prompt_file)
-  if (prompt !== undefined) files.push({ kind: 'prompt', path: prompt })
-  return files.filter(file => isUnder(file.path, runsDir) && !file.path.endsWith('.jsonl') && !named.has(file.path))
+  if (prompt !== undefined) candidates.push({ kind: 'prompt', path: prompt })
+  const files: RunFile[] = []
+  const refused: RunFileRefusal[] = []
+  for (const file of candidates) {
+    const reason = hasDotSegment(file.path) ? 'the path has . or .. segments' : !isUnder(file.path, runsDir) ? undefined : runFileLocationProblem(file.path, runsDir, isWindows)
+    if (reason !== undefined) refused.push({ ...file, name: lastSegment(file.path), reason })
+    else if (isUnder(file.path, runsDir) && !file.path.endsWith('.jsonl') && !named.has(key(file.path))) files.push(file)
+  }
+  // The pid file beside a result file that was refused is no news of its own.
+  const isResultRefused = refused.some(one => one.kind === 'result')
+  return { files, refused: refused.filter(one => one.kind !== 'pid' || !isResultRefused) }
+}
+
+/** The files planRunFiles lets through (see there); `isUnder` as there, the platform POSIX. */
+export function runFilesToDelete(entry: SessionEntry, others: readonly SessionEntry[], runsDir: string, isUnder: (path: string, dir: string) => boolean): RunFile[] {
+  return planRunFiles(entry, others, runsDir, isUnder).files
 }
 
 export const CLOSE_SCHEMA = {

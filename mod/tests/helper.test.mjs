@@ -162,6 +162,92 @@ test('renameOver: the temp file takes an existing file\'s place; removeFile: a f
   }
 })
 
+test('removeFile with regularOnly: a regular file goes; a symbolic link (to a file, a directory, a missing target), a directory and a bad flag are refused with a fixed code and nothing is touched', () => {
+  const dir = scratch()
+  const outside = scratch()
+  try {
+    const runs = join(dir, 'runs')
+    fs.mkdirSync(runs)
+    fs.writeFileSync(join(outside, 'secret.txt'), 'outside file')
+    fs.writeFileSync(join(runs, 'plain.json'), 'plain')
+    fs.mkdirSync(join(runs, 'sub'))
+    fs.writeFileSync(join(runs, 'sub', 'inner.txt'), 'inner')
+    fs.symlinkSync(join(outside, 'secret.txt'), join(runs, 'link.json'))
+    fs.symlinkSync(outside, join(runs, 'linkdir'), 'dir')
+    fs.symlinkSync(join(outside, 'missing'), join(runs, 'dangling.json'))
+    // The normal case, and a path that is not there.
+    assert.deepEqual(helper('removeFile', { path: join(runs, 'plain.json'), regularOnly: true }).answer, { ok: true, removed: true })
+    assert.equal(fs.existsSync(join(runs, 'plain.json')), false)
+    assert.deepEqual(helper('removeFile', { path: join(runs, 'plain.json'), regularOnly: true }).answer, { ok: true, removed: false })
+    // A link of any kind is refused with IS_LINK; the link and its target stay.
+    for (const name of ['link.json', 'linkdir', 'dangling.json']) {
+      const run = helper('removeFile', { path: join(runs, name), regularOnly: true })
+      assertFailure(run, 'IS_LINK', dir)
+      assert.ok(fs.lstatSync(join(runs, name)).isSymbolicLink(), name)
+    }
+    assert.equal(fs.readFileSync(join(outside, 'secret.txt'), 'utf8'), 'outside file')
+    assert.deepEqual(fs.readdirSync(outside), ['secret.txt'])
+    // A directory (not empty or empty) is refused with NOT_FILE.
+    assertFailure(helper('removeFile', { path: join(runs, 'sub'), regularOnly: true }), 'NOT_FILE', dir)
+    assert.equal(fs.readFileSync(join(runs, 'sub', 'inner.txt'), 'utf8'), 'inner')
+    // A bad flag is a bad request; without the flag the operation is the old one.
+    assertFailure(helper('removeFile', { path: join(runs, 'link.json'), regularOnly: 'yes' }), 'BAD_REQUEST', dir)
+    assert.ok(fs.lstatSync(join(runs, 'link.json')).isSymbolicLink())
+    assert.deepEqual(helper('removeFile', { path: join(runs, 'link.json') }).answer, { ok: true, removed: true })
+    assert.equal(fs.readFileSync(join(outside, 'secret.txt'), 'utf8'), 'outside file')
+    // In a batch the refusal stops it, with its position.
+    const batch = helper('batch', { ops: [{ op: 'removeFile', path: join(runs, 'sub'), regularOnly: true }] })
+    assert.equal(batch.answer.code, 'NOT_FILE')
+    assert.equal(batch.answer.at, 0)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+    fs.rmSync(outside, { recursive: true, force: true })
+  }
+})
+
+/** REMOVE_REGULAR_SCRIPT of hooks/host-posix.ts, the adapter's own removal of a regular file, as the mod runs it. */
+function removeRegularScript() {
+  const src = fs.readFileSync(join(HERE, '..', 'hooks', 'host-posix.ts'), 'utf8')
+  const found = /export const REMOVE_REGULAR_SCRIPT = String\.raw`([\s\S]*?)`\n/.exec(src)
+  assert.ok(found, 'REMOVE_REGULAR_SCRIPT not found')
+  return found[1]
+}
+
+test('REMOVE_REGULAR_SCRIPT under sh (the native fallback): the same answers as the helper, by exit code (0 removed, 3 not there, 4 a link, 5 no regular file)', { skip: !IS_LINUX }, () => {
+  const dir = scratch()
+  const outside = scratch()
+  try {
+    const script = removeRegularScript()
+    const run = path => spawnSync('sh', ['-c', script, 'session-remove', path]).status
+    const runs = join(dir, 'runs')
+    fs.mkdirSync(runs)
+    fs.writeFileSync(join(outside, 'secret.txt'), 'outside file')
+    fs.writeFileSync(join(runs, 'plain.json'), 'plain')
+    fs.writeFileSync(join(runs, '-dash [x] \'q\'.json'), 'odd name')
+    fs.mkdirSync(join(runs, 'sub'))
+    fs.symlinkSync(join(outside, 'secret.txt'), join(runs, 'link.json'))
+    fs.symlinkSync(outside, join(runs, 'linkdir'), 'dir')
+    fs.symlinkSync(join(outside, 'missing'), join(runs, 'dangling.json'))
+    assert.equal(run(join(runs, 'plain.json')), 0)
+    assert.equal(fs.existsSync(join(runs, 'plain.json')), false)
+    assert.equal(run(join(runs, '-dash [x] \'q\'.json')), 0)
+    assert.equal(run(join(runs, 'plain.json')), 3)
+    assert.equal(run(join(runs, 'link.json')), 4)
+    assert.equal(run(join(runs, 'linkdir')), 4)
+    assert.equal(run(join(runs, 'dangling.json')), 4)
+    assert.equal(run(join(runs, 'sub')), 5)
+    for (const name of ['link.json', 'linkdir', 'dangling.json']) assert.ok(fs.lstatSync(join(runs, name)).isSymbolicLink(), name)
+    assert.equal(fs.readFileSync(join(outside, 'secret.txt'), 'utf8'), 'outside file')
+    assert.ok(fs.statSync(join(runs, 'sub')).isDirectory())
+    // A relative path that begins with a dash is a file name, not an option.
+    const plainDir = spawnSync('sh', ['-c', `${script}`, 'session-remove', '-x'], { cwd: runs })
+    assert.equal(plainDir.status, 3)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+    fs.rmSync(outside, { recursive: true, force: true })
+  }
+})
+
 test('append: added to the end without reading the file, its directory made; many processes at once lose and split nothing', async () => {
   const dir = scratch()
   try {

@@ -18,13 +18,15 @@ import {
   winPath,
 } from './core'
 import type { LaunchInput, ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RotatePlan, TailShape, WorkerWant } from './host'
-import { NEWER_MAX, PANE_TAIL, bashLaunchCommand, clockPause, parseNewerListing, readTail, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
+import type { Host, HostPort, NewerFiles, RemoveOutcome, RotatePlan, TailShape, WorkerWant } from './host'
+import { NEWER_MAX, PANE_TAIL, bashLaunchCommand, clockPause, parseNewerListing, readTail, removeOutcomeOfExit, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
 
 /**
  * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
  * (never as -Command text, whose quoting does not survive). `move <from> <to>` replaces an existing file in one
- * step (File.Replace: a reader never finds it missing) or moves it there; `remove <path>`; `append <from> <to>`
+ * step (File.Replace: a reader never finds it missing) or moves it there; `remove <path>`; `removeregular <path>`
+ * removes a regular file only (the attributes are read without following a link: a reparse point, a symbolic link or
+ * a junction, exits 4, a directory 5, a path that is not there 3); `append <from> <to>`
  * adds the text of a file to the end of another and removes the first, never reading what the second holds;
  * `tail <path> <lines> <width>` for a transcript over the 4 MiB read cap. Output is UTF-8; a failure exits 1 with
  * the reason.
@@ -43,6 +45,13 @@ export const FILES_PS1 = [
   '      else { [System.IO.File]::Move($A, $B) }',
   '    }',
   "    'remove' { if ([System.IO.File]::Exists($A)) { [System.IO.File]::Delete($A) } }",
+  "    'removeregular' {",
+  '      $attr = $null',
+  '      try { $attr = [System.IO.File]::GetAttributes($A) } catch [System.IO.IOException] { exit 3 }',
+  '      if ($attr -band [System.IO.FileAttributes]::ReparsePoint) { exit 4 }',
+  '      if ($attr -band [System.IO.FileAttributes]::Directory) { exit 5 }',
+  '      [System.IO.File]::Delete($A)',
+  '    }',
   "    'append' {",
   '      $utf8 = New-Object System.Text.UTF8Encoding $false',
   '      [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($B))',
@@ -261,6 +270,15 @@ async function removeFile(port: HostPort, path: string, isQuiet = false): Promis
   return ran?.exitCode === 0
 }
 
+/** Removes a regular file with the file script's `removeregular`; a link or a directory stays. */
+async function removeRegularFile(port: HostPort, path: string): Promise<RemoveOutcome> {
+  const ran = await runScript(port, 'files.ps1', FILES_PS1, ['removeregular', path]).catch((err: unknown) => {
+    port.traceError('remove', err)
+    return undefined
+  })
+  return ran === undefined ? 'failed' : removeOutcomeOfExit(ran.exitCode)
+}
+
 /**
  * Puts the temp file in the file's place with the file script; when it cannot run or fails, the text is written over
  * the file directly (the caller has checked it is still the one expected), and that write, which a reader can see
@@ -351,6 +369,7 @@ export const windowsHost: Host = {
   makeDir: async () => false,
   writeAtomic: (port: HostPort, path: string, text: string, expected?: string) => writeAtomicWith(windowsHost, port, path, text, expected),
   removeFile,
+  removeRegularFile,
   renameOver,
   /** The lines go to a file of their own, which the file script appends and removes. */
   async append(port: HostPort, path: string, lines: readonly string[], isQuiet: boolean, onRan: (exitCode: number) => void) {

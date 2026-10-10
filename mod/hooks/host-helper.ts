@@ -12,7 +12,7 @@ import type { ProcessRunResult } from 'claude-code'
 import type { SessionEntry } from '../types'
 import { parseProcFacts, probeArgs } from './core'
 import type { ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RotatePlan, TailShape } from './host'
+import type { Host, HostPort, NewerFiles, RemoveOutcome, RotatePlan, TailShape } from './host'
 import { NEWER_MAX, PANE_TAIL, TAIL_SHAPED_MAX_BYTES, readTail } from './host-shared'
 
 /** The helper's entry point under the plugin's directory. */
@@ -121,8 +121,8 @@ const rotateRequest = (plan: RotatePlan) => ({ path: plan.path, adding: plan.add
 
 /**
  * The adapter with its listed operations run by the helper: probe (Linux only: on Windows the process rows stay on
- * PROBE_PS1), writeAtomic, renameOver, removeFile, append, tail, rotate, filesNewerThan and rotateAndAppend (one batch).
- * Every other member is the adapter's own.
+ * PROBE_PS1), writeAtomic, renameOver, removeFile, removeRegularFile (the same helper operation with `regularOnly`), append,
+ * tail, rotate, filesNewerThan and rotateAndAppend (one batch). Every other member is the adapter's own.
  */
 export function withHelper(base: Host, setup: HelperSetup): Host {
   let ready: Promise<boolean> | undefined
@@ -266,6 +266,21 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         fields => (typeof fields.removed === 'boolean' ? true : undefined),
         () => base.removeFile(port, path, isQuiet),
       )
+    },
+
+    /**
+     * A regular file only: the helper refuses a link and a non-file with a fixed code (IS_LINK, NOT_FILE), which is the
+     * answer here and no fallback. Any other failure falls back to the adapter's own operation, which makes the same
+     * checks.
+     */
+    async removeRegularFile(port: HostPort, path: string): Promise<RemoveOutcome> {
+      if (!(await isReady(port))) return base.removeRegularFile(port, path)
+      const answer = await call(port, 'removeFile', { path, regularOnly: true }, false, { path, regularOnly: true }, CALL_TIMEOUT_MS)
+      if (answer.ok && typeof answer.fields.removed === 'boolean') return answer.fields.removed ? 'removed' : 'absent'
+      if (!answer.ok && answer.code === 'IS_LINK') return 'symlink'
+      if (!answer.ok && answer.code === 'NOT_FILE') return 'not-file'
+      port.noteHelper({ kind: 'fallback', op: 'removeFile', code: answer.ok ? 'BAD_ANSWER' : answer.code, isQuiet: false })
+      return base.removeRegularFile(port, path)
     },
 
     async append(port: HostPort, path: string, lines: readonly string[], isQuiet: boolean, onRan: (exitCode: number) => void): Promise<string | undefined> {

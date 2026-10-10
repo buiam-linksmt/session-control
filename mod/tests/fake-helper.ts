@@ -16,6 +16,26 @@ const move = (files: Map<string, string>, keyOf: KeyOf, from: string, to: string
   return true
 }
 
+/**
+ * A key as the system resolves it through the symbolic links of a test machine (`links`: a link's key to its target's
+ * key): the link itself, or a path through a linked directory, comes out at the target.
+ */
+export function throughLinks(links: ReadonlyMap<string, string>, key: string): string {
+  for (const [link, target] of links) {
+    if (key === link) return target
+    if (key.startsWith(`${link}/`)) return `${target}${key.slice(link.length)}`
+  }
+  return key
+}
+
+/** What a regular-file-only removal does over the map: the exit code the native scripts give (0 removed, 3 not there, 4 a link, 5 no regular file). A path through a linked directory is not looked at: it reaches the target, as the system's does. */
+export function removeRegularInMap(files: Map<string, string>, links: ReadonlyMap<string, string>, key: string): number {
+  if (links.has(key)) return 4
+  const real = throughLinks(links, key)
+  if (files.delete(real)) return 0
+  return [...files.keys()].some(file => file.startsWith(`${real}/`)) ? 5 : 3
+}
+
 /** The files under a directory of the map whose mtime (`mtimes`, 0 when unset) is after a time, as the helper's filesNewerThan walks them: no `.git` entered. */
 export function newerInMap(files: Map<string, string>, mtimes: ReadonlyMap<string, number>, dir: string, sinceSec: number): { path: string; mtimeMs: number }[] | undefined {
   const root = dir.replace(/\/+$/, '')
@@ -29,7 +49,15 @@ export function newerInMap(files: Map<string, string>, mtimes: ReadonlyMap<strin
 }
 
 /** The helper's answer to one request over the map of files; `probeOut` is what its probe prints; `mtimes` the files' mtimes in ms. */
-export function helperAnswer(files: Map<string, string>, op: string, request: Request, probeOut: string, keyOf: KeyOf = path => path.replace(/\\/g, '/'), mtimes: ReadonlyMap<string, number> = new Map()): Record<string, unknown> {
+export function helperAnswer(
+  files: Map<string, string>,
+  op: string,
+  request: Request,
+  probeOut: string,
+  keyOf: KeyOf = path => path.replace(/\\/g, '/'),
+  mtimes: ReadonlyMap<string, number> = new Map(),
+  links: ReadonlyMap<string, string> = new Map(),
+): Record<string, unknown> {
   const path = keyOf(String(request.path ?? ''))
   const fail = (code: string) => ({ ok: false, code })
   if (op === 'probe') return { ok: true, out: probeOut }
@@ -39,7 +67,11 @@ export function helperAnswer(files: Map<string, string>, op: string, request: Re
     return { ok: true, written: true }
   }
   if (op === 'renameOver') return move(files, keyOf, String(request.from), String(request.to)) ? { ok: true } : fail('NOT_FOUND')
-  if (op === 'removeFile') return { ok: true, removed: files.delete(path) }
+  if (op === 'removeFile') {
+    if (request.regularOnly !== true) return { ok: true, removed: files.delete(path) }
+    const code = removeRegularInMap(files, links, path)
+    return code === 0 ? { ok: true, removed: true } : code === 3 ? { ok: true, removed: false } : fail(code === 4 ? 'IS_LINK' : 'NOT_FILE')
+  }
   if (op === 'append') {
     files.set(path, `${files.get(path) ?? ''}${String(request.text)}`)
     return { ok: true, bytes: String(request.text).length }
@@ -61,7 +93,7 @@ export function helperAnswer(files: Map<string, string>, op: string, request: Re
   if (op === 'batch') {
     const results: unknown[] = []
     for (const [at, step] of (request.ops as Request[]).entries()) {
-      const one = helperAnswer(files, String(step.op), step, probeOut, keyOf, mtimes)
+      const one = helperAnswer(files, String(step.op), step, probeOut, keyOf, mtimes, links)
       if (one.ok !== true) return { ...one, at, results }
       results.push(one)
     }

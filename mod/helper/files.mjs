@@ -109,10 +109,22 @@ export function renameOver(request) {
   return {}
 }
 
-/** `{path}`: the file goes; one that is not there is no failure (`removed: false`). */
+/**
+ * `{path, regularOnly?}`: the file goes; one that is not there is no failure (`removed: false`). With `regularOnly: true`
+ * only a regular file goes: the path's last component is looked at with lstat, which does not follow a link, and a
+ * symbolic link (on Windows also a junction) is refused with IS_LINK, anything else that is no regular file (a
+ * directory, a device) with NOT_FILE; nothing is removed then. The unlink itself never follows a link either.
+ */
 export function removeFile(request) {
+  const target = path(request, 'path')
+  if (request.regularOnly !== undefined && typeof request.regularOnly !== 'boolean') throw new HelperError('BAD_REQUEST')
   try {
-    fs.unlinkSync(path(request, 'path'))
+    if (request.regularOnly === true) {
+      const info = fs.lstatSync(target)
+      if (info.isSymbolicLink()) throw new HelperError('IS_LINK')
+      if (!info.isFile()) throw new HelperError('NOT_FILE')
+    }
+    fs.unlinkSync(target)
     return { removed: true }
   } catch (err) {
     if (err?.code === 'ENOENT') return { removed: false }

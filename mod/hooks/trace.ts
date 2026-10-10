@@ -1,7 +1,7 @@
 // Pure parts of the debug trace: the line format, the redaction, what of a message and of a command line is shown and
 // the rotation. The writing itself lives in register.tsx, where `$` is available.
 
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from './host-posix'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT } from './host-posix'
 import { FILES_PS1, NEWER_PS1, PROBE_PS1 } from './host-windows'
 
 /** The trace file's name inside the runs directory. */
@@ -229,6 +229,7 @@ const SCRIPTS: readonly [string, string][] = [
   [PROBE_SCRIPT, '<PROBE_SCRIPT>'],
   [APPEND_SCRIPT, '<APPEND_SCRIPT>'],
   [ROTATE_SCRIPT, '<ROTATE_SCRIPT>'],
+  [REMOVE_REGULAR_SCRIPT, '<REMOVE_REGULAR_SCRIPT>'],
   [NEWER_SCRIPT, '<NEWER_SCRIPT>'],
   [FILES_PS1, '<FILES_PS1>'],
   [PROBE_PS1, '<PROBE_PS1>'],

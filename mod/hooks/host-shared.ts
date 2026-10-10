@@ -5,7 +5,7 @@ import type { FsStat } from 'claude-code'
 
 import type { LaunchArgs } from './core'
 import { buildLaunchArgv, tailLines } from './core'
-import type { Host, HostPort, LaunchTarget, NewerFiles, RotatePlan, TailShape } from './host'
+import type { Host, HostPort, LaunchTarget, NewerFiles, RemoveOutcome, RotatePlan, TailShape } from './host'
 import { tmpPath } from './store'
 
 /**
@@ -22,6 +22,14 @@ export async function writeAtomicWith(host: Pick<Host, 'removeFile' | 'renameOve
   }
   await host.renameOver(port, tmp, path, text)
   return true
+}
+
+/**
+ * What the native scripts that remove a regular file (REMOVE_REGULAR_SCRIPT, the `removeregular` operation of
+ * FILES_PS1) exit with: 0 removed, 3 not there, 4 a link, 5 no regular file; anything else is a failure.
+ */
+export function removeOutcomeOfExit(exitCode: number): RemoveOutcome {
+  return exitCode === 0 ? 'removed' : exitCode === 3 ? 'absent' : exitCode === 4 ? 'symlink' : exitCode === 5 ? 'not-file' : 'failed'
 }
 
 /** Writes a file that is not there ($.fs.write makes the directories); a file that is there but cannot be read is left alone. */

@@ -16,6 +16,8 @@ export const CODES = Object.freeze([
   'EXISTS',
   'IS_DIR',
   'NOT_DIR',
+  'IS_LINK',
+  'NOT_FILE',
   'NO_SPACE',
   'READ_ONLY',
   'CROSS_DEVICE',

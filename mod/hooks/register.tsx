@@ -22,7 +22,7 @@ import {
   utf8Bytes,
 } from './trace'
 import { selectHost } from './host'
-import type { Host, HostEnvName, HostPort, TailShape } from './host'
+import type { Host, HostEnvName, HostPort, RemoveOutcome, TailShape } from './host'
 import { HELPER_SCRIPT, fallbackFields, fallbackToast, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
@@ -41,6 +41,7 @@ import {
   listSessionsText,
   matchSession,
   panelSnapshotText,
+  plainText,
   readResultText,
   sessionWritesText,
   workerTailText,
@@ -54,10 +55,10 @@ import {
   fillFromEntry,
   filledFields,
   launchArgsOf,
+  planRunFiles,
   promptSourceRefusal,
   rulesWanted,
   runFigures,
-  runFilesToDelete,
   withRunFigures,
   ackEntries,
   registerEntry,
@@ -830,9 +831,11 @@ async function retire($: EngineInterface, ids: readonly string[], reviewed: Read
 
 /**
  * Deletes the run files of retired sessions whose outcome was clean or whose retire was reviewed: result, error and
- * pid files and the prompt file the mod wrote, inside the runs directory and named by no other registry entry
- * (runFilesToDelete); never a transcript. Answers the sentence the retire's answer ends with ('' when nothing was there
- * to delete). Nothing here refuses: a file that will not go is named.
+ * pid files and the prompt file the mod wrote, only files that sit directly in the runs directory (planRunFiles) and
+ * named by no other registry entry, and only regular files that are no symbolic link (the host's removeRegularFile,
+ * which looks at the path without following a link); never a transcript. Answers the sentence the retire's answer ends
+ * with ('' when nothing was there to delete). Nothing here refuses the retire: a path that is refused is named
+ * (`not deleted: <name>: <reason>`), a file that will not go is named.
  */
 async function cleanRunFiles($: EngineInterface, removed: readonly SessionEntry[], reviewedSids: readonly string[], runs: string): Promise<string> {
   const eligible = removed.filter(entry => (entry.outcome as { kind?: unknown } | undefined)?.kind === 'clean' || reviewedSids.includes(String(entry.session_id)))
@@ -843,25 +846,31 @@ async function cleanRunFiles($: EngineInterface, removed: readonly SessionEntry[
   const left = remaining.ok ? remaining.entries : []
   const deleted: string[] = []
   const kept: string[] = []
+  const refusals: string[] = []
+  const shown = (name: string) => plainText(name).slice(0, 120)
   for (const entry of eligible) {
     const others = [...left, ...removed.filter(one => one !== entry)]
     const names: string[] = []
     const stuck: string[] = []
-    for (const file of runFilesToDelete(entry, others, runs, (path, dir) => isUnder(path, dir, isWindows))) {
-      if (!(await $.fs.exists(file.path).catch(() => false))) continue
-      const isGone = await machine.removeFile(portOf($), file.path).catch(() => false)
+    const plan = planRunFiles(entry, others, runs, (path, dir) => isUnder(path, dir, isWindows), isWindows)
+    for (const one of plan.refused) refusals.push(`not deleted: ${shown(one.name)}: ${one.reason}`)
+    for (const file of plan.files) {
+      const outcome = await machine.removeRegularFile(portOf($), file.path).catch((): RemoveOutcome => 'failed')
       const name = file.path.slice(Math.max(file.path.lastIndexOf('/'), file.path.lastIndexOf('\\')) + 1)
-      if (isGone && !(await $.fs.exists(file.path).catch(() => false))) names.push(name)
-      else stuck.push(name)
+      if (outcome === 'removed') names.push(name)
+      else if (outcome === 'symlink') refusals.push(`not deleted: ${shown(name)}: is a symbolic link`)
+      else if (outcome === 'not-file') refusals.push(`not deleted: ${shown(name)}: is not a regular file`)
+      else if (outcome === 'failed') stuck.push(name)
     }
     const sid = String(entry.session_id).slice(0, 8)
     if (names.length > 0) deleted.push(`${sid} (${names.join(', ')})`)
     if (stuck.length > 0) kept.push(`${sid} (${stuck.join(', ')})`)
   }
-  if (deleted.length + kept.length > 0) trace($, 'retire.cleanup', { deleted: deleted.length, failed: kept.length })
+  if (deleted.length + kept.length + refusals.length > 0) trace($, 'retire.cleanup', { deleted: deleted.length, failed: kept.length, refused: refusals.length })
   const gone = deleted.length === 0 ? '' : ` Run files deleted from ${runs}: ${deleted.join('; ')}.`
   const notGone = kept.length === 0 ? '' : ` Run files that could not be deleted: ${kept.join('; ')}.`
-  return `${gone}${notGone}`
+  const notDeleted = refusals.length === 0 ? '' : ` (${refusals.join('; ')})`
+  return `${gone}${notGone}${notDeleted}`
 }
 
 /** close_worker: acknowledge_workers, then (keep false) retire_workers, each as it answers on its own. */

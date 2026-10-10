@@ -9,6 +9,8 @@ import {
   promptSourceRefusal,
   rulesWanted,
   runFigures,
+  planRunFiles,
+  runFileLocationProblem,
   runFilesToDelete,
   withRunFigures,
   annotateCleared,
@@ -1385,6 +1387,68 @@ describe('retire cleanup', () => {
     ])
     expect(runFilesToDelete(entry, [{ session_id: 'b', note: `${RUNS}/x.err` }], RUNS, under).map(one => one.kind)).toEqual(['result', 'pid', 'prompt'])
     expect(runFilesToDelete({ result_file: '/elsewhere/x.json', err_file: `${RUNS}/t.jsonl`, prompt_file: '/scratch/p.md' }, [], RUNS, under)).toEqual([])
+  })
+  test('runFileLocationProblem: a file directly in the runs directory is fine; a subfolder, a double slash and (on Windows) a stream or a trailing dot are not', () => {
+    expect(runFileLocationProblem(`${RUNS}/x.json`, RUNS, false)).toBeUndefined()
+    expect(runFileLocationProblem(`${RUNS}/x.json`, `${RUNS}/`, false)).toBeUndefined()
+    expect(runFileLocationProblem(`${RUNS}/sub/x.json`, RUNS, false)).toBe('not directly in the runs folder')
+    expect(runFileLocationProblem(`${RUNS}//x.json`, RUNS, false)).toBe('not directly in the runs folder')
+    expect(runFileLocationProblem(`${RUNS}/`, RUNS, false)).toBe('not directly in the runs folder')
+    expect(runFileLocationProblem(`${RUNS}`, RUNS, false)).toBe('not directly in the runs folder')
+    expect(runFileLocationProblem('/elsewhere/x.json', RUNS, false)).toBe('not directly in the runs folder')
+    expect(runFileLocationProblem(`${RUNS}/x.json`, '', false)).toBe('not directly in the runs folder')
+    const win = 'C:/Users/u/.claude/session-control/runs'
+    expect(runFileLocationProblem(`${win}/x.json`, win, true)).toBeUndefined()
+    expect(runFileLocationProblem('c:\\users\\u\\.claude\\session-control\\runs\\X.json', win, true)).toBeUndefined()
+    expect(runFileLocationProblem(`/c/Users/u/.claude/session-control/runs/x.json`, win, true)).toBeUndefined()
+    expect(runFileLocationProblem(`${win}/sub/x.json`, win, true)).toBe('not directly in the runs folder')
+    expect(runFileLocationProblem(`${win}\\sub\\x.json`, win, true)).toBe('not directly in the runs folder')
+    expect(runFileLocationProblem(`${win}/x.json:stream`, win, true)).toBe('not a plain file name')
+    expect(runFileLocationProblem(`${win}/x.json.`, win, true)).toBe('not a plain file name')
+    expect(runFileLocationProblem(`${win}/x.json `, win, true)).toBe('not a plain file name')
+    // On Linux a colon or a trailing dot is part of a name.
+    expect(runFileLocationProblem(`${RUNS}/x:y.`, RUNS, false)).toBeUndefined()
+  })
+  test('planRunFiles: dot segments and a path in a subfolder are refused with a reason, a plainly outside path, a transcript and a shared file are left alone, the rest goes', () => {
+    const plan = (entry: Record<string, unknown>, others: Record<string, unknown>[] = []) => planRunFiles(entry, others, RUNS, under)
+    // The normal case: all four files, nothing refused.
+    expect(plan({ result_file: `${RUNS}/x.json`, err_file: `${RUNS}/x.err`, prompt_file: `${RUNS}/x.prompt.md` })).toEqual({
+      files: [
+        { kind: 'result', path: `${RUNS}/x.json` },
+        { kind: 'error', path: `${RUNS}/x.err` },
+        { kind: 'pid', path: `${RUNS}/x.pid` },
+        { kind: 'prompt', path: `${RUNS}/x.prompt.md` },
+      ],
+      refused: [],
+    })
+    // A .. path that leaves the runs directory (it starts with the runs directory as text) and one that comes back.
+    const out = plan({ result_file: `${RUNS}/../outside/x.json`, err_file: `${RUNS}/../runs/y.err` })
+    expect(out.files).toEqual([])
+    expect(out.refused).toEqual([
+      { kind: 'result', path: `${RUNS}/../outside/x.json`, name: 'x.json', reason: 'the path has . or .. segments' },
+      { kind: 'error', path: `${RUNS}/../runs/y.err`, name: 'y.err', reason: 'the path has . or .. segments' },
+    ])
+    // A . segment, in the middle or at the end, and a .. outside the runs text too; the pid beside a refused result is not listed again.
+    expect(plan({ err_file: `${RUNS}/./x.err`, prompt_file: `${RUNS}/x/..` }).refused.map(one => one.reason)).toEqual(['the path has . or .. segments', 'the path has . or .. segments'])
+    expect(plan({ err_file: '/h/other/../x.err' }).refused.map(one => one.name)).toEqual(['x.err'])
+    // Under the runs directory but not directly in it: a subfolder (any depth).
+    const nested = plan({ result_file: `${RUNS}/sub/x.json`, err_file: `${RUNS}/a/b/x.err`, prompt_file: `${RUNS}/sub2/p.md` })
+    expect(nested.files).toEqual([])
+    expect(nested.refused.map(one => [one.kind, one.name, one.reason])).toEqual([
+      ['result', 'x.json', 'not directly in the runs folder'],
+      ['error', 'x.err', 'not directly in the runs folder'],
+      ['prompt', 'p.md', 'not directly in the runs folder'],
+    ])
+    // Plainly outside, a transcript and a shared file: left alone, no word (as before). A refused name's directory part never shows.
+    expect(plan({ result_file: '/elsewhere/x.json', err_file: `${RUNS}/t.jsonl` })).toEqual({ files: [], refused: [] })
+    expect(plan({ err_file: `${RUNS}/x.err` }, [{ note: `${RUNS}/x.err` }])).toEqual({ files: [], refused: [] })
+    // On Windows the shared file is told by the platform's path comparison.
+    const winRuns = 'C:/h/runs'
+    const winUnder = (path: string, dir: string) => path.toLowerCase().replace(/\\/g, '/').startsWith(`${dir.toLowerCase()}/`)
+    expect(planRunFiles({ err_file: 'C:\\h\\runs\\X.err' }, [{ note: 'c:/h/runs/x.err' }], winRuns, winUnder, true)).toEqual({ files: [], refused: [] })
+    expect(planRunFiles({ err_file: 'C:\\h\\runs\\sub\\X.err' }, [], winRuns, winUnder, true).refused.map(one => [one.name, one.reason])).toEqual([['X.err', 'not directly in the runs folder']])
+    // The old function still gives the files only.
+    expect(runFilesToDelete({ result_file: `${RUNS}/sub/x.json`, err_file: `${RUNS}/x.err` }, [], RUNS, under)).toEqual([{ kind: 'error', path: `${RUNS}/x.err` }])
   })
   test('runFigures and withRunFigures: cost and duration from the result file, added to the cleared-log line when it lacks them', () => {
     expect(runFigures(JSON.stringify({ total_cost_usd: 0.25, duration_ms: 1200, result: 'x' }))).toEqual({ cost_usd: 0.25, duration_ms: 1200 })

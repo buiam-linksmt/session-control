@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
 import { FILES_PS1, NEWER_PS1 } from '../hooks/host-windows'
 import {
   REDACTED,
@@ -214,6 +214,7 @@ describe('trace lines', () => {
     expect(shownArgv(['sh', '-c', PROBE_SCRIPT, 'session-probe', 'pid:1|/c'])).toEqual(['sh', '-c', '<PROBE_SCRIPT>', 'session-probe', 'pid:1|/c'])
     expect(shownArgv(['sh', '-c', APPEND_SCRIPT, 'session-log', '{"a":"\u00e9"}', '/r/cleared.jsonl'])).toEqual(['sh', '-c', '<APPEND_SCRIPT>', 'session-log', '<11 bytes>', '/r/cleared.jsonl'])
     expect(shownArgv(['sh', '-c', ROTATE_SCRIPT, 'session-trace', '/r/trace.log', '2'])).toEqual(['sh', '-c', '<ROTATE_SCRIPT>', 'session-trace', '/r/trace.log', '2'])
+    expect(shownArgv(['sh', '-c', REMOVE_REGULAR_SCRIPT, 'session-remove', '/r/a.json'])).toEqual(['sh', '-c', '<REMOVE_REGULAR_SCRIPT>', 'session-remove', '/r/a.json'])
     expect(shownArgv(['powershell.exe', '-File', 'C:/r/files.ps1', 'append', 'C:/r/a', 'C:/r/b'])).toEqual(['powershell.exe', '-File', 'C:/r/files.ps1', 'append', 'C:/r/a', 'C:/r/b'])
     expect(shownArgv([FILES_PS1])).toEqual(['<FILES_PS1>'])
     expect(shownArgv(['test', '-s', '/work/new/prompt.md'])).toEqual(['test', '-s', '/work/new/prompt.md'])

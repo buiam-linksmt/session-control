@@ -57,6 +57,13 @@ export type TailShape = { lines: number; width: number }
 /** What filesNewerThan answers: the newest files first (at most NEWER_MAX of host-shared.ts), each with its mtime, and how many there are in all. */
 export type NewerFiles = { files: { path: string; mtimeMs: number }[]; total: number }
 
+/**
+ * What removeRegularFile came to: the file went (`removed`), was not there (`absent`), is a symbolic link or, on
+ * Windows, another reparse point (`symlink`), is no regular file (`not-file`: a directory, a device), or would not go
+ * (`failed`). Only `removed` and `absent` changed or found nothing; the others left the path as it was.
+ */
+export type RemoveOutcome = 'removed' | 'absent' | 'symlink' | 'not-file' | 'failed'
+
 /** The launch verdict's fields the command and the worker match read. */
 export type LaunchTarget = { configDir: string; resumeSid?: string; isConfigInherited?: boolean; name: string }
 
@@ -123,6 +130,12 @@ export type Host = {
   writeAtomic(port: HostPort, path: string, text: string, expected?: string): Promise<boolean>
   /** Removes a file; answers whether it went. */
   removeFile(port: HostPort, path: string, isQuiet?: boolean): Promise<boolean>
+  /**
+   * Removes a regular file and nothing else: the path's own last component is looked at without following a link, and a
+   * symbolic link, a directory or anything that is no regular file is refused (`symlink`, `not-file`) and left in place.
+   * The caller has checked the path is a plain file name in the folder it may clean.
+   */
+  removeRegularFile(port: HostPort, path: string): Promise<RemoveOutcome>
   /** Puts the temporary file in the file's place. */
   renameOver(port: HostPort, tmp: string, path: string, text: string): Promise<void>
   /** Appends lines to a log without reading it; `onRan` gets the exit code; answers what went wrong. */
@@ -173,6 +186,7 @@ export const HOST_MEMBERS = [
   'makeDir',
   'writeAtomic',
   'removeFile',
+  'removeRegularFile',
   'renameOver',
   'append',
   'tail',

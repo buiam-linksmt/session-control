@@ -7,7 +7,8 @@
 //   probe         {args}                              -> {out}       Linux only: the lines of PROBE_SCRIPT
 //   writeAtomic   {path, text, expected?}             -> {written}
 //   renameOver    {from, to}                          -> {}
-//   removeFile    {path}                              -> {removed}
+//   removeFile    {path, regularOnly?}                -> {removed}   regularOnly: a symbolic link is refused (IS_LINK), so is
+//                                                                    a non-file (NOT_FILE)
 //   append        {path, text}                        -> {bytes}
 //   tail          {path, lines, width, maxBytes?}     -> {text, dropped}
 //   rotate        {path, adding, maxBytes, moves}     -> {rotated}

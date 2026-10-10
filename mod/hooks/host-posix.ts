@@ -6,8 +6,8 @@
 import type { SessionEntry } from '../types'
 import { findNewWorker, isDefaultConfigDir, defaultConfigDir, parseProcFacts, probeArgs, transcriptPath } from './core'
 import type { LaunchArgs, LaunchInput, ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RotatePlan, TailShape, WorkerWant } from './host'
-import { NEWER_MAX, TAIL_SHAPED_MAX_BYTES, bashLaunchCommand, parseNewerListing, rotateAndAppendWith, writeAtomicWith } from './host-shared'
+import type { Host, HostPort, NewerFiles, RemoveOutcome, RotatePlan, TailShape, WorkerWant } from './host'
+import { NEWER_MAX, TAIL_SHAPED_MAX_BYTES, bashLaunchCommand, parseNewerListing, removeOutcomeOfExit, rotateAndAppendWith, writeAtomicWith } from './host-shared'
 import { dirOf } from './store'
 
 /**
@@ -82,6 +82,24 @@ find "$d" -name .git -prune -o -type f ! -path "*$nl*" -newermt "@$t" -printf '%
  * first line kept may then be cut at its start).
  */
 export const TAIL_SHAPED_SCRIPT = 'tail -n "$2" "$1" | cut -c1-"$3" | tail -c "$4"'
+
+/**
+ * Removes a regular file and nothing else: the one argument is the path. `[ -L ]` does not follow a link, so a symbolic
+ * link is refused whatever it points to (exit 4), a path that is not there is exit 3, anything that is no regular
+ * file (a directory, a device) exit 5; only then `rm -f`. The mod's own check that the path is a plain file name in
+ * the runs directory has been made before.
+ */
+export const REMOVE_REGULAR_SCRIPT = String.raw`p=$1
+[ -L "$p" ] && exit 4
+[ -e "$p" ] || exit 3
+[ -f "$p" ] || exit 5
+rm -f -- "$p"`
+
+/** Removes a regular file with REMOVE_REGULAR_SCRIPT. */
+async function removeRegularFile(port: HostPort, path: string): Promise<RemoveOutcome> {
+  const ran = await port.run(['sh', '-c', REMOVE_REGULAR_SCRIPT, 'session-remove', path], { timeoutMs: 5_000 })
+  return removeOutcomeOfExit(ran.exitCode)
+}
 
 /** Removes a file with `rm -f`; it counts as gone. */
 async function removeFile(port: HostPort, path: string, isQuiet = false): Promise<boolean> {
@@ -161,6 +179,7 @@ export const posixHost: Host = {
   },
   writeAtomic: (port: HostPort, path: string, text: string, expected?: string) => writeAtomicWith(posixHost, port, path, text, expected),
   removeFile,
+  removeRegularFile,
   renameOver,
   /** APPEND_SCRIPT, which never reads the log, so a log of any size takes the lines. */
   async append(port: HostPort, path: string, lines: readonly string[], isQuiet: boolean, onRan: (exitCode: number) => void) {

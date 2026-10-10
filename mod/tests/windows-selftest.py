@@ -109,6 +109,23 @@ try:
     assert code == 1 and get('log.jsonl').startswith('old line'), (code, err)
     code, out, err = run('files.ps1', files, 'nonsense')
     assert code == 1 and 'unknown operation' in err, (code, err)
+    # removeregular: a regular file goes (a name with brackets and blanks is literal); a path that is not there is exit 3
+    # (a missing folder too); a directory is exit 5; a junction (a reparse point, made with New-Item: no admin right
+    # needed) is exit 4, and neither the junction nor the folder it leads to is touched.
+    put('rr [1] x.json', 'x')
+    assert run('files.ps1', files, 'removeregular', f'{win}/rr [1] x.json')[0] == 0 and get('rr [1] x.json') is None
+    assert run('files.ps1', files, 'removeregular', f'{win}/rr [1] x.json')[0] == 3
+    assert run('files.ps1', files, 'removeregular', f'{win}/no such dir/x.json')[0] == 3
+    os.makedirs(os.path.join(work, 'rr-dir'))
+    put('rr-dir/inner.txt', 'inner')
+    assert run('files.ps1', files, 'removeregular', f'{win}/rr-dir')[0] == 5 and get('rr-dir/inner.txt') == 'inner'
+    os.makedirs(os.path.join(work, 'rr-out'))
+    put('rr-out/secret.txt', 'outside')
+    code, out, err = run('junction.ps1', "param([string]$L, [string]$T)\r\n$null = New-Item -ItemType Junction -Path $L -Target $T\r\n",
+                         to_win(os.path.join(work, 'rr-junction'), '\\'), to_win(os.path.join(work, 'rr-out'), '\\'))
+    assert code == 0, (code, err)
+    assert run('files.ps1', files, 'removeregular', f'{win}/rr-junction')[0] == 4
+    assert os.path.exists(os.path.join(work, 'rr-junction')) and get('rr-out/secret.txt') == 'outside'
     print('windows-files-selftest: ok')
 
     # --- NEWER_PS1: the files under a folder written after a time. A junction out of the tree (made with New-Item, no
@@ -481,6 +498,13 @@ try:
         assert helper('append', {'path': w('node dir/fresh.jsonl'), 'text': 'x\n'})[0]['ok'] is True and get('node dir/fresh.jsonl') == 'x\n'
         assert helper('removeFile', {'path': w('log.jsonl')})[0] == {'ok': True, 'removed': True} and get('log.jsonl') is None
         assert helper('removeFile', {'path': w('log.jsonl')})[0] == {'ok': True, 'removed': False}
+        # regularOnly: a regular file goes, a directory is NOT_FILE and a junction IS_LINK (nothing touched), a missing path is no failure
+        put('ro.json', 'x')
+        assert helper('removeFile', {'path': w('ro.json'), 'regularOnly': True})[0] == {'ok': True, 'removed': True} and get('ro.json') is None
+        assert helper('removeFile', {'path': w('ro.json'), 'regularOnly': True})[0] == {'ok': True, 'removed': False}
+        assert helper('removeFile', {'path': w('rr-dir'), 'regularOnly': True})[0] == {'ok': False, 'code': 'NOT_FILE'} and get('rr-dir/inner.txt') == 'inner'
+        assert helper('removeFile', {'path': w('rr-junction'), 'regularOnly': True})[0] == {'ok': False, 'code': 'IS_LINK'}
+        assert os.path.exists(os.path.join(work, 'rr-junction')) and get('rr-out/secret.txt') == 'outside'
         # a failure is a fixed code, with no path or message
         answer, _ = helper('tail', {'path': w('missing.jsonl'), 'lines': 600, 'width': 20000})
         assert answer == {'ok': False, 'code': 'NOT_FOUND'}, answer

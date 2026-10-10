@@ -11,9 +11,9 @@ import type { Host, HostPort, RotatePlan } from '../hooks/host'
 import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, appendNotRepeated, appendText, fallbackFields, fallbackToast, newerAnswer, nodeMajor, readAnswer, rejectionCode, withHelper } from '../hooks/host-helper'
 import { TAIL_SHAPED_MAX_BYTES } from '../hooks/host-shared'
 import type { HelperNote } from '../hooks/host-helper'
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, TAIL_SHAPED_SCRIPT, posixHost } from '../hooks/host-posix'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, TAIL_SHAPED_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, NEWER_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
-import { helperAnswer as fakeHelper } from './fake-helper'
+import { helperAnswer as fakeHelper, removeRegularInMap } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
 const ran = (stdout = '', exitCode = 0, stderr = '', isStdoutTruncated = false): ProcessRunResult => ({ exitCode, stdout, stderr, isStdoutTruncated, isStderrTruncated: false })
@@ -33,6 +33,8 @@ type Run = { argv: string[]; stdin?: string; isQuiet?: boolean; shown?: Record<s
 
 type Sim = {
   files: Map<string, string>
+  /** The symbolic links: a link's key to its target's key. */
+  links: Map<string, string>
   runs: Run[]
   notes: HelperNote[]
   /** What `node --version` prints; null: node cannot start. */
@@ -54,11 +56,11 @@ const move = (files: Map<string, string>, from: string, to: string) => {
 }
 
 /** The helper's operations over the map of files (tests/fake-helper.ts), its probe printing PROBE_OUT. */
-const helperAnswer = (files: Map<string, string>, op: string, request: Request) => fakeHelper(files, op, request, PROBE_OUT)
+const helperAnswer = (files: Map<string, string>, op: string, request: Request, links: ReadonlyMap<string, string> = new Map()) => fakeHelper(files, op, request, PROBE_OUT, keyOf, new Map(), links)
 
 /** The simulated machine: the adapters' own commands (sh, mv, rm, PowerShell's scripts) and node, answered as the system would. */
 function machine(answering: Answering = 'real', version: string | null = 'v24.14.0\n'): Sim {
-  return { files: new Map(), runs: [], notes: [], version, answering, nowMs: NOW_MS }
+  return { files: new Map(), links: new Map(), runs: [], notes: [], version, answering, nowMs: NOW_MS }
 }
 
 function runOn(sim: Sim, argv: readonly string[], stdin?: string): ProcessRunResult {
@@ -73,7 +75,7 @@ function runOn(sim: Sim, argv: readonly string[], stdin?: string): ProcessRunRes
     if (sim.answering === 'spawn') throw new Error('spawn /m/node/bin/node EACCES')
     if (sim.answering === 'timeout') throw new Error('the command timed out after 10000 ms')
     if (typeof sim.answering === 'function') return sim.answering(op, request)
-    const answer = helperAnswer(sim.files, op, request)
+    const answer = helperAnswer(sim.files, op, request, sim.links)
     return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
   }
   if (cmd === 'mv') return move(sim.files, argv[2] ?? '', argv[3] ?? '') ? ran() : ran('', 1, 'mv: cannot stat')
@@ -81,6 +83,8 @@ function runOn(sim: Sim, argv: readonly string[], stdin?: string): ProcessRunRes
     sim.files.delete(keyOf(argv[2] ?? ''))
     return ran()
   }
+  if (cmd === 'sh' && script === REMOVE_REGULAR_SCRIPT) return ran('', removeRegularInMap(sim.files, sim.links, keyOf(argv[4] ?? '')))
+  if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/files.ps1') && argv[7] === 'removeregular') return ran('', removeRegularInMap(sim.files, sim.links, keyOf(argv[8] ?? '')))
   if (cmd === 'sh' && script === PROBE_SCRIPT) return ran(PROBE_OUT)
   if (cmd === 'sh' && script === APPEND_SCRIPT) {
     const path = keyOf(argv[5] ?? '')
@@ -333,6 +337,65 @@ describe('withHelper on Linux', () => {
     const answer = helperAnswer(sim.files, op, request)
     return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
   }
+
+  test('removeRegularFile is one helper call with regularOnly; the helper\'s refusal of a link or a non-file is the answer, no fallback, no adapter command', async () => {
+    const sim = machine()
+    const host = helped()
+    const port = portOf(sim)
+    sim.files.set('/m/runs/a.json', 'A')
+    sim.files.set('/m/runs/sub/inner', 'I')
+    sim.files.set('/m/out/secret', 'S')
+    sim.links.set('/m/runs/link.json', '/m/out/secret')
+    sim.links.set('/m/runs/linkdir', '/m/out')
+    expect(await host.removeRegularFile(port, '/m/runs/a.json')).toBe('removed')
+    expect(await host.removeRegularFile(port, '/m/runs/a.json')).toBe('absent')
+    expect(await host.removeRegularFile(port, '/m/runs/link.json')).toBe('symlink')
+    expect(await host.removeRegularFile(port, '/m/runs/linkdir')).toBe('symlink')
+    expect(await host.removeRegularFile(port, '/m/runs/sub')).toBe('not-file')
+    expect(calls(sim)).toEqual(['/m/runs/a.json', '/m/runs/a.json', '/m/runs/link.json', '/m/runs/linkdir', '/m/runs/sub'].map(path => ({ op: 'removeFile', request: { path, regularOnly: true } })))
+    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
+    expect(fallbacks(sim)).toEqual([])
+    expect([...sim.files.keys()].sort()).toEqual(['/m/out/secret', '/m/runs/sub/inner'])
+    expect(sim.links.size).toBe(2)
+  })
+
+  for (const [name, answering, code] of [
+    ['a spawn failure', 'spawn', 'SPAWN'],
+    ['a timeout', 'timeout', 'TIMEOUT'],
+    ['an access error', (): ProcessRunResult => ran('{"ok":false,"code":"ACCESS"}\n', 1), 'ACCESS'],
+    ['an answer that is not JSON', (): ProcessRunResult => ran('boom', 1), 'BAD_JSON'],
+    ['an answer without the field', (): ProcessRunResult => ran('{"ok":true}\n'), 'BAD_ANSWER'],
+  ] as const) {
+    test(`removeRegularFile after ${name}: that call falls back to REMOVE_REGULAR_SCRIPT, which makes the same checks; the note is the operation and the code`, async () => {
+      const sim = machine('real')
+      sim.answering = answering
+      const host = helped()
+      const port = portOf(sim)
+      sim.files.set('/m/runs/a.json', 'A')
+      sim.files.set('/m/out/secret', 'S')
+      sim.links.set('/m/runs/link.json', '/m/out/secret')
+      expect(await host.removeRegularFile(port, '/m/runs/a.json')).toBe('removed')
+      expect(await host.removeRegularFile(port, '/m/runs/link.json')).toBe('symlink')
+      expect(await host.removeRegularFile(port, '/m/runs/none.json')).toBe('absent')
+      expect(fallbacks(sim)).toEqual(['removeFile', 'removeFile', 'removeFile'].map(op => ({ kind: 'fallback', op, code, isQuiet: false })))
+      expect(sim.runs.filter(one => one.argv[0] === 'sh').map(one => [one.argv[2] === REMOVE_REGULAR_SCRIPT, one.argv[4]])).toEqual([[true, '/m/runs/a.json'], [true, '/m/runs/link.json'], [true, '/m/runs/none.json']])
+      expect([...sim.files.keys()]).toEqual(['/m/out/secret'])
+    })
+  }
+
+  test('removeRegularFile without Node: the adapter\'s script, no helper call, no note', async () => {
+    const sim = machine('real', null)
+    const host = helped()
+    const port = portOf(sim)
+    sim.files.set('/m/runs/a.json', 'A')
+    sim.files.set('/m/out/secret', 'S')
+    sim.links.set('/m/runs/link.json', '/m/out/secret')
+    expect(await host.removeRegularFile(port, '/m/runs/a.json')).toBe('removed')
+    expect(await host.removeRegularFile(port, '/m/runs/link.json')).toBe('symlink')
+    expect(calls(sim)).toEqual([])
+    expect(fallbacks(sim)).toEqual([])
+    expect(sim.files.has('/m/out/secret')).toBe(true)
+  })
 
   test('an append that timed out after writing is not made again: one line in the log, a note that says so, no exit code', async () => {
     const sim = machine('real')
@@ -637,6 +700,35 @@ describe('withHelper on Windows', () => {
       { kind: 'fallback', op: 'writeAtomic', code: 'SPAWN', isQuiet: false },
       { kind: 'fallback', op: 'append', code: 'SPAWN', isQuiet: false },
     ])
+  })
+
+  test('removeRegularFile on Windows: through the helper, and after a failed call through the file script\'s removeregular, which keeps a link and a directory', async () => {
+    const sim = machine()
+    const host = helped(windowsHost)
+    const port = portOf(sim)
+    sim.files.set('C:/m/runs/a.json', 'A')
+    sim.files.set('C:/m/runs/sub/inner', 'I')
+    sim.files.set('C:/m/out/secret', 'S')
+    sim.links.set('C:/m/runs/link.json', 'C:/m/out/secret')
+    expect(await host.removeRegularFile(port, 'C:/m/runs/a.json')).toBe('removed')
+    expect(await host.removeRegularFile(port, 'C:/m/runs/link.json')).toBe('symlink')
+    expect(await host.removeRegularFile(port, 'C:/m/runs/sub')).toBe('not-file')
+    expect(fallbacks(sim)).toEqual([])
+    sim.answering = 'spawn'
+    sim.files.set('C:/m/runs/b.json', 'B')
+    expect(await host.removeRegularFile(port, 'C:/m/runs/b.json')).toBe('removed')
+    expect(await host.removeRegularFile(port, 'C:/m/runs/link.json')).toBe('symlink')
+    expect(await host.removeRegularFile(port, 'C:/m/runs/sub')).toBe('not-file')
+    expect(await host.removeRegularFile(port, 'C:/m/runs/none.json')).toBe('absent')
+    expect(sim.runs.filter(one => one.argv[6]?.endsWith('/files.ps1')).map(one => one.argv.slice(7))).toEqual([
+      ['removeregular', 'C:/m/runs/b.json'],
+      ['removeregular', 'C:/m/runs/link.json'],
+      ['removeregular', 'C:/m/runs/sub'],
+      ['removeregular', 'C:/m/runs/none.json'],
+    ])
+    expect(sim.files.get('/m/runs/files.ps1')).toBe(FILES_PS1)
+    expect(fallbacks(sim).map(note => note.kind === 'fallback' && note.op)).toEqual(['removeFile', 'removeFile', 'removeFile', 'removeFile'])
+    expect([...sim.files.keys()].sort()).toEqual(['/m/runs/files.ps1', 'C:/m/out/secret', 'C:/m/runs/sub/inner'])
   })
 })
 
