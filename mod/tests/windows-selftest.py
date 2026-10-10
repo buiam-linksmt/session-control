@@ -227,6 +227,152 @@ try:
             assert (got['argv'][11] != one['text']) == one['rewritten'], (one, got['argv'][11])
         print(f'windows-launch-selftest: ok ({len(prompts)} prompts through Git Bash)')
 
+    # --- the PowerShell launch route (the launchRoute option at powershell): the command rendered by the real
+    # powershellLaunchCommand of hooks/host-powershell.ts (the Linux node loads the TypeScript itself), then run as a
+    # script by Windows PowerShell 5.1 and by PowerShell 7, as the engine's PowerShell tool would run it. node.exe with a
+    # stub script stands in for claude.exe: the test swaps `Get-Command claude.exe` for `Get-Command node.exe` and puts
+    # the stub's path first in the argument string, and checks no claude.exe is left in the text before anything runs.
+    # The stub prints its argv, working directory, the two variables and its pid as JSON on stdout (with the prompt it
+    # read, so the result file holds non-ASCII text), copies its stdin byte for byte to a file, writes a line to stderr
+    # and exits with the code it is given. The only process cmdlets are the command's own Start-Process and Get-Command.
+    linux_node = shutil.which('node')
+    shells = [('Windows PowerShell 5.1', PS)]
+    pwsh = shutil.which('pwsh.exe')
+    if pwsh:
+        shells.append(('PowerShell 7', pwsh))
+    node_exe_win = where('node.exe')
+    if not linux_node or not node_exe_win:
+        print('windows-powershell-launch-selftest: skipped (no node on Linux to render the command, or no node.exe on Windows)')
+    else:
+        hooks = os.path.join(HERE, '..', 'hooks')
+        # Relative imports without an extension (./core) resolve to the .ts file beside them, as the engine resolves them.
+        resolve_hook = ("data:text/javascript,import{registerHooks}from'node:module';registerHooks({resolve(s,c,n){try{return n(s,c)}"
+                        "catch(e){if(/^\\.\\.?\\//.test(s))return n(s+'.ts',c);throw e}}})")
+        render_js = ("import{readFileSync}from'node:fs';"
+                     f"const m=await import({json.dumps('file://' + os.path.abspath(os.path.join(hooks, 'host-powershell.ts')))});"
+                     "const cases=JSON.parse(readFileSync(0,'utf8'));"
+                     "process.stdout.write(JSON.stringify(cases.map(c=>({command:m.powershellLaunchCommand(c.args,c.target,c.result,c.err),"
+                     "argv:m.powershellLaunchArgs(c.args,c.target),pidFile:m.launchPidFile(c.result),refusal:m.powershellLaunchRefusal(c.args,c.runsDir)??null}))))")
+
+        def render(cases):
+            r = subprocess.run([linux_node, '--no-warnings', '--experimental-strip-types', '--import', resolve_hook, '--input-type=module', '-e', render_js],
+                               input=json.dumps(cases).encode('utf-8'), capture_output=True, timeout=120)
+            assert r.returncode == 0, r.stderr.decode('utf-8', 'replace')[:2000]
+            return json.loads(r.stdout.decode('utf-8'))
+
+        stub_dir = os.path.join(work, 'stub')
+        os.makedirs(stub_dir)
+        stub = os.path.join(stub_dir, 'claude-stub.js')
+        open(stub, 'w', encoding='utf-8', newline='').write(
+            "const fs = require('fs')\n"
+            "const input = fs.readFileSync(0)\n"
+            "fs.writeFileSync(process.env.SC_STUB_STDIN_COPY, input)\n"
+            "process.stdout.write(JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), cfg: process.env.CLAUDE_CONFIG_DIR ?? null,\n"
+            "  effort: process.env.CLAUDE_CODE_EFFORT_LEVEL ?? null, pid: process.pid, prompt: input.toString('utf8') }))\n"
+            "process.stderr.write('stub stderr caf\\u00e9\\n')\n"
+            "process.exitCode = Number(process.env.SC_STUB_EXIT)\n")
+        stub_arg = to_win(stub)
+        if ' ' in stub_arg or '"' in stub_arg:
+            stub_arg = '"' + stub_arg + '"'
+        sid = 'bbbbbbbb-2222-4222-8222-222222222222'
+        prompt_text = ('Goal: check the "launch" route\'s quoting\r\nline two: caf\u00e9 \u2615 \u65e5\u672c \U0001F600\n'
+                       '$env:PATH `backtick` %PATH% & | < > ^ ; \' "" \\" \\\\\nlast line without newline \u2019 end')
+        # (label, launch dir, prompt file, runs dir, config dir picked (None: inherited), resume sid, exit code)
+        layouts = [
+            ('fresh, config inherited, blanks and a quote', "proj o'k dir", 'prompt one.md', "runs o'k", None, None, 0),
+            ('picked config dir; brackets, a backtick and non-ASCII in the launch dir', 'proj [1] Jos`\u00e9', 'prompt \u00e9 \u2019.md', 'runs \u00e8 dir', 'cfg \u00e9 dir', None, 3),
+            ('a resume under a picked config dir', 'proj resume', 'p.md', 'runs-r', 'cfg-r', sid, 1),
+        ]
+        cases, prepared = [], []
+        for n, (label, d, p, r, cfg, resume, code) in enumerate(layouts):
+            base_dir = os.path.join(work, f'ps{n}')
+            proj, runs_dir = os.path.join(base_dir, d), os.path.join(base_dir, r)
+            os.makedirs(proj)
+            os.makedirs(runs_dir)
+            prompt_path = os.path.join(base_dir, p)
+            open(prompt_path, 'wb').write(prompt_text.encode('utf-8'))
+            cfg_win = to_win(os.path.join(base_dir, cfg)) if cfg else 'C:/inherited/never/written'
+            name = f'w-selftest-{n}-261010120000'
+            result = to_win(os.path.join(runs_dir, f'20261010120000-ps-{n}.json'))
+            err = to_win(os.path.join(runs_dir, f'20261010120000-ps-{n}.err'))
+            target = {'configDir': cfg_win, 'name': name, **({'isConfigInherited': True} if cfg is None else {}), **({'resumeSid': resume} if resume else {})}
+            cases.append({'args': {'dir': to_win(proj), 'prompt_file': to_win(prompt_path), 'model': 'opus', 'effort': 'high', 'title': 'ps'},
+                          'target': target, 'result': result, 'err': err, 'runsDir': to_win(runs_dir)})
+            prepared.append((label, proj, prompt_path, runs_dir, cfg_win if cfg else None, code, base_dir))
+        # Why a prompt file (or a run file) with brackets is refused on this route: rendered as it would be, it fails at
+        # Start-Process under both versions before anything starts; the real refusal names it.
+        wild_dir = os.path.join(work, 'ps-wild', 'p [x]')
+        os.makedirs(wild_dir)
+        open(os.path.join(wild_dir, 'prompt.md'), 'w', encoding='utf-8').write('x\n')
+        wild_runs = os.path.join(work, 'ps-wild', 'runs')
+        os.makedirs(wild_runs)
+        cases.append({'args': {'dir': to_win(os.path.join(work, 'ps-wild')), 'prompt_file': to_win(os.path.join(wild_dir, 'prompt.md')), 'model': 'opus', 'effort': 'high', 'title': 'ps'},
+                      'target': {'configDir': 'C:/x', 'isConfigInherited': True, 'name': 'w-wild-1'}, 'result': to_win(os.path.join(wild_runs, 'w.json')),
+                      'err': to_win(os.path.join(wild_runs, 'w.err')), 'runsDir': to_win(wild_runs)})
+        rendered = render(cases)
+        assert [one['refusal'] is None for one in rendered] == [True, True, True, False], [one['refusal'] for one in rendered]
+        wild = rendered.pop()
+        cases.pop()
+        settings = SRC.split("export const WORKER_SETTINGS = '", 1)[1].split("'", 1)[0]
+        lines_out = []
+        for shell_name, shell in shells:
+            for n, (label, proj, prompt_path, runs_dir, cfg_win, code, base_dir) in enumerate(prepared):
+                one = rendered[n]
+                command = one['command']
+                assert command.count('Get-Command claude.exe ') == 1 and command.count("-ArgumentList '-p --model ") == 1, command
+                assert all(0x20 <= ord(ch) <= 0x7e or ch == '\n' for ch in command), 'the command is not printable ASCII'
+                want_argv = ['-p', '--model', 'opus', *(['--resume', sid] if n == 2 else []), '-n', f'w-selftest-{n}-261010120000', '--settings', settings,
+                             '--dangerously-skip-permissions', '--output-format', 'json']
+                assert one['argv'] == want_argv, one['argv']
+                run_cmd = command.replace('Get-Command claude.exe ', 'Get-Command node.exe ').replace("-ArgumentList '-p --model ", f"-ArgumentList '{stub_arg} -p --model ")
+                assert 'claude.exe' not in run_cmd
+                copy = os.path.join(base_dir, f'stdin-copy-{len(lines_out)}.bin')
+                for leftover in (cases[n]['result'], cases[n]['err'], one['pidFile']):
+                    if os.path.exists(to_wsl(leftover)):
+                        os.remove(to_wsl(leftover))
+                # The tool's own process: node.exe found on its PATH, a parent CLAUDE_CONFIG_DIR that an inherited launch keeps
+                # and a picked one replaces, the stub's knobs. Then the rendered command, unchanged but for the stand-in.
+                preamble = '\n'.join([
+                    f"$env:Path = '{node_exe_win.rsplit(chr(92), 1)[0]};' + $env:Path",
+                    "$env:CLAUDE_CONFIG_DIR = 'C:/parent/config'",
+                    "Remove-Item Env:CLAUDE_CODE_EFFORT_LEVEL -ErrorAction SilentlyContinue",
+                    f"$env:SC_STUB_STDIN_COPY = '{to_win(copy)}'",
+                    f"$env:SC_STUB_EXIT = '{code}'",
+                ])
+                script = os.path.join(base_dir, f'launch-{len(lines_out)}.ps1')
+                open(script, 'w', encoding='ascii', newline='').write(preamble + '\n' + run_cmd + '\n')
+                r = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', to_win(script)], capture_output=True, timeout=120, cwd=work)
+                stderr = r.stderr.decode('utf-8', 'replace')
+                assert r.returncode == code, (shell_name, label, r.returncode, stderr[:1500], r.stdout[:500])
+                raw = open(to_wsl(cases[n]['result']), 'rb').read()
+                assert not raw.startswith(b'\xef\xbb\xbf'), 'the result file has a BOM'
+                got = json.loads(raw.decode('utf-8'))
+                assert got['argv'] == want_argv, (shell_name, label, got['argv'])
+                assert open(copy, 'rb').read() == prompt_text.encode('utf-8'), 'stdin changed on the way'
+                assert got['prompt'] == prompt_text
+                assert got['cwd'].lower() == to_win(proj, '\\').lower(), (got['cwd'], proj)
+                assert got['effort'] == 'high', got
+                assert got['cfg'] == (cfg_win if cfg_win else 'C:/parent/config'), (label, got['cfg'])
+                pid_text = open(to_wsl(one['pidFile']), 'rb').read()
+                assert pid_text.decode('ascii').strip() == str(got['pid']), (pid_text, got['pid'])
+                assert open(to_wsl(cases[n]['err']), 'rb').read() == 'stub stderr caf\u00e9\n'.encode('utf-8')
+                lines_out.append(f'  {shell_name}: {label}: exit {r.returncode} = {code}; argv {len(got["argv"])} intact (name and settings JSON single); '
+                                 f'stdin {len(prompt_text.encode("utf-8"))} bytes intact; result UTF-8, no BOM; pid file {got["pid"]} = child pid; '
+                                 f'cwd ok; CLAUDE_CONFIG_DIR {"set to the picked dir" if cfg_win else "inherited from the parent"}')
+        for shell_name, shell in shells:
+            run_cmd = wild['command'].replace('Get-Command claude.exe ', 'Get-Command node.exe ').replace("-ArgumentList '-p --model ", f"-ArgumentList '{stub_arg} -p --model ")
+            assert 'claude.exe' not in run_cmd
+            script = os.path.join(work, 'ps-wild', f'wild-{len(lines_out)}.ps1')
+            open(script, 'w', encoding='ascii', newline='').write(f"$env:Path = '{node_exe_win.rsplit(chr(92), 1)[0]};' + $env:Path\n" + run_cmd + '\n')
+            r = subprocess.run([shell, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', to_win(script)], capture_output=True, timeout=120, cwd=work)
+            stderr = r.stderr.decode('utf-8', 'replace')
+            assert r.returncode == 1 and 'Start-Process' in stderr and not os.path.exists(os.path.join(wild_runs, 'w.json')), (shell_name, r.returncode, stderr[:600])
+            lines_out.append(f'  {shell_name}: a prompt file under "p [x]": Start-Process fails (exit 1, nothing started), as powershellLaunchRefusal says')
+        print(f'windows-powershell-launch-selftest: ok ({len(lines_out)} runs under {", ".join(name for name, _ in shells)})')
+        print('\n'.join(lines_out))
+        if not pwsh:
+            print('windows-powershell-launch-selftest: PowerShell 7 skipped (no pwsh.exe)')
+
     # --- the Node helper's file operations with the Windows node.exe, from a copy of mod/helper in the scratch
     # directory (a script on the WSL file system would be read over \\wsl$). No claude starts; no PowerShell script
     # of this test calls a process API.
