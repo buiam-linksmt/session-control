@@ -56,6 +56,8 @@ import {
   START_MATCH_MS,
   findNewWindowsWorker,
   findNewWorker,
+  isHeadless,
+  isLicenceRun,
   isSameWinPath,
   isWinAbsolute,
   tailLines,
@@ -174,6 +176,55 @@ describe('row status', () => {
     expect(formatRow(row, 100).startsWith('alive worker')).toBe(true)
     expect(formatRow(row, 100)).toContain('running')
     expect(formatRow(row, 100)).not.toContain('/fixture/lic')
+  })
+})
+
+describe('licence runs are not orphans', () => {
+  // Command lines as the probes print them: Linux joins the arguments with spaces, Windows gives CommandLine as is.
+  const LICENCE = [
+    'claude -p /usage --output-format json --no-session-persistence',
+    'claude -p ok --dangerously-skip-permissions',
+    'claude -p ok',
+    '/home/u/.local/bin/claude -p /usage --output-format json --no-session-persistence',
+    '"C:\\Users\\u\\.local\\bin\\claude.exe" -p /usage --output-format json --no-session-persistence',
+    '"C:\\Users\\u\\.local\\bin\\claude.exe" -p "ok" --dangerously-skip-permissions',
+    'C:\\Users\\u\\.local\\bin\\claude.exe --print ok',
+  ]
+  const WORKER_PROMPT = '-n w-check-usage-261010173723 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json --'
+  const WORKERS = [
+    `claude -p --model opus ${WORKER_PROMPT} Goal: read the /usage text and report`,
+    `claude -p --model haiku ${WORKER_PROMPT} /usage`,
+    `claude -p --model haiku ${WORKER_PROMPT} ok`,
+    'claude -p /usage is high: find out why and report',
+    'claude -p ok, now run the suite --verbose',
+    'claude -p ok -- go on',
+    'claude --print --model sonnet',
+    `"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus ${WORKER_PROMPT} "Goal: read the /usage text"`,
+    '"C:\\Users\\u\\.local\\bin\\claude.exe" -p "ok then check /usage"',
+  ]
+  const probeLine = (pid: number, cwd: string, cmd: string) => ['P', pid, 'claude', 1, cwd, '/fixture/lic/a', cmd].join('\t')
+
+  test('the usage probe and the token wake, Linux and Windows, are licence runs; worker command lines are not', () => {
+    expect(LICENCE.map(isLicenceRun)).toEqual(LICENCE.map(() => true))
+    expect(WORKERS.map(isLicenceRun)).toEqual(WORKERS.map(() => false))
+    expect(LICENCE.every(isHeadless)).toBe(true)
+  })
+
+  test('no orphan row for a licence run; an unregistered worker is still one, a prompt holding /usage too', () => {
+    for (const [stdout, isWin] of [[PROBE_STDOUT, false], [WIN_PROBE_STDOUT, true]] as const) {
+      const extra = [...LICENCE, ...WORKERS].map((cmd, i) => probeLine(8000 + i, isWin ? 'C:\\' : '/', cmd))
+      const rows = buildRows(REGISTRY, parseProcFacts([stdout, ...extra].join('\n')), NOW_SEC)
+      const orphans = rows.filter(row => row.status === 'orphan').map(row => row.pid)
+      expect(orphans).toEqual([4999, ...WORKERS.map((_, i) => 8000 + LICENCE.length + i)])
+    }
+  })
+
+  test('the new-worker match never takes a licence run: it has no --model', () => {
+    const want = { dir: '/', configDir: '/fixture/lic/a', model: 'opus' }
+    const probes = parseProcFacts(LICENCE.map((cmd, i) => probeLine(8000 + i, '/', cmd)).join('\n'))
+    expect(findNewWorker(probes, want, new Set())).toBeUndefined()
+    const bare = parseProcFacts(LICENCE.map((cmd, i) => ['P', 8000 + i, 'claude', 1, '', '', cmd].join('\t')).join('\n'))
+    expect(findNewWindowsWorker(bare, { ...want, dir: 'C:\\' }, new Set(), 5)).toBeUndefined()
   })
 })
 

@@ -140,6 +140,31 @@ export function isHeadless(cmdline: string): boolean {
   return /(^|\s)(-p|--print)(\s|$)/.test(cmdline)
 }
 
+/** The prompts of the licence daemon's own headless runs: its usage probe and its token wake. */
+const LICENCE_PROMPTS = new Set(['/usage', 'ok'])
+
+/**
+ * Whether a command line is one of the licence daemon's own short runs, `claude -p /usage --output-format json
+ * --no-session-persistence` (the usage probe) or `claude -p ok --dangerously-skip-permissions` (the token wake), on
+ * Linux (the probe joins the arguments with spaces) or Windows (`"C:\...\claude.exe" -p ok`). Read by the argument
+ * structure: the word after `-p` is the whole prompt, and only options and their values follow it. A worker's prompt
+ * that merely holds those words (`claude -p --model haiku ... -- <prompt>`, or a prompt that starts with them and goes
+ * on with more words) is not one.
+ */
+export function isLicenceRun(cmdline: string): boolean {
+  // The program goes first, a quoted Windows path whole; a word's own quotes are dropped.
+  const words = cmdline
+    .trim()
+    .replace(/^"[^"]*"|^\S+/, '')
+    .split(/\s+/)
+    .filter(word => word !== '')
+    .map(word => word.replace(/^(["'])(.*)\1$/, '$2'))
+  const at = words.findIndex(word => word === '-p' || word === '--print')
+  if (at < 0 || !LICENCE_PROMPTS.has(words[at + 1] ?? '')) return false
+  // After the prompt: options, each with at most one value; `--` would start a prompt of its own.
+  return words.slice(at + 2).every((word, i, rest) => word !== '--' && (word.startsWith('-') || (rest[i - 1] ?? '').startsWith('--')))
+}
+
 // ---------------------------------------------------------------- rows
 
 /**
@@ -172,7 +197,7 @@ const STATUS_ORDER: Record<SessionRowStatus, number> = {
   done: 5,
 }
 
-/** One row per registry entry, plus one per live headless claude no entry claims. */
+/** One row per registry entry, plus one per live headless claude no entry claims that is not a licence run. */
 export function buildRows(
   entries: readonly SessionEntry[],
   facts: ProcFacts,
@@ -202,7 +227,7 @@ export function buildRows(
     })
   }
   for (const proc of facts.claude) {
-    if (claimed.has(proc.pid) || !isHeadless(proc.cmdline)) continue
+    if (claimed.has(proc.pid) || !isHeadless(proc.cmdline) || isLicenceRun(proc.cmdline)) continue
     rows.push({
       title: `(no entry) ${proc.cwd}`,
       sid8: '',
