@@ -1,6 +1,25 @@
-// The scripts of the Windows adapter (native Windows, Windows PowerShell 5.1): the file operations $.fs lacks and the
-// process probe, each written to the runs directory and run with -File by the adapter below. Moved here unchanged
-// from core.ts.
+// The Windows adapter of the host interface (native Windows: Claude Code on Windows, Git Bash as the Bash tool's
+// shell, which has no sh, jq, mv or /proc on the PATH a command starts with). The file operations $.fs lacks and the
+// process probe are Windows PowerShell 5.1 scripts, written to the runs directory and run with -File; paths are kept
+// in the native C:/... form and compared as Windows compares them. Its scripts came here unchanged from core.ts.
+// trace.ts imports them to name them: this file never imports trace.ts.
+
+import type { SessionEntry } from '../types'
+import {
+  defaultConfigDir,
+  findNewWindowsWorker,
+  isDefaultConfigDir,
+  isSameWinPath,
+  isWinAbsolute,
+  parseProcFacts,
+  probeArgs,
+  transcriptPath,
+  windowsPickerRefusal,
+  winPath,
+} from './core'
+import type { LaunchArgs, ProcFacts } from './core'
+import type { Host, HostPort, RotatePlan, WorkerWant } from './host'
+import { bashLaunchCommand, clockPause, readTail, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
 
 /**
  * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
@@ -165,3 +184,144 @@ export const PROBE_PS1 = [
   '}',
   'exit 0',
 ].join('\r\n')
+
+/** Windows PowerShell 5.1 by absolute path: on Windows `bash` is the WSL launcher, and sh, mv and pwsh are not on the PATH a command gets. */
+async function powershell(port: HostPort): Promise<string> {
+  const root = (await port.env('SystemRoot')) ?? 'C:\\Windows'
+  return `${root.replace(/[\\/]+$/, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+}
+
+/** One of the mod's PowerShell scripts in the runs directory, written when it is not there as it should be (which makes the directory). */
+async function ensureScript(port: HostPort, name: string, text: string, isQuiet = false): Promise<string> {
+  const path = `${await port.runsDir()}/${name}`
+  if ((await port.read(path).catch(() => undefined)) !== text) await port.write(path, text, isQuiet)
+  return path
+}
+
+/** Runs one of the mod's PowerShell scripts with -File: its text never crosses a command line. */
+async function runScript(port: HostPort, name: string, text: string, args: readonly string[], timeoutMs = 10_000, isQuiet = false) {
+  const path = await ensureScript(port, name, text, isQuiet)
+  return port.run([await powershell(port), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path, ...args], { timeoutMs }, isQuiet)
+}
+
+/** Removes a file with the file script, best effort. Answers whether it went. */
+async function removeFile(port: HostPort, path: string, isQuiet = false): Promise<boolean> {
+  const ran = await runScript(port, 'files.ps1', FILES_PS1, ['remove', path], 10_000, isQuiet).catch((err: unknown) => {
+    if (!isQuiet) port.traceError('remove', err)
+    return undefined
+  })
+  return ran?.exitCode === 0
+}
+
+/**
+ * Puts the temp file in the file's place with the file script; when it cannot run or fails, the text is written over
+ * the file directly (the caller has checked it is still the one expected), and that write, which a reader can see
+ * half done, is reported once.
+ */
+async function renameOver(port: HostPort, tmp: string, path: string, text: string): Promise<void> {
+  const ran = await runScript(port, 'files.ps1', FILES_PS1, ['move', tmp, path]).catch((err: unknown) => {
+    port.traceError('rename', err)
+    return { exitCode: -1, stderr: String(err) }
+  })
+  if (ran.exitCode === 0) return
+  await port.write(path, text)
+  // The script's own remove; when that cannot run either, $.fs (which cannot remove) empties the temp file instead.
+  const isRemoved = await removeFile(port, tmp)
+  if (!isRemoved) await port.write(tmp, '')
+  const leftover = isRemoved ? '' : `; the temp file ${tmp} could not be removed and was emptied`
+  port.noteDirectWrite(`the rename failed (${ran.stderr.trim().slice(0, 100)}); ${path} was written directly, not atomically${leftover}`)
+}
+
+/** On Windows the schema's leading / is Git Bash's /c/...: from here on, and in the registry, the native C:/... form. */
+const native = (path: unknown) => (typeof path === 'string' ? winPath(path) : path) as string
+
+export const windowsHost: Host = {
+  platform: 'windows',
+
+  /** Git Bash hands on HOME as /c/Users/...; without a usable one the profile folder is home. Native form either way. */
+  async homeDir(port: HostPort): Promise<string> {
+    const home = await port.env('HOME')
+    return winPath(home !== undefined && isWinAbsolute(home) ? home : ((await port.env('USERPROFILE')) ?? ''))
+  },
+  nativePath: winPath,
+  sessionDir: winPath,
+  isSameDir: isSameWinPath,
+  transcriptPath: (entry: SessionEntry) => transcriptPath(entry, true),
+  defaultConfigDir: (home: string, own: string | undefined) => defaultConfigDir(home, own, true),
+  isDefaultConfigDir: (dir: string, defaultDir: string) => isDefaultConfigDir(dir, defaultDir, true),
+
+  /**
+   * PROBE_PS1, which also looks for sessions files under `configDirs`. A probe that fails is an error: read as no
+   * process at all it would mark every worker dead.
+   */
+  async probe(port: HostPort, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
+    const ran = await runScript(port, 'probe.ps1', PROBE_PS1, [...probeArgs(entries), ...configDirs.map(dir => `c:${dir}`)], 20_000)
+    if (ran.exitCode !== 0) throw new Error(`the process probe failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 160)}`)
+    return parseProcFacts(ran.stdout.replace(/\r/g, ''))
+  },
+  async findNewWorker(port: HostPort, facts: ProcFacts, want: WorkerWant, known: ReadonlySet<number>, launchedAt: number) {
+    return findNewWindowsWorker(facts, want, known, ((await port.now()) - launchedAt) / 1000)
+  },
+  /** The probe reads where the worker's sessions file is: the config dir itself. */
+  workerConfigDir: (verdict: { configDir: string }) => verdict.configDir,
+  /** The engine's clock: Windows has no sleep to start. */
+  pause: clockPause,
+
+  launchArgs: (given: LaunchArgs) => ({ ...given, dir: native(given.dir), prompt_file: native(given.prompt_file) }),
+  launchChecks: statLaunchChecks,
+  launchFacts: (promptText: string | undefined) => ({ isWindows: true, promptChars: promptText?.length, promptLead: promptText?.slice(0, 200) }),
+  pickerArgv(argv: string[]) {
+    const refusal = windowsPickerRefusal(argv)
+    if (refusal !== undefined) return { refusal }
+    argv[0] = winPath(argv[0] ?? '')
+    return { argv }
+  },
+  launchTool: 'Bash',
+  launchCommand: bashLaunchCommand,
+  // On Windows the engine offers the Bash tool only when it finds Git Bash, which it may miss for a per-user Git
+  // whose mingw64 git.exe comes first on the PATH (a session started from Git Bash).
+  launchToolHint: ' On Windows Claude Code offers the Bash tool only when it finds Git Bash: start the orchestrator with CLAUDE_CODE_GIT_BASH_PATH set to Git\\bin\\bash.exe.',
+
+  createFile: writeIfAbsent,
+  /** Writing the file script makes the runs directory; the backups directory comes with the first backup. */
+  async prepareHelperDirs(port: HostPort): Promise<void> {
+    await ensureScript(port, 'files.ps1', FILES_PS1)
+  },
+  /** Writing the file script makes the runs directory. */
+  async prepareRunsDir(port: HostPort): Promise<void> {
+    await ensureScript(port, 'files.ps1', FILES_PS1)
+  },
+  /** The file script's append makes the directory itself: nothing to retry. */
+  makeDir: async () => false,
+  writeAtomic: (port: HostPort, path: string, text: string, expected?: string) => writeAtomicWith(windowsHost, port, path, text, expected),
+  removeFile,
+  renameOver,
+  /** The lines go to a file of their own, which the file script appends and removes. */
+  async append(port: HostPort, path: string, lines: readonly string[], isQuiet: boolean, onRan: (exitCode: number) => void) {
+    const added = `${path}.add.${await port.now()}`
+    await port.write(added, lines.map(line => `${line}\n`).join(''), isQuiet)
+    const ran = await runScript(port, 'files.ps1', FILES_PS1, ['append', added, path], 10_000, isQuiet).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
+    onRan(ran.exitCode)
+    if (ran.exitCode === 0) return undefined
+    await removeFile(port, added, isQuiet)
+    return `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`
+  },
+  /** A read, or the file script for a transcript over the read cap. */
+  async tail(port: HostPort, path: string): Promise<string | undefined> {
+    const text = await readTail(port, path, 600, 20000)
+    if (text !== undefined) return text
+    const ran = await runScript(port, 'files.ps1', FILES_PS1, ['tail', path, '600', '20000']).catch((err: unknown) => {
+      port.traceError('transcript tail', err)
+      return undefined
+    })
+    return ran?.exitCode === 0 ? ran.stdout : undefined
+  },
+  /** Each rename of the plan by the file script, where a file another session moved meanwhile is no failure. */
+  async rotate(port: HostPort, plan: RotatePlan): Promise<void> {
+    for (const [from, to] of plan.moves) {
+      if (!(await port.exists(from).catch(() => false))) continue
+      const ran = await runScript(port, 'files.ps1', FILES_PS1, ['move', from, to], 10_000, true)
+      if (ran.exitCode !== 0 && (await port.exists(from).catch(() => true))) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`)
+    }
+  },
+}
