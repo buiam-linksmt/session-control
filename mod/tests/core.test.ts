@@ -38,8 +38,12 @@ import {
   probeArgs,
   rowStatus,
   statusLabel,
+  registerEntry,
+  removeEntries,
+  ackEntries,
 } from '../hooks/core'
 import type { LaunchArgs, LaunchFacts } from '../hooks/core'
+import { freshText } from '../hooks/store'
 import {
   DAEMON_RESUME,
   HOME,
@@ -54,7 +58,9 @@ import {
   SID_REUSED,
   SID_UNREPORTED,
   TASK_NOTIFICATION_KILLED,
+  REGISTRY_GOLDEN,
 } from './fixtures'
+import type { SessionEntry } from '../types'
 
 const facts = parseProcFacts(PROBE_STDOUT)
 const statusLabelFor = (row: { status: never }) => statusLabel(row.status).slice(0, 6).padEnd(6)
@@ -538,5 +544,44 @@ describe('report linter', () => {
     const footer = '\n\nSessions\nnone'
     expect(lintReport('The obsidian-manager updated the note.' + footer, withFooter).join()).toContain('has not acknowledged')
     expect(lintReport('The obsidian-manager update is unacknowledged.' + footer, withFooter)).toEqual([])
+  })
+})
+
+describe('registry edits: the differential cases the jq scripts are checked against', () => {
+  for (const one of REGISTRY_GOLDEN) {
+    test(one.name, () => {
+      if (one.registry === null && one.op !== 'register') {
+        // A missing file: the scripts exit without writing, and the caller reads nothing to edit.
+        expect(one.expect).toEqual({ unchanged: true })
+        return
+      }
+      // A missing file is registered into as the scripts do: it starts as an empty array.
+      const text = one.registry ?? freshText('headless-sessions.json') ?? ''
+      const ids = one.ids ?? []
+      const edited =
+        one.op === 'register'
+          ? registerEntry(text, (one.entry ?? {}) as SessionEntry, one.mode === 'resume' ? 'resume' : 'new')
+          : one.op === 'clear'
+            ? removeEntries(text, ids)
+            : ackEntries(text, ids, one.keep === true)
+      if (one.expect.refused === true) {
+        expect(edited.ok).toBe(false)
+        return
+      }
+      expect(edited).toEqual(one.op === 'clear' ? { ok: true, text: one.expect.text, removed: one.expect.log } : { ok: true, text: one.expect.text })
+    })
+  }
+
+  test('every kind of case is there', () => {
+    const names = REGISTRY_GOLDEN.map(one => one.name).join('\n')
+    for (const word of ['register new', 'register resume', 'clear', 'ack keep', 'ack plain', 'missing', 'empty', 'surrogate', 'DEL', 'key order', 'not JSON']) {
+      expect(names).toContain(word)
+    }
+  })
+
+  test('the refusal of a registry that does not parse is parseRegistry\'s', () => {
+    const bad = registerEntry('not json', {}, 'new')
+    expect(bad.ok === false && bad.error.startsWith('registry is not JSON')).toBe(true)
+    expect(ackEntries('{"a":1}', ['x'], false)).toEqual({ ok: false, error: 'registry is not a JSON array' })
   })
 })

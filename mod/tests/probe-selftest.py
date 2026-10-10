@@ -105,3 +105,44 @@ subprocess.run(['sh', '-c', ack, 'session-ack', reg2, 'plain', 'aaa'], capture_o
 got = json.load(open(reg2))
 assert got[0]['reported'] is True and 'keep' not in got[0], got
 print('ack-selftest: ok')
+
+# --- registry edits: REGISTER_SCRIPT, CLEAR_SCRIPT and ACK_SCRIPT against the differential cases the TypeScript
+# edits are tested on (REGISTRY_GOLDEN in tests/fixtures.ts); together they prove both write the same bytes.
+import shutil
+fx = open(os.path.join(os.path.dirname(__file__), 'fixtures.ts'), encoding='utf-8').read()
+golden_block = fx.split('// REGISTRY_GOLDEN:BEGIN', 1)[1].split('// REGISTRY_GOLDEN:END', 1)[0]
+golden = json.loads(golden_block.split(' = ', 1)[1])
+scripts = {
+    'register': raw,
+    'clear': clear,
+    'ack': ack,
+}
+gold_dir = tempfile.mkdtemp(prefix='session-golden-')
+try:
+    for n, case in enumerate(golden):
+        reg, log = f'{gold_dir}/{n}.json', f'{gold_dir}/{n}.cleared.jsonl'
+        if case['registry'] is not None:
+            open(reg, 'w', encoding='utf-8', newline='').write(case['registry'])
+        if case['op'] == 'register':
+            argv = ['session-register', reg, json.dumps(case['entry'], separators=(',', ':'), ensure_ascii=False), case['mode']]
+        elif case['op'] == 'clear':
+            argv = ['session-clear', reg, log, *case['ids']]
+        else:
+            argv = ['session-ack', reg, 'keep' if case['keep'] else 'plain', *case['ids']]
+        r = subprocess.run(['sh', '-c', scripts[case['op']], *argv], capture_output=True, timeout=30)
+        text = open(reg, encoding='utf-8', newline='').read() if os.path.exists(reg) else None
+        logged = open(log, encoding='utf-8', newline='').read() if os.path.exists(log) else ''
+        want = case.get('old') or case['expect']
+        where = f"{case['name']}: exit {r.returncode}, {text!r:.200}, log {logged!r:.200}"
+        if want.get('refused') or want.get('fails'):
+            assert r.returncode != 0 and text == case['registry'], where
+        elif want.get('unchanged'):
+            assert r.returncode == 0 and text == case['registry'], where
+        elif want.get('sameValue'):
+            assert r.returncode == 0 and json.loads(text) == json.loads(case['expect']['text']), where
+        else:
+            assert r.returncode == 0 and text == want['text'], where
+        assert logged == want.get('log', ''), where
+finally:
+    shutil.rmtree(gold_dir)
+print(f'registry-golden-selftest: ok ({len(golden)} cases)')

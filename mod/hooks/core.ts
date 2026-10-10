@@ -632,6 +632,137 @@ ids=$(printf '%s\n' "$@" | jq -R . | jq -s .)
 tmp="$R.tmp.$$"
 jq --argjson ids "$ids" --arg k "$K" 'map(if (.session_id as $s | $ids | index($s)) then (.reported = true) | (if $k == "keep" then .keep = true else del(.keep) end) else . end)' "$R" > "$tmp" && mv "$tmp" "$R"`
 
+// The three registry scripts above as pure functions of the registry text. On the registry the mod writes they
+// give what jq 1.7 writes, byte for byte (the differential cases REGISTRY_GOLDEN in tests/fixtures.ts, run
+// against the scripts by tests/probe-selftest.py). On purpose they differ in two places: registering into an
+// empty file keeps the entry (jq writes an empty file), and a text JSON.parse refuses is refused, never rewritten.
+// A number jq keeps as written (1.0, 1E+2) comes out as JavaScript writes it, the same value, as mergeCompletion
+// writes it already.
+
+export type RegistryEdit = { ok: true; text: string } | { ok: false; error: string }
+
+type Rec = Record<string, unknown>
+
+/** jq's layout of a value: JSON.stringify's, with DEL escaped as jq escapes it. */
+function jqText(value: unknown, indent?: number): string {
+  return JSON.stringify(value, null, indent).replace(/\x7f/g, '\\u007f')
+}
+
+/** Strings as jq reads them: a lone low surrogate becomes U+FFFD; undefined for a lone high one, which jq refuses. */
+function jqStrings(value: unknown): unknown {
+  let isRefused = false
+  const fix = (text: string) =>
+    text.replace(/[\ud800-\udbff][\udc00-\udfff]|[\ud800-\udfff]/g, unit => {
+      if (unit.length === 2) return unit
+      if (unit <= '\udbff') isRefused = true
+      return '�'
+    })
+  const walk = (one: unknown): unknown => {
+    if (typeof one === 'string') return fix(one)
+    if (Array.isArray(one)) return one.map(walk)
+    if (one !== null && typeof one === 'object') {
+      const out: Rec = {}
+      // defineProperty: an assignment to "__proto__" would set the prototype instead of keeping the key.
+      for (const [key, part] of Object.entries(one)) Object.defineProperty(out, fix(key), { value: walk(part), enumerable: true, writable: true, configurable: true })
+      return out
+    }
+    return one
+  }
+  const fixed = walk(value)
+  return isRefused ? undefined : fixed
+}
+
+/** jq's `==`: deep, object keys in any order, a missing value is null. */
+function jqEqual(a: unknown, b: unknown): boolean {
+  const x = a ?? null
+  const y = b ?? null
+  if (Array.isArray(x) || Array.isArray(y)) {
+    return Array.isArray(x) && Array.isArray(y) && x.length === y.length && x.every((one, i) => jqEqual(one, y[i]))
+  }
+  if (x !== null && y !== null && typeof x === 'object' && typeof y === 'object') {
+    const keys = Object.keys(x)
+    return keys.length === Object.keys(y).length && keys.every(key => Object.prototype.hasOwnProperty.call(y, key) && jqEqual((x as Rec)[key], (y as Rec)[key]))
+  }
+  return x === y
+}
+
+/** jq's `$ids | index($s)` as a test: a string is one of the ids, an array a run of consecutive ids. */
+function jqIndexed(ids: readonly string[], sid: unknown): boolean {
+  if (Array.isArray(sid)) {
+    if (sid.length === 0) return false
+    for (let at = 0; at + sid.length <= ids.length; at++) if (sid.every((one, k) => jqEqual(one, ids[at + k]))) return true
+    return false
+  }
+  return typeof sid === 'string' && ids.includes(sid)
+}
+
+/** The registry as the scripts read it: the parsed array, its strings as jq reads them. */
+function registryList(text: string): { ok: true; list: unknown[] } | { ok: false; error: string } {
+  const parsed = parseRegistry(text)
+  if (!parsed.ok) return parsed
+  if (text.trim() === '') return { ok: true, list: [] }
+  const list = jqStrings(JSON.parse(text))
+  if (list === undefined) return { ok: false, error: 'registry holds an unpaired \\u surrogate escape' }
+  return { ok: true, list: list as unknown[] }
+}
+
+/** jq stops on `.session_id` of anything but an object or null, so the scripts change nothing then. */
+const NOT_AN_ENTRY = { ok: false, error: 'registry holds an item that is not an object' } as const
+
+const isEntryOrNull = (one: unknown) => one === null || (typeof one === 'object' && !Array.isArray(one))
+
+/** The ids as the scripts take them: one per line of their arguments. */
+const idLines = (ids: readonly string[]) => ids.flatMap(id => id.split('\n'))
+
+/** REGISTER_SCRIPT: `new` appends the entry; `resume` merges it over every entry with its session id, dropping `reported` and `outcome`. */
+export function registerEntry(text: string, entry: SessionEntry, mode: 'new' | 'resume'): RegistryEdit {
+  if (mode === 'resume' && text.trim() === '') return { ok: true, text: '' }
+  const read = registryList(text)
+  if (!read.ok) return read
+  const fresh = jqStrings(entry) as Rec | undefined
+  if (fresh === undefined) return { ok: false, error: 'the entry holds an unpaired surrogate' }
+  if (mode === 'new') return { ok: true, text: jqText([...read.list, fresh], 2) + '\n' }
+  if (!read.list.every(isEntryOrNull)) return NOT_AN_ENTRY
+  const list = read.list.map(one => {
+    if (!jqEqual((one as Rec | null)?.session_id, fresh.session_id)) return one
+    const merged: Rec = { ...(one as Rec | null), ...fresh }
+    delete merged.reported
+    delete merged.outcome
+    return merged
+  })
+  return { ok: true, text: jqText(list, 2) + '\n' }
+}
+
+/** CLEAR_SCRIPT: the registry without the named sessions, and the removed entries as the log lines it appends. */
+export function removeEntries(text: string, ids: readonly string[]): (RegistryEdit & { ok: true; removed: string }) | { ok: false; error: string } {
+  if (text.trim() === '') return { ok: true, text: '', removed: '' }
+  const read = registryList(text)
+  if (!read.ok) return read
+  if (!read.list.every(isEntryOrNull)) return NOT_AN_ENTRY
+  const named = idLines(ids)
+  const isNamed = (one: unknown) => jqIndexed(named, (one as Rec | null)?.session_id)
+  const removed = read.list.filter(isNamed).map(one => jqText(one) + '\n').join('')
+  return { ok: true, text: jqText(read.list.filter(one => !isNamed(one)), 2) + '\n', removed }
+}
+
+/** ACK_SCRIPT: the named sessions get `reported: true`, and `keep: true` when kept, no `keep` otherwise. */
+export function ackEntries(text: string, ids: readonly string[], keep: boolean): RegistryEdit {
+  if (text.trim() === '') return { ok: true, text: '' }
+  const read = registryList(text)
+  if (!read.ok) return read
+  if (!read.list.every(isEntryOrNull)) return NOT_AN_ENTRY
+  const named = idLines(ids)
+  const list = read.list.map(one => {
+    if (!jqIndexed(named, (one as Rec | null)?.session_id)) return one
+    const acked: Rec = { ...(one as Rec) }
+    acked.reported = true
+    if (keep) acked.keep = true
+    else delete acked.keep
+    return acked
+  })
+  return { ok: true, text: jqText(list, 2) + '\n' }
+}
+
 export type RetireVerdict = { removable: string[]; refused: { id: string; reason: string }[] }
 
 /** The text of the queue file that counts: every task not marked done; a text that is not the queue JSON counts whole. */
