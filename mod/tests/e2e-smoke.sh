@@ -1,7 +1,7 @@
 #!/bin/sh
 # End-to-end smoke test of the session-control mod against the real claude, in a scratch directory it makes and
 # removes: (a) one headless haiku orchestrator launches one haiku worker through launch_worker and waits for it in the
-# foreground; (b) where tmux exists, an interactive claude opens the panel with /session-control (no model call).
+# foreground, and the worker's launch line, session name, messaging socket and registry entry are checked; (b) where tmux exists, an interactive claude opens the panel with /session-control (no model call).
 # Everything goes to the scratch directory (registry, runs directory, trace); the real registry, helper files and runs
 # directory are never touched, and the licence picker option is empty: the worker gets no CLAUDE_CONFIG_DIR and
 # inherits the default configuration (this shell's CLAUDE_CONFIG_DIR, else ~/.claude), which the registry records.
@@ -99,13 +99,27 @@ SEEN_PID=''
 # in Git Bash, whose /proc does not list a native claude.exe). A haiku worker lives a few seconds: looked for 4 times
 # a second.
 WLINE=''
+# The worker's own argv (NULs as blanks) and pid, from the same /proc entry.
+WCMD=''
+WPROC=''
 catch_worker() {
   for _d in /proc/[0-9]*; do
     [ "$(readlink "$_d/cwd" 2>/dev/null)" = "$WORK" ] && [ "$(cat "$_d/comm" 2>/dev/null)" = claude ] || continue
     _pp=$(sed -n 's/^PPid:[[:space:]]*//p' "$_d/status" 2>/dev/null)
     WLINE=$(tr '\0' ' ' < "/proc/$_pp/cmdline" 2>/dev/null)
+    WCMD=$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null)
+    WPROC=${_d#/proc/}
     return
   done
+}
+# The worker's messaging socket while it lives: messagingSocketPath of its sessions file under the inherited config
+# dir, seen as a socket (test -S) while /proc still lists the worker.
+CFG_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
+SOCK_LIVE=''
+catch_socket() {
+  [ -n "$WPROC" ] && [ -d "/proc/$WPROC" ] || return
+  _sp=$(grep -o '"messagingSocketPath": *"[^"]*"' "$CFG_DIR/sessions/$WPROC.json" 2>/dev/null | sed 's/.*: *"//; s/"$//')
+  [ -n "$_sp" ] && [ -S "$_sp" ] && [ -d "/proc/$WPROC" ] && SOCK_LIVE=$_sp
 }
 elapsed=0
 while kill -0 "$OPID" 2>/dev/null && [ "$elapsed" -lt 480 ]; do
@@ -115,6 +129,7 @@ while kill -0 "$OPID" 2>/dev/null && [ "$elapsed" -lt 480 ]; do
   fi
   for _q in 1 2 3 4; do
     [ -z "$WLINE" ] && [ -d /proc/self ] && ! command -v cygpath >/dev/null 2>&1 && catch_worker
+    [ -z "$SOCK_LIVE" ] && catch_socket
     sleep 0.25
   done
   elapsed=$((elapsed + 1))
@@ -147,8 +162,29 @@ CFG=$(field config_dir)
 if [ "$CFG" = "$WANT_CFG" ]; then pass "registry entry has the inherited config_dir ($CFG)"; else fail "registry entry has the inherited config_dir $WANT_CFG (got '$CFG')"; fi
 if [ -n "$WLINE" ]; then
   if printf '%s' "$WLINE" | grep -F -q 'claude -p' && ! printf '%s' "$WLINE" | grep -F -q 'CLAUDE_CONFIG_DIR='; then pass "worker's launch line sets no CLAUDE_CONFIG_DIR"; else fail "worker's launch line sets no CLAUDE_CONFIG_DIR: $(printf '%s' "$WLINE" | head -c 300)"; fi
+  # The Bash tool runs the launch line inside a quoted command of its own: its quotes show as '"'"' there.
+  if printf '%s' "$WLINE" | sed "s/'\"'\"'/'/g" | grep -E -q "claude -p --model 'haiku' -n 'w-e2e-smoke-worker-[0-9]{12}' --settings '\\{\"crossSessionInbound\":\"accept\"\\}' --dangerously-skip-permissions"; then
+    pass "worker's launch line carries -n <unique name> and --settings with crossSessionInbound accept"
+  else
+    fail "worker's launch line carries -n <unique name> and --settings with crossSessionInbound accept: $(printf '%s' "$WLINE" | grep -o 'claude -p.*--output-format' | head -c 300)"
+  fi
+  if printf '%s' "$WCMD" | grep -E -q -- '-p --model haiku -n w-e2e-smoke-worker-[0-9]{12} --settings \{"crossSessionInbound":"accept"\} --dangerously-skip-permissions'; then
+    pass "worker's own argv has the name and the settings JSON as single arguments"
+  else
+    fail "worker's own argv has the name and the settings JSON as single arguments: $(printf '%s' "$WCMD" | grep -o -- '-p.*--output-format' | head -c 300)"
+  fi
 else
   skip "worker's launch line (its shell not seen in /proc)"
+fi
+NAME=$(field name)
+SOCKET=$(field socket_path)
+if printf '%s' "$NAME" | grep -Eq '^w-e2e-smoke-worker-[0-9]{12}$'; then pass "registry entry has the session name ($NAME)"; else fail "registry entry has the session name w-e2e-smoke-worker-<yyMMddHHmmss> (got '$NAME')"; fi
+if [ -n "$SOCKET" ]; then pass "registry entry has the socket_path ($SOCKET)"; else fail 'registry entry has the socket_path'; fi
+if [ -d /proc/self ] && ! command -v cygpath >/dev/null 2>&1; then
+  if [ -n "$SOCK_LIVE" ] && [ "$SOCK_LIVE" = "$SOCKET" ]; then pass 'the socket existed while the worker lived, at the path the registry records'; else fail "the socket existed while the worker lived, at the path the registry records (seen '$SOCK_LIVE')"; fi
+  if [ -n "$SOCKET" ] && [ ! -e "$SOCKET" ]; then pass 'the socket is gone after the worker exited'; else info "socket after the exit: $(ls -l "$SOCKET" 2>&1 | head -c 200)"; fi
+else
+  skip 'the socket while the worker lived (no /proc listing of the worker)'
 fi
 [ -n "$RESULT_FILE" ] && info "worker cost USD $(grep -o '"total_cost_usd": *[0-9.e-]*' "$RESULT_FILE" 2>/dev/null | grep -o '[0-9.e-]*$')"
 
@@ -161,6 +197,9 @@ if has "\"event\":\"fs.write\",\"path\":\"$REGN.tmp." && grep -F '"event":"proce
 else
   fail 'trace has the register write: its temp file and the process.run of the rename'
 fi
+if has '"event":"worker.found"' && has '"isNamed":true,"isSocketSeen":true'; then pass 'trace: the worker.found line saw the name and the socket in the sessions file'; else fail 'trace: the worker.found line saw the name and the socket in the sessions file'; fi
+if has '"event":"completion"' && has '"outcome":"clean"'; then pass "trace: the completion line has the outcome clean (report check noted: $(grep -o '"isReportNoted":[a-z]*' "$TRACE" | head -n 1 | sed 's/.*://'))"; else fail 'trace: the completion line has the outcome clean'; fi
+if grep -E -q 'sk-ant-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}|"(accessToken|refreshToken|apiKey)"' "$TRACE" 2>/dev/null; then fail 'trace: no token-like text (sk-ant-, a JWT, a token field)'; else pass 'trace: no token-like text (sk-ant-, a JWT, a token field)'; fi
 if has '"event":"worker.start"' && has '"isConfigDirSet":false'; then pass 'trace: the worker.start line sets no CLAUDE_CONFIG_DIR'; else fail 'trace: the worker.start line sets no CLAUDE_CONFIG_DIR'; fi
 if has '"licencePickCommand":"empty"' && has "\"registryPath\":\"$REGN\""; then pass 'trace shows the scratch options (scratch registry, no licence picker)'; else fail 'trace shows the scratch options (scratch registry, no licence picker)'; fi
 SN=$(native "$S")
