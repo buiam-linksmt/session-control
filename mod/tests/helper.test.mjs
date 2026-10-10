@@ -386,7 +386,7 @@ test('probe: the fake /proc tree gives the recorded PROBE_SCRIPT lines, the same
     const want = RECORDED.replaceAll('<cfg>', tree.cfg).replaceAll('<root>', tree.root)
     const shell = spawnSync('sh', ['-c', probeScript().replaceAll('/proc', tree.proc), 'session-probe', ...tree.args]).stdout.toString('utf8')
     assert.equal(shell, want)
-    const run = helper('probe', { args: tree.args }, { SC_HELPER_PROC_ROOT: tree.proc })
+    const run = helper('probe', { args: tree.args }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: tree.proc })
     assert.equal(run.code, 0)
     assert.deepEqual(Object.keys(run.answer), ['ok', 'out'])
     assert.equal(run.answer.out, want)
@@ -395,7 +395,7 @@ test('probe: the fake /proc tree gives the recorded PROBE_SCRIPT lines, the same
     fs.mkdirSync(join(tree.proc, 'self'))
     const shellSelf = spawnSync('sh', ['-c', probeScript().replaceAll('/proc', tree.proc), 'session-probe', 'pid:self|~']).stdout.toString('utf8')
     assert.ok(shellSelf.includes('A\tself\t'))
-    assert.ok(!helper('probe', { args: ['pid:self|~', 'pid:..|~', 'pid:|~'] }, { SC_HELPER_PROC_ROOT: tree.proc }).answer.out.includes('\nA\t'))
+    assert.ok(!helper('probe', { args: ['pid:self|~', 'pid:..|~', 'pid:|~'] }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: tree.proc }).answer.out.includes('\nA\t'))
   } finally {
     fs.rmSync(tree.root, { recursive: true, force: true })
   }
@@ -404,7 +404,7 @@ test('probe: the fake /proc tree gives the recorded PROBE_SCRIPT lines, the same
 test('probe: no environment content but CLAUDE_CONFIG_DIR, and no sessions-file field but procStart and sessionId, in any answer', { skip: !IS_LINUX }, () => {
   const tree = fakeTree()
   try {
-    const run = helper('probe', { args: tree.args }, { SC_HELPER_PROC_ROOT: tree.proc })
+    const run = helper('probe', { args: tree.args }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: tree.proc })
     assert.equal(run.answer.ok, true)
     for (const text of [run.stdout, run.stderr]) {
       assert.ok(!text.includes(CANARY), 'the canary leaked')
@@ -413,8 +413,26 @@ test('probe: no environment content but CLAUDE_CONFIG_DIR, and no sessions-file 
       assert.ok(!text.includes('/not/claude'), 'a non-claude process leaked')
     }
     // A request that fails says nothing of the tree either.
-    const bad = helper('probe', '{"args":', { SC_HELPER_PROC_ROOT: tree.proc })
+    const bad = helper('probe', '{"args":', { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: tree.proc })
     assertFailure(bad, 'BAD_REQUEST', tree.root)
+  } finally {
+    fs.rmSync(tree.root, { recursive: true, force: true })
+  }
+})
+
+test('probe: SC_HELPER_PROC_ROOT alone, or with SC_HELPER_TEST other than 1, is ignored: the live /proc is read', { skip: !IS_LINUX }, () => {
+  const tree = fakeTree()
+  try {
+    const fake = helper('probe', { args: tree.args }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: tree.proc }).answer.out
+    assert.ok(fake.includes(`P\t100\tclaude\t8765\t${tree.root}/work dir\t`), fake)
+    for (const env of [{ SC_HELPER_PROC_ROOT: tree.proc }, { SC_HELPER_TEST: 'true', SC_HELPER_PROC_ROOT: tree.proc }, { SC_HELPER_TEST: '0', SC_HELPER_PROC_ROOT: tree.proc }, { SC_HELPER_TEST: '', SC_HELPER_PROC_ROOT: tree.proc }]) {
+      const run = helper('probe', { args: tree.args }, env)
+      assert.equal(run.code, 0)
+      // None of the fake tree's processes: its claude in "work dir", its resumed claude, its odd comm.
+      assert.ok(!run.answer.out.includes(`${tree.root}/work dir`), JSON.stringify(env))
+      assert.ok(!run.answer.out.includes('claude --resume abc'), JSON.stringify(env))
+      assert.ok(!run.answer.out.includes('\t8765\t') && !run.answer.out.includes('\t28765\t'), JSON.stringify(env))
+    }
   } finally {
     fs.rmSync(tree.root, { recursive: true, force: true })
   }

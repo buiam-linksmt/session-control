@@ -8,8 +8,11 @@
 
 import * as fs from 'node:fs'
 
-/** /proc, or a fake tree's in the helper's own tests (SC_HELPER_PROC_ROOT). */
-const PROC = process.env.SC_HELPER_PROC_ROOT || '/proc'
+/**
+ * /proc, or a fake tree's in the helper's own tests: SC_HELPER_PROC_ROOT counts only together with SC_HELPER_TEST=1, so
+ * a stray variable in the environment the mod runs node with cannot point the probe at another tree.
+ */
+const PROC = (process.env.SC_HELPER_TEST === '1' && process.env.SC_HELPER_PROC_ROOT) || '/proc'
 
 /**
  * Clock ticks per second of /proc/<pid>/stat (getconf CLK_TCK in the shell probe). The kernel reports USER_HZ, which is
