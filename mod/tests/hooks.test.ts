@@ -15,6 +15,7 @@ import {
   NOW_MS,
   ORCH_DIR,
   PROBE_STDOUT,
+  REGISTRY,
   REGISTRY_PATH,
   REGISTRY_TEXT,
   RESULTS,
@@ -99,7 +100,7 @@ const given = (path: string, isWin: boolean) => {
   return isWin ? slashed : slashed.replace(/^[A-Za-z]:(?=\/)/, '')
 }
 
-function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
+function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText: string | (() => string) = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
   const w: World = { bash: [], powershell: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
   // A test that answers env.get itself says so.
   if (!isEnvOwn) mock.env(on, env)
@@ -120,7 +121,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     w.reads.push(seen(e.path))
     if (MISSING.has(path) || LATE.has(path)) throw new Error(`ENOENT ${e.path}`)
     if (UNREADABLE.has(path)) throw new Error(`EFBIG ${e.path}`)
-    if (path === REGISTRY_PATH) return { value: registryText }
+    if (path === REGISTRY_PATH) return { value: typeof registryText === 'function' ? registryText() : registryText }
     if (path === '/work/orch/CLAUDE.md') return { value: '# Role: Session Orchestrator\n' }
     if (path === '/work/new/thin.md') return { value: 'Just do the work.' }
     if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE_TEXT }
@@ -2083,5 +2084,97 @@ describe('seconds tick', () => {
     for (let step = 0; step < 3; step++) await w.clock.advance(1000)
     expect((await ui.find({ key: 'x:points' }))?.props.label).toBe('[-]')
     expect(String(((await ui.findAll({}))[0] as { text?: string }).text)).toContain('Detail one')
+  })
+})
+
+describe('a log whose session leaves the registry', () => {
+  type Ui = Awaited<ReturnType<typeof mountPane>>
+  const SID = SID_ALIVE
+  const without = (...gone: string[]) => JSON.stringify(REGISTRY.filter(one => !gone.includes(one.session_id ?? '')), null, 2) + '\n'
+  const boxesOf = async (ui: Ui) =>
+    (await ui.findAll({ type: 'Box' })).filter(box => box.props.borderStyle === 'round').map(box => /^(SESSIONS|QUEUED WORK|OPEN POINTS|LOG)/.exec(box.text)?.[1])
+  const THREE = ['SESSIONS', 'QUEUED WORK', 'OPEN POINTS']
+  const setup = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On) => {
+    const reg = { text: REGISTRY_TEXT }
+    const w = world(on, '/fixture/lic/a\n', true, () => reg.text)
+    stubPanel(on)
+    await $.session.start(start(ORCH_DIR))
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    const ui = await mountPane($)
+    await ui.press({ key: `s:${SID}` })
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    return { w, reg, ui }
+  }
+
+  test('the entry vanishes while its log is open: the default view returns, the log is cleared, the next polls reopen nothing', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    reg.text = without(SID)
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(THREE)
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /no transcript path/ })).toBeUndefined()
+    await w.clock.advance(10000)
+    expect(await boxesOf(ui)).toEqual(THREE)
+    expect(await ui.find({ type: 'Text', text: /no transcript path/ })).toBeUndefined()
+    // No row keeps the selection marker.
+    expect((await ui.findAll({ type: 'Button' })).some(one => String(one.props.label).startsWith('▸'))).toBe(false)
+  })
+
+  test('an expanded section state is cleared with the closed log', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    // The sessions icon closes the log and expands SESSIONS (the other two are one-line headers); the row opens the log again.
+    await ui.press({ key: 'x:sessions' })
+    expect(await boxesOf(ui)).toEqual(['SESSIONS'])
+    await ui.press({ key: `s:${SID}` })
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    reg.text = without(SID)
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(THREE)
+  })
+
+  test('an unreadable or unparsable registry keeps the log as it is', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    reg.text = '{ not json'
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+    UNREADABLE.add(REGISTRY_PATH)
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    UNREADABLE.clear()
+    reg.text = REGISTRY_TEXT
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+  })
+
+  test('a still-present entry keeps its log, also when another entry is retired or the same id is registered again', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    reg.text = without(SID_DONE)
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+    // Removed and registered again between two polls: the entry is there at the poll, the log stays.
+    reg.text = REGISTRY_TEXT
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+  })
+
+  test('with a different session selected, retiring a third one keeps the open log', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    reg.text = without(SID_UNREPORTED)
+    await w.clock.advance(5000)
+    expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+  })
+
+  test('a session retired while the panel is hidden leaves nothing selected when the panel is shown again', { options: OPTIONS }, async ($, on) => {
+    const { w, reg, ui } = await setup($, on)
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await ui.unmount()
+    reg.text = without(SID)
+    await w.clock.advance(5000)
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    expect(await boxesOf(await mountPane($))).toEqual(THREE)
   })
 })

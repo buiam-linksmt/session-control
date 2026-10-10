@@ -579,10 +579,23 @@ async function refresh($: EngineInterface, taskStatus?: string): Promise<void> {
 async function refreshWatch($: EngineInterface): Promise<void> {
   const sid = await read($, selected)
   if (!isActive || sid === null) return
-  const parsed = parseRegistry(await readRegistryText($))
-  const entry = parsed.ok ? parsed.entries.find(one => one.session_id === sid) : undefined
-  const path = entry === undefined ? undefined : (await hostOf($)).transcriptPath(entry)
-  const title = entry?.title ?? sid.slice(0, 8)
+  // A registry that cannot be read or parsed leaves the view as it is: a read error must not close the user's log.
+  const text = await $.fs.read(await registryPath($)).catch(() => undefined)
+  const parsed = text === undefined ? undefined : parseRegistry(text)
+  if (parsed === undefined || !parsed.ok) return
+  const entry = parsed.entries.find(one => one.session_id === sid)
+  if (entry === undefined) {
+    // The session left the registry (retired): its log closes and the default three sections return, unless the
+    // selection moved on while the registry was read.
+    if ((await read($, selected)) === sid) {
+      await update($, selected, () => null)
+      await update($, watch, () => null)
+      await update($, expanded, () => null)
+    }
+    return
+  }
+  const path = (await hostOf($)).transcriptPath(entry)
+  const title = entry.title ?? sid.slice(0, 8)
   if (path === undefined) {
     await update($, watch, () => ({ title, lines: ['no transcript path for this entry'] }))
     return
