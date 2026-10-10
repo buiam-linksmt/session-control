@@ -73,6 +73,8 @@ declare module 'claude-code' {
       queued: { title: string; running?: true }[] | null
       /** Session id whose output box is open in the panel; null when none. */
       selected: string | null
+      /** Section a header icon expanded to the whole docked panel; null shows the three boxes. */
+      expanded: 'sessions' | 'queue' | 'points' | null
       /** Tasks sent to peers; an entry is acknowledged once a peer reply arrives. */
       ledger: { to: string; at: number; excerpt: string; isAcked: boolean }[]
       /** Open, not held points of open-points.json; null when unreadable. */

@@ -57,7 +57,7 @@ The bookkeeping tools write a backup of the file they change into `backups/`, on
 
 ## Using it
 
-`/session-control` shows or hides the side panel. The panel has three sections: Sessions, Queued work and Open points. Tracking of runs, the completion handling and the report check run whether the panel is shown or not.
+`/session-control` shows or hides the side panel. The panel has three sections: Sessions, Queued work and Open points. The `[+]` icon in a section's header expands that section to the whole panel and hides the other two; `[-]` returns to the three boxes, and opening a session's log returns to the log layout (sessions one third, log two thirds). Tracking of runs, the completion handling and the report check run whether the panel is shown or not.
 
 Worker completion: when a registered worker's process is gone, the mod classifies its result file (`clean`, `limit`, `login`, `killed`, `error` or `chatter`), shows a toast and, with `completionWrites` on, merges the outcome into the worker's registry entry (it drops `pid` and sets `reported` to `false`). The outcome reaches the model with the next task notification. After a context compaction the next prompt carries a digest of the running workers and the open points.
 

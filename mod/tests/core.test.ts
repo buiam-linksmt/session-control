@@ -458,6 +458,14 @@ describe('panel layout', () => {
     expect(boxAt(sectionBoxes(36, false), 13)?.id).toBe('queue')
     expect(clampOffset(99, 20, 5)).toBe(15)
   })
+  test('an expanded section takes the whole body alone; an open log wins over it', () => {
+    expect(sectionBoxes(36, false, 'sessions').map(b => [b.id, b.top, b.height])).toEqual([['sessions', 0, 36]])
+    expect(sectionBoxes(36, false, 'queue').map(b => [b.id, b.top, b.height])).toEqual([['queue', 0, 36]])
+    expect(sectionBoxes(36, false, 'points').map(b => [b.id, b.top, b.height])).toEqual([['points', 0, 36]])
+    expect(sectionBoxes(36, false, null)).toEqual(sectionBoxes(36, false))
+    expect(sectionBoxes(36, true, 'sessions')).toEqual(sectionBoxes(36, true))
+    expect(boxAt(sectionBoxes(36, false, 'points'), 30)?.id).toBe('points')
+  })
 })
 
 describe('retiring finished workers', () => {

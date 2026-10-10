@@ -761,6 +761,108 @@ describe('launch_worker', () => {
   })
 })
 
+describe('expanding a section', () => {
+  type Ui = Awaited<ReturnType<typeof mountPane>>
+  /** The bordered boxes as drawn: each one's title and height, top to bottom. */
+  const layoutOf = async (ui: Ui) =>
+    (await ui.findAll({ type: 'Box' }))
+      .filter(box => box.props.borderStyle === 'round')
+      .map(box => [/^(SESSIONS|QUEUED WORK|OPEN POINTS|LOG)/.exec(box.text)?.[1], box.props.height])
+  const SID = 'aaaaaaaa-1111-4111-8111-111111111111'
+  const THREE = [['SESSIONS', 12], ['QUEUED WORK', 12], ['OPEN POINTS', 12]]
+  const open = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On) => {
+    world(on)
+    stubPanel(on)
+    await $.session.start(start(ORCH_DIR))
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    return mountPane($)
+  }
+
+  test('the panel starts with three equal boxes, each header holding an expand icon', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on)
+    expect(await layoutOf(ui)).toEqual(THREE)
+    for (const id of ['sessions', 'queue', 'points']) expect((await ui.find({ key: `x:${id}` }))?.props.label).toBe('[+]')
+  })
+
+  test('each icon expands its section to the whole panel and hides the others; pressed again it restores the three boxes', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on)
+    const all = async () => String(((await ui.findAll({}))[0] as { text?: string }).text)
+    for (const [id, title] of [['sessions', 'SESSIONS'], ['queue', 'QUEUED WORK'], ['points', 'OPEN POINTS']] as const) {
+      await ui.press({ key: `x:${id}` })
+      expect(await layoutOf(ui)).toEqual([[title, 36]])
+      expect((await ui.find({ key: `x:${id}` }))?.props.label).toBe('[-]')
+      for (const other of THREE.map(one => one[0]).filter(one => one !== title)) expect(await all()).not.toContain(other)
+      await ui.press({ key: `x:${id}` })
+      expect(await layoutOf(ui)).toEqual(THREE)
+    }
+  })
+
+  test('one section is expanded at a time: the hidden sections draw no icon, and the next one pressed shows alone', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on)
+    await ui.press({ key: 'x:queue' })
+    expect(await layoutOf(ui)).toEqual([['QUEUED WORK', 36]])
+    expect(await ui.find({ key: 'x:points' })).toBeUndefined()
+    // The hidden sections' icons are not drawn: collapsing, then pressing another, switches to it.
+    await ui.press({ key: 'x:queue' })
+    await ui.press({ key: 'x:points' })
+    expect(await layoutOf(ui)).toEqual([['OPEN POINTS', 36]])
+    await ui.press({ key: 'x:points' })
+    await ui.press({ key: 'x:sessions' })
+    expect(await layoutOf(ui)).toEqual([['SESSIONS', 36]])
+  })
+
+  test('opening a session log from the expanded sessions box resets to sessions one third, log two thirds', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on)
+    await ui.press({ key: 'x:sessions' })
+    await ui.press({ key: `s:${SID}` })
+    expect(await layoutOf(ui)).toEqual([['SESSIONS', 12], ['LOG', 24]])
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+    expect((await ui.find({ key: 'x:sessions' }))?.props.label).toBe('[+]')
+    // The expanded state is cleared: closing the log shows the three boxes again.
+    await ui.press({ key: `s:${SID}` })
+    expect(await layoutOf(ui)).toEqual(THREE)
+  })
+
+  test('the sessions icon in the log view closes the log and expands the sessions; the open-point click still works expanded', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on)
+    await ui.press({ key: `s:${SID}` })
+    expect(await layoutOf(ui)).toEqual([['SESSIONS', 12], ['LOG', 24]])
+    await ui.press({ key: 'x:sessions' })
+    expect(await layoutOf(ui)).toEqual([['SESSIONS', 36]])
+    await ui.press({ key: 'x:sessions' })
+    await ui.press({ key: 'x:points' })
+    await ui.press({ key: 'p:a:0' })
+    expect(String(((await ui.findAll({}))[0] as { text?: string }).text)).toContain('Detail one')
+  })
+
+  test('a panel shown again, after the command hid it or the close mark closed it, starts with no section expanded', { options: OPTIONS }, async ($, on) => {
+    world(on)
+    let isUp = false
+    on('ui.open', () => {
+      isUp = true
+      return { value: { isPlaced: true } } as never
+    })
+    on('ui.panes', () => ({ value: isUp ? [{ id: 'session-control' }] : [] }) as never)
+    await $.session.start(start(ORCH_DIR))
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    const ui = await mountPane($)
+    await ui.press({ key: 'x:points' })
+    expect(await layoutOf(ui)).toEqual([['OPEN POINTS', 36]])
+    expect((await $.command.run({ command: 'session-control', args: 'side' } as never)).text).toBe('Session-control panel hidden, session-control stays on.')
+    await ui.unmount()
+    isUp = false
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    const again = await mountPane($)
+    expect(await layoutOf(again)).toEqual(THREE)
+    await again.press({ key: 'x:queue' })
+    // The engine's close mark closes the pane without the command: the next show still starts collapsed.
+    await again.unmount()
+    isUp = false
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    expect(await layoutOf(await mountPane($))).toEqual(THREE)
+  })
+})
+
 describe('platform', () => {
   const args = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
   /** A launch, an acknowledgement and a retirement, the probe text shown as <probe>. */

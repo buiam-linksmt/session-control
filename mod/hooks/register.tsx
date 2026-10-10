@@ -83,7 +83,7 @@ import {
   rowStatus,
   slugify,
 } from './core'
-import type { LaunchArgs, PresentedPoint, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
+import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -106,6 +106,7 @@ const offsets = atom({ plugin: 'session-control', key: 'offsets' } as const, { s
 const tab = atom({ plugin: 'session-control', key: 'tab' } as const, 'sessions')
 const selected = atom({ plugin: 'session-control', key: 'selected' } as const, null)
 const points = atom({ plugin: 'session-control', key: 'points' } as const, null)
+const expanded = atom({ plugin: 'session-control', key: 'expanded' } as const, null)
 
 type Config = {
   orchestratorDir: string
@@ -975,10 +976,13 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
   if (isUp) {
     await $.ui.close({ id: PANE })
     await update($, selected, () => null)
+    await update($, expanded, () => null)
     trace($, 'panel', { isShown: false })
     return { text: 'Session-control panel hidden, session-control stays on.' }
   }
   await refresh($)
+  // Each panel starts with no section expanded, also after the engine's close mark closed the last one.
+  await update($, expanded, () => null)
   const opened = await $.ui.open({ id: PANE, title: 'Session control' })
   trace($, 'panel', { isShown: true, isPlaced: opened.isPlaced })
   return { text: opened.isPlaced ? 'Session-control panel opened.' : `Session-control panel waits: ${opened.reason}` }
@@ -1188,7 +1192,7 @@ export const register: Register = (on, options) => {
     const snap = await read($, snapshot)
     const columns = e.props.bodyColumns
     if (snap === null) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
-    const [view, sel, queue, list, back, pointSel, offs, activeTab] = await Promise.all([
+    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState] = await Promise.all([
       read($, watch),
       read($, selected),
       read($, queued),
@@ -1197,9 +1201,12 @@ export const register: Register = (on, options) => {
       read($, selectedPoint),
       read($, offsets),
       read($, tab),
+      read($, expanded),
     ])
     const width = Math.max(20, columns - 4)
     const isLogOpen = sel !== null && view !== null
+    // Docked, a section expanded by its header icon takes the whole body; an open log wins over it.
+    const expandedId: ExpandableId | null = isLogOpen ? null : expandedState
     // Docked: three boxes, never below three content rows each. Seated low (inline): one box at a time behind a tab
     // strip, at most 11 rows, so the panel can never push the chat input off the screen.
     const isCompact = e.props.placement === 'inline'
@@ -1207,14 +1214,20 @@ export const register: Register = (on, options) => {
     const compactRows = Math.max(3, Math.min(7, e.props.scroll.bodyRows))
     const activeId: SectionId = isLogOpen ? 'log' : (activeTab as SectionId)
     const bodyRows = isCompact ? compactRows : Math.max(MIN_SESSIONS_BOX + 2 * MIN_BOX, e.props.scroll.bodyRows)
-    const boxes: SectionBox[] = isCompact ? [{ id: activeId, top: 1, height: compactRows - 1 }] : sectionBoxes(bodyRows, isLogOpen)
+    const boxes: SectionBox[] = isCompact ? [{ id: activeId, top: 1, height: compactRows - 1 }] : sectionBoxes(bodyRows, isLogOpen, expandedId)
     layout = { boxes, totals: {} }
     type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning' }
     const widths = paneWidths(snap.rows, width - 2)
     const toggle = (sid: string) => async () => {
+      await update($, expanded, () => null)
       await update($, selected, current => (current === sid ? null : sid))
       await update($, boxBack, () => 0)
       await refreshWatch($)
+    }
+    // The header icon: expands its section, or collapses it back to the three boxes; it closes an open log.
+    const expand = (id: ExpandableId) => async () => {
+      await update($, selected, () => null)
+      await update($, expanded, current => (current === id ? null : id))
     }
     const togglePoint = (id: string) => () => update($, selectedPoint, current => (current === id ? null : id))
     const rowEl = (r: PRow) =>
@@ -1262,7 +1275,12 @@ export const register: Register = (on, options) => {
       }
       return (
         <Box flexDirection="column" height={box.height} overflow="hidden" borderStyle="round" borderDimColor>
-          <Text bold>{title}</Text>
+          <Box flexDirection="row">
+            <Box flexGrow={1}>
+              <Text bold>{title}</Text>
+            </Box>
+            {id !== 'log' && <Button key={`x:${id}`} label={expandedId === id ? '[-]' : '[+]'} plain dimColor onPress={expand(id)} />}
+          </Box>
           {fixed.map(rowEl)}
           {rows}
         </Box>
@@ -1349,11 +1367,14 @@ export const register: Register = (on, options) => {
             : sessionsBlock(true),
       )
     }
+    const sections: Record<ExpandableId, () => ReturnType<typeof block>> = {
+      sessions: () => sessionsBlock(),
+      queue: () => block('queue', 'QUEUED WORK', [], queueRows, offs.queue),
+      points: () => block('points', 'OPEN POINTS', [], pointRows, offs.points),
+    }
     return (
       <Box flexDirection="column" height={bodyRows} overflow="hidden">
-        {sessionsBlock()}
-        {block('queue', 'QUEUED WORK', [], queueRows, offs.queue)}
-        {block('points', 'OPEN POINTS', [], pointRows, offs.points)}
+        {boxes.map(one => sections[one.id as ExpandableId]())}
       </Box>
     )
   })

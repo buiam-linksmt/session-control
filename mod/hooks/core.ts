@@ -1359,9 +1359,16 @@ export type SectionBox = { id: SectionId; top: number; height: number }
 export const MIN_BOX = 6
 export const MIN_SESSIONS_BOX = 7
 
-/** Heights of the boxes in the panel body: three equal thirds, or (log open) sessions one third and the log two thirds; never below three content rows. */
-export function sectionBoxes(bodyRows: number, isLogOpen: boolean): SectionBox[] {
+/** The sections a header icon expands to the whole panel body. */
+export type ExpandableId = 'sessions' | 'queue' | 'points'
+
+/**
+ * Heights of the boxes in the panel body: three equal thirds, or (log open) sessions one third and the log two thirds,
+ * or (one section expanded, no log open) that section alone over the whole body; never below three content rows.
+ */
+export function sectionBoxes(bodyRows: number, isLogOpen: boolean, expanded: ExpandableId | null = null): SectionBox[] {
   const third = Math.max(MIN_SESSIONS_BOX, Math.floor(bodyRows / 3))
+  if (expanded !== null && !isLogOpen) return [{ id: expanded, top: 0, height: Math.max(expanded === 'sessions' ? MIN_SESSIONS_BOX : MIN_BOX, bodyRows) }]
   if (isLogOpen) {
     return [
       { id: 'sessions', top: 0, height: third },
