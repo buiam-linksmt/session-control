@@ -10,6 +10,7 @@ export function freshText(file: string): string | undefined {
   if (file === 'task-queue.json') return JSON.stringify({ tasks: [] }, null, 2) + '\n'
   if (file === 'agreed-decisions.md') return '# Agreed decisions\n'
   if (file === 'open-points-archive.md') return '# Open points archive\n'
+  if (file === 'agreed-decisions-archive.md') return '# Agreed decisions archive\n'
   if (file === 'headless-sessions.json') return '[]\n'
   return undefined
 }

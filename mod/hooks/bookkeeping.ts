@@ -156,3 +156,203 @@ export function appendDecision(text: string, input: Obj): Edit {
   lines.splice(end, 0, line)
   return { ok: true, text: lines.join('\n') + '\n', note: `recorded ${str(input.id)} in ${section}` }
 }
+
+// ---------------------------------------------------------------- decision sections and their archive
+
+/** The archive of agreed-decisions.md: the file archive_decisions moves whole sections into. */
+export const DECISIONS_ARCHIVE = 'agreed-decisions-archive.md'
+
+/** The section of agreed-decisions.md that holds one summary line per archived section, after the file's intro. */
+export const ARCHIVED_HEADING = 'Archived sections'
+
+export const ARCHIVE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['sections'],
+  properties: {
+    sections: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 50,
+      items: { type: 'string', minLength: 1 },
+      description: 'Section headings of agreed-decisions.md, without "## ", exactly as the file has them.',
+    },
+  },
+} as const
+
+/** One `## ` section of a decisions file: its heading, where it starts and ends (character offsets of the whole text), its lines after the heading. */
+export type DecisionSection = { heading: string; start: number; end: number; body: string }
+
+/** The `## ` sections of a decisions text, in order; a section runs from its heading line to the next one or the end. */
+export function decisionSectionsOf(text: string): DecisionSection[] {
+  const heads: { heading: string; start: number; bodyStart: number }[] = []
+  let at = 0
+  for (const line of text.split('\n')) {
+    if (line.startsWith('## ')) heads.push({ heading: line.slice(3).trim(), start: at, bodyStart: Math.min(text.length, at + line.length + 1) })
+    at += line.length + 1
+  }
+  return heads.map((head, n) => {
+    const end = heads[n + 1]?.start ?? text.length
+    return { heading: head.heading, start: head.start, end, body: text.slice(head.bodyStart, end) }
+  })
+}
+
+/** The section a heading names, exactly (blanks around it aside), or why there is none to take. */
+export function findDecisionSection(text: string, heading: string): { section: DecisionSection } | { error: string } {
+  const wanted = heading.trim()
+  const found = decisionSectionsOf(text).filter(one => one.heading === wanted)
+  if (found.length === 0) return { error: `agreed-decisions.md has no section "${wanted}"` }
+  if (found.length > 1) return { error: `agreed-decisions.md has ${found.length} sections headed "${wanted}"` }
+  return { section: found[0] as DecisionSection }
+}
+
+/** The ids of a section's decision lines (`<id>. <text>`, as appendDecision writes them), in order. */
+export function decisionIds(body: string): string[] {
+  const ids: string[] = []
+  for (const line of body.split('\n')) {
+    const found = /^([A-Za-z0-9][A-Za-z0-9_.-]*?)\. \S/.exec(line)
+    if (found?.[1] !== undefined) ids.push(found[1])
+  }
+  return ids
+}
+
+/** A section's marks other files may name it by: a branch, a T-number or a number of five digits or more in its heading (as audit_state reads them). */
+function headingMarks(heading: string): string[] {
+  const marks = new Set<string>()
+  for (const found of heading.matchAll(/\bbranch(?:es)?\s+([A-Za-z0-9._/-]+)/gi)) if (found[1] !== undefined) marks.add(found[1].replace(/[.,;:]+$/, ''))
+  for (const found of heading.matchAll(/\bT\d{2,3}\b|\b\d{5,}\b/g)) marks.add(found[0])
+  return [...marks]
+}
+
+const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/**
+ * How a text names a section, or undefined: its whole heading (case aside), one of its decision ids that holds a
+ * letter (a bare number names nothing), or a mark of its heading, each as a whole word.
+ */
+export function namesSection(text: string, section: { heading: string; ids: readonly string[] }): string | undefined {
+  if (text.toLowerCase().includes(section.heading.toLowerCase())) return 'its heading'
+  const word = (token: string) => new RegExp(`(?<![A-Za-z0-9_-])${escapeRe(token)}(?![A-Za-z0-9_-])`)
+  const id = section.ids.find(one => /[A-Za-z]/.test(one) && word(one).test(text))
+  if (id !== undefined) return `decision id ${id}`
+  const mark = headingMarks(section.heading).find(one => word(one).test(text))
+  return mark === undefined ? undefined : `${mark}`
+}
+
+/** What may still need a section: the queue's tasks not done, the running sessions, the open points that are open. */
+export type ArchiveRefs = {
+  queueText?: string
+  pointsText?: string
+  /** The registry entries whose process is alive. */
+  running: readonly { session_id?: unknown; title?: unknown; section?: unknown; name?: unknown }[]
+}
+
+/** Who still names a section: one phrase per task, session or point, empty when nothing does. */
+export function sectionUsers(section: { heading: string; ids: readonly string[] }, refs: ArchiveRefs): string[] {
+  const users: string[] = []
+  const list = (text: string | undefined, key: string): Obj[] => {
+    if (text === undefined) return []
+    try {
+      const value = (JSON.parse(text) as Obj | null)?.[key]
+      return Array.isArray(value) ? (value.filter(one => one !== null && typeof one === 'object') as Obj[]) : []
+    } catch {
+      return []
+    }
+  }
+  for (const task of list(refs.queueText, 'tasks')) {
+    if (str(task.status) === 'done') continue
+    const how = namesSection(JSON.stringify(task), section)
+    if (how !== undefined) users.push(`queue task ${str(task.id) || '(no id)'} (${str(task.status) || 'no status'}) names it by ${how}`)
+  }
+  for (const entry of refs.running) {
+    const sid = typeof entry.session_id === 'string' ? entry.session_id.slice(0, 8) : '(no id)'
+    if (typeof entry.section === 'string' && entry.section.trim() === section.heading) {
+      users.push(`running session ${sid} was launched with it`)
+      continue
+    }
+    const how = namesSection([entry.title, entry.name].filter(one => typeof one === 'string').join('\n'), section)
+    if (how !== undefined) users.push(`running session ${sid} names it by ${how}`)
+  }
+  for (const point of list(refs.pointsText, 'points')) {
+    if (str(point.status) !== 'open') continue
+    const how = namesSection([point.title, point.detail, point.recommendation].map(str).join('\n'), section)
+    if (how !== undefined) users.push(`open point ${str(point.id) || '(no id)'} names it by ${how}`)
+  }
+  return users
+}
+
+/** The summary line an archived section leaves: its heading, its id range, the date and "archived". */
+export function archivedLine(heading: string, ids: readonly string[], today: string): string {
+  const range = ids.length === 0 ? 'no ids' : ids.length === 1 ? `id ${ids[0]}` : `ids ${ids[0]} to ${ids[ids.length - 1]}`
+  return `- ${heading} (${range}): archived ${today} to ${DECISIONS_ARCHIVE}`
+}
+
+export type ArchiveEdit =
+  | { ok: true; text: string; archive: string; note: string; archived: { heading: string; ids: string[] }[] }
+  | { ok: false; error: string }
+
+/**
+ * Moves whole sections of agreed-decisions.md out: `archive` is what the archive file gets, a dated header line and
+ * each section's text exactly as the file held it (heading line to the next heading); `text` is the file without
+ * them, with one summary line each under ARCHIVED_HEADING (made after the intro, before the first section, when
+ * missing). All or nothing: a Standing section, ARCHIVED_HEADING itself, an unknown or doubled heading, a section
+ * named twice in the call, and a section a queue task, running session or open point still names refuse the call,
+ * each said.
+ */
+export function archiveDecisions(text: string, headings: readonly string[], refs: ArchiveRefs, today: string): ArchiveEdit {
+  const refusals: string[] = []
+  const chosen: DecisionSection[] = []
+  const seen = new Set<string>()
+  for (const raw of headings) {
+    const heading = str(raw).trim()
+    if (seen.has(heading)) {
+      refusals.push(`"${heading}" is named twice`)
+      continue
+    }
+    seen.add(heading)
+    if (/^standing\b/i.test(heading)) {
+      refusals.push(`"${heading}" is a Standing section, which is never archived`)
+      continue
+    }
+    if (heading === ARCHIVED_HEADING) {
+      refusals.push(`"${heading}" holds the summary lines of archived sections`)
+      continue
+    }
+    const found = findDecisionSection(text, heading)
+    if ('error' in found) {
+      refusals.push(found.error)
+      continue
+    }
+    const users = sectionUsers({ heading, ids: decisionIds(found.section.body) }, refs)
+    if (users.length > 0) {
+      refusals.push(`"${heading}" is still named: ${users.join('; ')}`)
+      continue
+    }
+    chosen.push(found.section)
+  }
+  if (refusals.length > 0) return { ok: false, error: `nothing archived: ${refusals.join('; ')}` }
+  const archived = chosen.map(one => ({ heading: one.heading, ids: decisionIds(one.body) }))
+  const moved = [...chosen].sort((a, b) => a.start - b.start)
+  const block = moved.map(one => text.slice(one.start, one.end)).map(part => (part.endsWith('\n') ? part : `${part}\n`)).join('')
+  const archive = `\n# Archived ${today} from agreed-decisions.md\n\n${block}`
+  // The file without the sections, cut from the last one back so the offsets hold.
+  let rest = text
+  for (const one of [...moved].reverse()) rest = rest.slice(0, one.start) + rest.slice(one.end)
+  // A last section gone leaves the blank lines before it at the end: one line end stays.
+  if (rest !== text && moved.at(-1)?.end === text.length) rest = rest.replace(/\n+$/, '\n')
+  const summaries = archived.map(one => archivedLine(one.heading, one.ids, today))
+  const sections = decisionSectionsOf(rest)
+  const own = sections.find(one => one.heading === ARCHIVED_HEADING)
+  if (own !== undefined) {
+    const kept = rest.slice(own.start, own.end).replace(/\n*$/, '\n')
+    rest = `${rest.slice(0, own.start)}${kept}${summaries.join('\n')}\n${own.end < rest.length ? '\n' : ''}${rest.slice(own.end)}`
+  } else {
+    const first = sections[0]?.start ?? rest.length
+    const intro = rest.slice(0, first)
+    const head = intro.trim() === '' ? '' : `${intro.replace(/\n*$/, '\n')}\n`
+    const tail = rest.slice(first)
+    rest = `${head}## ${ARCHIVED_HEADING}\n${summaries.join('\n')}\n${tail === '' ? '' : `\n${tail}`}`
+  }
+  const note = `archived ${archived.map(one => `"${one.heading}"`).join(', ')} to ${DECISIONS_ARCHIVE}`
+  return { ok: true, text: rest, archive, note, archived }
+}

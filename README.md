@@ -6,7 +6,7 @@ An orchestrator kit for Claude Code. One interactive session, the orchestrator, 
 - `mod/` is the session-control mod. It provides:
   - a side panel with the worker sessions, the queued work and the open points;
   - the worker tools `launch_worker`, `acknowledge_workers`, `retire_workers` and `close_worker`;
-  - the bookkeeping tools `open_point`, `queue_task` and `record_decision`;
+  - the bookkeeping tools `open_point`, `queue_task`, `record_decision` and `archive_decisions`;
   - the read-only inspection tools `list_sessions`, `read_result`, `worker_tail`, `session_writes`, `panel_snapshot` and `audit_state`;
   - a report check that sends a faulty orchestrator report back once.
 - `model-complexity-matrix.md` is the lookup table for the model and effort of each worker. `CLAUDE.md` requires it at every launch.
@@ -75,6 +75,7 @@ The tools are registered when the mod becomes active and are named `mcp__session
 | `open_point` | Adds, answers, closes, holds or releases an entry of `open-points.json`. Settled entries older than 7 days move to `open-points-archive.md`. |
 | `queue_task` | Adds, updates or removes a task of `task-queue.json`. |
 | `record_decision` | Appends one numbered line to a section of `agreed-decisions.md`; the section is created when missing. |
+| `archive_decisions` | `{sections}`: section headings of `agreed-decisions.md` without `## `, exactly as the file has them. Moves those whole sections (heading line to the next heading, the bytes as they are) into `agreed-decisions-archive.md`, created with the line `# Agreed decisions archive` when missing and only ever appended to, under one dated header line per call (`# Archived <date> from agreed-decisions.md`); the main file keeps one summary line per archived section, `- <heading> (ids <first> to <last>): archived <date> to agreed-decisions-archive.md`, under a `## Archived sections` heading it makes after the file's intro (`audit_state` never counts that section as stale). All or nothing: it refuses a `Standing` section (any heading that starts with Standing), `Archived sections` itself, an unknown or doubled heading, a heading named twice, and a section that a queue task not `done`, a running session (its title or name, or the section it was launched with) or an open point still names, by the whole heading (case aside), a decision id that holds a letter, or a branch, T-number or number of five digits or more of its heading, each as a whole word; the refusal names each task, session or point. The file is backed up into `backups/` once per day before the first change; the archive is written before the main file, each through a temporary file and a rename against the text read (Linux and Windows). |
 | `list_sessions` | Read-only. `{include_finished?}` (default true). A count line, then one line per row of the panel's row builder: each registry entry with its title, session id, name, cwd, config dir, model, effort, status as the panel shows it, pid, elapsed text, outcome kind and summary, cost and keep mark; and each orphan (a live headless `claude -p` no entry claims, the licence daemon's probes left out) with its pid, cwd, config dir and age. `include_finished: false` leaves the finished rows out and says how many. |
 | `read_result` | Read-only. `{session_id, max_chars?}` (default 12000, 500 to 50000). The worker's final report: the result file's `.result`; when that is chatter (the `chatter` label of the completion) or there is no result to read (no file, not JSON, no `.result`), the last assistant message of 200 characters or more of its transcript, a message's rows joined and a subagent's rows left out (a real report can sit under late notification chatter). It says the source used and why, the outcome label (and the registry's when it differs), cost, duration, turns, `is_error` and `subtype`, how many replacements the redaction made, and whether the report was cut (the head kept, the characters cut counted). Never the whole transcript. |
 | `worker_tail` | Read-only. `{session_id, lines?}` (default 40, at most 200). The transcript's last lines summarised as the panel's log shows them, the seconds since the transcript was last written (the probe's, else the file's mtime) and whether the process is alive by the Abort check. |
@@ -264,7 +265,7 @@ mod/
   helper/host.mjs               the Node helper's entry point (protocol.mjs, ops.mjs, files.mjs, linux.mjs)
   hooks/inspect.ts              the inspection tools' schemas and plain text (list_sessions ... panel_snapshot)
   hooks/audit.ts                audit_state's findings
-  hooks/bookkeeping.ts          edits of open points, queue and decisions
+  hooks/bookkeeping.ts          edits of open points, queue and decisions; the decisions archive
   hooks/store.ts                initial helper-file text, dates, paths
   tests/                        *.test.ts (powershell.test.ts, inspect.test.ts, audit.test.ts among them),
                                 fixtures.ts, fake-helper.ts, helper.test.mjs, probe-selftest.py,

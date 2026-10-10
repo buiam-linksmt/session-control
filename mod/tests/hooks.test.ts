@@ -342,9 +342,9 @@ describe('tool surface', () => {
     // Changed on purpose by feature/inspect-tools: six read-only inspection tools (list_sessions, read_result,
     // worker_tail, session_writes, panel_snapshot, audit_state) are registered after the six; the six are unchanged
     // (the next test pins their own fingerprint, 6072:68e1b3f1, this line's value before the change).
-    // Changed on purpose again by feature/write-tools (9499:ccae8712 before): close_worker is registered after
+    // Changed on purpose again by feature/write-tools (9499:ccae8712 before): close_worker and archive_decisions are registered after
     // audit_state; the twelve tools before it are unchanged (the next test pins each).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('11029:39536527')
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('11909:ac870414')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -364,10 +364,11 @@ describe('tool surface', () => {
       'panel_snapshot',
       'audit_state',
       'close_worker',
+      'archive_decisions',
     ])
     // The six tools before feature/inspect-tools keep their names, descriptions and schemas byte for byte.
     expect(fingerprint(JSON.stringify(w.tools.slice(0, 6)))).toBe('6072:68e1b3f1')
-    // Each tool's own pin. The twelve tools before feature/write-tools are unchanged byte for byte; close_worker is new.
+    // Each tool's own pin. The twelve tools before feature/write-tools are unchanged byte for byte; close_worker and archive_decisions are new.
     const pins = Object.fromEntries(w.tools.map(tool => [tool.name, fingerprint(JSON.stringify(tool))]))
     expect(pins).toEqual({
       launch_worker: '1382:a077d922',
@@ -383,6 +384,7 @@ describe('tool surface', () => {
       panel_snapshot: '267:bb88911d',
       audit_state: '562:67cf260d',
       close_worker: '1529:9741bcb0',
+      archive_decisions: '879:39a97972',
     })
   })
 })

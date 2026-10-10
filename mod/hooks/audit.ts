@@ -8,6 +8,7 @@ import { activeQueueText, formatAge, rowStatus } from './core'
 import type { ProcFacts } from './core'
 import { bounded, clean } from './inspect'
 import { localDate } from './store'
+import { ARCHIVED_HEADING } from './bookkeeping'
 
 export const AUDIT_SCHEMA = { type: 'object', additionalProperties: false, properties: {} } as const
 
@@ -352,7 +353,7 @@ export function auditFindings(input: AuditInput): Finding[] {
       .join('\n')
       .toLowerCase()
     const stale = decisionSections(input.decisionsText)
-      .filter(section => !/^standing\b/i.test(section.heading))
+      .filter(section => !/^standing\b/i.test(section.heading) && section.heading !== ARCHIVED_HEADING)
       .map(section => ({ section, left: hasUnitLeft(section.heading, live) }))
       .filter(one => !one.left.isLeft)
     if (stale.length > 0) {
@@ -361,7 +362,7 @@ export function auditFindings(input: AuditInput): Finding[] {
         kind: 'decisions-stale',
         subject: 'agreed-decisions.md',
         evidence: `${plural(stale.length, 'section')} whose unit no queue task, registry entry or open point names: ${names(stale.map(one => `"${one.section.heading}" (${one.left.by})`), 8, 200)}`,
-        action: 'archive the sections of closed units (the archive action of the tools step), keeping the Standing ones',
+        action: 'archive the sections of closed units with archive_decisions, keeping the Standing ones',
       })
     }
   }

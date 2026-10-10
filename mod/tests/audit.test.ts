@@ -183,6 +183,13 @@ describe('audit findings, one fixture per kind', () => {
     ])
   })
 
+  test('agreed-decisions.md: the Archived sections summary that archive_decisions keeps is never a stale section', () => {
+    const archived = `${DECISIONS}\n## Archived sections\n- Old unit (ids old-1 to old-3): archived 2026-10-11 to agreed-decisions-archive.md\n`
+    const stale = auditFindings({ ...BASE, entries: [...ENTRIES, { title: 'Live parser work', session_id: 'x', cwd: '/w' }], decisionsText: archived }).filter(one => one.kind === 'decisions-stale')
+    expect(stale.map(one => one.evidence).join()).not.toContain('Archived sections')
+    expect(stale.map(one => one.action)).toEqual(['archive the sections of closed units with archive_decisions, keeping the Standing ones'])
+  })
+
   test('a helper file that does not parse is a high finding and its checks are skipped; so is an unreadable registry', () => {
     const found = auditFindings({ entries: [], facts: FACTS, nowMs: NOW, queueText: '{', pointsText: '[]', registryError: 'registry is not JSON: x' })
     expect(found.map(one => [one.severity, one.kind, one.evidence])).toEqual([

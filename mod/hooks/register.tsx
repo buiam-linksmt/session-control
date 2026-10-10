@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessRunInit, ProcessRunResult, Register } from 'claude-code'
 
 import type { SessionEntry, SessionOutcome } from '../types'
-import { DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, editOpenPoints, editQueue } from './bookkeeping'
+import { ARCHIVE_SCHEMA, ARCHIVED_HEADING, DECISIONS_ARCHIVE, DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, archiveDecisions, editOpenPoints, editQueue } from './bookkeeping'
 import type { Edit } from './bookkeeping'
 import { backupName, dirOf, freshText, localDate } from './store'
 import {
@@ -119,6 +119,7 @@ const WRITES_TOOL = 'mcp__session-control__session_writes'
 const SNAPSHOT_TOOL = 'mcp__session-control__panel_snapshot'
 const AUDIT_TOOL = 'mcp__session-control__audit_state'
 const CLOSE_TOOL = 'mcp__session-control__close_worker'
+const ARCHIVE_TOOL = 'mcp__session-control__archive_decisions'
 
 /** How much of a transcript read_result reads when the whole is over the read cap: a final report can be one long row. */
 const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
@@ -867,6 +868,52 @@ async function close($: EngineInterface, ids: readonly string[], keep: boolean, 
   return { result: `${acked.result} ${retired.result}` }
 }
 
+/**
+ * archive_decisions: whole sections of agreed-decisions.md go to agreed-decisions-archive.md (appended, under a dated
+ * header line), one summary line each stays (archiveDecisions). The decisions file is backed up first; the archive is
+ * written before the decisions file, each through writeAtomic against the text read.
+ */
+async function archiveSections($: EngineInterface, sections: unknown) {
+  const headings = Array.isArray(sections) ? sections.filter((one): one is string => typeof one === 'string') : []
+  if (headings.length === 0) return { deny: `${PLUGIN}: sections must name at least one section` }
+  const file = 'agreed-decisions.md'
+  const path = orchPath(file)
+  const archivePath = orchPath(DECISIONS_ARCHIVE)
+  const parsed = parseRegistry(await readRegistryText($))
+  if (!parsed.ok) return { deny: `${PLUGIN}: ${parsed.error}: the running sessions cannot be told; nothing archived` }
+  const facts = await probe($, parsed.entries)
+  const running = parsed.entries.filter(entry => rowStatus(entry, facts) === 'alive')
+  const [queueText, pointsText] = await Promise.all([$.fs.read(orchPath('task-queue.json')).catch(() => undefined), $.fs.read(orchPath('open-points.json')).catch(() => undefined)])
+  const today = localDate(await $.clock.now())
+  let appended: string | undefined
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const text = await $.fs.read(path).catch(() => undefined)
+    if (text === undefined) return { deny: `${PLUGIN}: ${file} cannot be read` }
+    const edited = archiveDecisions(text, headings, { queueText, pointsText, running }, today)
+    if (!edited.ok) {
+      trace($, 'guard', { tool: 'archive_decisions', isOk: false, ...messageFields(edited.error, 'reason') })
+      return { deny: `${PLUGIN}: ${edited.error}` }
+    }
+    await backupOnce($, file, 'archive-decisions', today, text)
+    // The archive first: a failure after it leaves the sections in both files, a failure before it loses none. A
+    // second attempt does not append the same block again.
+    if (appended !== edited.archive) {
+      const old = await $.fs.read(archivePath).catch(() => undefined)
+      if (old === undefined && (await $.fs.exists(archivePath).catch(() => true))) return { deny: `${PLUGIN}: ${DECISIONS_ARCHIVE} cannot be read; nothing written` }
+      const head = old ?? freshText(DECISIONS_ARCHIVE) ?? ''
+      const next = `${head}${head === '' || head.endsWith('\n') ? '' : '\n'}${edited.archive}`
+      if (!(await writeAtomic($, archivePath, next, old))) return { deny: `${PLUGIN}: ${DECISIONS_ARCHIVE} changed while it was being written; nothing written, try again` }
+      appended = edited.archive
+    }
+    if (await writeAtomic($, path, edited.text, text)) {
+      trace($, 'guard', { tool: 'archive_decisions', isOk: true, sections: edited.archived.length })
+      const lines = edited.archived.map(one => edited.text.split('\n').find(line => line.startsWith(`- ${one.heading} (`)) ?? one.heading)
+      return { result: `${file}: ${edited.note}; the summary lines under "## ${ARCHIVED_HEADING}": ${lines.join(' | ')}. Backup: backups/${backupName(file, 'archive-decisions', today)} (once per day).` }
+    }
+  }
+  return { deny: `${PLUGIN}: ${file} changed while it was being edited; ${DECISIONS_ARCHIVE} holds the sections, ${file} still does too: try again` }
+}
+
 async function launch($: EngineInterface, given: LaunchArgs) {
   const machine = await hostOf($)
   // The launch's paths in the form the host stores, from here on and in the registry (on Windows C:/..., never /c/...).
@@ -1284,6 +1331,11 @@ async function activate($: EngineInterface): Promise<void> {
         'Acknowledge and retire finished workers in one call: exactly acknowledge_workers, then retire_workers, with their refusals and their answers one after the other (reviewed as retire_workers takes it). keep=true only acknowledges and keeps (a resume or follow-up is expected); nothing is retired. A retire of a clean or reviewed session deletes its result, error, pid and mod-written prompt files in the runs directory, its cost and duration kept in cleared.jsonl.',
         CLOSE_SCHEMA,
       ],
+      [
+        'archive_decisions',
+        'Move whole sections of agreed-decisions.md into agreed-decisions-archive.md (created when missing; appended, the text byte for byte under a dated header line) and leave one summary line each (heading, id range, date, archived) under "## Archived sections". Refuses a Standing section, an unknown heading and a section that a queue task not done, a running session or an open point still names (by its heading, a decision id or a branch or T-number of its heading), saying which; then nothing is archived. The file is backed up first.',
+        ARCHIVE_SCHEMA,
+      ],
     ] as const) {
       await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
     }
@@ -1538,6 +1590,12 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => {
     traceError($, 'close_worker', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: close_worker failed` }
+  })
+
+  // The section headings are the orchestrator's own free text: the trace keeps no call field and the answer's length only.
+  on('tool.call', { tool: ARCHIVE_TOOL }, ($, e) => tracedTool($, 'archive_decisions', e, [], () => archiveSections($, plain(e).sections), true)).catch(($, e, next) => {
+    traceError($, 'archive_decisions', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: archive_decisions failed` }
   })
 
   // The inspection tools: read-only; their answers reach the trace as a length only.

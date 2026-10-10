@@ -607,6 +607,63 @@ describe('write-side tools through the plugin, on both platforms', () => {
       expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([{ ...entries[1], reported: true, keep: true }])
     })
 
+    test(`${p.name}: archive_decisions moves a free section byte for byte under a dated header, leaves one summary line, backs the file up; refuses a named, a Standing and an unknown section`, { options }, async ($, on) => {
+      const m = machine(p.env)
+      boot(on, m)
+      const decisions = [
+        '# Agreed decisions',
+        '',
+        'One section per unit of work.',
+        '',
+        '## Unit A (user, 2026-09-20)',
+        'unita-1. Keep the grammar.\t(tab kept)',
+        'unita-2. No new dependency; trailing blanks stay.   ',
+        '',
+        '## Unit B - branch feature/unit-b',
+        'unitb-1. One commit per feature.',
+        '',
+        '## Standing',
+        'push-x. Pushes need no go-ahead.',
+        '',
+      ].join('\n')
+      const sectionA = '## Unit A (user, 2026-09-20)\nunita-1. Keep the grammar.\t(tab kept)\nunita-2. No new dependency; trailing blanks stay.   \n\n'
+      put(m, `${orch}/agreed-decisions.md`, decisions)
+      put(m, `${orch}/task-queue.json`, JSON.stringify({ tasks: [{ id: 'q-b', status: 'queued', title: 'Follow-up on feature/unit-b' }, { id: 'q-a', status: 'done', title: 'Unit A (user, 2026-09-20) done' }] }))
+      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      const archive = (sections: string[]) => $.tool.call({ tool: 'mcp__session-control__archive_decisions', sections } as never) as Promise<{ result?: unknown; deny?: unknown }>
+      // All or nothing: B is named by a queued task (by its branch), so A is not archived either.
+      const refused = await archive(['Unit A (user, 2026-09-20)', 'Unit B - branch feature/unit-b', 'Standing', 'Unit C'])
+      expect(String(refused.deny)).toBe(
+        'session-control: nothing archived: "Unit B - branch feature/unit-b" is still named: queue task q-b (queued) names it by feature/unit-b; "Standing" is a Standing section, which is never archived; agreed-decisions.md has no section "Unit C"',
+      )
+      expect(get(m, `${orch}/agreed-decisions.md`)).toBe(decisions)
+      expect(get(m, `${orch}/agreed-decisions-archive.md`)).toBeUndefined()
+      const done = await archive(['Unit A (user, 2026-09-20)'])
+      const summaryA = `- Unit A (user, 2026-09-20) (ids unita-1 to unita-2): archived ${today} to agreed-decisions-archive.md`
+      expect(String(done.result)).toBe(
+        `agreed-decisions.md: archived "Unit A (user, 2026-09-20)" to agreed-decisions-archive.md; the summary lines under "## Archived sections": ${summaryA}. Backup: backups/agreed-decisions-before-archive-decisions-${today}.md (once per day).`,
+      )
+      expect(get(m, `${orch}/agreed-decisions-archive.md`)).toBe(`# Agreed decisions archive\n\n# Archived ${today} from agreed-decisions.md\n\n${sectionA}`)
+      expect(get(m, `${orch}/agreed-decisions.md`)).toBe(
+        ['# Agreed decisions', '', 'One section per unit of work.', '', '## Archived sections', summaryA, '', '## Unit B - branch feature/unit-b', 'unitb-1. One commit per feature.', '', '## Standing', 'push-x. Pushes need no go-ahead.', ''].join('\n'),
+      )
+      expect(get(m, `${orch}/backups/agreed-decisions-before-archive-decisions-${today}.md`)).toBe(decisions)
+      expect([...m.files.keys()].filter(file => file.includes('.tmp.'))).toEqual([])
+      // Once the queue no longer names B: appended under a second header, the first archive's bytes untouched.
+      put(m, `${orch}/task-queue.json`, JSON.stringify({ tasks: [] }))
+      const second = await archive(['Unit B - branch feature/unit-b'])
+      expect(String(second.result)).toContain('archived "Unit B - branch feature/unit-b"')
+      expect(get(m, `${orch}/agreed-decisions-archive.md`)).toBe(
+        `# Agreed decisions archive\n\n# Archived ${today} from agreed-decisions.md\n\n${sectionA}\n# Archived ${today} from agreed-decisions.md\n\n## Unit B - branch feature/unit-b\nunitb-1. One commit per feature.\n\n`,
+      )
+      expect(get(m, `${orch}/agreed-decisions.md`)).toBe(
+        ['# Agreed decisions', '', 'One section per unit of work.', '', '## Archived sections', summaryA, `- Unit B - branch feature/unit-b (id unitb-1): archived ${today} to agreed-decisions-archive.md`, '', '## Standing', 'push-x. Pushes need no go-ahead.', ''].join('\n'),
+      )
+      // The backup of the day is the first one: it is written once per day.
+      expect(get(m, `${orch}/backups/agreed-decisions-before-archive-decisions-${today}.md`)).toBe(decisions)
+      const again = await archive(['Archived sections'])
+      expect(String(again.deny)).toBe('session-control: nothing archived: "Archived sections" holds the summary lines of archived sections')
+    })
   }
 })
 
