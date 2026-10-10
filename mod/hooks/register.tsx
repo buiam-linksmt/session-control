@@ -1232,7 +1232,9 @@ export const register: Register = (on, options) => {
       await update($, expanded, current => (current === id ? null : id))
     }
     const togglePoint = (id: string) => () => update($, selectedPoint, current => (current === id ? null : id))
-    const rowEl = (r: PRow) =>
+    // A pressable row's label is padded to `fill`, its column's width: the Button is as wide as its label, so the
+    // pointer's light spans the row and not only its text.
+    const rowEl = (r: PRow, fill = 0, scope?: string) =>
       r.press === undefined ? (
         <Text bold={r.bold} dimColor={r.dim} color={r.color}>
           {r.text}
@@ -1240,10 +1242,10 @@ export const register: Register = (on, options) => {
       ) : (
         <Button
           key={r.key}
-          label={r.text === '' ? ' ' : r.text}
+          label={(r.text === '' ? ' ' : r.text).padEnd(fill)}
           plain
           dimColor={r.dim}
-          hover={r.group === undefined ? undefined : { scope: r.group, inverse: true }}
+          hover={scope === undefined ? undefined : { scope, inverse: true }}
           onPress={r.press}
         />
       )
@@ -1254,14 +1256,22 @@ export const register: Register = (on, options) => {
       layout.totals[id] = { total, visible }
       const from = isTail ? Math.max(0, total - visible - back) : clampOffset(offset, total, visible)
       const bar = scrollbar(total, visible, from)
+      const shown = body.slice(from, from + visible)
+      // The rows' column: the box's inner width less the scroll bar (no border in the compact panel).
+      const fill = Math.max(1, columns - (isPlain ? 1 : 3))
+      // A pressable row and its scroll-bar cell share a hover scope (a block's own when it has one), so the light
+      // reaches the box's right edge as it starts at its left one; the cell lit at full strength, as the row is.
+      const scopes = shown.map((r, i) => (r.press === undefined ? undefined : (r.group ?? `${id}:${from + i}`)))
       const rows = (
         <Box flexDirection="row" height={visible}>
           <Box flexDirection="column" flexGrow={1}>
-            {body.slice(from, from + visible).map(rowEl)}
+            {shown.map((r, i) => rowEl(r, fill, scopes[i]))}
           </Box>
           <Box flexDirection="column" width={1}>
-            {bar.map(ch => (
-              <Text dimColor>{ch}</Text>
+            {bar.map((ch, i) => (
+              <Text dimColor hover={scopes[i] === undefined ? undefined : { scope: scopes[i], inverse: true, dimColor: false }}>
+                {ch}
+              </Text>
             ))}
           </Box>
         </Box>
@@ -1270,7 +1280,7 @@ export const register: Register = (on, options) => {
       if (isPlain) {
         return (
           <Box flexDirection="column" height={box.height} overflow="hidden">
-            {fixed.map(rowEl)}
+            {fixed.map(r => rowEl(r))}
             {rows}
           </Box>
         )
@@ -1283,7 +1293,7 @@ export const register: Register = (on, options) => {
             </Box>
             {id !== 'log' && <Button key={`x:${id}`} label={expandedId === id ? '[-]' : '[+]'} plain dimColor onPress={expand(id)} />}
           </Box>
-          {fixed.map(rowEl)}
+          {fixed.map(r => rowEl(r))}
           {rows}
         </Box>
       )

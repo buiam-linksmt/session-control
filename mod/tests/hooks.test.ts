@@ -895,6 +895,56 @@ describe('expanding a section', () => {
   })
 })
 
+describe('row hover', () => {
+  type Ui = Awaited<ReturnType<typeof mountPane>>
+  const SID = 'aaaaaaaa-1111-4111-8111-111111111111'
+  /**
+   * Every pressable row of the sessions and open points: its label fills the rows' column, the box's inner width
+   * less the scroll bar, so the light under the pointer spans the row and not only its text. (The mock leaves out
+   * `hover`: the scroll-bar cell lit with its row is seen in the real engine only.)
+   */
+  const expectFullRows = async (ui: Ui, fill: number) => {
+    const rows = (await ui.findAll({ type: 'Button' })).filter(one => /^[sp]:/.test(one.key ?? ''))
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) expect([row.key, String(row.props.label).length]).toEqual([row.key, fill])
+    return rows
+  }
+  const open = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On, props = PANE_PROPS) => {
+    world(on)
+    stubPanel(on)
+    await $.session.start(start(ORCH_DIR))
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    return $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: props as never })
+  }
+
+  test('docked, every pressable row spans its box to the scroll bar, in the three boxes, each expanded section and the log view', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on)
+    // 120 body columns: the box's two borders and the scroll bar leave 117 for the rows.
+    const keys = (await expectFullRows(ui, 117)).map(one => one.key)
+    expect(keys).toContain(`s:${SID}`)
+    expect(keys).toContain('p:a:0')
+    await ui.press({ key: 'p:a:0' })
+    expect((await expectFullRows(ui, 117)).some(one => /^p:a:t:/.test(one.key ?? ''))).toBe(true)
+    for (const id of ['sessions', 'points']) {
+      await ui.press({ key: `x:${id}` })
+      await expectFullRows(ui, 117)
+      await ui.press({ key: `x:${id}` })
+    }
+    await ui.press({ key: `s:${SID}` })
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+    await expectFullRows(ui, 117)
+    // The padding is trailing: the row still reads and presses as before.
+    expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toMatch(/^\u25B8 alive worker/)
+  })
+
+  test('seated inline, with no border, a pressable row spans the body to the scroll bar', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on, { ...PANE_PROPS, placement: 'inline', scroll: { offset: 0, bodyRows: 40 } })
+    await expectFullRows(ui, 119)
+    await ui.press({ key: 'tab:points' })
+    await expectFullRows(ui, 119)
+  })
+})
+
 describe('platform', () => {
   const args = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
   /** A launch, an acknowledgement and a retirement, the probe text shown as <probe>. */
