@@ -110,13 +110,21 @@ instruction didn't mention, message content beyond what was specified) is a call
 on, never one for the worker, however reasonable the inference.
 
 **Sign-off list.** Each instance needs the user's go-ahead in this conversation and is never relayed as
-a routine gate token: a push to a protected branch (`main`, `develop`, or what the repo's git rules
-name) or to a repo the user marked local-only; force-push or any rewrite of pushed history; deleting a
+a routine gate token: a push to a repo the user marked local-only; a push to a protected branch (`main`,
+`develop`, or what the repo's git rules name) where the project's push policy asks (below);
+force-push or any rewrite of pushed history; deleting a
 remote branch, tag or PR; `reset --hard`, `checkout --`, `clean`, `branch -D` or a forced
 `worktree remove` over uncommitted or unpushed work; stopping, resetting or reconfiguring a shared live
 stack or anything the user set up by hand; sending, sharing or deleting anything outside the repo. A
 non-protected branch the worker created or the user named is pushed, fast-forward only, right after
 each commit, with no gate (Worker prompt, item 3).
+
+**Push policy per project.** The user decides per project whether a push to a protected branch needs a
+go-ahead. The policy is a decision recorded with `record_decision` in a `Standing` section (id
+`push-<project>`). A project with no recorded policy: the first push to one of its protected branches is
+put to the user as a question (ask every time, or push without asking) and the answer is recorded for that
+project. Under "no gate" a worker pushes that branch fast-forward only right after each commit, like any
+other branch; a force-push or history rewrite still needs a go-ahead.
 
 **Before proposing the shape of work that implements one item of a larger set (a requirement, a ticket,
 a spec clause), have a worker read the sibling items** for behaviour that contradicts or already covers
@@ -168,7 +176,8 @@ Every launch prompt carries, addressed to the worker, each item below that appli
    state is a premise to check before acting on it; a false one is reported, never acted on. Before
    blaming another repo, `git fetch` there and state how far behind its remote the checkout is.
 3. Scope as exact paths, branches, services and commands, never a topic: the paths it may commit; the
-   push of its non-protected branch, fast-forward only, right after each commit; what it may stop,
+   push of its branch where no go-ahead is needed (a non-protected branch, or a protected one under a
+   project policy of "no gate"), fast-forward only, right after each commit; what it may stop,
    restart or tear down. Each sign-off item the task could touch: stop before it and report. Read the
    repo's own gates (its `CLAUDE.md`, `.claude/rules/`) before acting; give the answers the user settled.
 4. Commit messages follow the repo's rules, carry no AI attribution trailer and never mention an agent;
@@ -470,7 +479,7 @@ footer, no list of open points.
 **A blocker goes in the open points file and is raised as a question.** An environmental failure met
 while orchestrating, or reported by a worker (missing credentials, an unreachable host, an absent
 tool), is a blocker the moment it stops a check from completing, never a caveat in prose. Work ready
-for commit or push that needs the user's go-ahead (a protected branch, or contents the user has not
+for commit or push that needs the user's go-ahead (a protected branch under a policy that asks, or contents the user has not
 settled; a feature branch is pushed automatically, see Scope) is an open point too, closed the turn the
 user answers.
 
