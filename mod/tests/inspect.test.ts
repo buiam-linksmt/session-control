@@ -21,6 +21,7 @@ import {
   redactCounted,
   sessionWritesText,
   transcriptWrites,
+  workerTailText,
 } from '../hooks/inspect'
 import { newerInMap } from './fake-helper'
 import { NOW_MS, NOW_SEC } from './fixtures'
@@ -383,7 +384,7 @@ describe('worker_tail', () => {
     expect(got.text.split('\n')).toEqual([
       `worker_tail for session ${SID_ALIVE} "alive worker"`,
       'process: alive, pid 4101',
-      `transcript: ${transcriptOf('/m/work/alive', SID_ALIVE)}, last written 30 s ago (30s)`,
+      `transcript: ${transcriptOf('/m/work/alive', SID_ALIVE)}, last written 30 s ago`,
       "last 4 lines (of 40 asked), summarised as the panel's log shows them; redaction: 2 replacements:",
       'Reading the suite files.',
       '> Bash git status -sb',
@@ -401,7 +402,7 @@ describe('worker_tail', () => {
     const done = await $.tool.call({ tool: tool('worker_tail'), session_id: SID_CHATTER } as never)
     const lines = String((done as { result?: unknown }).result).split('\n')
     expect(lines[1]).toBe('process: not alive (no pid recorded: finished or never started)')
-    expect(lines[2]).toBe(`transcript: ${transcriptOf('/m/work/chatter', SID_CHATTER)}, last written 45 s ago (45s)`)
+    expect(lines[2]).toBe(`transcript: ${transcriptOf('/m/work/chatter', SID_CHATTER)}, last written 45 s ago`)
   })
 
   test('a transcript that cannot be read, and an unknown id', { options: OPTIONS }, async ($, on) => {
@@ -585,6 +586,14 @@ describe('inspect.ts', () => {
     expect(text).toContain('C:/work/Orch/open-points.json  [ORCHESTRATOR DIR]')
     expect(text).toContain('C:/work/reg.json  [REGISTRY]')
     expect(text).toContain('- Write of c:\\work\\orch\\task-queue.json')
+  })
+
+  test('worker_tail tells the age in whole seconds, and from a minute up also as the elapsed column does', () => {
+    const entry = { session_id: SID_CHATTER, title: 't' }
+    const facts = { claude: [], pidComm: new Map(), pidProof: new Map(), transcriptMtime: new Map() }
+    const line = (ageSec: number) => workerTailText({ entry, facts, path: '/t.jsonl', ageSec, lines: [], wanted: 1 }).split('\n')[2]
+    expect(line(5.9)).toBe('transcript: /t.jsonl, last written 5 s ago')
+    expect(line(125.6)).toBe('transcript: /t.jsonl, last written 125 s ago (2m05s)')
   })
 
   test('transcriptWrites keeps at most 20 lines; bounded cuts an answer and says how much', () => {

@@ -374,7 +374,8 @@ export function workerTailText(input: {
     out.push('transcript: the entry lacks the config_dir, cwd or session_id that place it')
     return out.join('\n')
   }
-  const age = input.ageSec === undefined ? 'last write unknown' : `last written ${Math.round(input.ageSec)} s ago (${formatAge(input.ageSec)})`
+  const sec = input.ageSec === undefined ? undefined : Math.floor(input.ageSec)
+  const age = sec === undefined ? 'last write unknown' : `last written ${sec} s ago${sec >= 60 ? ` (${formatAge(sec)})` : ''}`
   out.push(`transcript: ${oneLine(input.path, 400)}, ${age}`)
   if (input.lines === undefined) {
     out.push('the transcript cannot be read')
