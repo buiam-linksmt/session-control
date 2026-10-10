@@ -366,8 +366,9 @@ function noteDirectWrite($: EngineInterface, text: string): void {
 
 /**
  * The Node helper's word: its detection is one trace line; a fallback is a trace line with the operation and the code
- * (and `isRepeated` false for an append that timed out and was not made again) and, once per load, a toast. The fallback of an untraced operation (the trace's own write) is traced once per
- * operation: a line for each would be written by the write that failed, and the flush would never end.
+ * (and `isRepeated` false for an append that timed out and was not made again) and, once per load, a toast. The
+ * fallback of an untraced operation (the trace's own write) is traced once per operation: a line for each would be
+ * written by the write that failed, and the flush would never end.
  */
 function noteHelper($: EngineInterface, note: HelperNote): void {
   if (note.kind === 'node') {

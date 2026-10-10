@@ -1,7 +1,8 @@
-// The PowerShell launch route (the launchRoute option at `powershell`, native Windows only): a worker starts through the
-// engine's PowerShell tool instead of its Bash tool, which on Windows the engine offers only when it finds Git Bash.
-// withPowerShellLaunch lays the route over the Windows adapter: launchTool, launchCommand, launchToolHint, launchPidFile
-// and launchRefusal are its own, every other member (the launch guards, the probe, the worker match) the adapter's.
+// The PowerShell launch route (the launchRoute option at `powershell`, native Windows only): a worker starts through
+// the engine's PowerShell tool instead of its Bash tool, which on Windows the engine offers only when it finds Git
+// Bash. withPowerShellLaunch lays the route over the Windows adapter: launchTool, launchCommand, launchToolHint,
+// launchPidFile and launchRefusal are its own, every other member (the launch guards, the probe, the worker match) the
+// adapter's.
 // Nothing here runs a process: the command is text for the PowerShell tool. tests/windows-selftest.py renders it with
 // this file and runs it under Windows PowerShell 5.1 and PowerShell 7, with node.exe standing in for claude.exe.
 
@@ -93,11 +94,12 @@ export function powershellLaunchArgs(args: LaunchArgs, target: LaunchTarget): st
  * starts). Windows PowerShell must load its own modules under a PowerShell 7 parent; the effort, and the config
  * directory unless the worker inherits it, are set for claude.exe to inherit; claude.exe is found on the PATH.
  * Start-Process starts it in the launch directory (wildcard-escaped, as it reads it) with the prompt file as standard
- * input and the result and error files as standard output and error (its own redirections: the bytes go through as they are, never re-encoded, and
- * the prompt never meets the command-line length limit). Its arguments go as one string, each quoted by winArg: Windows
- * PowerShell 5.1 joins an argument list with blanks and quotes nothing, so the name and the settings JSON reach
- * claude.exe whole only when quoted here, the same string under both. Then the pid goes to the pid file, the command
- * waits for claude.exe and exits with its exit code, so the tool's exit notification carries it.
+ * input and the result and error files as standard output and error (its own redirections: the bytes go through as
+ * they are, never re-encoded, and the prompt never meets the command-line length limit). Its arguments go as one
+ * string, each quoted by winArg: Windows PowerShell 5.1 joins an argument list with blanks and quotes nothing, so the
+ * name and the settings JSON reach claude.exe whole only when quoted here, the same string under both. Then the pid
+ * goes to the pid file, the command waits for claude.exe and exits with its exit code, so the tool's exit
+ * notification carries it.
  */
 export function powershellLaunchCommand(args: LaunchArgs, target: LaunchTarget, resultFile: string, errFile: string): string {
   const argumentList = powershellLaunchArgs(args, target).map(winArg).join(' ')

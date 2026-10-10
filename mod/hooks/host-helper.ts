@@ -2,10 +2,10 @@
 // the process probe) run in one `node mod/helper/host.mjs <op>` process each, with the request as JSON on stdin. Node
 // is looked for at the first operation that needs it: none, or one older than HELPER_MIN_NODE, leaves the adapter's
 // own operations in place, and the first operation HELPER_REDETECT_MS or more after that lookup looks again, so
-// installing Node needs no reload; once found it stays for the load. A call that fails (Node cannot start, times out, answers
-// what is not one JSON object or answers ok:false) falls back to the adapter's own operation for that call, and the
-// port is told the operation and a fixed code, never a message or content; an append that timed out is the exception
-// (appendNotRepeated).
+// installing Node needs no reload; once found it stays for the load. A call that fails (Node cannot start, times out,
+// answers what is not one JSON object or answers ok:false) falls back to the adapter's own operation for that call,
+// and the port is told the operation and a fixed code, never a message or content; an append that timed out is the
+// exception (appendNotRepeated).
 
 import type { ProcessRunResult } from 'claude-code'
 
@@ -37,8 +37,8 @@ export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'batch'> } & Record<s
 export type HelperAnswer = { ok: true; fields: Record<string, unknown> } | { ok: false; code: string; at?: number }
 
 /**
- * What the port is told: Node's detection, each time its outcome changes; and each fallback (`isQuiet`: of an untraced operation, the
- * trace's own write among them; `isRepeated` false: an append that timed out, not made again).
+ * What the port is told: Node's detection, each time its outcome changes; and each fallback (`isQuiet`: of an untraced
+ * operation, the trace's own write among them; `isRepeated` false: an append that timed out, not made again).
  */
 export type HelperNote =
   | { kind: 'node'; isActive: boolean; version?: string; reason?: string }
@@ -91,10 +91,10 @@ export function readAnswer(ran: ProcessRunResult): HelperAnswer {
 export const appendText = (lines: readonly string[]) => lines.map(line => `${line}\n`).join('')
 
 /**
- * Whether a failed call that appended (an append, or the trace's batch) is left as it is: after a TIMEOUT the helper may
- * have written the lines already, and the adapter's own append would write them a second time. Every other failure
- * (Node did not start, an exit code with no answer, an answer that is not JSON, ok:false) means nothing was written,
- * and the adapter appends. The lines may then be missing from the log; they are never in it twice.
+ * Whether a failed call that appended (an append, or the trace's batch) is left as it is: after a TIMEOUT the helper
+ * may have written the lines already, and the adapter's own append would write them a second time. Every other
+ * failure (Node did not start, an exit code with no answer, an answer that is not JSON, ok:false) means nothing was
+ * written, and the adapter appends. The lines may then be missing from the log; they are never in it twice.
  */
 export const appendNotRepeated = (failed: { code: string }) => failed.code === 'TIMEOUT'
 
@@ -267,7 +267,8 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         { path },
         fields => (typeof fields.bytes === 'number' ? { problem: undefined, isFallback: false } : undefined),
         async () => ({ problem: await base.append(port, path, lines, isQuiet, onRan), isFallback: true }),
-        // Timed out: the lines may be in the log already. Not repeated, no exit code to give, nothing for the caller to retry.
+        // Timed out: the lines may be in the log already. Not repeated, no exit code to give, nothing for the caller
+        // to retry.
         { problem: undefined, isFallback: true },
       )
       if (!appended.isFallback) onRan(0)
