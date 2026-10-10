@@ -5,7 +5,7 @@ import type { FsStat } from 'claude-code'
 
 import type { LaunchArgs } from './core'
 import { buildLaunchArgv, tailLines } from './core'
-import type { Host, HostPort, LaunchTarget, RotatePlan } from './host'
+import type { Host, HostPort, LaunchTarget, NewerFiles, RotatePlan } from './host'
 import { tmpPath } from './store'
 
 /**
@@ -56,4 +56,32 @@ export async function clockPause(port: HostPort, seconds: number): Promise<void>
 /** The command the Bash tool runs for a launch: bash on Linux, Git Bash on Windows, the same text. */
 export function bashLaunchCommand(args: LaunchArgs, target: LaunchTarget, resultFile: string, errFile: string): string {
   return buildLaunchArgv(args, target, resultFile, errFile)[2] ?? ''
+}
+
+/** The most paths filesNewerThan answers; `total` counts them all. */
+export const NEWER_MAX = 200
+
+/** `1791667060.8924861740` as whole milliseconds, read from the digits (no floating-point rounding). */
+const secondsToMs = (text: string) => {
+  const [whole = '0', fraction = ''] = text.split('.')
+  return Number(whole) * 1000 + Number(fraction.padEnd(3, '0').slice(0, 3))
+}
+
+/**
+ * What NEWER_SCRIPT (Linux) and NEWER_PS1 (Windows) print, read back: one `<mtime in seconds, with a fraction>\t<path>`
+ * line per file, newest first, then `N\t<count of all>`. Undefined without that last line (the listing did not end).
+ * `toPath` turns a printed path into the stored form.
+ */
+export function parseNewerListing(stdout: string, toPath: (path: string) => string = path => path): NewerFiles | undefined {
+  const files: NewerFiles['files'] = []
+  let total: number | undefined
+  for (const line of stdout.split(/\r?\n/)) {
+    const tab = line.indexOf('\t')
+    if (tab < 0) continue
+    const head = line.slice(0, tab)
+    const rest = line.slice(tab + 1)
+    if (head === 'N' && /^\d+$/.test(rest)) total = Number(rest)
+    else if (/^\d+(\.\d+)?$/.test(head) && rest !== '') files.push({ path: toPath(rest), mtimeMs: secondsToMs(head) })
+  }
+  return total === undefined ? undefined : { files, total: Math.max(total, files.length) }
 }

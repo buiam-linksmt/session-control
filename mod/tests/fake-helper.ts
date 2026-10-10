@@ -16,8 +16,20 @@ const move = (files: Map<string, string>, keyOf: KeyOf, from: string, to: string
   return true
 }
 
-/** The helper's answer to one request over the map of files; `probeOut` is what its probe prints. */
-export function helperAnswer(files: Map<string, string>, op: string, request: Request, probeOut: string, keyOf: KeyOf = path => path.replace(/\\/g, '/')): Record<string, unknown> {
+/** The files under a directory of the map whose mtime (`mtimes`, 0 when unset) is after a time, as the helper's filesNewerThan walks them: no `.git` entered. */
+export function newerInMap(files: Map<string, string>, mtimes: ReadonlyMap<string, number>, dir: string, sinceSec: number): { path: string; mtimeMs: number }[] | undefined {
+  const root = dir.replace(/\/+$/, '')
+  const under = [...files.keys()].filter(key => key.startsWith(`${root}/`))
+  if (under.length === 0) return undefined
+  return under
+    .filter(key => !key.slice(root.length + 1).split('/').includes('.git'))
+    .map(key => ({ path: key, mtimeMs: mtimes.get(key) ?? 0 }))
+    .filter(one => one.mtimeMs > sinceSec * 1000)
+    .sort((a, b) => b.mtimeMs - a.mtimeMs || (a.path < b.path ? -1 : 1))
+}
+
+/** The helper's answer to one request over the map of files; `probeOut` is what its probe prints; `mtimes` the files' mtimes in ms. */
+export function helperAnswer(files: Map<string, string>, op: string, request: Request, probeOut: string, keyOf: KeyOf = path => path.replace(/\\/g, '/'), mtimes: ReadonlyMap<string, number> = new Map()): Record<string, unknown> {
   const path = keyOf(String(request.path ?? ''))
   const fail = (code: string) => ({ ok: false, code })
   if (op === 'probe') return { ok: true, out: probeOut }
@@ -42,10 +54,14 @@ export function helperAnswer(files: Map<string, string>, op: string, request: Re
     for (const [from, to] of request.moves as [string, string][]) move(files, keyOf, from, to)
     return { ok: true, rotated: true }
   }
+  if (op === 'filesNewerThan') {
+    const found = newerInMap(files, mtimes, keyOf(String(request.dir ?? '')), Number(request.since))
+    return found === undefined ? fail('NOT_FOUND') : { ok: true, files: found.slice(0, Number(request.max)), total: found.length }
+  }
   if (op === 'batch') {
     const results: unknown[] = []
     for (const [at, step] of (request.ops as Request[]).entries()) {
-      const one = helperAnswer(files, String(step.op), step, probeOut, keyOf)
+      const one = helperAnswer(files, String(step.op), step, probeOut, keyOf, mtimes)
       if (one.ok !== true) return { ...one, at, results }
       results.push(one)
     }

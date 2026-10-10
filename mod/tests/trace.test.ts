@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
-import { FILES_PS1 } from '../hooks/host-windows'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
+import { FILES_PS1, NEWER_PS1 } from '../hooks/host-windows'
 import {
   REDACTED,
   TRACE_CHUNK_BYTES,
@@ -183,6 +183,11 @@ describe('trace lines', () => {
     expect(shownArgv(['powershell.exe', '-File', 'C:/r/files.ps1', 'append', 'C:/r/a', 'C:/r/b'])).toEqual(['powershell.exe', '-File', 'C:/r/files.ps1', 'append', 'C:/r/a', 'C:/r/b'])
     expect(shownArgv([FILES_PS1])).toEqual(['<FILES_PS1>'])
     expect(shownArgv(['test', '-s', '/work/new/prompt.md'])).toEqual(['test', '-s', '/work/new/prompt.md'])
+  })
+
+  test('the listing of the files written after a time shows by name, its directory and arguments as they are', () => {
+    expect(shownArgv(['sh', '-c', NEWER_SCRIPT, 'session-newer', '/work/a', '1790000000', '200'])).toEqual(['sh', '-c', '<NEWER_SCRIPT>', 'session-newer', '/work/a', '1790000000', '200'])
+    expect(shownArgv([NEWER_PS1])).toEqual(['<NEWER_PS1>'])
   })
 
   test('UTF-8 byte counts', () => {

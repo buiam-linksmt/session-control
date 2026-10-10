@@ -4,13 +4,15 @@
 Extracts the Windows PowerShell scripts from hooks/host-windows.ts, writes them to a scratch directory on the Windows
 side and runs them through powershell.exe, the way the mod runs them on native Windows (absolute path, -File).
 It proves the scripts' own behaviour on this host's PowerShell and file system only: not what the Windows engine
-passes them, nor a real claude.exe. The scratch directory is a new folder under SC_WIN_SCRATCH (a Windows path)
+passes them, nor a real claude.exe. NEWER_PS1 (the listing of the files written after a time) runs over a scratch
+tree holding a .git folder and a junction out of the tree. The scratch directory is a new folder under SC_WIN_SCRATCH (a Windows path)
 or under the Windows %TEMP%, and is removed at the end. Without powershell.exe it prints `skipped`.
 
 Its last part copies the Node helper (mod/helper/*.mjs) to the scratch directory and runs its file operations with
 the Windows node.exe (SC_WIN_NODE, else C:\\Program Files\\nodejs\\node.exe), as the mod does on native Windows:
 rename over an existing file (also while another process holds it open), append, remove, the tail of a 3 MB UTF-8
-file with CRLF line ends and non-ASCII text, and a batch of 20 operations, with the time per batch. Without that
+file with CRLF line ends and non-ASCII text, filesNewerThan over the tree NEWER_PS1 listed (the junction neither
+followed nor listed), and a batch of 20 operations, with the time per batch. Without that
 node.exe it prints `skipped`."""
 import ast, json, os, shutil, subprocess, sys, tempfile
 
@@ -108,6 +110,53 @@ try:
     code, out, err = run('files.ps1', files, 'nonsense')
     assert code == 1 and 'unknown operation' in err, (code, err)
     print('windows-files-selftest: ok')
+
+    # --- NEWER_PS1: the files under a folder written after a time. A junction out of the tree (made with New-Item, no
+    # admin right needed) is neither followed nor listed, no .git folder is entered, the newest come first and the
+    # count covers what the cap leaves out.
+    newer = constant('NEWER_PS1')
+    T = 1_790_000_000
+
+    def stamp(name, sec, text='x'):
+        os.makedirs(os.path.dirname(os.path.join(work, name)), exist_ok=True)
+        put(name, text)
+        os.utime(os.path.join(work, name), (sec, sec))
+
+    stamp('newer/a.txt', T + 30)
+    stamp('newer/sub [1]/b b.txt', T + 20)
+    stamp('newer/caf\u00e9.txt', T + 25)
+    stamp('newer/old.txt', T - 100)
+    stamp('newer/.git/HEAD', T + 50)
+    stamp('outside/secret.txt', T + 40, 'canary-outside')
+    code, out, err = run('junction.ps1', "param([string]$L, [string]$T)\r\n$null = New-Item -ItemType Junction -Path $L -Target $T\r\n",
+                         to_win(os.path.join(work, 'newer', 'j'), '\\'), to_win(os.path.join(work, 'outside'), '\\'))
+    assert code == 0, (code, err)
+    assert os.path.exists(os.path.join(work, 'newer', 'j', 'secret.txt')), 'the junction does not lead out of the tree'
+    want_newer = [('a.txt', (T + 30) * 1000), ('caf\u00e9.txt', (T + 25) * 1000), ('sub [1]/b b.txt', (T + 20) * 1000)]
+
+    def newer_lines(out):
+        lines = out.replace('\r\n', '\n').rstrip('\n').split('\n')
+        total = lines.pop()
+        assert total.startswith('N\t'), out
+        found = []
+        for line in lines:
+            sec, path = line.split('\t', 1)
+            whole, _, fraction = sec.partition('.')
+            found.append((path.replace('\\', '/'), int(whole) * 1000 + int((fraction + '000')[:3])))
+        return found, int(total[2:])
+
+    code, out, err = run('newer.ps1', newer, f'{win}/newer', str(T), '200')
+    assert code == 0 and err == '', (code, err)
+    found, total = newer_lines(out)
+    root = to_win(os.path.join(work, 'newer')).rstrip('/')
+    assert [(p[len(root) + 1:], ms) for p, ms in found] == want_newer and total == 3, (found, total)
+    assert 'outside' not in out and 'secret' not in out, out
+    code, out, err = run('newer.ps1', newer, f'{win}/newer', str(T), '1')
+    found, total = newer_lines(out)
+    assert code == 0 and len(found) == 1 and found[0][0].endswith('/a.txt') and total == 3, (code, out, err)
+    code, out, err = run('newer.ps1', newer, f'{win}/no such folder', str(T), '200')
+    assert code == 3 and out == '', (code, out, err)
+    print('windows-newer-selftest: ok (NEWER_PS1: newest first, the cap and the count, no .git, the junction neither followed nor listed)')
 
     # --- PROBE_PS1, with its process name swapped to powershell.exe: a sleeping powershell.exe of this test's own
     # plays the worker, and fake sessions files under the scratch directory play the engine's. This verifies the
@@ -462,6 +511,16 @@ try:
         # the file script's tail of the same file: Get-Content drops the \r, otherwise the same lines
         code, out, err = run('files.ps1', files, 'tail', w('big.jsonl'), '600', '20000')
         assert code == 0 and out == want.replace('\r\n', '\n'), (code, err[:200])
+        # filesNewerThan: the same files as NEWER_PS1 over the same tree, the junction out of it neither followed nor
+        # listed, paths in the stored C:/... form, mtimes in ms; a missing folder is a fixed code
+        answer, newer_ms = helper('filesNewerThan', {'dir': w('newer'), 'since': T, 'max': 200})
+        assert answer['ok'] is True and answer['total'] == 3, answer
+        assert [(one['path'][len(w('newer')) + 1:], one['mtimeMs']) for one in answer['files']] == want_newer, answer
+        assert 'outside' not in json.dumps(answer), answer
+        answer, _ = helper('filesNewerThan', {'dir': w('newer'), 'since': T, 'max': 1})
+        assert answer['total'] == 3 and len(answer['files']) == 1, answer
+        answer, _ = helper('filesNewerThan', {'dir': w('no such folder'), 'since': T, 'max': 1})
+        assert answer == {'ok': False, 'code': 'NOT_FOUND'}, answer
         # a batch of 20 file operations in one process, in order; timed against 20 helper runs and 20 file-script runs
         def batch_ops(n):
             ops = []
@@ -490,7 +549,7 @@ try:
             code, out, err = run('files.ps1', files, 'append', w('ps.add'), w('ps.log'))
             ps_ms.append((time.perf_counter() - started) * 1000)
             assert code == 0, err
-        print(f'windows-helper-selftest: ok (node {version}; rename over a held file {held_ms:.0f} ms; tail of {size / 1e6:.1f} MB {tail_ms:.0f} ms; '
+        print(f'windows-helper-selftest: ok (node {version}; rename over a held file {held_ms:.0f} ms; tail of {size / 1e6:.1f} MB {tail_ms:.0f} ms; filesNewerThan {newer_ms:.0f} ms; '
               f'a batch of 20 operations: median {statistics.median(batch_ms):.0f} ms per batch (runs {", ".join(f"{one:.0f}" for one in batch_ms)}); '
               f'the same 20 as single helper runs {sum(single_ms):.0f} ms in all (median {statistics.median(single_ms):.0f} ms each); '
               f'20 file-script appends {sum(ps_ms):.0f} ms in all (median {statistics.median(ps_ms):.0f} ms each); timed from WSL through interop)')

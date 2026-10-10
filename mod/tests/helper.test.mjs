@@ -312,6 +312,143 @@ test('batch: the operations in order in one process; the first failure stops it 
   }
 })
 
+// ---------------------------------------------------------------- filesNewerThan: the read-only listing
+
+/** NEWER_SCRIPT of hooks/host-posix.ts, as the mod runs it. */
+function newerScript() {
+  const src = fs.readFileSync(join(HERE, '..', 'hooks', 'host-posix.ts'), 'utf8')
+  const found = /export const NEWER_SCRIPT = String\.raw`([\s\S]*?)`\n/.exec(src)
+  assert.ok(found, 'NEWER_SCRIPT not found')
+  return found[1]
+}
+
+/** A file with its mtime set to `sec` (epoch seconds, a fraction allowed). */
+function put(file, sec, text = 'x') {
+  fs.mkdirSync(dirname(file), { recursive: true })
+  fs.writeFileSync(file, text)
+  fs.utimesSync(file, sec, sec)
+}
+
+const T = 1_790_000_000
+
+test('filesNewerThan: the files written after the time, newest first, paths and mtimes only; .git never entered; no symbolic link followed or listed', { skip: process.platform === 'win32' }, () => {
+  const top = scratch()
+  try {
+    const dir = join(top, 'work')
+    const outside = join(top, 'outside')
+    put(join(dir, 'a.txt'), T + 30)
+    put(join(dir, 'sub', 'b.txt'), T + 20.5)
+    put(join(dir, 'old.txt'), T - 100)
+    put(join(dir, '.git', 'HEAD'), T + 50)
+    put(join(dir, 'sub', '.git', 'index'), T + 50)
+    put(join(outside, 'secret.txt'), T + 40, 'canary-outside-content')
+    // A folder link out of the tree, a file link out of it, and a link back up that would loop.
+    fs.symlinkSync(outside, join(dir, 'out'))
+    fs.symlinkSync(join(outside, 'secret.txt'), join(dir, 'link.txt'))
+    fs.symlinkSync(dir, join(dir, 'sub', 'loop'))
+    const run = helper('filesNewerThan', { dir, since: T, max: 200 })
+    assert.equal(run.code, 0, run.stdout)
+    assert.deepEqual(run.answer, {
+      ok: true,
+      files: [
+        { path: `${dir}/a.txt`, mtimeMs: (T + 30) * 1000 },
+        { path: `${dir}/sub/b.txt`, mtimeMs: (T + 20.5) * 1000 },
+      ],
+      total: 2,
+    })
+    assert.ok(!run.stdout.includes('outside') && !run.stdout.includes('canary'), run.stdout)
+    assert.equal(run.stderr, '')
+    // Nothing was written: the tree is as it was.
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['.git', 'a.txt', 'link.txt', 'old.txt', 'out', 'sub'])
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true })
+  }
+})
+
+test('filesNewerThan: at most `max` paths, the newest, with the count of all; a tie goes by path; a file of exactly the second asked is not after it', () => {
+  const dir = scratch()
+  try {
+    for (let n = 0; n < 230; n++) put(join(dir, `f${String(n).padStart(3, '0')}.txt`), T + 1 + n)
+    put(join(dir, 'tie-b.txt'), T + 500)
+    put(join(dir, 'tie-a.txt'), T + 500)
+    put(join(dir, 'exact.txt'), T)
+    const run = helper('filesNewerThan', { dir, since: T, max: 200 })
+    assert.equal(run.code, 0)
+    assert.equal(run.answer.total, 232)
+    assert.equal(run.answer.files.length, 200)
+    assert.deepEqual(run.answer.files.slice(0, 3).map(one => one.path.slice(dir.length + 1)), ['tie-a.txt', 'tie-b.txt', 'f229.txt'])
+    assert.equal(run.answer.files.at(-1).path, `${dir}/f032.txt`)
+    assert.ok(run.answer.files.every((one, at, all) => at === 0 || all[at - 1].mtimeMs >= one.mtimeMs))
+    assert.ok(run.answer.files.every(one => Object.keys(one).join() === 'path,mtimeMs'))
+    assert.ok(!run.answer.files.some(one => one.path.endsWith('exact.txt')))
+    assert.deepEqual(helper('filesNewerThan', { dir, since: T + 1000, max: 5 }).answer, { ok: true, files: [], total: 0 })
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('filesNewerThan: a bad request, a missing directory and a file in its place are fixed codes, never a path', () => {
+  const dir = scratch()
+  try {
+    put(join(dir, 'file'), T)
+    assertFailure(helper('filesNewerThan', { dir: join(dir, 'none'), since: 0, max: 10 }), 'NOT_FOUND', dir)
+    assertFailure(helper('filesNewerThan', { dir: join(dir, 'file'), since: 0, max: 10 }), 'NOT_DIR', dir)
+    assertFailure(helper('filesNewerThan', { dir, since: '0', max: 10 }), 'BAD_REQUEST')
+    assertFailure(helper('filesNewerThan', { dir, since: -1, max: 10 }), 'BAD_REQUEST')
+    assertFailure(helper('filesNewerThan', { dir, since: 0, max: 0 }), 'BAD_REQUEST')
+    assertFailure(helper('filesNewerThan', { dir: '', since: 0, max: 10 }), 'BAD_REQUEST')
+    assertFailure(helper('filesNewerThan', { since: 0, max: 10 }), 'BAD_REQUEST')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('filesNewerThan: a folder it cannot read is passed over, the rest listed', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+  const dir = scratch()
+  try {
+    put(join(dir, 'open', 'a.txt'), T + 10)
+    put(join(dir, 'shut', 'b.txt'), T + 20)
+    fs.chmodSync(join(dir, 'shut'), 0o000)
+    const run = helper('filesNewerThan', { dir, since: T, max: 10 })
+    assert.deepEqual(run.answer, { ok: true, files: [{ path: `${dir}/open/a.txt`, mtimeMs: (T + 10) * 1000 }], total: 1 })
+  } finally {
+    fs.chmodSync(join(dir, 'shut'), 0o755)
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('filesNewerThan: the same files, order and count as NEWER_SCRIPT under sh over the same tree', { skip: !IS_LINUX || !has('find') || !has('sort') || !has('awk') }, () => {
+  const top = scratch()
+  try {
+    const dir = join(top, 'work tree')
+    put(join(dir, 'a.txt'), T + 30.25)
+    put(join(dir, 'deep', 'er', 'b b.txt'), T + 20)
+    put(join(dir, 'tie2.txt'), T + 25)
+    put(join(dir, 'tie1.txt'), T + 25)
+    put(join(dir, 'old.txt'), T - 5)
+    put(join(dir, '.git', 'x'), T + 60)
+    put(join(top, 'outside.txt'), T + 70)
+    fs.symlinkSync(top, join(dir, 'up'))
+    fs.symlinkSync(join(top, 'outside.txt'), join(dir, 'l.txt'))
+    for (const max of [10, 2]) {
+      const sh = spawnSync('sh', ['-c', newerScript(), 'session-newer', dir, String(T), String(max)], { encoding: 'utf8' })
+      assert.equal(sh.status, 0, sh.stderr)
+      const lines = sh.stdout.trimEnd().split('\n')
+      const total = Number(lines.pop().split('\t')[1])
+      const shFiles = lines.map(line => {
+        const [sec, ...rest] = line.split('\t')
+        const [whole, fraction = ''] = sec.split('.')
+        return { path: rest.join('\t'), mtimeMs: Number(whole) * 1000 + Number(fraction.padEnd(3, '0').slice(0, 3)) }
+      })
+      const run = helper('filesNewerThan', { dir, since: T, max })
+      assert.deepEqual({ files: shFiles, total }, { files: run.answer.files, total: run.answer.total })
+    }
+    assert.equal(spawnSync('sh', ['-c', newerScript(), 'session-newer', join(top, 'none'), String(T), '10']).status, 3)
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true })
+  }
+})
+
 // ---------------------------------------------------------------- the probe over a fake /proc tree
 
 /** PROBE_SCRIPT of hooks/host-posix.ts, as the mod runs it. */

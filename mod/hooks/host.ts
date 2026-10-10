@@ -51,6 +51,9 @@ export type WorkerWant = { dir: string; configDir: string; model: string }
 /** One rotation of the trace: the file, the bytes about to go in, the files kept, the size limit and the renames. */
 export type RotatePlan = { path: string; adding: number; keep: number; maxBytes: number; moves: readonly (readonly [string, string])[] }
 
+/** What filesNewerThan answers: the newest files first (at most NEWER_MAX of host-shared.ts), each with its mtime, and how many there are in all. */
+export type NewerFiles = { files: { path: string; mtimeMs: number }[]; total: number }
+
 /** The launch verdict's fields the command and the worker match read. */
 export type LaunchTarget = { configDir: string; resumeSid?: string; isConfigInherited?: boolean; name: string }
 
@@ -123,6 +126,12 @@ export type Host = {
   append(port: HostPort, path: string, lines: readonly string[], isQuiet: boolean, onRan: (exitCode: number) => void): Promise<string | undefined>
   /** The last 600 lines of a transcript, each cut to 20000 characters; undefined when it cannot be read. */
   tail(port: HostPort, path: string): Promise<string | undefined>
+  /**
+   * The regular files under `dir` whose mtime is after `epochSeconds`, newest first, at most NEWER_MAX with the true
+   * count: paths and mtimes only. A directory named `.git` is not entered and no symbolic link (or Windows reparse
+   * point) is followed or listed. Undefined when `dir` is no directory or the listing failed.
+   */
+  filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined>
   /** Rotates the trace. */
   rotate(port: HostPort, plan: RotatePlan): Promise<void>
   /** The trace's write, untraced: the rotation when one is given, then the append; answers what went wrong with the append. */
@@ -161,6 +170,7 @@ export const HOST_MEMBERS = [
   'renameOver',
   'append',
   'tail',
+  'filesNewerThan',
   'rotate',
   'rotateAndAppend',
 ] as const satisfies readonly (keyof Host)[]

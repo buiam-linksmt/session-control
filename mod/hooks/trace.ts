@@ -1,8 +1,8 @@
 // Pure parts of the debug trace: the line format, the redaction, what of a message and of a command line is shown and
 // the rotation. The writing itself lives in register.tsx, where `$` is available.
 
-import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from './host-posix'
-import { FILES_PS1, PROBE_PS1 } from './host-windows'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from './host-posix'
+import { FILES_PS1, NEWER_PS1, PROBE_PS1 } from './host-windows'
 
 /** The trace file's name inside the runs directory. */
 export const TRACE_FILE = 'trace.log'
@@ -207,8 +207,10 @@ const SCRIPTS: readonly [string, string][] = [
   [PROBE_SCRIPT, '<PROBE_SCRIPT>'],
   [APPEND_SCRIPT, '<APPEND_SCRIPT>'],
   [ROTATE_SCRIPT, '<ROTATE_SCRIPT>'],
+  [NEWER_SCRIPT, '<NEWER_SCRIPT>'],
   [FILES_PS1, '<FILES_PS1>'],
   [PROBE_PS1, '<PROBE_PS1>'],
+  [NEWER_PS1, '<NEWER_PS1>'],
 ]
 
 /** A command line as the trace shows it: the mod's scripts by name, the text an append adds as its byte count. */

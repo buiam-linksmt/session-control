@@ -11,6 +11,7 @@
 //   append        {path, text}                        -> {bytes}
 //   tail          {path, lines, width, maxBytes?}     -> {text, dropped}
 //   rotate        {path, adding, maxBytes, moves}     -> {rotated}
+//   filesNewerThan {dir, since, max}                  -> {files: [{path, mtimeMs}], total}   read-only
 //   batch         {ops: [{op, ...request}, ...]}      -> {results}   file operations in order, in this one process;
 //                                                                    the first failure stops it: {ok:false, code, at}
 

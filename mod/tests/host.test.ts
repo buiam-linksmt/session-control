@@ -14,9 +14,10 @@ import { HOST_MEMBERS, selectHost } from '../hooks/host'
 import type { Host, HostPort } from '../hooks/host'
 import { withHelper } from '../hooks/host-helper'
 import { withPowerShellLaunch } from '../hooks/host-powershell'
-import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, posixHost } from '../hooks/host-posix'
-import { FILES_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
-import { helperAnswer } from './fake-helper'
+import { NEWER_MAX } from '../hooks/host-shared'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, posixHost } from '../hooks/host-posix'
+import { FILES_PS1, NEWER_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
+import { helperAnswer, newerInMap } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
 type Ran = { exitCode: number; stdout: string; stderr: string; isStdoutTruncated: boolean; isStderrTruncated: boolean }
@@ -33,6 +34,8 @@ const probeOutput = (work: string, cfg: string, cmd: string) => `P\t4242\tclaude
 type Machine = {
   env: Record<string, string>
   files: Map<string, string>
+  /** The files' mtimes in epoch ms (0 when unset), for the listing of the files written after a time. */
+  mtimes: Map<string, number>
   runs: string[][]
   /** Milliseconds waited on the engine's clock. */
   sleeps: number[]
@@ -45,6 +48,7 @@ type Machine = {
 /** The simulated machine: its files and the commands both adapters run, answered as the system would. */
 function machine(env: Record<string, string>): Machine {
   const files = new Map<string, string>()
+  const mtimes = new Map<string, number>()
   const runs: string[][] = []
   const isDir = (path: string) => [...files.keys()].some(file => file.startsWith(`${keyOf(path).replace(/\/+$/, '')}/`))
   const move = (from: string, to: string) => {
@@ -75,7 +79,7 @@ function machine(env: Record<string, string>): Machine {
     if (cmd === NODE && argv[1] === HELPER) {
       const isWin = env.OS === 'Windows_NT'
       const out = isWin ? '' : probeOutput('/m/work', '/m/cfg', 'claude -p --model opus --output-format json -- Goal: x')
-      const answer = helperAnswer(files, String(argv[2]), JSON.parse(stdin ?? '') as Record<string, unknown>, out, keyOf)
+      const answer = helperAnswer(files, String(argv[2]), JSON.parse(stdin ?? '') as Record<string, unknown>, out, keyOf, mtimes)
       return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
     }
     if (cmd === 'rm') {
@@ -93,6 +97,12 @@ function machine(env: Record<string, string>): Machine {
       const path = keyOf(argv[5] ?? '')
       files.set(path, `${files.get(path) ?? ''}${argv[4]}\n`)
       return ran()
+    }
+    // The listing as find, sort and awk print it: seconds with a fraction, the count last; exit 3 without the directory.
+    if (cmd === 'sh' && script === NEWER_SCRIPT) {
+      const found = newerInMap(files, mtimes, keyOf(argv[4] ?? ''), Number(argv[5]))
+      if (found === undefined) return ran('', 3)
+      return ran(`${found.slice(0, Number(argv[6])).map(one => `${(one.mtimeMs / 1000).toFixed(10)}\t${one.path}\n`).join('')}N\t${found.length}\n`)
     }
     if (cmd === 'sh' && script === PROBE_SCRIPT) return ran(probeOutput('/m/work', '/m/cfg', 'claude -p --model opus --output-format json -- Goal: x'))
     if (cmd === 'sh' && script?.startsWith('tail -n 600 ')) {
@@ -123,6 +133,14 @@ function machine(env: Record<string, string>): Machine {
         return text === undefined ? ran('', 1, 'not found') : ran(tailLines(text, Number(b), Number(c)))
       }
     }
+    // NEWER_PS1 prints full names with backslashes and three decimals, with PowerShell's own line ends.
+    if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/newer.ps1')) {
+      expect(files.get(keyOf(argv[6]))).toBe(NEWER_PS1)
+      const found = newerInMap(files, mtimes, keyOf(argv[7] ?? ''), Number(argv[8]))
+      if (found === undefined) return ran('', 3)
+      const lines = found.slice(0, Number(argv[9])).map(one => `${(one.mtimeMs / 1000).toFixed(3)}\t${one.path.replace(/\//g, '\\')}`)
+      return ran([...lines, `N\t${found.length}`, ''].join('\r\n'))
+    }
     if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/probe.ps1')) {
       expect(files.get(keyOf(argv[6]))).toBe(PROBE_PS1)
       const out = probeOutput('C:\\m\\work', 'C:\\m\\cfg', '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus --output-format json -- "Goal: x"')
@@ -130,7 +148,7 @@ function machine(env: Record<string, string>): Machine {
     }
     throw new Error(`unexpected command ${argv.join(' ')}`)
   }
-  return { env, files, runs, sleeps: [], read, exists: path => files.has(keyOf(path)) || isDir(path), stat, run }
+  return { env, files, mtimes, runs, sleeps: [], read, exists: path => files.has(keyOf(path)) || isDir(path), stat, run }
 }
 
 /** The machine beneath the plugins: the mock engine's fs, process, env and clock hooks answer from it. */
@@ -353,6 +371,50 @@ describe('host contract', () => {
       expect(await host.rotateAndAppend(port, trace, ['{"b":2}'])).toBeUndefined()
       expect([at(m, trace), at(m, `${trace}.1`)]).toEqual(['{"a":1}\n{"b":2}\n', 'new\n'])
       expect(notes).toEqual([])
+    })
+
+    test(`${one.name}: filesNewerThan lists the files written after a time, newest first, paths and mtimes only, never in .git; a missing directory is undefined`, async () => {
+      const m = machine(one.env)
+      const notes: string[] = []
+      const port = portOf(m, runs, notes)
+      const put = (path: string, sec: number) => {
+        m.files.set(keyOf(path), 'x')
+        m.mtimes.set(keyOf(path), sec * 1000 + 250)
+      }
+      put(`${root}/work/old.txt`, 1000)
+      put(`${root}/work/new.txt`, 3000)
+      put(`${root}/work/sub dir/mid.txt`, 2000)
+      put(`${root}/work/same.txt`, 2000)
+      put(`${root}/work/.git/index`, 3500)
+      put(`${root}/work/sub dir/.git/HEAD`, 3500)
+      put(`${root}/other/x.txt`, 4000)
+      // A file of exactly the second asked is not after it; 250 ms into it is.
+      put(`${root}/work/at.txt`, 1500)
+      m.mtimes.set(keyOf(`${root}/work/at.txt`), 1_500_000)
+      expect(await host.filesNewerThan(port, `${root}/work`, 1500)).toEqual({
+        files: [
+          { path: `${root}/work/new.txt`, mtimeMs: 3_000_250 },
+          { path: `${root}/work/same.txt`, mtimeMs: 2_000_250 },
+          { path: `${root}/work/sub dir/mid.txt`, mtimeMs: 2_000_250 },
+        ],
+        total: 3,
+      })
+      expect(await host.filesNewerThan(port, `${root}/work`, 5000)).toEqual({ files: [], total: 0 })
+      expect(notes).toEqual([])
+      expect(await host.filesNewerThan(port, `${root}/none`, 0)).toBeUndefined()
+    })
+
+    test(`${one.name}: filesNewerThan answers at most ${NEWER_MAX} paths, the newest, with the count of all`, async () => {
+      const m = machine(one.env)
+      for (let n = 0; n < NEWER_MAX + 25; n++) {
+        m.files.set(keyOf(`${root}/work/f${n}.txt`), 'x')
+        m.mtimes.set(keyOf(`${root}/work/f${n}.txt`), (10_000 + n) * 1000)
+      }
+      const listed = await host.filesNewerThan(portOf(m, runs), `${root}/work`, 0)
+      expect(listed?.total).toBe(NEWER_MAX + 25)
+      expect(listed?.files.length).toBe(NEWER_MAX)
+      expect(listed?.files[0]).toEqual({ path: `${root}/work/f${NEWER_MAX + 24}.txt`, mtimeMs: (10_000 + NEWER_MAX + 24) * 1000 })
+      expect(listed?.files.at(-1)?.path).toBe(`${root}/work/f25.txt`)
     })
 
     test(`${one.name}: no operation falls back (the helper, where there is one, answers every call)`, async () => {

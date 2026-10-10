@@ -12,8 +12,8 @@ import type { ProcessRunResult } from 'claude-code'
 import type { SessionEntry } from '../types'
 import { parseProcFacts, probeArgs } from './core'
 import type { ProcFacts } from './core'
-import type { Host, HostPort, RotatePlan } from './host'
-import { readTail } from './host-shared'
+import type { Host, HostPort, NewerFiles, RotatePlan } from './host'
+import { NEWER_MAX, readTail } from './host-shared'
 
 /** The helper's entry point under the plugin's directory. */
 export const HELPER_SCRIPT = 'helper/host.mjs'
@@ -28,7 +28,7 @@ export const HELPER_REDETECT_MS = 10 * 60_000
 export type HelperSetup = { node: string; script: string }
 
 /** The helper's operations as its protocol names them. */
-export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'batch'
+export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'batch'
 
 /** One step of a batch: a file operation and its request. */
 export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'batch'> } & Record<string, unknown>
@@ -49,6 +49,9 @@ export const CALL_CODES = ['SPAWN', 'TIMEOUT', 'BAD_JSON', 'TRUNCATED', 'BAD_ANS
 
 /** How long one helper call may take: a probe or a file operation. */
 const CALL_TIMEOUT_MS = 10_000
+
+/** How long the walk of filesNewerThan may take, as the adapters' own listing. */
+const LISTING_TIMEOUT_MS = 30_000
 
 /** How long `node --version` may take. */
 const VERSION_TIMEOUT_MS = 5_000
@@ -108,13 +111,21 @@ export function fallbackToast(note: HelperNote & { kind: 'fallback' }): string {
   return `helper fallback: ${note.op}${note.isRepeated === false ? ' (timed out, not repeated)' : ''}`
 }
 
+/** A helper's filesNewerThan answer as NewerFiles: an array of `{path, mtimeMs}` and a count, or undefined. */
+export function newerAnswer(fields: Record<string, unknown>): NewerFiles | undefined {
+  const { files, total } = fields
+  if (!Array.isArray(files) || typeof total !== 'number' || !Number.isSafeInteger(total) || total < files.length) return undefined
+  const isFile = (one: unknown): one is { path: string; mtimeMs: number } => isRecord(one) && typeof one.path === 'string' && typeof one.mtimeMs === 'number'
+  return files.every(isFile) ? { files: files.map(one => ({ path: one.path, mtimeMs: one.mtimeMs })), total } : undefined
+}
+
 /** The rotation request of a plan. */
 const rotateRequest = (plan: RotatePlan) => ({ path: plan.path, adding: plan.adding, maxBytes: plan.maxBytes, moves: plan.moves.map(([from, to]) => [from, to]) })
 
 /**
  * The adapter with its listed operations run by the helper: probe (Linux only: on Windows the process rows stay on
- * PROBE_PS1), writeAtomic, renameOver, removeFile, append, tail, rotate and rotateAndAppend (one batch). Every other
- * member is the adapter's own.
+ * PROBE_PS1), writeAtomic, renameOver, removeFile, append, tail, rotate, filesNewerThan and rotateAndAppend (one batch).
+ * Every other member is the adapter's own.
  */
 export function withHelper(base: Host, setup: HelperSetup): Host {
   let ready: Promise<boolean> | undefined
@@ -165,9 +176,9 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
   }
 
   /** One helper call; the trace shows the operation and the given fields, never the request. */
-  async function call(port: HostPort, op: HelperOp, request: Record<string, unknown>, isQuiet: boolean, shown: Record<string, unknown>): Promise<HelperAnswer> {
+  async function call(port: HostPort, op: HelperOp, request: Record<string, unknown>, isQuiet: boolean, shown: Record<string, unknown>, timeoutMs: number): Promise<HelperAnswer> {
     try {
-      const ran = await port.run([setup.node, setup.script, op], { stdin: JSON.stringify(request), timeoutMs: CALL_TIMEOUT_MS }, isQuiet, { helper: op, ...shown })
+      const ran = await port.run([setup.node, setup.script, op], { stdin: JSON.stringify(request), timeoutMs }, isQuiet, { helper: op, ...shown })
       return readAnswer(ran)
     } catch (err) {
       return { ok: false, code: rejectionCode(err) }
@@ -178,6 +189,7 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
    * An operation through the helper: `use` reads the answer's fields (undefined: not the answer expected), `fallback`
    * is the adapter's own operation, run when Node is missing or the call fails; a failed call is told to the port.
    * `unrepeated`, for a call that appends, is what a failure appendNotRepeated leaves in place of the fallback.
+   * `timeoutMs` bounds the call (CALL_TIMEOUT_MS unless given).
    */
   async function through<T>(
     port: HostPort,
@@ -188,9 +200,10 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
     use: (fields: Record<string, unknown>) => T | undefined,
     fallback: (failed: HelperAnswer & { ok: false }) => Promise<T>,
     unrepeated?: T,
+    timeoutMs = CALL_TIMEOUT_MS,
   ): Promise<T> {
     if (!(await isReady(port))) return fallback({ ok: false, code: 'NO_NODE' })
-    const answer = await call(port, op, request, isQuiet, shown)
+    const answer = await call(port, op, request, isQuiet, shown, timeoutMs)
     const value = answer.ok ? use(answer.fields) : undefined
     if (value !== undefined) return value
     const failed = answer.ok ? ({ ok: false, code: 'BAD_ANSWER' } as const) : answer
@@ -290,6 +303,24 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         fields => (typeof fields.text === 'string' ? { text: fields.text } : undefined),
         async () => ({ text: await base.tail(port, path) }),
       ).then(found => found.text)
+    },
+
+    /** The walk in one Node process; a failure (a directory that is not there among them) asks the adapter's own listing. */
+    async filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined> {
+      return through(
+        port,
+        'filesNewerThan',
+        { dir, since: Math.floor(epochSeconds), max: NEWER_MAX },
+        false,
+        { path: dir },
+        fields => {
+          const found = newerAnswer(fields)
+          return found === undefined ? undefined : { found }
+        },
+        async () => ({ found: await base.filesNewerThan(port, dir, epochSeconds) }),
+        undefined,
+        LISTING_TIMEOUT_MS,
+      ).then(done => done.found)
     },
 
     async rotate(port: HostPort, plan: RotatePlan): Promise<void> {

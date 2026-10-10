@@ -6,8 +6,8 @@
 import type { SessionEntry } from '../types'
 import { findNewWorker, isDefaultConfigDir, defaultConfigDir, parseProcFacts, probeArgs, transcriptPath } from './core'
 import type { LaunchArgs, ProcFacts } from './core'
-import type { Host, HostPort, RotatePlan, WorkerWant } from './host'
-import { bashLaunchCommand, rotateAndAppendWith, writeAtomicWith } from './host-shared'
+import type { Host, HostPort, NewerFiles, RotatePlan, WorkerWant } from './host'
+import { NEWER_MAX, bashLaunchCommand, parseNewerListing, rotateAndAppendWith, writeAtomicWith } from './host-shared'
 import { dirOf } from './store'
 
 /**
@@ -61,6 +61,21 @@ export const ROTATE_SCRIPT = String.raw`L=$1; i=$2; max=$3; add=$4
 [ $((size)) -gt 0 ] && [ $((size + add)) -gt "$max" ] || exit 0
 while [ "$i" -gt 1 ]; do p=$((i - 1)); [ -f "$L.$p" ] && mv -f "$L.$p" "$L.$i" 2>/dev/null; i=$p; done
 mv -f "$L" "$L.1" 2>/dev/null || [ ! -e "$L" ]`
+
+/**
+ * The files under a directory written after a time, read-only: args are the directory, the epoch seconds and the most
+ * lines to print. `find -newermt @<seconds>` lists the regular files newer than that second (a symbolic link is no
+ * regular file, and find does not follow one), never entering a `.git`; newest first, the first `max` printed as
+ * `<mtime>\t<path>`, then `N\t<count of all>`. A path holding a line break is left out (it would split its line).
+ * Exit 3 when the directory is not there.
+ */
+export const NEWER_SCRIPT = String.raw`d=$1; t=$2; max=$3
+[ -d "$d" ] || exit 3
+export LC_ALL=C
+nl='
+'
+find "$d" -name .git -prune -o -type f ! -path "*$nl*" -newermt "@$t" -printf '%T@\t%p\n' 2>/dev/null |
+  sort -t "$(printf '\t')" -k1,1nr -k2,2 | awk -v max="$max" 'NR <= max { print } END { printf "N\t%d\n", NR }'`
 
 /** Removes a file with `rm -f`; it counts as gone. */
 async function removeFile(port: HostPort, path: string, isQuiet = false): Promise<boolean> {
@@ -151,6 +166,11 @@ export const posixHost: Host = {
   async tail(port: HostPort, path: string): Promise<string | undefined> {
     const ran = await port.run(['sh', '-c', 'tail -n 600 "$1" | cut -c1-20000', 'session-tail', path], { timeoutMs: 5_000 })
     return ran.exitCode === 0 ? ran.stdout : undefined
+  },
+  /** NEWER_SCRIPT under sh: find, sort and awk, nothing written. */
+  async filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined> {
+    const ran = await port.run(['sh', '-c', NEWER_SCRIPT, 'session-newer', dir, String(Math.floor(epochSeconds)), String(NEWER_MAX)], { timeoutMs: 30_000 })
+    return ran.exitCode === 0 && !ran.isStdoutTruncated ? parseNewerListing(ran.stdout) : undefined
   },
   /** ROTATE_SCRIPT, which checks the size again itself; untraced (the trace is what it rotates). */
   async rotate(port: HostPort, plan: RotatePlan): Promise<void> {

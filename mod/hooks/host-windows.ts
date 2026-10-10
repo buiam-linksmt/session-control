@@ -18,8 +18,8 @@ import {
   winPath,
 } from './core'
 import type { LaunchArgs, ProcFacts } from './core'
-import type { Host, HostPort, RotatePlan, WorkerWant } from './host'
-import { bashLaunchCommand, clockPause, readTail, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
+import type { Host, HostPort, NewerFiles, RotatePlan, WorkerWant } from './host'
+import { NEWER_MAX, bashLaunchCommand, clockPause, parseNewerListing, readTail, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
 
 /**
  * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
@@ -58,6 +58,54 @@ export const FILES_PS1 = [
   '    }',
   '    default { throw "unknown operation: $Op" }',
   '  }',
+  '} catch {',
+  '  [Console]::Error.WriteLine($_.Exception.Message)',
+  '  exit 1',
+  '}',
+  'exit 0',
+].join('\r\n')
+
+/**
+ * The files under a directory written after a time, for Windows PowerShell 5.1, read-only, run as a file like
+ * FILES_PS1: args are the directory, the epoch seconds and the most lines to print. A walk of its own over
+ * System.IO.DirectoryInfo: no folder named `.git` is entered, and an entry with the ReparsePoint attribute (a symbolic
+ * link, a junction) is neither followed nor listed; a folder it cannot read is passed over. It prints what NEWER_SCRIPT
+ * prints: the newest first, the first `max` as `<mtime in seconds>\t<path>`, then `N\t<count of all>`. Exit 3 when
+ * the directory is not there.
+ */
+export const NEWER_PS1 = [
+  '# session-control: the files under a folder written after a time, for Windows PowerShell 5.1 (session_writes)',
+  'param([string]$Dir, [string]$Since, [string]$Max)',
+  '$env:PSModulePath = "$PSHOME\\Modules"',
+  "$ErrorActionPreference = 'Stop'",
+  '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
+  'try {',
+  '  if (-not [System.IO.Directory]::Exists($Dir)) { exit 3 }',
+  '  $epoch = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)',
+  '  $after = $epoch.AddSeconds([long]$Since)',
+  '  $skip = [System.IO.FileAttributes]::ReparsePoint',
+  '  $found = New-Object System.Collections.Generic.List[System.IO.FileSystemInfo]',
+  '  $todo = New-Object System.Collections.Generic.Stack[string]',
+  '  $todo.Push($Dir)',
+  '  while ($todo.Count -gt 0) {',
+  '    $here = $todo.Pop()',
+  '    try { $entries = (New-Object System.IO.DirectoryInfo $here).GetFileSystemInfos() } catch { continue }',
+  '    foreach ($one in $entries) {',
+  "      if ($one.Name -eq '.git' -or ($one.Attributes -band $skip) -ne 0) { continue }",
+  '      if ($one -is [System.IO.DirectoryInfo]) { $todo.Push($one.FullName) }',
+  '      elseif ($one.LastWriteTimeUtc -gt $after) { $found.Add($one) }',
+  '    }',
+  '  }',
+  '  $out = New-Object System.Text.StringBuilder',
+  '  $shown = 0',
+  '  foreach ($one in @($found | Sort-Object -Property @{ Expression = { $_.LastWriteTimeUtc }; Descending = $true }, @{ Expression = { $_.FullName }; Descending = $false })) {',
+  '    if ($shown -ge [int]$Max) { break }',
+  '    $sec = ($one.LastWriteTimeUtc - $epoch).TotalSeconds.ToString(\'F3\', [System.Globalization.CultureInfo]::InvariantCulture)',
+  '    [void]$out.Append("$sec`t$($one.FullName)`n")',
+  '    $shown++',
+  '  }',
+  '  [void]$out.Append("N`t$($found.Count)`n")',
+  '  [Console]::Out.Write($out.ToString())',
   '} catch {',
   '  [Console]::Error.WriteLine($_.Exception.Message)',
   '  exit 1',
@@ -319,6 +367,14 @@ export const windowsHost: Host = {
       return undefined
     })
     return ran?.exitCode === 0 ? ran.stdout : undefined
+  },
+  /** NEWER_PS1, its paths taken in the native C:/... form; nothing written but the script itself, as every script here. */
+  async filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined> {
+    const ran = await runScript(port, 'newer.ps1', NEWER_PS1, [dir, String(Math.floor(epochSeconds)), String(NEWER_MAX)], 30_000).catch((err: unknown) => {
+      port.traceError('files newer than', err)
+      return undefined
+    })
+    return ran?.exitCode === 0 && !ran.isStdoutTruncated ? parseNewerListing(ran.stdout, winPath) : undefined
   },
   /** Each rename of the plan by the file script, where a file another session moved meanwhile is no failure. */
   async rotate(port: HostPort, plan: RotatePlan): Promise<void> {

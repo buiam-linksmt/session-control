@@ -1,5 +1,6 @@
 // The file operations, alike on Linux and Windows: an atomic write through a sibling temp file, a rename over an
-// existing file, a removal, a true OS append, the tail of a file read from its end, and the trace rotation.
+// existing file, a removal, a true OS append, the tail of a file read from its end, the trace rotation, and the
+// read-only listing of the files written after a time under a directory.
 
 import { randomBytes } from 'node:crypto'
 import * as fs from 'node:fs'
@@ -232,5 +233,51 @@ export function rotate(request) {
   return { rotated: true }
 }
 
+/** A directory entry joined to its directory with `/`, the separator the mod stores on both systems. */
+const joined = (dir, name) => (dir.endsWith('/') || dir.endsWith('\\') ? `${dir}${name}` : `${dir}/${name}`)
+
+/**
+ * `{dir, since, max}`: the regular files under `dir` whose mtime is after `since` (epoch seconds), newest first (a
+ * tie by path), the first `max` of them with `total`, the count of all: `{files: [{path, mtimeMs}], total}`, paths
+ * and mtimes only, nothing read and nothing written. Every entry is taken by lstat: a symbolic link (on Windows also
+ * a junction, which lstat reports as one) is neither followed nor listed, so the walk never leaves the tree; a folder
+ * named `.git` is not entered; a folder that cannot be read is passed over, as `find` passes it over. `dir` itself
+ * must be a directory (NOT_DIR, NOT_FOUND).
+ */
+export function filesNewerThan(request) {
+  const root = path(request, 'dir')
+  const since = request.since
+  if (typeof since !== 'number' || !Number.isFinite(since) || since < 0) throw new HelperError('BAD_REQUEST')
+  const max = count(request, 'max', 1)
+  if (!fs.statSync(root).isDirectory()) throw new HelperError('NOT_DIR')
+  const after = since * 1000
+  const found = []
+  const todo = [root]
+  while (todo.length > 0) {
+    const dir = todo.pop()
+    let names
+    try {
+      names = fs.readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      if (name === '.git') continue
+      const full = joined(dir, name)
+      let stat
+      try {
+        stat = fs.lstatSync(full)
+      } catch {
+        continue
+      }
+      if (stat.isSymbolicLink()) continue
+      if (stat.isDirectory()) todo.push(full)
+      else if (stat.isFile() && stat.mtimeMs > after) found.push({ path: full, mtimeMs: Math.floor(stat.mtimeMs) })
+    }
+  }
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  return { files: found.slice(0, max), total: found.length }
+}
+
 /** The file operations by name, for a request of its own or one step of a batch. */
-export const FILE_OPS = Object.freeze({ writeAtomic, renameOver, removeFile, append, tail, rotate })
+export const FILE_OPS = Object.freeze({ writeAtomic, renameOver, removeFile, append, tail, rotate, filesNewerThan })
