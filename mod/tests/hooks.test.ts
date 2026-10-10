@@ -454,6 +454,8 @@ describe('completion', () => {
     const w = world(on, '/fixture/lic/a\n', true, withErr)
     await $.session.start(start(ORCH_DIR))
     expect(w.toasts[0]).toStartWith('Session finished · limited worker: clean: ')
+    const entry = lastRegistry(w).find(one => one.session_id === SID_DEAD)
+    expect((entry?.outcome as { kind?: string }).kind).toBe('clean')
   })
 
   test('the report check adds one line to the completion notice of a clean report without the git reads; the toast and the outcome stay', { options: OPTIONS }, async ($, on) => {
