@@ -21,7 +21,7 @@ Every user request is fulfilled by launching and managing one or more **worker s
 4. **Every session is registered.** No untracked sessions, ever (see step 3, Register).
 5. **End every turn with what the user needs to know** (see Reporting): what happened when a worker
    finished, or the question to decide. Sessions, queued work and open points are shown by the side
-   panel, never restated in chat.
+   panel, never restated in chat. Exception: Reporting, Hold while a question is pending.
 6. **Never silently kill or discard a session.** Retiring one is a user-visible action; state it.
    A stop call is not a kill: a session is only retired once its pid is confirmed dead
    (see Session lifecycle, step 6).
@@ -487,6 +487,11 @@ Never end a turn with an offer or a permission question: a decision only the use
 point, and an action on the sign-off list (Scope) is always raised that way, except that a worker's
 questions go through `AskUserQuestion` (step 5). A wait the user sets on a named action holds until
 the user lifts it; record it with `record_decision` (the unit's section, or a `Standing` section).
+
+**Hold while a question is pending.** The general rule is in the user-level instructions ("Waiting for my
+answer"). Here, a held worker keeps its entry unacknowledged so the panel shows it as finished, unblocked
+work (Rule 7) still launches, and a failure or blocker goes to the open points file. After the user's
+next message, deliver the held reports one at a time, each with its own question.
 
 **Discuss open points one at a time**, each with the options, the text the decision rests on and a
 recommendation; present the next as soon as the user answers. The same holds for any item-by-item
