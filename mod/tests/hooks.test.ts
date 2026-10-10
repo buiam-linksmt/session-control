@@ -5,7 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { FILES_PS1, PROBE_SCRIPT, REGISTER_SCRIPT, probeArgs } from '../hooks/core'
+import { FILES_PS1, PROBE_PS1, PROBE_SCRIPT, REGISTER_SCRIPT, probeArgs } from '../hooks/core'
 
 import {
   HOME,
@@ -18,6 +18,7 @@ import {
   SID_ALIVE,
   SID_DEAD,
   TASK_NOTIFICATION_KILLED,
+  WIN_PROBE_STDOUT,
 } from './fixtures'
 
 const PICKER = '/fixture/bin/pick --need {need}'
@@ -51,8 +52,8 @@ const MISSING = new Set<string>()
 const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
-// Set to make the Windows file script's move fail.
-const WINDOWS = { isMoveBroken: false }
+// Set to make the Windows file script's move, or the Windows probe, fail.
+const WINDOWS = { isMoveBroken: false, isProbeBroken: false }
 
 /** Windows PowerShell as the mod runs it when SystemRoot is unset. */
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
@@ -126,6 +127,14 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === 'test' && e.argv[1] === '-e') return { value: { ...ok, stdout: '', exitCode: 1 } }
     if (e.argv[0] === 'test') return { value: { ...ok, stdout: '', exitCode: promptFileExists ? 0 : 1 } }
     if (e.argv[0] === '/fixture/bin/pick') return { value: { ...ok, stdout: pickStdout, exitCode: pickStdout ? 0 : 3 } }
+    if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/probe.ps1')) {
+      if (WINDOWS.isProbeBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Invalid class' } }
+      const worker = w.spawned
+        ? 'P\t7001\tclaude\t3\tC:\\work\\new\tC:/fixture/lic/a\t"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus --dangerously-skip-permissions --output-format json -- prompt\n'
+        : ''
+      // PowerShell's own line ends.
+      return { value: { ...ok, stdout: (WIN_PROBE_STDOUT + worker).replace(/\n/g, '\r\n') } }
+    }
     if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/files.ps1')) {
       const [op, from, to] = e.argv.slice(7).map(String)
       if (op === 'move' && WINDOWS.isMoveBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Access denied.' } }
@@ -668,6 +677,32 @@ describe('platform', () => {
     // No POSIX tool is started for the files: they are written through $.fs, which makes their directories.
     expect(w.runs.filter(argv => ['mv', 'rm', 'test', 'mkdir'].includes(String(argv[0])))).toEqual([])
     expect(w.writes.some(one => one.path.endsWith(`C:${ORCH_DIR}/agreed-decisions.md`))).toBe(true)
+  })
+
+  test('Windows: the probe is PROBE_PS1 run as a file, with the registry\'s pids and transcripts', { options: WIN_OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    stubPanel(on)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    expect(w.runs[0]).toEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT))])
+    expect(w.writes.find(one => one.path.endsWith(`${WIN_RUNS}/probe.ps1`))?.text).toBe(PROBE_PS1)
+    expect(w.runs.filter(argv => argv[0] === 'sh')).toEqual([])
+    // The dead worker is harvested, the live one shows as running with its elapsed time.
+    expect(w.toasts).toEqual(['session-control: limited worker: limit: rate limit hit'])
+    await $.command.run({ command: 'session-control', args: '' } as never)
+    const all = String(((await (await mountPane($)).findAll({}))[0] as { text?: string }).text ?? '')
+    expect(all).toMatch(/alive worker\s+aaaaaaaa\s+running\s+opus\s+high\s+2m/)
+  })
+
+  test('Windows: a probe that fails is an error on the panel, and no worker is taken for dead', { options: WIN_OPTIONS }, async ($, on) => {
+    WINDOWS.isProbeBroken = true
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      expect(w.toasts).toEqual(['session-control: Error: the process probe failed (exit 1): Invalid class'])
+      expect(w.writes.some(one => fixture(one.path).startsWith(REGISTRY_PATH))).toBe(false)
+    } finally {
+      WINDOWS.isProbeBroken = false
+    }
   })
 
   test('Windows: a HOME that Git Bash handed on (/c/...) is home, in native form', { options: WIN_OPTIONS }, async ($, on) => {

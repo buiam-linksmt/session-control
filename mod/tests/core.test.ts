@@ -42,6 +42,10 @@ import {
   removeEntries,
   ackEntries,
   FILES_PS1,
+  PROBE_PS1,
+  START_MATCH_MS,
+  findNewWindowsWorker,
+  findNewWorker,
   isSameWinPath,
   isWinAbsolute,
   tailLines,
@@ -64,6 +68,7 @@ import {
   SID_UNREPORTED,
   TASK_NOTIFICATION_KILLED,
   REGISTRY_GOLDEN,
+  WIN_PROBE_STDOUT,
 } from './fixtures'
 import type { SessionEntry } from '../types'
 
@@ -643,5 +648,84 @@ describe('Windows file script', () => {
     expect(FILES_PS1).toContain('exit 1')
     // Windows line ends throughout.
     expect(FILES_PS1.replace(/\r\n/g, '').includes('\n')).toBe(false)
+  })
+})
+
+/** The tool fingerprint's checksum, over any text. */
+function fingerprint(text: string): string {
+  let hash = 2166136261
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619) >>> 0
+  return `${text.length}:${hash.toString(16)}`
+}
+
+describe('Windows probe', () => {
+  const win = parseProcFacts(WIN_PROBE_STDOUT)
+  const byPid = (pid: number) => REGISTRY.find(e => e.pid === pid)!
+
+  test('the Linux probe text is the one it always was', () => {
+    expect(fingerprint(PROBE_SCRIPT)).toBe('1260:2204f4bb')
+  })
+
+  test('its lines read as the Linux ones: alive, a reused pid, no sessions file', () => {
+    expect(isPidAlive(byPid(4101), win)).toBe(true)
+    expect(isPidAlive(byPid(4106), win)).toBe(false)
+    expect(isPidAlive(byPid(4102), win)).toBe(false)
+    expect(REGISTRY.map(e => rowStatus(e, win))).toEqual(REGISTRY.map(e => rowStatus(e, facts)))
+    expect(win.transcriptMtime.get(SID_ALIVE)).toBe(NOW_SEC - 30)
+    expect(win.pidComm.get(4101)).toBe('claude')
+  })
+
+  test('a claude.exe no sessions file names is an orphan with no config dir; the interactive one is not listed', () => {
+    const rows = buildRows(REGISTRY, win, NOW_SEC)
+    const orphans = rows.filter(row => row.status === 'orphan')
+    expect(orphans.map(row => [row.pid, row.configDir, row.elapsedSec])).toEqual([[4999, '?', 2400]])
+    expect(rows.find(row => row.pid === 4101)?.elapsedSec).toBe(125)
+  })
+
+  test('Windows line ends, stripped as the probe call strips them, read the same', () => {
+    const crlf = WIN_PROBE_STDOUT.replace(/\n/g, '\r\n')
+    expect(parseProcFacts(crlf.replace(/\r/g, ''))).toEqual(win)
+  })
+
+  test('the script matches by startedAt within START_MATCH_MS, takes its own modules and the same arguments', () => {
+    expect(PROBE_PS1).toContain(`$before = ${START_MATCH_MS.before}`)
+    expect(PROBE_PS1).toContain(`$after = ${START_MATCH_MS.after}`)
+    expect(PROBE_PS1).toContain("$name = 'claude.exe'")
+    expect(PROBE_PS1).toContain('$env:PSModulePath = "$PSHOME\\Modules"')
+    expect(PROBE_PS1).toContain('Get-CimInstance -ClassName Win32_Process -Filter $filter')
+    expect(PROBE_PS1).toContain('$gap = [long]$file.startedAt - $ms')
+    for (const tag of ["'pid:'", "'t:'", "'c:'", '"P`t', '"A`t', '"T`t']) expect(PROBE_PS1).toContain(tag)
+    expect(PROBE_PS1.replace(/\r\n/g, '').includes('\n')).toBe(false)
+  })
+})
+
+describe('the new worker of a launch', () => {
+  const want = { dir: '/work/new', configDir: '/fixture/lic/a', model: 'opus' }
+  const line = (pid: number, cwd: string, cfg: string, cmd = 'claude -p --model opus --output-format json', elapsed = 3) =>
+    ['P', pid, 'claude', elapsed, cwd, cfg, cmd].join('\t')
+  test('Linux: a headless claude in the dir under the config dir with the model, not seen before; exact paths', () => {
+    const facts = parseProcFacts([line(1, '/work/new/', '/fixture/lic/a'), line(2, '/work/new', '/fixture/lic/a')].join('\n'))
+    expect(findNewWorker(facts, want, new Set())?.pid).toBe(1)
+    expect(findNewWorker(facts, want, new Set([1]))?.pid).toBe(2)
+    expect(findNewWorker(parseProcFacts(line(3, '/Work/New', '/fixture/lic/a')), want, new Set())).toBeUndefined()
+    expect(findNewWorker(parseProcFacts(line(4, '/work/new', '/fixture/lic/a', 'claude --model opus')), want, new Set())).toBeUndefined()
+    expect(findNewWorker(parseProcFacts(line(5, '/work/new', '', 'claude -p --model opus')), want, new Set())).toBeUndefined()
+  })
+
+  test('Windows: paths compared as Windows does; without a sessions file a fresh headless claude.exe with the model', () => {
+    const winWant = { dir: 'C:/Work/New', configDir: 'C:/Users/u/.claude', model: 'opus' }
+    const spelled = parseProcFacts(line(1, 'C:\\work\\new\\', 'C:\\Users\\u\\.claude'))
+    expect(findNewWindowsWorker(spelled, winWant, new Set(), 10)?.pid).toBe(1)
+    expect(findNewWindowsWorker(spelled, winWant, new Set([1]), 10)).toBeUndefined()
+    expect(findNewWindowsWorker(parseProcFacts(line(2, 'C:\\other', 'C:\\Users\\u\\.claude')), winWant, new Set(), 10)).toBeUndefined()
+    expect(findNewWindowsWorker(parseProcFacts(line(3, 'C:\\work\\new', 'C:\\Users\\v\\.claude')), winWant, new Set(), 10)).toBeUndefined()
+    const bare = (elapsed: number, cmd?: string) => parseProcFacts(line(4, '', '', cmd, elapsed))
+    expect(findNewWindowsWorker(bare(3), winWant, new Set(), 4)?.pid).toBe(4)
+    expect(findNewWindowsWorker(bare(30), winWant, new Set(), 4)).toBeUndefined()
+    expect(findNewWindowsWorker(bare(3, 'claude.exe --model opus'), winWant, new Set(), 4)).toBeUndefined()
+    expect(findNewWindowsWorker(bare(3, 'claude.exe -p --model sonnet'), winWant, new Set(), 4)).toBeUndefined()
+    // A worker the probe placed wins over one it could not.
+    const both = parseProcFacts([line(5, '', ''), line(6, 'C:/work/new', 'C:/Users/u/.claude')].join('\n'))
+    expect(findNewWindowsWorker(both, winWant, new Set(), 10)?.pid).toBe(6)
   })
 })

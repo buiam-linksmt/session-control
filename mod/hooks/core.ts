@@ -549,6 +549,24 @@ export function findNewWorker(
   )
 }
 
+/**
+ * findNewWorker on native Windows: the same match, with paths compared as Windows compares them. A claude.exe whose
+ * sessions file the probe found nowhere (no cwd, no config dir) still counts when it is headless, has the launch's
+ * model and is younger than the launch; its session id is then read from the launch's config dir.
+ */
+export function findNewWindowsWorker(
+  facts: ProcFacts,
+  want: { dir: string; configDir: string; model: string },
+  known: ReadonlySet<number>,
+  launchedSecAgo: number,
+): ProcFact | undefined {
+  const fresh = facts.claude.filter(one => !known.has(one.pid) && isHeadless(one.cmdline) && one.cmdline.includes(`--model ${want.model}`))
+  return (
+    fresh.find(one => one.cwd !== '' && isSameWinPath(one.cwd, want.dir) && isSameWinPath(one.configDir, want.configDir)) ??
+    fresh.find(one => one.cwd === '' && one.configDir === '' && one.elapsedSec !== undefined && one.elapsedSec <= launchedSecAgo + 1)
+  )
+}
+
 /** The registry entry for a fresh launch (a resume updates the existing entry in place). */
 export function newRegistryEntry(
   args: LaunchArgs,
@@ -879,6 +897,126 @@ export const FILES_PS1 = [
   '    }',
   '    default { throw "unknown operation: $Op" }',
   '  }',
+  '} catch {',
+  '  [Console]::Error.WriteLine($_.Exception.Message)',
+  '  exit 1',
+  '}',
+  'exit 0',
+].join('\r\n')
+
+/**
+ * How far a sessions file's `startedAt` may sit from its process's creation for the pid to count as that process,
+ * in milliseconds: a little before (clock granularity), and after by however long the engine takes to start (2 to
+ * 6 s seen on Linux, once 257 s). Only the lower bound guards against a reused pid: a process created after the file
+ * was written cannot be the one that wrote it, and none created before it can share the pid while the writer lives.
+ */
+export const START_MATCH_MS = { before: 2_000, after: 600_000 } as const
+
+/**
+ * The process probe for native Windows (Windows PowerShell 5.1), run as a file like FILES_PS1. It prints the lines
+ * PROBE_SCRIPT prints, so parseProcFacts and isPidAlive read them unchanged:
+ *   P <pid> claude <elapsedSec> <cwd> <configDir> <cmdline>   per claude.exe (Win32_Process)
+ *   A <pid> <name> <creationMs> <fileStart> <fileSessionId>   per asked pid that exists
+ *   T <sid> <mtimeEpochSec>                                   newest transcript of an asked session
+ * Win32_Process has no cwd and no environment, so cwd and config dir come from the engine's own
+ * <config dir>/sessions/<pid>.json, looked for in the asked config dirs, the `c:<dir>` arguments and
+ * %USERPROFILE%\.claude. A file counts for a process when its `pid` (if any) is the pid and its `startedAt` (epoch ms)
+ * is within START_MATCH_MS of the creation time; the A line then carries the creation time in both start columns,
+ * else the file's own value, which isPidAlive reads as not alive. No file: no cwd, no config dir, not alive.
+ */
+export const PROBE_PS1 = [
+  '# session-control: the process probe for Windows PowerShell 5.1 (the P, A and T lines of PROBE_SCRIPT)',
+  '$env:PSModulePath = "$PSHOME\\Modules"',
+  "$ErrorActionPreference = 'Stop'",
+  '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
+  "$name = 'claude.exe'",
+  // START_MATCH_MS
+  '$before = 2000',
+  '$after = 600000',
+  '$epoch = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)',
+  '$dirs = New-Object System.Collections.Generic.List[string]',
+  'function Add-Dir([string]$dir) { if ($dir -ne \'\' -and $dir -ne \'~\' -and -not $dirs.Contains($dir)) { $dirs.Add($dir) } }',
+  'function Flat($text) { if ($null -eq $text) { return \'\' } return ([string]$text -replace "[`t`r`n]", \' \') }',
+  'function Ms([DateTime]$at) { return [long][Math]::Floor(($at.ToUniversalTime() - $epoch).TotalMilliseconds) }',
+  '# The sessions file of a pid under a config dir, or $null when there is none to read.',
+  'function Session([string]$dir, [long]$id) {',
+  '  $file = "$dir\\sessions\\$id.json"',
+  '  if ($dir -eq \'~\' -or -not [System.IO.File]::Exists($file)) { return $null }',
+  '  try { return ([System.IO.File]::ReadAllText($file, [System.Text.Encoding]::UTF8) | ConvertFrom-Json) } catch { return $null }',
+  '}',
+  '# Whether a sessions file was written by the process created at $ms.',
+  'function IsSame($file, [long]$id, [long]$ms) {',
+  '  if ($null -eq $file -or $null -eq $file.startedAt) { return $false }',
+  '  if ($null -ne $file.pid -and [long]$file.pid -ne $id) { return $false }',
+  '  $gap = [long]$file.startedAt - $ms',
+  '  return ($gap -ge -$before -and $gap -le $after)',
+  '}',
+  '$asked = @()',
+  '$sessions = @()',
+  'foreach ($arg in $args) {',
+  "  if ($arg.StartsWith('pid:')) {",
+  '    $rest = $arg.Substring(4); $cut = $rest.IndexOf(\'|\')',
+  '    $id = if ($cut -lt 0) { $rest } else { $rest.Substring(0, $cut) }',
+  '    $dir = if ($cut -lt 0) { $rest } else { $rest.Substring($cut + 1) }',
+  '    if ($dir.IndexOf(\'|\') -ge 0) { $dir = $dir.Substring(0, $dir.IndexOf(\'|\')) }',
+  '    $n = 0L',
+  '    if ([long]::TryParse($id, [ref]$n)) { $asked += ,@($n, $dir); Add-Dir $dir }',
+  "  } elseif ($arg.StartsWith('t:')) {",
+  '    $rest = $arg.Substring(2); $cut = $rest.IndexOf(\'|\')',
+  '    $sid = if ($cut -lt 0) { $rest } else { $rest.Substring(0, $cut) }',
+  '    $dir = if ($cut -lt 0) { $rest } else { $rest.Substring($cut + 1) }',
+  '    $sessions += ,@($sid, $dir); Add-Dir $dir',
+  "  } elseif ($arg.StartsWith('c:')) { Add-Dir $arg.Substring(2) }",
+  '}',
+  'if ($env:USERPROFILE) { Add-Dir "$env:USERPROFILE\\.claude" }',
+  'try {',
+  '  $filter = "Name=\'$name\'"',
+  '  foreach ($one in $asked) { $filter += " OR ProcessId=$($one[0])" }',
+  '  $procs = @(Get-CimInstance -ClassName Win32_Process -Filter $filter -Property ProcessId, Name, CreationDate, CommandLine)',
+  '  $now = [DateTime]::UtcNow',
+  '  $out = New-Object System.Text.StringBuilder',
+  '  $byPid = @{}',
+  '  foreach ($proc in $procs) { $byPid[[long]$proc.ProcessId] = $proc }',
+  '  foreach ($proc in $procs) {',
+  '    if ($proc.Name -ne $name -or $null -eq $proc.CreationDate) { continue }',
+  '    $id = [long]$proc.ProcessId; $ms = Ms $proc.CreationDate',
+  '    $elapsed = [long][Math]::Floor(($now - $proc.CreationDate.ToUniversalTime()).TotalSeconds)',
+  '    $cwd = \'\'; $cfg = \'\'',
+  '    foreach ($dir in $dirs) {',
+  '      $file = Session $dir $id',
+  '      if (IsSame $file $id $ms) { $cwd = Flat $file.cwd; $cfg = Flat $dir; break }',
+  '    }',
+  '    [void]$out.Append("P`t$id`tclaude`t$elapsed`t$cwd`t$cfg`t$(Flat $proc.CommandLine)`n")',
+  '  }',
+  '  foreach ($one in $asked) {',
+  '    $proc = $byPid[[long]$one[0]]',
+  '    if ($null -eq $proc) { continue }',
+  '    $id = [long]$one[0]',
+  '    $comm = $proc.Name -replace \'\\.exe$\', \'\'',
+  '    if ($null -eq $proc.CreationDate) { [void]$out.Append("A`t$id`t$comm`t`t`t`n"); continue }',
+  '    $ms = Ms $proc.CreationDate',
+  '    $file = Session $one[1] $id',
+  '    $start = \'\'; $sid = \'\'',
+  '    if ($null -ne $file) {',
+  '      if ($null -ne $file.sessionId) { $sid = Flat $file.sessionId }',
+  '      if (IsSame $file $id $ms) { $start = "$ms" } elseif ($null -ne $file.startedAt) { $start = Flat $file.startedAt }',
+  '    }',
+  '    [void]$out.Append("A`t$id`t$comm`t$ms`t$start`t$sid`n")',
+  '  }',
+  '  foreach ($one in $sessions) {',
+  '    $projects = "$($one[1])\\projects"',
+  '    if ($one[1] -eq \'~\' -or -not [System.IO.Directory]::Exists($projects)) { continue }',
+  '    $newest = $null',
+  '    foreach ($dir in [System.IO.Directory]::GetDirectories($projects)) {',
+  '      $path = "$dir\\$($one[0]).jsonl"',
+  '      if ([System.IO.File]::Exists($path)) {',
+  '        $at = [System.IO.File]::GetLastWriteTimeUtc($path)',
+  '        if ($null -eq $newest -or $at -gt $newest) { $newest = $at }',
+  '      }',
+  '    }',
+  '    if ($null -ne $newest) { [void]$out.Append("T`t$($one[0])`t$([long][Math]::Floor(($newest - $epoch).TotalSeconds))`n") }',
+  '  }',
+  '  [Console]::Out.Write($out.ToString())',
   '} catch {',
   '  [Console]::Error.WriteLine($_.Exception.Message)',
   '  exit 1',

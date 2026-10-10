@@ -55,6 +55,23 @@ export const PROBE_STDOUT = [
   '',
 ].join('\n')
 
+/**
+ * What PROBE_PS1 prints on Windows for the same registry: the creation time in epoch ms in both start columns of a
+ * pid whose sessions file matches (4101), the file's own startedAt where it does not (4106), none without a file
+ * (4102); a claude.exe whose sessions file is nowhere has no cwd and no config dir (4999).
+ */
+export const WIN_PROBE_STDOUT = [
+  tab('P', 4101, 'claude', 125, 'C:\\work\\a', 'C:/fixture/lic/a', '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus --dangerously-skip-permissions'),
+  tab('P', 4999, 'claude', 2400, '', '', 'claude.exe --print --model sonnet'),
+  tab('P', 3000, 'claude', 90000, 'C:\\orch', 'C:\\Users\\u\\.claude', 'claude.exe --continue'),
+  tab('A', 4101, 'claude', 1789999875123, 1789999875123, SID_ALIVE),
+  tab('A', 4102, 'claude', 1789990000000, '', ''),
+  tab('A', 4106, 'claude', 1789999990000, 1789990000000, SID_REUSED),
+  tab('T', SID_ALIVE, NOW_SEC - 30),
+  tab('T', SID_DEAD, NOW_SEC - 600),
+  '',
+].join('\n')
+
 export const RESULTS = {
   clean: JSON.stringify({
     type: 'result',

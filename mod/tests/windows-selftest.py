@@ -89,5 +89,81 @@ try:
     code, out, err = run('files.ps1', files, 'nonsense')
     assert code == 1 and 'unknown operation' in err, (code, err)
     print('windows-files-selftest: ok')
+
+    # --- PROBE_PS1, with its process name swapped to powershell.exe: a sleeping powershell.exe of this test's own
+    # plays the worker, and fake sessions files under the scratch directory play the engine's. This verifies the
+    # script's own arithmetic and output only, never a real claude.exe or a real sessions file.
+    probe = constant('PROBE_PS1')
+    assert probe.count("$name = 'claude.exe'") == 1
+    probe = probe.replace("$name = 'claude.exe'", "$name = 'powershell.exe'")
+    to_ms = '[long][Math]::Floor(($t.ToUniversalTime() - (New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc))).TotalMilliseconds)'
+
+    def ps(command):
+        r = subprocess.run([PS, '-NoProfile', '-NonInteractive', '-Command', command], capture_output=True, text=True, timeout=60, cwd=work)
+        assert r.returncode == 0, r.stderr
+        return r.stdout.strip()
+
+    def sleeper(seconds):
+        marker = os.path.join(work, f'pid-{seconds}.txt')
+        proc = subprocess.Popen([PS, '-NoProfile', '-NonInteractive', '-Command', f"$PID | Set-Content -Encoding ascii '{to_win(marker)}'; Start-Sleep {seconds}"], cwd=work)
+        for _ in range(300):
+            if os.path.exists(marker) and open(marker).read().strip():
+                return proc, int(open(marker).read().strip())
+            subprocess.run(['sleep', '0.1'])
+        raise AssertionError('the sleeper did not start')
+
+    live, pid = sleeper(120)
+    gone, gone_pid = sleeper(0)
+    gone.wait(timeout=60)
+    try:
+        created = int(ps(f'$t = (Get-CimInstance Win32_Process -Filter "ProcessId={pid}").CreationDate; {to_ms}'))
+        sid, sid2 = '11111111-2222-4333-8444-555555555555', '99999999-2222-4333-8444-555555555555'
+
+        def session_dir(name, **fields):
+            cfg = os.path.join(work, name)
+            os.makedirs(os.path.join(cfg, 'sessions'), exist_ok=True)
+            json.dump(fields, open(os.path.join(cfg, 'sessions', f'{pid}.json'), 'w'))
+            return to_win(cfg)
+
+        good = session_dir('cfg good', pid=pid, sessionId=sid, cwd='C:\\fake\\cwd', startedAt=created + 1500)
+        os.makedirs(os.path.join(work, 'cfg good', 'projects', 'C--fake-cwd'))
+        transcript = os.path.join(work, 'cfg good', 'projects', 'C--fake-cwd', f'{sid}.jsonl')
+        open(transcript, 'w').write('{}\n')
+        os.utime(transcript, (1_700_000_000, 1_700_000_000))
+        os.makedirs(os.path.join(work, 'cfg good', 'projects', 'other'))
+        older = os.path.join(work, 'cfg good', 'projects', 'other', f'{sid}.jsonl')
+        open(older, 'w').write('{}\n')
+        os.utime(older, (1_600_000_000, 1_600_000_000))
+        stale = session_dir('cfg stale', pid=pid, sessionId=sid2, cwd='C:\\old', startedAt=created - 3_600_000)
+        late = session_dir('cfg late', pid=pid, sessionId=sid2, cwd='C:\\late', startedAt=created + 600_001)
+        other = session_dir('cfg other pid', pid=pid + 1, sessionId=sid2, cwd='C:\\x', startedAt=created + 10)
+        empty = to_win(os.path.join(work, 'cfg empty'))
+
+        def lines(*args):
+            code, out, err = run('probe.ps1', probe, *args)
+            assert code == 0 and err == '', (code, err)
+            assert '\r' not in out
+            return [line.split('\t') for line in out.splitlines()]
+
+        started = __import__('time').time()
+        got = lines(f'pid:{pid}|{good}', f't:{sid}|{good}', f'c:{stale}', f'pid:{gone_pid}|{good}')
+        took = __import__('time').time() - started
+        mine = [cols for cols in got if cols[0] == 'P' and cols[1] == str(pid)]
+        assert len(mine) == 1 and mine[0][2] == 'claude' and mine[0][4] == 'C:\\fake\\cwd' and mine[0][5] == good, mine
+        assert int(mine[0][3]) >= 0 and 'Start-Sleep 120' in mine[0][6], mine
+        assert [cols for cols in got if cols[0] == 'A'] == [['A', str(pid), 'powershell', str(created), str(created), sid]], got
+        assert [cols for cols in got if cols[0] == 'T'] == [['T', sid, '1700000000']], got
+        # a sessions file from before the process (a reused pid), one written too long after it, one naming another
+        # pid, and none at all: the start columns differ or the file's is empty, so the pid is not alive
+        for cfg, want in ((stale, str(created - 3_600_000)), (late, str(created + 600_001)), (other, str(created + 10)), (empty, '')):
+            got = lines(f'pid:{pid}|{cfg}', f'c:{cfg}')
+            assert [cols for cols in got if cols[0] == 'A'] == [['A', str(pid), 'powershell', str(created), want, sid2 if cfg in (stale, late, other) else '']], (cfg, got)
+            assert [cols[4:6] for cols in got if cols[0] == 'P' and cols[1] == str(pid)] == [['', '']], (cfg, got)
+        # an empty registry: P lines only; a config dir of '~' is never searched
+        assert all(cols[0] == 'P' for cols in lines('pid:1|~', 't:x|~') if cols[1] != '1')
+        print(f'windows-probe-selftest: ok (verifies our arithmetic only; one probe took {took:.2f} s)')
+    finally:
+        subprocess.run([PS, '-NoProfile', '-NonInteractive', '-Command', f'Stop-Process -Id {pid} -ErrorAction SilentlyContinue'], capture_output=True, timeout=60, cwd=work)
+        live.wait(timeout=60)
 finally:
     shutil.rmtree(work)

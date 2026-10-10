@@ -8,7 +8,9 @@ import { backupName, dirOf, freshText, localDate, tmpPath } from './store'
 import {
   FILES_PS1,
   LAUNCH_SCHEMA,
+  PROBE_PS1,
   PROBE_SCRIPT,
+  findNewWindowsWorker,
   isWinAbsolute,
   tailLines,
   winPath,
@@ -285,7 +287,16 @@ async function ensureHelperFiles($: EngineInterface): Promise<void> {
   else await $.process.run(['mkdir', '-p', orchPath('backups'), await runsPath($)], { timeoutMs: 5_000 })
 }
 
-async function probe($: EngineInterface, entries: readonly SessionEntry[]): Promise<ProcFacts> {
+/**
+ * The process facts: PROBE_SCRIPT under sh on Linux; on Windows PROBE_PS1, which also looks for sessions files under
+ * `configDirs`. A Windows probe that fails is an error: read as no process at all it would mark every worker dead.
+ */
+async function probe($: EngineInterface, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
+  if (await isWindows($)) {
+    const ran = await runScript($, 'probe.ps1', PROBE_PS1, [...probeArgs(entries), ...configDirs.map(dir => `c:${dir}`)], 20_000)
+    if (ran.exitCode !== 0) throw new Error(`the process probe failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 160)}`)
+    return parseProcFacts(ran.stdout.replace(/\r/g, ''))
+  }
   const ran = await $.process.run(['sh', '-c', PROBE_SCRIPT, 'session-probe', ...probeArgs(entries)], {
     timeoutMs: 10_000,
   })
@@ -557,6 +568,8 @@ async function spawnWorker(
   const files = { result: `${base}.json`, err: `${base}.err` }
   const command = buildLaunchArgv(args, verdict, files.result, files.err)[2] ?? ''
   const known = new Set(before.claude.map(one => one.pid))
+  const isWin = await isWindows($)
+  const launchedAt = await $.clock.now()
   // The engine's own background task: its exit notification reaches the session.
   await $.tool.call({
     tool: 'Bash',
@@ -568,7 +581,9 @@ async function spawnWorker(
   let worker: ReturnType<typeof findNewWorker>
   for (let attempt = 0; attempt < 15 && worker === undefined; attempt++) {
     await $.process.run(['sleep', '2'], { timeoutMs: 5_000 })
-    worker = findNewWorker(await probe($, entries), { dir: args.dir, configDir: verdict.configDir, model: args.model }, known)
+    const facts = await probe($, entries, [verdict.configDir])
+    const want = { dir: args.dir, configDir: verdict.configDir, model: args.model }
+    worker = isWin ? findNewWindowsWorker(facts, want, known, ((await $.clock.now()) - launchedAt) / 1000) : findNewWorker(facts, want, known)
   }
   if (worker === undefined) {
     return { result: `Started in the background but no claude process appeared within 30 s; check ${files.err}. Not registered.` }
