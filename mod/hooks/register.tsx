@@ -538,7 +538,8 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   if (harvested.has(key)) return
   if (typeof entry.result_file !== 'string') return
   const resultText = await $.fs.read(entry.result_file).catch(() => '')
-  const outcome: SessionOutcome = classifyResult(resultText, taskStatus)
+  const errText = typeof entry.err_file === 'string' ? await $.fs.read(entry.err_file).catch(() => '') : ''
+  const outcome: SessionOutcome = classifyResult(resultText, taskStatus, errText)
   harvested.add(key)
   trace($, 'completion', { session_id: sid, pid: entry.pid, outcome: outcome.kind, isWritten: config.completionWrites })
   const label = `${entry.title ?? sid.slice(0, 8)}: ${outcome.summary}`

@@ -75,6 +75,7 @@ import {
   REGISTRY,
   REGISTRY_TEXT,
   RESULTS,
+  REAL_RESULTS,
   SID_ALIVE,
   SID_DEAD,
   SID_DONE,
@@ -193,6 +194,37 @@ describe('completion classifier', () => {
     expect(classifyResult(RESULTS.clean, 'killed').kind).toBe('killed')
   })
   test('other is_error is error', () => expect(classifyResult(RESULTS.error).kind).toBe('error'))
+  test('a normal report that quotes the login message is clean (the two reports once labelled login)', () => {
+    expect(classifyResult(REAL_RESULTS.designReport)).toMatchObject({ kind: 'clean', costUsd: 9.5 })
+    expect(classifyResult(REAL_RESULTS.probeReport).kind).toBe('clean')
+    expect(classifyResult(REAL_RESULTS.designReport, 'completed', '').kind).toBe('clean')
+  })
+  test('a normal report that quotes limit or memory messages is clean too', () => {
+    const report = "Checked the classifier: a run ends with \"You've hit your session limit · resets 3pm\" or \"Invalid API key · Please run /login\"; the kernel log had no out of memory or oom-kill line. All 12 tests pass."
+    expect(classifyResult(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: report })).kind).toBe('clean')
+  })
+  test('genuine engine errors: limit and login from the error result text or the API status', () => {
+    expect(classifyResult(REAL_RESULTS.limitError).summary).toBe('limit: rate limit hit')
+    expect(classifyResult(REAL_RESULTS.limitStatus).kind).toBe('limit')
+    expect(classifyResult(REAL_RESULTS.loginRefreshFailed).summary).toBe('login: licence needs a re-login')
+    expect(classifyResult(REAL_RESULTS.loginExpired).kind).toBe('login')
+    expect(classifyResult(REAL_RESULTS.loginStatus).kind).toBe('login')
+  })
+  test('the error file is a reliable signal: login, limit or memory there wins over a normal result', () => {
+    expect(classifyResult('', undefined, 'Invalid API key · Please run /login\n').kind).toBe('login')
+    expect(classifyResult(REAL_RESULTS.designReport, undefined, "Error: You've hit your weekly limit\n").kind).toBe('limit')
+    expect(classifyResult('', 'failed', 'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory\n').summary).toBe('killed: killed (memory)')
+    // An error file with other text changes nothing.
+    expect(classifyResult(REAL_RESULTS.designReport, undefined, 'warning: something unrelated\n').kind).toBe('clean')
+  })
+  test('a subtype other than success is an error, with the subtype when there is no text', () => {
+    expect(classifyResult(REAL_RESULTS.maxTurns).summary).toBe('error: error_max_turns')
+  })
+  test('the old matches on a failed run still hold: the old fixtures keep their labels', () => {
+    expect(classifyResult(RESULTS.limit).kind).toBe('limit')
+    expect(classifyResult(RESULTS.login).kind).toBe('login')
+    expect(classifyResult(RESULTS.oom).kind).toBe('killed')
+  })
   test('every outcome has a toast title, and the toast is the title, a separator, then the message', () => {
     const titles = (['clean', 'limit', 'login', 'killed', 'error', 'chatter'] as const).map(kind => TOAST_TITLES[kind])
     expect(titles).toEqual(['Session finished', 'Usage limit reached', 'Login needed', 'Session killed', 'Session failed', 'Session ended without a report'])

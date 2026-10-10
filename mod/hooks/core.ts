@@ -313,12 +313,21 @@ export function toastText(title: string, message: string): string {
   return `${title} \u00B7 ${message}`
 }
 
+/** An engine message that a usage limit stopped the run. */
+const LIMIT_TEXT = /hit your (session |usage |weekly )?limit|usage limit reached/i
+/** An engine message that the licence's login is gone: expired or refused credentials. */
+const LOGIN_TEXT = /please run \/login|invalid api key|oauth (token|session) (has )?expired|failed to authenticate|not logged in|authentication_failed/i
+/** A message that the process was killed for memory. */
+const MEMORY_TEXT = /low on memory|out of memory|oom-?kill/i
+
 /**
- * Classifies a finished worker from its `--output-format json` result file's
- * text (may be empty or truncated) and, when known, the background task's
- * status (`completed`, `failed`, `killed`).
+ * Classifies a finished worker from its `--output-format json` result file's text (may be empty or truncated), the
+ * background task's status when known (`completed`, `failed`, `killed`) and its error file's text when there is one.
+ * `limit`, `login` and a memory kill come only from reliable signals: the error file, a result that is not JSON, the
+ * result text of a run that failed (`is_error` true or a subtype other than `success`) and the API error status (429,
+ * 401). The words of a normal report never count: a report may quote those messages.
  */
-export function classifyResult(resultText: string, taskStatus?: string): SessionOutcome {
+export function classifyResult(resultText: string, taskStatus?: string, errText = ''): SessionOutcome {
   let parsed: Record<string, unknown> | undefined
   try {
     const value: unknown = JSON.parse(resultText)
@@ -330,6 +339,9 @@ export function classifyResult(resultText: string, taskStatus?: string): Session
   }
   const text = typeof parsed?.result === 'string' ? parsed.result : ''
   const isError = parsed?.is_error === true
+  const subtype = typeof parsed?.subtype === 'string' ? parsed.subtype : undefined
+  const isFailed = isError || (subtype !== undefined && subtype !== 'success')
+  const apiStatus = typeof parsed?.api_error_status === 'number' ? parsed.api_error_status : undefined
   const costUsd = typeof parsed?.total_cost_usd === 'number' ? parsed.total_cost_usd : undefined
   const sessionId = typeof parsed?.session_id === 'string' ? parsed.session_id : undefined
   const make = (kind: SessionOutcomeKind, why: string): SessionOutcome => ({
@@ -338,18 +350,17 @@ export function classifyResult(resultText: string, taskStatus?: string): Session
     ...(costUsd === undefined ? {} : { costUsd }),
     ...(sessionId === undefined ? {} : { sessionId }),
   })
-  const haystack = `${text}\n${resultText}`
-  if (/hit your (session |usage |weekly )?limit/i.test(haystack)) return make('limit', 'rate limit hit')
-  if (/please run \/login|invalid api key|oauth token (has )?expired/i.test(haystack)) {
-    return make('login', 'licence needs a re-login')
-  }
-  if (taskStatus === 'killed' || /low on memory|out of memory|oom-?kill/i.test(haystack)) {
+  const signal = [errText, parsed === undefined ? resultText : '', isFailed ? text : ''].join('\n')
+  if (apiStatus === 429 || LIMIT_TEXT.test(signal)) return make('limit', 'rate limit hit')
+  if (apiStatus === 401 || LOGIN_TEXT.test(signal)) return make('login', 'licence needs a re-login')
+  if (taskStatus === 'killed' || MEMORY_TEXT.test(signal)) {
     return make('killed', taskStatus === 'killed' ? 'background task killed' : 'killed (memory)')
   }
   if (parsed === undefined) {
     return make('killed', resultText.trim() === '' ? 'no result written' : 'result not JSON (cut off?)')
   }
   if (isError) return make('error', firstLine(text) || 'is_error with no text')
+  if (isFailed) return make('error', firstLine(text) || subtype || 'failed with no text')
   if (text.trim() === '') return make('chatter', 'empty result')
   if (text.trim().length < 40) {
     // A short answer is chatter only after real work: a long run, many turns or a real cost.

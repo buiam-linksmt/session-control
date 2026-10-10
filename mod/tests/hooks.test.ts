@@ -16,6 +16,7 @@ import {
   REGISTRY_PATH,
   REGISTRY_TEXT,
   RESULTS,
+  REAL_RESULTS,
   SID_ALIVE,
   SID_DEAD,
   SID_DONE,
@@ -121,6 +122,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
     const result = /^\/fixture\/results\/(\w+)\.json$/.exec(path)?.[1]
     if (result !== undefined && result in RESULTS) return { value: RESULTS[result as keyof typeof RESULTS] }
+    if (result !== undefined && result in REAL_RESULTS) return { value: REAL_RESULTS[result as keyof typeof REAL_RESULTS] }
+    if (path === '/fixture/results/login.err') return { value: 'Error: Invalid API key · Please run /login\n' }
     if (['/fixture/home/.claude/sessions/7001.json', '/fixture/lic/own/sessions/7001.json'].includes(path) && !isWin) return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123', ...inboxFields() }) }
     if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: WORKER.sid, procStart: '123', ...inboxFields() }) }
     if (seen(e.path) === 'C:/fixture/home/.claude/sessions/7001.json') return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
@@ -431,6 +434,21 @@ describe('completion', () => {
       expect(w.toasts).toEqual([`${title} \u00B7 limited worker: ${summary}`])
     })
   }
+
+  test('a clean report quoting the login message is clean; the err file is read and a login there is a login', { options: OPTIONS }, async ($, on) => {
+    const quoting = REGISTRY_TEXT.replace('/fixture/results/limit.json', '/fixture/results/designReport.json')
+    const w = world(on, '/fixture/lic/a\n', true, quoting)
+    await $.session.start(start(ORCH_DIR))
+    expect(w.toasts[0]).toStartWith('Session finished · limited worker: clean: ')
+    expect(w.reads).not.toContain('/fixture/results/login.err')
+  })
+  test('the err file of the entry decides a login', { options: OPTIONS }, async ($, on) => {
+    const withErr = REGISTRY_TEXT.replace('"result_file": "/fixture/results/limit.json"', '"result_file": "/fixture/results/designReport.json",\n    "err_file": "/fixture/results/login.err"')
+    const w = world(on, '/fixture/lic/a\n', true, withErr)
+    await $.session.start(start(ORCH_DIR))
+    expect(w.reads).toContain('/fixture/results/login.err')
+    expect(w.toasts).toEqual(['Login needed · limited worker: login: licence needs a re-login'])
+  })
 
   test('with completionWrites off nothing is written, the toast still shows', { options: { ...OPTIONS, completionWrites: false } }, async ($, on) => {
     const w = world(on)

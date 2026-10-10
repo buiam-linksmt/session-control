@@ -96,6 +96,67 @@ export const RESULTS = {
   oom: 'Killed: process was low on memory',
 }
 
+/**
+ * Sanitized snippets of real worker results. The two reports finished fine and were labelled login, because they
+ * quote the engine's login message; the errors are the engine's own messages as a -p run writes them (texts taken
+ * from transcripts: a rate_limit and an authentication_failed API error).
+ */
+const DESIGN_REPORT = [
+  '## Design: launch_worker with an inbox',
+  '',
+  '| 9 | Outcome labels (`clean`, `limit`, `login`, `killed`, `error`, `chatter`) | core.ts:300-341 | From state plus the transcript\'s last assistant entry:<br>' +
+    '• `rate_limit` error → limit.<br>• `authentication_failed` error ("Login expired · Please run /login") → login, no recovery (**V**, same transcript).<br>' +
+    '• `failed` → error.<br>• `stopped` without us → killed. |',
+  '',
+  '## Final git reads (/work/session_control, run last)',
+  '`git status -sb` (exit 0):',
+  '```',
+  '## main...origin/main',
+  ' M CLAUDE.md',
+  '```',
+  'The `CLAUDE.md` change is not mine; the file changed on disk during the run and I edited nothing.',
+  '',
+  '`git log --oneline @{u}..HEAD` (exit 0): no output.',
+  '',
+  '## Files written outside the repo',
+  '- **Created and deleted:** `/tmp/bgdesign-test`.',
+].join('\n')
+
+const PROBE_REPORT = [
+  '## 3. Parser cases',
+  '',
+  'Failure cases:',
+  '- **`auth`:** the logged-out cost-summary text, and `Not logged in · Please run /login`.',
+  '- **`error`:** subscription header with no limit lines, bad `%`, unknown zone, `25pm`, `Feb 30`, a bad weekly reset, unknown text, `is_error` with any text.',
+  '',
+  '## 5. Session_control git (run last, read-only)',
+  '',
+  '```',
+  '$ git status -sb        → exit 0',
+  '## feature/panel-expand-sections...origin/feature/panel-expand-sections',
+  ' M CLAUDE.md',
+  '$ git log --oneline @{u}..HEAD   → exit 0 (no output)',
+  '```',
+  '',
+  'The modified `CLAUDE.md` there was not changed by me; I wrote nothing in that repo.',
+].join('\n')
+
+const run = (fields: Record<string, unknown>) =>
+  JSON.stringify({ type: 'result', subtype: 'success', is_error: false, api_error_status: null, num_turns: 30, duration_ms: 600_000, total_cost_usd: 3.2, ...fields })
+
+export const REAL_RESULTS = {
+  designReport: run({ num_turns: 2, duration_ms: 65_282, total_cost_usd: 9.5, result: DESIGN_REPORT }),
+  probeReport: run({ num_turns: 58, duration_ms: 673_295, result: PROBE_REPORT }),
+  limitError: run({ is_error: true, terminal_reason: 'api_error', num_turns: 4, result: "You've hit your session limit · resets 11:30am (UTC)" }),
+  limitStatus: run({ is_error: true, api_error_status: 429, terminal_reason: 'api_error', result: 'API Error: Request rejected (429)' }),
+  loginRefreshFailed: run({ is_error: true, terminal_reason: 'api_error', num_turns: 1, result: 'Failed to authenticate: OAuth session expired and could not be refreshed' }),
+  loginExpired: run({ is_error: true, terminal_reason: 'api_error', num_turns: 1, result: 'Login expired · Please run /login' }),
+  loginStatus: run({ is_error: true, api_error_status: 401, terminal_reason: 'api_error', result: 'API Error: 401 authentication error' }),
+  maxTurns: run({ subtype: 'error_max_turns', num_turns: 50 }),
+}
+
+export const REPORT_TEXTS = { design: DESIGN_REPORT, probe: PROBE_REPORT }
+
 export const TASK_NOTIFICATION_KILLED =
   '<task-notification>\n<task-id>b7x1</task-id>\n<output-file>/tmp/tasks/b7x1.output</output-file>\n<status>killed</status>\n<summary>Background command was killed</summary>\n</task-notification>'
 
