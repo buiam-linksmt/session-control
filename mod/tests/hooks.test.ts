@@ -58,7 +58,7 @@ const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
 // The CLAUDE_CONFIG_DIR the Linux probe reads from the new worker's environment ('' when it has none).
-const WORKER = { linuxConfigDir: '/fixture/lic/a' }
+const WORKER = { linuxConfigDir: '/fixture/lic/a', isBashMissing: false }
 // Knobs of the Windows fixture: a failing move or probe; the config dir the probe finds the new worker's sessions
 // file in, or none (unplaced).
 const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false }
@@ -204,6 +204,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
   })
   on('tool.call', { tool: 'Bash' }, ($, e) => {
+    if (WORKER.isBashMissing) throw new Error('no tool named "Bash" in this session')
     w.bash.push(e as never)
     w.spawned = true
     return { result: 'Command running in background with ID: fixture' }
@@ -479,6 +480,23 @@ describe('launch_worker', () => {
       expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: '/fixture/lic/own' })
     } finally {
       WORKER.linuxConfigDir = '/fixture/lic/a'
+    }
+  })
+
+  test('a Bash tool the session does not offer is a clear refusal, and nothing is registered', { options: OPTIONS }, async ($, on) => {
+    WORKER.isBashMissing = true
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.deny)).toStartWith('session-control: the worker could not be started through the Bash tool (')
+      // The engine's reason in the brackets (the kit's own wording for a failed call).
+      expect(String(out.deny)).toMatch(/Bash tool \(.+\); nothing/)
+      expect(String(out.deny)).toEndWith('nothing was launched.')
+      expect(w.bash.length).toBe(0)
+      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+    } finally {
+      WORKER.isBashMissing = false
     }
   })
 
@@ -935,6 +953,19 @@ describe('platform', () => {
       expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: 'C:/fixture/lic/a' })
     } finally {
       WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
+    }
+  })
+
+  test('Windows: without a Bash tool (Git Bash not found) the refusal says how to give the engine Git Bash', { options: NO_PICKER }, async ($, on) => {
+    WORKER.isBashMissing = true
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+      expect(String(out.deny)).toContain('nothing was launched. On Windows Claude Code offers the Bash tool only when it finds Git Bash: start the orchestrator with CLAUDE_CODE_GIT_BASH_PATH set to Git\\bin\\bash.exe.')
+      expect(w.bash.length).toBe(0)
+    } finally {
+      WORKER.isBashMissing = false
     }
   })
 

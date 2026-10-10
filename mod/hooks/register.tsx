@@ -835,13 +835,21 @@ async function spawnWorker(
   const launchedAt = await $.clock.now()
   trace($, 'worker.start', { configDir: verdict.configDir, isConfigDirSet: verdict.isConfigInherited !== true, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
   // The engine's own background task: its exit notification reaches the session.
-  await $.tool.call({
-    tool: 'Bash',
-    command,
-    description: `session-control worker: ${args.title}`.slice(0, 100),
-    run_in_background: true,
-    timeout: launchTimeoutMs(args),
-  })
+  try {
+    await $.tool.call({
+      tool: 'Bash',
+      command,
+      description: `session-control worker: ${args.title}`.slice(0, 100),
+      run_in_background: true,
+      timeout: launchTimeoutMs(args),
+    })
+  } catch (err) {
+    // On Windows the engine offers the Bash tool only when it finds Git Bash, which it may miss for a per-user Git
+    // whose mingw64 git.exe comes first on the PATH (a session started from Git Bash).
+    const hint = isWin ? ' On Windows Claude Code offers the Bash tool only when it finds Git Bash: start the orchestrator with CLAUDE_CODE_GIT_BASH_PATH set to Git\\bin\\bash.exe.' : ''
+    trace($, 'error', { where: 'worker.start', ...messageFields(errorText(err)) })
+    return { deny: `${PLUGIN}: the worker could not be started through the Bash tool (${errorText(err).slice(0, 160)}); nothing was launched.${hint}` }
+  }
   let worker: ReturnType<typeof findNewWorker>
   for (let attempt = 0; attempt < 15 && worker === undefined; attempt++) {
     await pause($, 2)

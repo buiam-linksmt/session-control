@@ -21,6 +21,13 @@ native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else pri
 msys() { native "$1" | sed -E 's#^([A-Za-z]):/#/\1/#'; }
 
 command -v claude >/dev/null 2>&1 || { fail 'claude is on the PATH'; exit 1; }
+# Git Bash: the Windows claude.exe offers its Bash tool only when it finds Git Bash, and started from Git Bash (its
+# mingw64 git.exe first on the PATH) it can miss a per-user Git: point it at this Git's bin\bash.exe.
+if command -v cygpath >/dev/null 2>&1 && [ -z "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ -f "$(cygpath -u "$(cygpath -w /)")bin/bash.exe" ]; then
+  CLAUDE_CODE_GIT_BASH_PATH="$(cygpath -w /)bin\\bash.exe"
+  export CLAUDE_CODE_GIT_BASH_PATH
+  info "CLAUDE_CODE_GIT_BASH_PATH set to $CLAUDE_CODE_GIT_BASH_PATH"
+fi
 S=$(mktemp -d "${TMPDIR:-/tmp}/session-control-e2e.XXXXXX") || { fail 'scratch directory made'; exit 1; }
 S=$(cd "$S" && pwd -P)
 ORCH=$S/orch
@@ -94,7 +101,7 @@ while kill -0 "$OPID" 2>/dev/null && [ "$elapsed" -lt 480 ]; do
     [ -n "$SEEN_PID" ] && WPID=$SEEN_PID
   fi
   for _q in 1 2 3 4; do
-    [ -z "$WLINE" ] && [ -d /proc/self ] && catch_worker
+    [ -z "$WLINE" ] && [ -d /proc/self ] && ! command -v cygpath >/dev/null 2>&1 && catch_worker
     sleep 0.25
   done
   elapsed=$((elapsed + 1))
@@ -219,7 +226,7 @@ else
 fi
 
 # ---------------------------------------------------------------- (c) the prompt never in the trace; clean up
-if [ -s "$TRACE" ] && ! grep -F -q -i -- "$PROMPT_PHRASE" "$TRACE" && ! grep -F -q -- 'nothing to wait for in the foreground' "$TRACE"; then pass 'trace: no line contains the prompt text'; else fail 'trace: no line contains the prompt text'; fi
+if [ -s "$TRACE" ] && ! grep -F -q -- "$PROMPT_PHRASE" "$TRACE" && ! grep -F -q -- 'nothing to wait for in the foreground' "$TRACE"; then pass 'trace: no line contains the prompt text'; else fail 'trace: no line contains the prompt text'; fi
 # A process ended by the tmux server's exit may take a moment to go.
 _l=0
 while :; do
