@@ -190,7 +190,7 @@ describe('completion classifier', () => {
     const titles = (['clean', 'limit', 'login', 'killed', 'error', 'chatter'] as const).map(kind => TOAST_TITLES[kind])
     expect(titles).toEqual(['Session finished', 'Usage limit reached', 'Login needed', 'Session killed', 'Session failed', 'Session ended without a report'])
     expect([TOAST_TITLES.tracking, TOAST_TITLES.directWrite, TOAST_TITLES.trace]).toEqual(['Tracking problem', 'Write not atomic', 'Debug trace failed'])
-    expect(toastText(TOAST_TITLES[classifyResult(RESULTS.oom).kind], 'session-control: w: killed (memory)')).toBe('Session killed \u00B7 session-control: w: killed (memory)')
+    expect(toastText(TOAST_TITLES[classifyResult(RESULTS.oom).kind], 'w: killed (memory)')).toBe('Session killed \u00B7 w: killed (memory)')
   })
   test('task notification parse', () => {
     expect(parseTaskNotification(TASK_NOTIFICATION_KILLED)).toEqual({
