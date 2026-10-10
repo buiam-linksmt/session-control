@@ -120,13 +120,41 @@ claude plugin test ./mod
 python3 -I mod/tests/probe-selftest.py
 ```
 
-`claude plugin test` runs the `*.test.ts` files in `mod/tests/`. `probe-selftest.py` extracts the process probe from `mod/hooks/core.ts`, checks that it parses under `sh -n` and runs it against a fixture configuration directory.
+`claude plugin test` runs the `*.test.ts` files in `mod/tests/`. `probe-selftest.py` extracts the process probe from `mod/hooks/host-posix.ts`, checks that it parses under `sh -n` and runs it against a fixture configuration directory.
 
 To see what the mod does, set `SESSION_CONTROL_DEBUG=1` in the environment (or the `debug` option). A session where the board is on (the orchestrator directory, or after `/session-control`) then appends one JSON line per event to `trace.log` in the runs directory: commands run (argv with the mod's scripts by name, exit code, duration, stderr size), file writes (path and size), guard verdicts and caught errors (a kind and a message whose quoted text and echoed output become `…`). It never logs credentials, file contents, command output, prompt or transcript text, the environment, a worker's title or the licence picker's command (only whether one is set, and at a launch its executable's name and argument count); text that looks like a token becomes `[redacted]`. Any other session, a worker included, writes nothing. The trace is rotated at about 2 MiB (sessions share it), three files kept.
 
 `sh mod/tests/e2e-smoke.sh` smoke-tests the real `claude` from a scratch directory it removes afterwards: a haiku orchestrator (capped at `--max-budget-usd 0.25`) launches one haiku worker (its launch line with `-n` and the inbox settings, its registry entry with `name` and `socket_path`, and the socket while the worker lives are checked) and, where tmux exists, an interactive session opens the panel; it prints one line per check. It runs under the default configuration (`~/.claude`, `~/.claude.json`): the transcripts, the session files and the trust entry for its scratch folder stay there, and it spends a few cents of the default licence's quota.
 
 After a change to the mod, run the validation and the tests before relying on it.
+
+## Host adapters
+
+Everything the mod does that differs per operating system, or needs a process, goes through one interface, `Host` in `mod/hooks/host.ts`, with two adapters: `host-posix.ts` (Linux and WSL: `sh`, `mv`, `rm`, `tail`, `mkdir`, `sleep`, `/proc`) and `host-windows.ts` (native Windows: Windows PowerShell 5.1 scripts run with `-File`, paths in the `C:/...` form). `selectHost` in `host.ts` is the one platform choice: `OS=Windows_NT` with a drive-letter `USERPROFILE` takes the Windows adapter, anything else the Linux one. `register.tsx` calls it once per load and never branches on the platform itself. Each adapter's scripts sit in its own file; operations both do alike with `$.fs` and plain TypeScript are in `host-shared.ts`.
+
+An adapter never holds `$` (the validator follows `$` only into functions of `register.tsx`): it gets a `HostPort`, the engine facilities `register.tsx` builds over the hook's `$` (`run` and `write`, traced as before; `read`, `exists`, `stat`, `now`, `sleep`, `env` for `HOME`, `USERPROFILE` and `SystemRoot`; the runs directory; `traceError`; `noteDirectWrite`, the once-per-load toast).
+
+| Member | What it does |
+|---|---|
+| `platform` | `linux` or `windows`, as the trace names it |
+| `homeDir` | the home directory in the adapter's path form |
+| `nativePath` | a path in the form the mod stores (unchanged on Linux) |
+| `sessionDir`, `isSameDir` | the session's directory and its comparison with the orchestrator directory |
+| `transcriptPath` | where a worker's transcript lives |
+| `defaultConfigDir`, `isDefaultConfigDir` | the config directory a launch without a picker inherits, and the test for it |
+| `probe` | claude processes, liveness proof by pid and start time, transcript ages (sessions files under the given config dirs on Windows) |
+| `findNewWorker`, `workerConfigDir` | the new worker among the probe's facts, and the config directory the probe shows for it |
+| `pause` | the wait between discovery checks |
+| `launchArgs`, `launchChecks`, `launchFacts` | the launch's paths in stored form, the prompt-file and dir checks, the platform's facts for the launch guard |
+| `pickerArgv` | the licence picker's argv as run, or why it is refused |
+| `launchTool`, `launchCommand`, `launchToolHint` | the tool a worker starts through (`Bash`), its command text, the hint when the tool is missing |
+| `createFile`, `prepareHelperDirs`, `prepareRunsDir`, `makeDir` | a missing file with its directory, and the directories a fresh environment and a launch need |
+| `writeAtomic`, `renameOver`, `removeFile` | the registry write through a temp file and a rename, the rename, the removal |
+| `append` | lines added to a log without reading it |
+| `tail` | the last 600 lines of a transcript, each cut to 20000 characters |
+| `rotate` | the trace's rotation |
+
+`mod/tests/host.test.ts` runs one contract against both adapters and checks the selection.
 
 ## Layout
 
@@ -140,6 +168,10 @@ mod/
   hooks/hooks.json              names the hooks module
   hooks/register.tsx            hooks, tools, panel
   hooks/core.ts                 pure functions: registry, process facts, launch guard, report check
+  hooks/host.ts                 host interface and selectHost, the one platform choice
+  hooks/host-shared.ts          host operations both adapters do alike
+  hooks/host-posix.ts           Linux and WSL adapter and its sh scripts
+  hooks/host-windows.ts         native Windows adapter and its PowerShell scripts
   hooks/bookkeeping.ts          edits of open points, queue and decisions
   hooks/store.ts                initial helper-file text, dates, paths
   tests/                        *.test.ts, fixtures.ts, probe-selftest.py
