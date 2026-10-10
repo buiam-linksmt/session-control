@@ -66,15 +66,24 @@ const TAIL = [
 
 /** Windows PowerShell as the mod runs it when SystemRoot is unset. */
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+/** The fixture on Windows: C:/fixture/... and C:/work/... are the fixture's /fixture/... and /work/... */
+const fixture = (path: string) => path.replace(/^C:(?=\/(fixture|work)\/)/, '')
+
 /**
- * The fixture on Windows: C:/fixture/... and C:/work/... are the fixture's /fixture/... and /work/... The Linux test
- * kit resolves C:/x as a relative path, so the fs hooks see it after the session's directory.
+ * A path as the plugin gave it to $.fs, from the one the fs hooks see, which the kit resolves first: on a Windows
+ * host /x becomes C:\x; on a Linux host C:/x is a relative path, after the session's directory. The fixture's
+ * Linux paths come back as /x, its Windows ones as C:/x, on either host.
  */
-const fixture = (path: string) => path.replace(/^(.*\/)?C:(?=\/(fixture|work)\/)/, '')
+const given = (path: string, isWin: boolean) => {
+  const slashed = path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
+  return isWin ? slashed : slashed.replace(/^[A-Za-z]:(?=\/)/, '')
+}
 
 function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT, env: Record<string, string> = { HOME }): World {
   const w: World = { bash: [], spawned: false, writes: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
   mock.env(on, env)
+  const isWin = env.OS === 'Windows_NT' && /^[A-Za-z]:[\\/]/.test(env.USERPROFILE ?? '')
+  const seen = (path: string) => given(path, isWin)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => {
     w.registered.push(`/${e.name}`)
@@ -86,7 +95,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     return { value: { tool: `mcp__session-control__${e.name}` } }
   })
   on('fs.read', ($, e) => {
-    const path = fixture(e.path)
+    const path = fixture(seen(e.path))
     if (MISSING.has(path) || LATE.has(path)) throw new Error(`ENOENT ${e.path}`)
     if (UNREADABLE.has(path)) throw new Error(`EFBIG ${e.path}`)
     if (path === REGISTRY_PATH) return { value: registryText }
@@ -96,21 +105,21 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
     if (path === '/fixture/results/limit.json') return { value: RESULTS.limit }
     if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123' }) }
-    if (e.path.endsWith('C:/fixture/home/.claude/sessions/7001.json')) return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
+    if (seen(e.path) === 'C:/fixture/home/.claude/sessions/7001.json') return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
     if (path === '/work/new/big.md') return { value: BIG_PROMPT }
     // The mod's own scripts read back as written.
-    const written = w.writes.filter(one => one.path === e.path && one.path.endsWith('.ps1')).at(-1)
+    const written = w.writes.filter(one => one.path === seen(e.path) && one.path.endsWith('.ps1')).at(-1)
     if (written !== undefined) return { value: written.text }
     throw new Error(`ENOENT ${e.path}`)
   })
   on('fs.write', ($, e) => {
-    w.writes.push({ path: e.path, text: e.text })
+    w.writes.push({ path: seen(e.path), text: e.text })
     return { value: undefined }
   })
   // A path the read above refuses is missing, unless it is one that cannot be read.
-  on('fs.exists', ($, e) => ({ value: UNREADABLE.has(fixture(e.path)) }))
+  on('fs.exists', ($, e) => ({ value: UNREADABLE.has(fixture(seen(e.path))) }))
   on('fs.stat', ($, e) => {
-    const path = fixture(e.path)
+    const path = fixture(seen(e.path))
     const stat = { size: 0, mtimeMs: NOW_MS, isLink: false }
     if (['/work/new/prompt.md', '/work/new/big.md'].includes(path)) return { value: { ...stat, kind: 'file', size: promptFileExists ? 100 : 0 } }
     if (['/work/new', '/work/orch', ORCH_DIR].includes(path)) return { value: { ...stat, kind: 'dir' } }
