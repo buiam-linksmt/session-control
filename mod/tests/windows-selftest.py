@@ -5,7 +5,13 @@ Extracts the Windows PowerShell scripts from hooks/host-windows.ts, writes them 
 side and runs them through powershell.exe, the way the mod runs them on native Windows (absolute path, -File).
 It proves the scripts' own behaviour on this host's PowerShell and file system only: not what the Windows engine
 passes them, nor a real claude.exe. The scratch directory is a new folder under SC_WIN_SCRATCH (a Windows path)
-or under the Windows %TEMP%, and is removed at the end. Without powershell.exe it prints `skipped`."""
+or under the Windows %TEMP%, and is removed at the end. Without powershell.exe it prints `skipped`.
+
+Its last part copies the Node helper (mod/helper/*.mjs) to the scratch directory and runs its file operations with
+the Windows node.exe (SC_WIN_NODE, else C:\\Program Files\\nodejs\\node.exe), as the mod does on native Windows:
+rename over an existing file (also while another process holds it open), append, remove, the tail of a 3 MB UTF-8
+file with CRLF line ends and non-ASCII text, and a batch of 20 operations, with the time per batch. Without that
+node.exe it prints `skipped`."""
 import ast, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -220,5 +226,127 @@ try:
             assert got['cfg'] == to_win(cfg) and got['effort'] == 'high' and got['cwd'] == to_win(proj, '\\'), got
             assert (got['argv'][11] != one['text']) == one['rewritten'], (one, got['argv'][11])
         print(f'windows-launch-selftest: ok ({len(prompts)} prompts through Git Bash)')
+
+    # --- the Node helper's file operations with the Windows node.exe, from a copy of mod/helper in the scratch
+    # directory (a script on the WSL file system would be read over \\wsl$). No claude starts; no PowerShell script
+    # of this test calls a process API.
+    node_win = os.environ.get('SC_WIN_NODE') or 'C:\\Program Files\\nodejs\\node.exe'
+    node = to_wsl(node_win)
+    if not os.path.exists(node):
+        print(f'windows-helper-selftest: skipped (no {node_win})')
+    else:
+        import statistics, time
+        helper_dir = os.path.join(work, 'helper')
+        os.makedirs(helper_dir)
+        for name in os.listdir(os.path.join(HERE, '..', 'helper')):
+            if name.endswith('.mjs'):
+                shutil.copy(os.path.join(HERE, '..', 'helper', name), helper_dir)
+        host = f'{win}/helper/host.mjs'
+
+        def helper(op, request):
+            started = time.perf_counter()
+            r = subprocess.run([node, host, op], input=json.dumps(request).encode('utf-8'), capture_output=True, timeout=120, cwd=work)
+            took = (time.perf_counter() - started) * 1000
+            assert r.stderr == b'', (op, r.stderr[:500])
+            answer = json.loads(r.stdout.decode('utf-8'))
+            assert r.returncode == (0 if answer.get('ok') is True else 1), (op, r.returncode, answer)
+            return answer, took
+
+        version = subprocess.run([node, '--version'], capture_output=True, text=True, timeout=60, cwd=work).stdout.strip()
+        w = lambda name: f'{win}/{name}'
+        # rename over an existing file: replaced in one step, the temp file gone
+        put('reg.json', 'old')
+        put('reg.json.tmp.1', 'new \u00e9')
+        answer, _ = helper('renameOver', {'from': w('reg.json.tmp.1'), 'to': w('reg.json')})
+        assert answer == {'ok': True} and get('reg.json') == 'new \u00e9' and get('reg.json.tmp.1') is None, answer
+        # ... while another process holds the target open without delete sharing (a reader): the helper tries again
+        # until the holder lets go (here after 0.6 s; it gives up after 1 s)
+        put('held.json', 'old')
+        put('held.json.tmp', 'new')
+        holder = subprocess.Popen([PS, '-NoProfile', '-NonInteractive', '-Command',
+                                   f"$f = [System.IO.File]::Open('{to_win(os.path.join(work, 'held.json'), chr(92))}', 'Open', 'Read', 'Read'); "
+                                   f"'held' | Set-Content -Encoding ascii '{to_win(os.path.join(work, 'held.flag'), chr(92))}'; Start-Sleep -Milliseconds 600; $f.Close()"], cwd=work)
+        for _ in range(300):
+            if get('held.flag'):
+                break
+            time.sleep(0.05)
+        assert get('held.flag'), 'the holder did not open the file'
+        answer, held_ms = helper('renameOver', {'from': w('held.json.tmp'), 'to': w('held.json')})
+        holder.wait(timeout=60)
+        assert answer == {'ok': True} and get('held.json') == 'new', answer
+        # writeAtomic: a new file and its directory, a replaced one, a changed one left alone, no temp file left
+        assert helper('writeAtomic', {'path': w('deep dir/reg [1].json'), 'text': '[]\n'})[0] == {'ok': True, 'written': True}
+        assert helper('writeAtomic', {'path': w('deep dir/reg [1].json'), 'text': '[1]\n', 'expected': '[]\n'})[0] == {'ok': True, 'written': True}
+        assert helper('writeAtomic', {'path': w('deep dir/reg [1].json'), 'text': '[2]\n', 'expected': '[]\n'})[0] == {'ok': True, 'written': False}
+        assert get('deep dir/reg [1].json') == '[1]\n' and os.listdir(os.path.join(work, 'deep dir')) == ['reg [1].json']
+        # append: to the end, never read; a new directory made; remove: a file goes, a missing one is no failure
+        put('log.jsonl', 'old line\n')
+        assert helper('append', {'path': w('log.jsonl'), 'text': '{"t":"caf\u00e9 \u2615"}\n{"t":"b"}\n'})[0]['ok'] is True
+        assert get('log.jsonl') == 'old line\n{"t":"caf\u00e9 \u2615"}\n{"t":"b"}\n'
+        assert helper('append', {'path': w('node dir/fresh.jsonl'), 'text': 'x\n'})[0]['ok'] is True and get('node dir/fresh.jsonl') == 'x\n'
+        assert helper('removeFile', {'path': w('log.jsonl')})[0] == {'ok': True, 'removed': True} and get('log.jsonl') is None
+        assert helper('removeFile', {'path': w('log.jsonl')})[0] == {'ok': True, 'removed': False}
+        # a failure is a fixed code, with no path or message
+        answer, _ = helper('tail', {'path': w('missing.jsonl'), 'lines': 600, 'width': 20000})
+        assert answer == {'ok': False, 'code': 'NOT_FOUND'}, answer
+        # tail of a 3 MB UTF-8 file with CRLF line ends and non-ASCII text (4000 rows): the last 600 lines, each cut to 20000
+        # UTF-16 units (tailLines of hooks/core.ts; the \r stays, as in tailLines and tail | cut)
+        def utf16_cut(line, width):
+            units = line.encode('utf-16-le')
+            return units[:2 * width].decode('utf-16-le')
+        rows = []
+        for i in range(4000):
+            if i % 211 == 0:
+                rows.append(json.dumps({'i': i, 'big': 'caf\u00e9 ' * 4000 + '\u00fc' * 30}, ensure_ascii=False))
+            elif i % 3 == 0:
+                rows.append(json.dumps({'i': i, 't': 'r\u00e9sum\u00e9 \u2615 \u65e5\u672c\u8a9e \U0001F600 ' * (i % 40)}, ensure_ascii=False))
+            else:
+                rows.append(json.dumps({'i': i, 't': 'x' * (i % 1500)}))
+        text = ''.join(row + '\r\n' for row in rows)
+        open(os.path.join(work, 'big.jsonl'), 'w', encoding='utf-8', newline='').write(text)
+        size = os.path.getsize(os.path.join(work, 'big.jsonl'))
+        assert size >= 3_000_000, size
+        lines = text.split('\n')
+        if lines[-1] == '':
+            lines.pop()
+        want = ''.join(utf16_cut(line, 20000) + '\n' for line in lines[-600:])
+        answer, tail_ms = helper('tail', {'path': w('big.jsonl'), 'lines': 600, 'width': 20000})
+        assert answer['ok'] is True and answer['dropped'] == 0, {k: v for k, v in answer.items() if k != 'text'}
+        assert answer['text'] == want, (len(answer['text']), len(want))
+        # the file script's tail of the same file: Get-Content drops the \r, otherwise the same lines
+        code, out, err = run('files.ps1', files, 'tail', w('big.jsonl'), '600', '20000')
+        assert code == 0 and out == want.replace('\r\n', '\n'), (code, err[:200])
+        # a batch of 20 file operations in one process, in order; timed against 20 helper runs and 20 file-script runs
+        def batch_ops(n):
+            ops = []
+            for k in range(5):
+                ops += [{'op': 'writeAtomic', 'path': w(f'b{n}/reg.json'), 'text': f'[{k}]\n'},
+                        {'op': 'append', 'path': w(f'b{n}/log.jsonl'), 'text': f'{{"k":{k}}}\n'},
+                        {'op': 'tail', 'path': w(f'b{n}/log.jsonl'), 'lines': 2, 'width': 100},
+                        {'op': 'rotate', 'path': w(f'b{n}/log.jsonl'), 'adding': 1, 'maxBytes': 1000, 'moves': [[w(f'b{n}/log.jsonl'), w(f'b{n}/log.jsonl.1')]]}]
+            return ops
+        batch_ms = []
+        for n in range(5):
+            answer, took = helper('batch', {'ops': batch_ops(n)})
+            assert answer['ok'] is True and len(answer['results']) == 20, answer
+            assert answer['results'][18]['text'] == '{"k":3}\n{"k":4}\n' and get(f'b{n}/reg.json') == '[4]\n', answer['results'][18]
+            batch_ms.append(took)
+        single_ms = []
+        for step in batch_ops(9):
+            answer, took = helper(step['op'], {key: value for key, value in step.items() if key != 'op'})
+            assert answer['ok'] is True, answer
+            single_ms.append(took)
+        ps_ms = []
+        put('ps.log', '')
+        for k in range(20):
+            put('ps.add', f'{{"k":{k}}}\n')
+            started = time.perf_counter()
+            code, out, err = run('files.ps1', files, 'append', w('ps.add'), w('ps.log'))
+            ps_ms.append((time.perf_counter() - started) * 1000)
+            assert code == 0, err
+        print(f'windows-helper-selftest: ok (node {version}; rename over a held file {held_ms:.0f} ms; tail of {size / 1e6:.1f} MB {tail_ms:.0f} ms; '
+              f'a batch of 20 operations: median {statistics.median(batch_ms):.0f} ms per batch (runs {", ".join(f"{one:.0f}" for one in batch_ms)}); '
+              f'the same 20 as single helper runs {sum(single_ms):.0f} ms in all (median {statistics.median(single_ms):.0f} ms each); '
+              f'20 file-script appends {sum(ps_ms):.0f} ms in all (median {statistics.median(ps_ms):.0f} ms each); timed from WSL through interop)')
 finally:
     shutil.rmtree(work)

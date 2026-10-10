@@ -7,7 +7,10 @@
 # inherits the default configuration (this shell's CLAUDE_CONFIG_DIR, else ~/.claude), which the registry records.
 # POSIX sh, for Linux and Git Bash: sh mod/tests/e2e-smoke.sh. A few cents of haiku (the orchestrator is capped at
 # USD 0.25). One line per check; exit 1 on a failure. KEEP_TRACE=<file> copies the trace there before the scratch
-# directory goes.
+# directory goes. The mod runs with its default helper option (auto): where Node 22 or newer is on the PATH the trace
+# must show the Node helper in use and no helper.fallback line. HIDE_NODE=1 starts both claude sessions with every
+# PATH directory that holds node left out: the mod must find no Node, keep its built-in operations, and the run must
+# pass all the same.
 set -u
 
 MOD=$(cd "$(dirname "$0")/.." && pwd -P)
@@ -34,6 +37,27 @@ native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else pri
 msys() { native "$1" | sed -E 's#^([A-Za-z]):/#/\1/#'; }
 
 command -v claude >/dev/null 2>&1 || { fail 'claude is on the PATH'; exit 1; }
+# The PATH the claude sessions start with: this one, or with HIDE_NODE=1 this one less every directory holding node.
+RUN_PATH=$PATH
+if [ "${HIDE_NODE:-}" = 1 ]; then
+  RUN_PATH=''
+  set -f
+  _ifs=$IFS
+  IFS=:
+  for _d in $PATH; do
+    [ -n "$_d" ] || continue
+    if [ -x "$_d/node" ] || [ -x "$_d/node.exe" ]; then info "PATH without $_d (it holds node)"; continue; fi
+    RUN_PATH=${RUN_PATH:+$RUN_PATH:}$_d
+  done
+  IFS=$_ifs
+  set +f
+  PATH=$RUN_PATH command -v claude >/dev/null 2>&1 || { fail 'claude is on the PATH without node'; exit 1; }
+fi
+# Whether the mod should find the helper's Node: node on that PATH, version 22 or newer.
+NODE_FOUND=$(PATH=$RUN_PATH command -v node 2>/dev/null)
+NODE_MAJOR=$( [ -n "$NODE_FOUND" ] && PATH=$RUN_PATH node --version 2>/dev/null | sed -n 's/^v\([0-9]*\)\..*/\1/p')
+if [ -n "$NODE_MAJOR" ] && [ "$NODE_MAJOR" -ge 22 ]; then HELPER_WANTED=1; else HELPER_WANTED=0; fi
+info "node for the sessions: ${NODE_FOUND:-none} (major ${NODE_MAJOR:-none}); the helper is expected $( [ "$HELPER_WANTED" = 1 ] && echo active || echo inactive)"
 # Git Bash: the Windows claude.exe offers its Bash tool only when it finds Git Bash, and started from Git Bash (its
 # mingw64 git.exe first on the PATH) it can miss a per-user Git: point it at this Git's bin\bash.exe.
 if command -v cygpath >/dev/null 2>&1 && [ -z "${CLAUDE_CODE_GIT_BASH_PATH:-}" ] && [ -f "$(cygpath -u "$(cygpath -w /)")bin/bash.exe" ]; then
@@ -91,7 +115,7 @@ This is an automated smoke test of the session-control mod. Do exactly these thr
 EOF
 
 # ---------------------------------------------------------------- (a) headless orchestrator and worker
-(cd "$ORCH" && SESSION_CONTROL_DEBUG=1 exec claude -p --plugin-dir "$(native "$MOD")" --model haiku --dangerously-skip-permissions \
+(cd "$ORCH" && PATH=$RUN_PATH SESSION_CONTROL_DEBUG=1 exec claude -p --plugin-dir "$(native "$MOD")" --model haiku --dangerously-skip-permissions \
   --max-budget-usd 0.25 --output-format json --settings "$SETTINGS" < "$S/instruction.txt" > "$S/orchestrator.json" 2> "$S/orchestrator.err") &
 OPID=$!
 SEEN_PID=''
@@ -145,6 +169,7 @@ else
 fi
 OPID=''
 info "orchestrator cost USD $(grep -o '"total_cost_usd": *[0-9.e-]*' "$S/orchestrator.json" | grep -o '[0-9.e-]*$')"
+info "orchestrator session $(grep -o '"session_id": *"[^"]*"' "$S/orchestrator.json" | head -n 1 | sed 's/.*: *"//; s/"$//') (config dir ${CLAUDE_CONFIG_DIR:-$HOME/.claude}, cwd $ORCH)"
 
 field() { grep -o "\"$1\": *\"[^\"]*\"" "$REG" 2>/dev/null | head -n 1 | sed 's/.*: *"//; s/"$//'; }
 if [ -n "$SEEN_PID" ]; then pass "registry entry had a pid while the worker ran ($SEEN_PID)"; else fail 'registry entry had a pid while the worker ran'; fi
@@ -190,12 +215,35 @@ fi
 
 has() { grep -F -q -- "$1" "$TRACE" 2>/dev/null; }
 if has '"event":"tool.call","tool":"launch_worker"'; then pass 'trace has the launch tool.call line'; else fail 'trace has the launch tool.call line'; fi
-if has '"event":"process.run","argv":["sh","-c","<PROBE_SCRIPT>"' || grep -F '"event":"process.run"' "$TRACE" 2>/dev/null | grep -F -q 'probe.ps1'; then pass 'trace has the process.run line of the probe'; else fail 'trace has the process.run line of the probe'; fi
+if has '"event":"process.run","argv":["sh","-c","<PROBE_SCRIPT>"' || has '"event":"process.run","helper":"probe"' || grep -F '"event":"process.run"' "$TRACE" 2>/dev/null | grep -F -q 'probe.ps1'; then pass 'trace has the process.run line of the probe'; else fail 'trace has the process.run line of the probe'; fi
 REGN=$(native "$REG")
-if has "\"event\":\"fs.write\",\"path\":\"$REGN.tmp." && grep -F '"event":"process.run"' "$TRACE" | grep -F -q "$REGN.tmp." && has '"event":"worker.registered"'; then
+if [ "$HELPER_WANTED" = 1 ]; then
+  # The Node helper writes the registry in one process: its temp file never goes through $.fs.
+  if has "\"event\":\"process.run\",\"helper\":\"writeAtomic\",\"path\":\"$REGN\",\"exitCode\":0" && has '"event":"worker.registered"'; then
+    pass 'trace has the register write: the helper writeAtomic of the registry, exit 0'
+  else
+    fail 'trace has the register write: the helper writeAtomic of the registry, exit 0'
+  fi
+elif has "\"event\":\"fs.write\",\"path\":\"$REGN.tmp." && grep -F '"event":"process.run"' "$TRACE" | grep -F -q "$REGN.tmp." && has '"event":"worker.registered"'; then
   pass 'trace has the register write: its temp file and the process.run of the rename'
 else
   fail 'trace has the register write: its temp file and the process.run of the rename'
+fi
+# The Node helper: in use with no fallback where Node 22+ is on the sessions' PATH, else not found and never run.
+FALLBACKS=$(grep -c '"event":"helper.fallback"' "$TRACE" 2>/dev/null)
+HELPER_RUNS=$(grep -c '"event":"process.run","helper":"' "$TRACE" 2>/dev/null)
+if [ "$HELPER_WANTED" = 1 ]; then
+  if has '"event":"helper","isActive":true' && [ "$HELPER_RUNS" -gt 0 ] && [ "$FALLBACKS" -eq 0 ]; then
+    pass "trace: the Node helper in use ($(grep -o '"event":"helper","isActive":true,"version":"[^"]*"' "$TRACE" | head -n 1 | sed 's/.*"version":"//; s/"$//'), $HELPER_RUNS helper runs), no helper.fallback line"
+  else
+    fail "trace: the Node helper in use, no helper.fallback line ($HELPER_RUNS helper runs, $FALLBACKS fallbacks: $(grep -o '"event":"helper[^}]*' "$TRACE" | sort | uniq -c | head -n 5 | tr '\n' ' '))"
+  fi
+else
+  if has '"event":"helper","isActive":false' && [ "$HELPER_RUNS" -eq 0 ] && [ "$FALLBACKS" -eq 0 ]; then
+    pass "trace: no Node found ($(grep -o '"event":"helper","isActive":false[^}]*' "$TRACE" | head -n 1 | sed 's/.*"isActive":false,//')), the built-in operations only, no helper run"
+  else
+    fail "trace: no Node found, the built-in operations only ($HELPER_RUNS helper runs, $FALLBACKS fallbacks)"
+  fi
 fi
 if has '"event":"worker.found"' && has '"isNamed":true,"isSocketSeen":true'; then pass 'trace: the worker.found line saw the name and the socket in the sessions file'; else fail 'trace: the worker.found line saw the name and the socket in the sessions file'; fi
 if has '"event":"completion"' && has '"outcome":"clean"'; then pass "trace: the completion line has the outcome clean (report check noted: $(grep -o '"isReportNoted":[a-z]*' "$TRACE" | head -n 1 | sed 's/.*://'))"; else fail 'trace: the completion line has the outcome clean'; fi
@@ -203,7 +251,7 @@ if grep -E -q 'sk-ant-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}
 if has '"event":"worker.start"' && has '"isConfigDirSet":false'; then pass 'trace: the worker.start line sets no CLAUDE_CONFIG_DIR'; else fail 'trace: the worker.start line sets no CLAUDE_CONFIG_DIR'; fi
 if has '"licencePickCommand":"empty"' && has "\"registryPath\":\"$REGN\""; then pass 'trace shows the scratch options (scratch registry, no licence picker)'; else fail 'trace shows the scratch options (scratch registry, no licence picker)'; fi
 SN=$(native "$S")
-OUTSIDE=$(grep -E -o '"event":"fs\.(write|append)","path":"[^"]*"' "$TRACE" 2>/dev/null | sed 's/.*"path":"//; s/"$//' | grep -v -F "$SN/" | head -n 3)
+OUTSIDE=$(grep -E -o '"event":"(fs\.(write|append)|process\.run","helper":"[A-Za-z]*)","path":"[^"]*"' "$TRACE" 2>/dev/null | sed 's/.*"path":"//; s/"$//' | grep -v -F "$SN/" | head -n 3)
 if has '"event":"fs.write"' && [ -z "$OUTSIDE" ]; then pass 'trace: every file write is inside the scratch directory'; else fail "trace: every file write is inside the scratch directory (outside: $OUTSIDE)"; fi
 if has 'work-[redacted]' && ! has "$CANARY"; then pass 'trace: the key-like canary in the worker directory is [redacted]'; else fail 'trace: the key-like canary in the worker directory is [redacted]'; fi
 if command -v jq >/dev/null 2>&1; then
@@ -216,7 +264,7 @@ fi
 if command -v tmux >/dev/null 2>&1; then
   TSOCK=session-control-e2e-$$
   ISETTINGS=$(printf '%s' "$SETTINGS" | sed 's/^{/{"tui":"fullscreen",/')
-  printf "cd '%s' && SESSION_CONTROL_DEBUG=1 claude --plugin-dir '%s' --model haiku --settings '%s'\necho \"claude exited with \$?\"\nexec sleep 300\n" "$ORCH" "$MOD" "$ISETTINGS" > "$S/interactive.sh"
+  printf "cd '%s' && PATH='%s' SESSION_CONTROL_DEBUG=1 claude --plugin-dir '%s' --model haiku --settings '%s'\necho \"claude exited with \$?\"\nexec sleep 300\n" "$ORCH" "$RUN_PATH" "$MOD" "$ISETTINGS" > "$S/interactive.sh"
   # The pane stays after claude exits (the script sleeps on), so a failure can show what it said.
   tmux -L "$TSOCK" -f /dev/null new-session -d -s e2e -x 200 -y 50 "sh '$S/interactive.sh'"
   pane() { tmux -L "$TSOCK" capture-pane -p -t e2e 2>/dev/null; }
@@ -306,6 +354,11 @@ else
   pass 'no orchestrator, worker, interactive claude or tmux process left'
 fi
 WPID=''
+# The sessions this run started, by their transcripts (they stay under the config dir; the scratch directory goes).
+for _p in "$CFG_DIR"/projects/*"$(basename "$S" | sed 's/[^A-Za-z0-9]/-/g')"*; do
+  [ -d "$_p" ] || continue
+  for _t in "$_p"/*.jsonl; do [ -f "$_t" ] && info "session $(basename "$_t" .jsonl) in $(basename "$_p")"; done
+done
 if [ "${KEEP_TRACE:-}" != '' ] && [ -f "$TRACE" ]; then cp "$TRACE" "$KEEP_TRACE" && info "trace copied to $KEEP_TRACE"; fi
 trap - EXIT
 cleanup
