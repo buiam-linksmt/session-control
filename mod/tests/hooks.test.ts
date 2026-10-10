@@ -450,6 +450,28 @@ describe('completion', () => {
     expect(w.toasts).toEqual(['Login needed · limited worker: login: licence needs a re-login'])
   })
 
+  test('the report check adds one line to the completion notice of a clean report without the git reads; the toast and the outcome stay', { options: OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT.replace('/fixture/results/limit.json', '/fixture/results/clean.json'))
+    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+    await $.session.start(start(ORCH_DIR))
+    expect(w.toasts).toEqual(['Session finished · limited worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.'])
+    const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
+    expect(sent.context).toEqual([
+      'session-control completions: limited worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.; ' +
+        'limited worker: report check: report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes',
+    ])
+    const entry = lastRegistry(w).find(one => one.session_id === SID_DEAD)
+    expect((entry?.outcome as { kind?: string }).kind).toBe('clean')
+  })
+  test('a real report with both reads gets no report-check line', { options: OPTIONS }, async ($, on) => {
+    world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT.replace('/fixture/results/limit.json', '/fixture/results/probeReport.json'))
+    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+    await $.session.start(start(ORCH_DIR))
+    const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
+    expect(sent.context?.length).toBe(1)
+    expect(String(sent.context?.[0])).not.toContain('report check')
+  })
+
   test('with completionWrites off nothing is written, the toast still shows', { options: { ...OPTIONS, completionWrites: false } }, async ($, on) => {
     const w = world(on)
     await $.session.start(start(ORCH_DIR))

@@ -4,6 +4,8 @@ import {
   buildLaunchArgv,
   launchName,
   newRegistryEntry,
+  reportCheck,
+  resultReport,
   sessionFileFacts,
   workerName,
   WORKER_NAME,
@@ -76,6 +78,7 @@ import {
   REGISTRY_TEXT,
   RESULTS,
   REAL_RESULTS,
+  REPORT_TEXTS,
   SID_ALIVE,
   SID_DEAD,
   SID_DONE,
@@ -939,6 +942,55 @@ describe('session name and inbox of a launch', () => {
     const winWant = { dir: 'C:/work/new', configDir: 'C:/Users/u/.claude', model: 'opus' }
     expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, 'C:\\work\\new', 'C:\\Users\\u\\.claude', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
     expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, '', '', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
+  })
+})
+
+describe('worker-report check', () => {
+  test('the two real reports carry both reads with exit codes and nothing unpushed: no note', () => {
+    expect(reportCheck(REPORT_TEXTS.design)).toBeUndefined()
+    expect(reportCheck(REPORT_TEXTS.probe)).toBeUndefined()
+    expect(reportCheck(resultReport(REAL_RESULTS.designReport))).toBeUndefined()
+  })
+  test('a report without the reads: one short line naming what is missing', () => {
+    expect(reportCheck('Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.')).toBe(
+      'report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes',
+    )
+    const statusOnly = REPORT_TEXTS.design.split('`git log')[0] ?? ''
+    expect(reportCheck(statusOnly)).toBe('report lacks git log --oneline @{u}..HEAD with its exit code')
+    // The commands named without their output or exit code do not count.
+    expect(reportCheck('I ran git status -sb and git log --oneline @{u}..HEAD; all clean.')).toBe(
+      'report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes',
+    )
+    const noBranchLine = REPORT_TEXTS.probe.replace('## feature/panel-expand-sections...origin/feature/panel-expand-sections\n', '')
+    expect(reportCheck(noBranchLine)).toBe('report lacks git status -sb with its exit code')
+  })
+  test('unpushed commits listed by the log are noted, in a fence or in a list', () => {
+    const ahead = REPORT_TEXTS.probe
+      .replace('...origin/feature/panel-expand-sections', '...origin/feature/panel-expand-sections [ahead 2]')
+      .replace('$ git log --oneline @{u}..HEAD   → exit 0 (no output)', '$ git log --oneline @{u}..HEAD   → exit 0\nc1ff342 fix(completion): label limit and login only from reliable signals\n49467fc feat(registry): record the name')
+    expect(reportCheck(ahead)).toBe('git log @{u}..HEAD lists 2 unpushed commits')
+    const listed = '`git status -sb` (exit 0):\n```\n## main...origin/main [ahead 1]\n```\n`git log --oneline @{u}..HEAD` (exit 0):\n- `9b6e367` fix(toast): drop the plugin name\n\n## Files\n- none'
+    expect(reportCheck(listed)).toBe('git log @{u}..HEAD lists 1 unpushed commit')
+  })
+  test('tolerant: case, exit=0, exit code: 0, rc=0, @{upstream}, quoted lines', () => {
+    const variants = [
+      'GIT STATUS -SB (EXIT=0)\n## main...origin/main\nGit Log --Oneline @{U}..HEAD (Exit Code: 0): empty',
+      '```sh\n$ git status -sb; echo rc=0\n## feature/x...origin/feature/x\n$ git log --oneline @{upstream}..HEAD; echo rc=0\n```',
+      '> git status -sb → exit 0\n> ## main...origin/main\n> git log --oneline @{u}..HEAD → exit 0, no output',
+    ]
+    for (const one of variants) expect(reportCheck(one)).toBeUndefined()
+  })
+  test('a log that failed (no upstream) is noted with its exit code', () => {
+    const noUpstream = '`git status -sb` (exit 0):\n```\n## feature/new\n```\n`git log --oneline @{u}..HEAD` (exit 128): fatal: no upstream configured for branch \'feature/new\''
+    expect(reportCheck(noUpstream)).toBe('git log @{u}..HEAD exited 128')
+  })
+  test('words of the report around the reads are not commits', () => {
+    const words = '`git log --oneline @{u}..HEAD` (exit 0): no output.\n`git status -sb` (exit 0):\n```\n## main...origin/main\n```\ndefaced accepted 2026-10-10 deadbeef is not a commit line'
+    expect(reportCheck(words)).toBeUndefined()
+  })
+  test('resultReport: the result text of a result file, empty otherwise', () => {
+    expect(resultReport(JSON.stringify({ result: 'x' }))).toBe('x')
+    for (const text of ['', '{', 'null', '{"result":5}']) expect(resultReport(text)).toBe('')
   })
 })
 

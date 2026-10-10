@@ -372,6 +372,63 @@ export function classifyResult(resultText: string, taskStatus?: string, errText 
   return make('clean', firstLine(text))
 }
 
+/** The report a result file holds: its `result` text, or empty when it has none or is not JSON. */
+export function resultReport(resultText: string): string {
+  try {
+    const value = JSON.parse(resultText) as { result?: unknown } | null
+    return typeof value?.result === 'string' ? value.result : ''
+  } catch {
+    return ''
+  }
+}
+
+const GIT_STATUS = /git\s+status\s+-sb\b/gi
+const GIT_LOG = /git\s+log\s+--oneline\s+@\{(?:u|upstream)\}\.\.HEAD/gi
+/** An exit code as reports write it: `exit 0`, `exit=0`, `exit code: 0`, `rc=0`. */
+const EXIT_CODE = /\b(?:exit(?:\s+code)?|rc)\s*[:=]?\s*(\d+)/i
+/** A `git status -sb` branch line: `## main...origin/main [ahead 1]`, `## HEAD (no branch)`. */
+const BRANCH_LINE = /^[\s>]*##\s+\S/m
+/** A `git log --oneline` line: an abbreviated sha holding a digit, then the subject; a list mark or backticks may lead. */
+const COMMIT_LINE = /^[\s>]*(?:[-*]\s+)?`?(?=[0-9a-f]*\d)[0-9a-f]{7,40}`?\s+\S/gm
+
+/** The text after a command mention up to the next mention of either command, at most `max` characters. */
+function after(text: string, end: number, max: number): string {
+  const rest = text.slice(end, end + max)
+  const next = rest.search(/git\s+(?:status\s+-sb|log\s+--oneline)/i)
+  return next < 0 ? rest : rest.slice(0, next)
+}
+
+/**
+ * The worker-report check: whether a final report carries the output of `git status -sb` and of
+ * `git log --oneline @{u}..HEAD`, each with its exit code, as the worker prompts demand, and whether that log lists
+ * commits that are not pushed. Tolerant of case, code fences, `$ ` prompts and the spellings EXIT_CODE takes.
+ * Undefined when the report is in order; else one short line. It is a note only: it never changes the outcome.
+ */
+export function reportCheck(report: string): string | undefined {
+  let isStatus = false
+  for (const match of report.matchAll(GIT_STATUS)) {
+    const window = after(report, (match.index ?? 0) + match[0].length, 600)
+    if (EXIT_CODE.test(window) && BRANCH_LINE.test(window)) isStatus = true
+  }
+  let isLog = false
+  let commits = 0
+  const failed: string[] = []
+  for (const match of report.matchAll(GIT_LOG)) {
+    const window = after(report, (match.index ?? 0) + match[0].length, 600)
+    const exit = EXIT_CODE.exec(window)
+    if (exit === null) continue
+    isLog = true
+    if (exit[1] !== '0') failed.push(exit[1] ?? '?')
+    commits += [...window.matchAll(COMMIT_LINE)].length
+  }
+  const lacks = [isStatus ? '' : 'git status -sb', isLog ? '' : 'git log --oneline @{u}..HEAD'].filter(one => one !== '')
+  const notes: string[] = []
+  if (lacks.length > 0) notes.push(`report lacks ${lacks.join(' and ')} with ${lacks.length > 1 ? 'their exit codes' : 'its exit code'}`)
+  if (failed.length > 0) notes.push(`git log @{u}..HEAD exited ${failed.join(', ')}`)
+  if (commits > 0) notes.push(`git log @{u}..HEAD lists ${commits} unpushed commit${commits > 1 ? 's' : ''}`)
+  return notes.length === 0 ? undefined : notes.join('; ')
+}
+
 function firstLine(text: string): string {
   // The first line that holds words: a bare heading like "**Summary**" says nothing.
   const lines = text.split('\n').map(one => one.trim())

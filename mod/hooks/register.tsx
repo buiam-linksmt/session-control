@@ -86,6 +86,8 @@ import {
   slugify,
   launchName,
   sessionFileFacts,
+  reportCheck,
+  resultReport,
 } from './core'
 import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
 
@@ -540,9 +542,12 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   const resultText = await $.fs.read(entry.result_file).catch(() => '')
   const errText = typeof entry.err_file === 'string' ? await $.fs.read(entry.err_file).catch(() => '') : ''
   const outcome: SessionOutcome = classifyResult(resultText, taskStatus, errText)
+  // The report check reads a clean report only: the other outcomes have no report to check.
+  const reportNote = outcome.kind === 'clean' ? reportCheck(resultReport(resultText)) : undefined
   harvested.add(key)
-  trace($, 'completion', { session_id: sid, pid: entry.pid, outcome: outcome.kind, isWritten: config.completionWrites })
-  const label = `${entry.title ?? sid.slice(0, 8)}: ${outcome.summary}`
+  trace($, 'completion', { session_id: sid, pid: entry.pid, outcome: outcome.kind, isWritten: config.completionWrites, isReportNoted: reportNote !== undefined })
+  const who = entry.title ?? sid.slice(0, 8)
+  const label = `${who}: ${outcome.summary}`
   if (config.completionWrites) {
     // Read again right before writing, so the window against the licence
     // daemon's own writes is as short as this API allows (no lock, no rename).
@@ -556,7 +561,8 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
     }
   }
   $.ui.toast(toastText(TOAST_TITLES[outcome.kind], `${label}`), { timeoutMs: 8000 })
-  await update($, pendingNotes, list => [...list, label].slice(-20))
+  const notes = reportNote === undefined ? [label] : [label, `${who}: report check: ${reportNote}`]
+  await update($, pendingNotes, list => [...list, ...notes].slice(-20))
 }
 
 /** Reads the points and the queue into the panel's atoms; answers the first problem with those files. */
