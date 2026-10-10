@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
+  annotateCleared,
   buildLaunchArgv,
   launchName,
   newRegistryEntry,
@@ -691,6 +692,67 @@ describe('retiring finished workers', () => {
       'its process is alive',
       'no registry entry',
     ])
+  })
+})
+
+describe('retiring with a review', () => {
+  const none = parseProcFacts('')
+  const entry = (sid: string, kind: string, extra: object = {}) => ({ title: sid, session_id: sid, reported: true, outcome: { kind, summary: kind }, ...extra })
+  test('an outcome login, limit or killed goes with a reason, and the original kind is kept', () => {
+    for (const kind of ['login', 'limit', 'killed']) {
+      const v = retireVerdict([entry('aaaaaaaa-1', kind)], none, '', ['aaaaaaaa'], { aaaaaaaa: ' the run succeeded ' })
+      expect(v).toEqual({ removable: ['aaaaaaaa-1'], refused: [], reviewed: [{ session_id: 'aaaaaaaa-1', was: kind, reason: 'the run succeeded' }] })
+    }
+  })
+  test('a reviewed key may be the full id, and a clean session needs no review record', () => {
+    const v = retireVerdict([entry('aaaaaaaa-1', 'login'), entry('bbbbbbbb-1', 'clean')], none, '', ['aaaaaaaa', 'bbbbbbbb-1'], { 'aaaaaaaa-1': 'wrong label', bbbbbbbb: 'not needed' })
+    expect(v.removable).toEqual(['aaaaaaaa-1', 'bbbbbbbb-1'])
+    expect(v.reviewed).toEqual([{ session_id: 'aaaaaaaa-1', was: 'login', reason: 'wrong label' }])
+  })
+  test('a reviewed entry without a reason is refused, the session stays', () => {
+    for (const reason of ['', '   ', 5, null]) {
+      const v = retireVerdict([entry('aaaaaaaa-1', 'login')], none, '', ['aaaaaaaa'], { aaaaaaaa: reason })
+      expect(v.removable).toEqual([])
+      expect(v.refused.map(r => r.reason)).toEqual(['reviewed needs a non-empty reason'])
+    }
+  })
+  test('a reason does not lift the live, kept, queue-named, unclassified or unknown refusals', () => {
+    const list = [
+      entry('keep-0001', 'login', { keep: true }),
+      entry('queued-01', 'limit'),
+      entry(SID_ALIVE, 'killed', { pid: 4101, config_dir: '/fixture/lic/a' }),
+      { title: 'dead', session_id: 'dead-0001', config_dir: '/fixture/lic/a', pid: 999999 },
+    ]
+    const ids = ['keep-0001', 'queued-01', SID_ALIVE, 'unknown-1']
+    const reviewed = Object.fromEntries([...ids, 'dead-0001'].map(id => [id, 'read the transcript']))
+    const v = retireVerdict(list, parseProcFacts(PROBE_STDOUT), 'task waits on queued-01', [...ids, 'dead-0001'], reviewed)
+    expect(v.removable).toEqual([])
+    expect(v.reviewed).toBeUndefined()
+    expect(v.refused.map(r => r.reason)).toEqual([
+      'reviewed names no session of session_ids',
+      'marked keep: a resume or follow-up is expected',
+      'a queued or running task names it',
+      'its process is alive',
+      'no registry entry',
+      'its exit was not classified yet',
+    ])
+  })
+  test('a partial batch: the reviewed one goes, the unreviewed one with a wrong label stays', () => {
+    const v = retireVerdict([entry('aaaaaaaa-1', 'login'), entry('bbbbbbbb-1', 'limit')], none, '', ['aaaaaaaa', 'bbbbbbbb'], { aaaaaaaa: 'ok' })
+    expect(v.removable).toEqual(['aaaaaaaa-1'])
+    expect(v.refused).toEqual([{ id: 'bbbbbbbb', reason: 'outcome limit needs a resume' }])
+  })
+  test('a reviewed key that names no listed session, or is too short, is refused', () => {
+    const v = retireVerdict([entry('aaaaaaaa-1', 'login'), entry('bbbbbbbb-1', 'login')], none, '', ['aaaaaaaa'], { bbbbbbbb: 'x', aaaa: 'y' })
+    expect(v.refused.map(r => `${r.id}: ${r.reason}`)).toEqual(['bbbbbbbb: reviewed names no session of session_ids', 'aaaa: reviewed names no session of session_ids', 'aaaaaaaa: outcome login needs a resume'])
+    expect(v.removable).toEqual([])
+  })
+  test('the cleared-log lines get the two fields at the end, other lines stay as they are', () => {
+    const lines = '{"session_id":"a-1","outcome":{"kind":"login"}}\n{"session_id":"b-1"}\n'
+    expect(annotateCleared(lines, [{ session_id: 'a-1', was: 'login', reason: 'ok \u00e9' }])).toBe(
+      '{"session_id":"a-1","outcome":{"kind":"login"},"reviewed_outcome":"login","reviewed_reason":"ok \u00e9"}\n{"session_id":"b-1"}\n',
+    )
+    expect(annotateCleared(lines, [])).toBe(lines)
   })
 })
 

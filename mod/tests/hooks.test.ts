@@ -312,7 +312,9 @@ describe('tool surface', () => {
     const w = world(on)
     await $.session.start(start(ORCH_DIR))
     expect(w.tools.map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('5222:a22910df')
+    // Changed on purpose by feature/retire-reviewed: retire_workers gained the optional `reviewed` input and a longer
+    // description; the other five tools are unchanged (was 5222:a22910df).
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('6072:68e1b3f1')
   })
 })
 
@@ -856,6 +858,74 @@ describe('launch_worker', () => {
     expect(clears()[0]?.path).toBe(`${HOME}/.claude/session-control/runs/cleared.jsonl`)
     expect(lastRegistry(w).some(one => one.session_id === finished.session_id)).toBe(false)
     expect(lastRegistry(w).some(one => one.session_id === SID_ALIVE)).toBe(true)
+  })
+
+  describe('retire_workers with reviewed', () => {
+    const stuck = (n: number, kind: string, extra: object = {}) => ({ title: `stuck ${kind}`, session_id: `5757575${n}-0000-4000-8000-00000000000${n}`, config_dir: '/fixture/lic/a', reported: true, outcome: { kind, summary: `${kind}: old label` }, ...extra })
+    const login = stuck(1, 'login')
+    const limit = stuck(2, 'limit')
+    const killed = stuck(3, 'killed')
+    const kept = stuck(4, 'login', { keep: true })
+    // The first eight characters of a queued task's title name this session.
+    const queued = { ...stuck(5, 'limit'), session_id: 'Queued o-0000-4000-8000-000000000005' }
+    const setup = async (on: Parameters<typeof world>[0], $: Parameters<Parameters<typeof test>[2]>[0]) => {
+      const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login, limit, killed, kept, queued]))
+      await $.session.start(start(ORCH_DIR))
+      return w
+    }
+    const retire = async ($: Parameters<Parameters<typeof test>[2]>[0], input: object) =>
+      String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', ...input } as never)).result)
+    const clears = (w: World) => w.writes.filter(one => one.path.endsWith('/cleared.jsonl'))
+
+    test('login, limit and killed outcomes are retired on a reason; the log and the answer carry the original outcome and the reason', { options: OPTIONS }, async ($, on) => {
+      const w = await setup(on, $)
+      const out = await retire($, {
+        session_ids: [login.session_id.slice(0, 8), limit.session_id, killed.session_id.slice(0, 8)],
+        reviewed: { [login.session_id.slice(0, 8)]: 'run succeeded, label from the old classifier', [limit.session_id]: 'work done, limit text was quoted', [killed.session_id.slice(0, 8)]: 'abandoned on purpose' },
+      })
+      expect(out).toBe('Retired: 57575751, 57575752, 57575753. Retired with review: 57575751 (was login: run succeeded, label from the old classifier); 57575752 (was limit: work done, limit text was quoted); 57575753 (was killed: abandoned on purpose).')
+      expect(clears(w).length).toBe(1)
+      const lines = clears(w)[0]?.text.trimEnd().split('\n').map(line => JSON.parse(line)) ?? []
+      expect(lines.map(one => [one.session_id, one.outcome.kind, one.reviewed_outcome, one.reviewed_reason])).toEqual([
+        [login.session_id, 'login', 'login', 'run succeeded, label from the old classifier'],
+        [limit.session_id, 'limit', 'limit', 'work done, limit text was quoted'],
+        [killed.session_id, 'killed', 'killed', 'abandoned on purpose'],
+      ])
+      // The entry is logged as it was, with the two fields appended last.
+      expect(Object.keys(lines[0]).slice(-2)).toEqual(['reviewed_outcome', 'reviewed_reason'])
+      expect(Object.keys(lines[0]).slice(0, -2)).toEqual(Object.keys(login))
+      const left = lastRegistry(w).map(one => one.session_id)
+      for (const gone of [login, limit, killed]) expect(left).not.toContain(gone.session_id)
+      expect(left).toContain(kept.session_id)
+    })
+
+    test('without a reason nothing is retired; a clean session logs no review fields', { options: OPTIONS }, async ($, on) => {
+      const w = await setup(on, $)
+      const out = await retire($, { session_ids: [login.session_id.slice(0, 8)], reviewed: { [login.session_id.slice(0, 8)]: '' } })
+      expect(out).toContain('reviewed needs a non-empty reason')
+      expect(out).not.toContain('Retired with review')
+      expect(clears(w).length).toBe(0)
+      expect(out).toBe('Retired: none. Refused: 57575751 (reviewed needs a non-empty reason).')
+      const plain = await retire($, { session_ids: ['dddddddd'], reviewed: { dddddddd: 'not needed' } })
+      expect(plain).toBe('Retired: dddddddd.')
+      expect(clears(w)[0]?.text).not.toContain('reviewed_')
+    })
+
+    test('a live, kept or queue-named session is refused even with a reason; a partial batch retires only what passes', { options: OPTIONS }, async ($, on) => {
+      const w = await setup(on, $)
+      const ids = [SID_ALIVE.slice(0, 8), kept.session_id.slice(0, 8), queued.session_id.slice(0, 8), limit.session_id.slice(0, 8), killed.session_id.slice(0, 8)]
+      const out = await retire($, { session_ids: ids, reviewed: { [SID_ALIVE.slice(0, 8)]: 'r', [kept.session_id.slice(0, 8)]: 'r', [queued.session_id.slice(0, 8)]: 'r', [limit.session_id.slice(0, 8)]: 'false label' } })
+      expect(out).toContain('Retired: 57575752.')
+      expect(out).toContain('Retired with review: 57575752 (was limit: false label).')
+      expect(out).toContain('aaaaaaaa (its process is alive)')
+      expect(out).toContain('57575754 (marked keep: a resume or follow-up is expected)')
+      expect(out).toContain('Queued o (a queued or running task names it)')
+      expect(out).toContain('57575753 (outcome killed needs a resume)')
+      const left = lastRegistry(w).map(one => one.session_id)
+      expect(left).toEqual(expect.arrayContaining([SID_ALIVE, kept.session_id, queued.session_id, killed.session_id]))
+      expect(left).not.toContain(limit.session_id)
+      expect(clears(w).length).toBe(1)
+    })
   })
 
   test('open_point and record_decision edit the helper files, back them up first, and report a refusal', { options: OPTIONS }, async ($, on) => {
@@ -1404,6 +1474,17 @@ describe('platform', () => {
     }
   })
 
+  test('Windows: a reviewed retire logs the original outcome and the reason through the file script', { options: WIN_OPTIONS }, async ($, on) => {
+    const login = { title: 'stuck login', session_id: '57575751-0000-4000-8000-000000000001', config_dir: 'C:/fixture/lic/a', reported: true, outcome: { kind: 'login', summary: 'login: old label' } }
+    const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login]), WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    const out = String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['57575751'], reviewed: { '57575751': 'wrong label' } } as never)).result)
+    expect(out).toBe('Retired: 57575751. Retired with review: 57575751 (was login: wrong label).')
+    const text = w.writes.filter(one => one.path === `${WIN_RUNS}/cleared.jsonl`).map(one => one.text).join('')
+    expect(JSON.parse(text)).toMatchObject({ session_id: login.session_id, outcome: login.outcome, reviewed_outcome: 'login', reviewed_reason: 'wrong label' })
+    expect(lastRegistry(w).some(one => one.session_id === login.session_id)).toBe(false)
+  })
+
   test('Windows: after a failed rename the temp file is removed by the script\'s remove', { options: WIN_OPTIONS }, async ($, on) => {
     WINDOWS.isMoveBroken = true
     try {
@@ -1561,6 +1642,17 @@ describe('debug trace', () => {
     ])
     // The entry's content is in the cleared log, never in the trace.
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('done worker'))).toBe(false)
+  })
+
+  test('a reviewed retire: the guard line names the original outcome and the reason, the call line keeps free text out', { options: TRACED }, async ($, on) => {
+    const login = { title: 'stuck login', session_id: '57575751-0000-4000-8000-000000000001', config_dir: '/fixture/lic/a', reported: true, outcome: { kind: 'login', summary: 'login: old label' } }
+    const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login]))
+    await $.session.start(start(ORCH_DIR))
+    await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['57575751'], reviewed: { '57575751': 'wrong label' } } as never)
+    const events = from(bare(traceOf(w)), 'tool.call')
+    expect(events[0]).toEqual({ event: 'tool.call', tool: 'retire_workers', session_ids: ['57575751'] })
+    expect(events).toContainEqual({ event: 'guard', tool: 'retire_workers', removable: [login.session_id], refused: [], reviewed: [{ session_id: login.session_id, was: 'login', reason: 'wrong label' }] })
+    expect(events.at(-1)).toEqual({ event: 'tool.result', tool: 'retire_workers', result: 'Retired: 57575751. Retired with review: 57575751 (was login: wrong label).' })
   })
 
   test('a poll tick with a failing probe: the tick, the failed run, the error caught, the warning; renders are counted', { options: TRACED }, async ($, on) => {

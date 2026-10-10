@@ -40,6 +40,7 @@ import {
   registerEntry,
   removeEntries,
   retireVerdict,
+  annotateCleared,
   buildLaunchArgv,
   defaultConfigDir,
   isDefaultConfigDir,
@@ -769,12 +770,18 @@ async function acknowledge($: EngineInterface, ids: readonly string[], keep: boo
 }
 
 /** The orchestrator retires finished workers it no longer needs; the guards keep any that could still be resumed. */
-async function retire($: EngineInterface, ids: readonly string[]) {
+async function retire($: EngineInterface, ids: readonly string[], reviewed: Readonly<Record<string, unknown>>) {
   const reg = await registryAndFacts($)
   if ('deny' in reg) return reg
   const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => '')
-  const verdict = retireVerdict(reg.entries, reg.facts, queueText, ids)
-  trace($, 'guard', { tool: 'retire_workers', removable: verdict.removable, refused: verdict.refused })
+  const verdict = retireVerdict(reg.entries, reg.facts, queueText, ids, reviewed)
+  const reviews = verdict.reviewed ?? []
+  trace($, 'guard', {
+    tool: 'retire_workers',
+    removable: verdict.removable,
+    refused: verdict.refused,
+    ...(reviews.length === 0 ? {} : { reviewed: reviews.map(one => ({ ...one, reason: traceMessage(one.reason, TRACE_MAX_STRING) })) }),
+  })
   if (verdict.removable.length > 0) {
     const log = `${await runsPath($)}/cleared.jsonl`
     // The removed entries are logged before the registry is written; a second attempt logs only what is new.
@@ -782,7 +789,7 @@ async function retire($: EngineInterface, ids: readonly string[]) {
     const failed = await editRegistry($, async text => {
       const edited = removeEntries(text, verdict.removable)
       if (!edited.ok) return edited
-      const lines = edited.removed.split('\n').filter(line => line !== '' && !logged.has(line))
+      const lines = annotateCleared(edited.removed, reviews).split('\n').filter(line => line !== '' && !logged.has(line))
       if (lines.length > 0) {
         const problem = await appendLog($, log, lines)
         if (problem !== undefined) return { ok: false, error: `${problem}; nothing removed` }
@@ -795,7 +802,8 @@ async function retire($: EngineInterface, ids: readonly string[]) {
   }
   const removed = shortIds(verdict.removable)
   const refused = verdict.refused.length === 0 ? '' : ` Refused: ${verdict.refused.map(one => `${one.id.slice(0, 8)} (${one.reason})`).join('; ')}.`
-  return { result: `Retired: ${removed}.${refused}` }
+  const review = reviews.length === 0 ? '' : ` Retired with review: ${reviews.map(one => `${one.session_id.slice(0, 8)} (was ${one.was}: ${one.reason})`).join('; ')}.`
+  return { result: `Retired: ${removed}.${review}${refused}` }
 }
 
 async function launch($: EngineInterface, given: LaunchArgs) {
@@ -980,7 +988,10 @@ async function activate($: EngineInterface): Promise<void> {
       description:
         'Remove finished workers from the registry once their work is acknowledged and they are not needed for a resume ' +
         'or for new work with their context. Refuses a live session, one marked keep, one with an outcome that needs a resume ' +
-        'and one named in the task queue; removed entries are logged first.',
+        'and one named in the task queue; removed entries are logged first. When the stored outcome (login, limit, killed) ' +
+        'is wrong because you read the transcript and the run succeeded, or the work was deliberately abandoned, pass ' +
+        '`reviewed`: session id to a non-empty reason; the outcome check is skipped for that session only, and the ' +
+        'original outcome and the reason are logged in cleared.jsonl. Not a way past a live, kept, unclassified or queue-named session.',
       inputSchema: RETIRE_SCHEMA as unknown as Record<string, unknown>,
     })
     for (const [name, description, schema] of [
@@ -1217,8 +1228,9 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: RETIRE_TOOL }, ($, e) => {
-    const input = e as unknown as { session_ids?: unknown }
-    return tracedTool($, 'retire_workers', e, ['session_ids'], () => retire($, (input.session_ids as string[] | undefined) ?? []))
+    const input = e as unknown as { session_ids?: unknown; reviewed?: unknown }
+    const reviewed = typeof input.reviewed === 'object' && input.reviewed !== null && !Array.isArray(input.reviewed) ? (input.reviewed as Record<string, unknown>) : {}
+    return tracedTool($, 'retire_workers', e, ['session_ids'], () => retire($, (input.session_ids as string[] | undefined) ?? [], reviewed))
   }).catch(($, e, next) => {
     traceError($, 'retire_workers', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: retire_workers failed` }

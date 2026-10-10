@@ -951,6 +951,13 @@ export const RETIRE_SCHEMA = {
   required: ['session_ids'],
   properties: {
     session_ids: sessionIds('Session ids (full, or the first 8 characters) of finished workers whose work is acknowledged and that are not needed any more.'),
+    reviewed: {
+      type: 'object',
+      maxProperties: 50,
+      additionalProperties: { type: 'string', minLength: 1 },
+      description:
+        'Optional. Maps a session id (full, or the first 8 characters) to the reason the orchestrator gives after reading its transcript: the stored outcome label is wrong or the work was deliberately abandoned. For that session the outcome check is skipped; every other refusal stays. The original outcome and the reason are logged in cleared.jsonl.',
+    },
   },
 } as const
 
@@ -1106,7 +1113,8 @@ export function ackEntries(text: string, ids: readonly string[], keep: boolean):
   return { ok: true, text: jqText(list, 2) + '\n' }
 }
 
-export type RetireVerdict = { removable: string[]; refused: { id: string; reason: string }[] }
+export type RetireReview = { session_id: string; was: string; reason: string }
+export type RetireVerdict = { removable: string[]; refused: { id: string; reason: string }[]; reviewed?: RetireReview[] }
 
 /** The text of the queue file that counts: every task not marked done; a text that is not the queue JSON counts whole. */
 export function activeQueueText(queueText: string): string {
@@ -1129,9 +1137,22 @@ export function findBySid(entries: readonly SessionEntry[], id: string): (Sessio
   return entries.find((one): one is SessionEntry & { session_id: string } => typeof one.session_id === 'string' && (one.session_id === id || one.session_id.startsWith(id)))
 }
 
-export function retireVerdict(entries: readonly SessionEntry[], facts: ProcFacts, rawQueueText: string, ids: readonly string[]): RetireVerdict {
+export function retireVerdict(
+  entries: readonly SessionEntry[],
+  facts: ProcFacts,
+  rawQueueText: string,
+  ids: readonly string[],
+  reviewed: Readonly<Record<string, unknown>> = {},
+): RetireVerdict {
   const queueText = activeQueueText(rawQueueText)
   const verdict: RetireVerdict = { removable: [], refused: [] }
+  // A reviewed key names the session by the same rule as an id; it must name one of the listed sessions, with a reason.
+  const listed = new Set(ids.map(id => findBySid(entries, id)?.session_id).filter((sid): sid is string => sid !== undefined))
+  const reviewOf = (sid: string) => Object.keys(reviewed).find(key => key.length >= 8 && sid.startsWith(key))
+  for (const key of Object.keys(reviewed)) {
+    const entry = key.length >= 8 ? findBySid(entries, key) : undefined
+    if (entry === undefined || !listed.has(entry.session_id)) verdict.refused.push({ id: key, reason: 'reviewed names no session of session_ids' })
+  }
   for (const id of ids) {
     const entry = findBySid(entries, id)
     const sid = entry?.session_id
@@ -1141,14 +1162,38 @@ export function retireVerdict(entries: readonly SessionEntry[], facts: ProcFacts
     }
     const status = rowStatus(entry, facts)
     const outcome = entry.outcome as { kind?: unknown } | undefined
+    const key = reviewOf(sid)
+    const reason = key === undefined ? undefined : reviewed[key]
+    const isReviewed = key !== undefined && outcome !== undefined && outcome.kind !== 'clean'
+    if (key !== undefined && (typeof reason !== 'string' || reason.trim() === '')) {
+      verdict.refused.push({ id, reason: 'reviewed needs a non-empty reason' })
+      continue
+    }
     if (status === 'alive') verdict.refused.push({ id, reason: 'its process is alive' })
     else if (status === 'dead') verdict.refused.push({ id, reason: 'its exit was not classified yet' })
     else if (entry.keep === true) verdict.refused.push({ id, reason: 'marked keep: a resume or follow-up is expected' })
-    else if (outcome !== undefined && outcome.kind !== 'clean') verdict.refused.push({ id, reason: `outcome ${String(outcome.kind)} needs a resume` })
+    else if (outcome !== undefined && outcome.kind !== 'clean' && !isReviewed) verdict.refused.push({ id, reason: `outcome ${String(outcome.kind)} needs a resume` })
     else if (queueText.includes(sid) || queueText.includes(sid.slice(0, 8))) verdict.refused.push({ id, reason: 'a queued or running task names it' })
-    else verdict.removable.push(sid)
+    else {
+      verdict.removable.push(sid)
+      if (isReviewed) (verdict.reviewed ??= []).push({ session_id: sid, was: String(outcome?.kind), reason: String(reason).trim() })
+    }
   }
   return verdict
+}
+
+/** Cleared-log lines of removed entries: those of a reviewed retire get `reviewed_outcome` (the stored kind) and `reviewed_reason` at the end. */
+export function annotateCleared(removed: string, reviews: readonly RetireReview[]): string {
+  if (reviews.length === 0) return removed
+  return removed
+    .split('\n')
+    .map(line => {
+      if (line === '') return line
+      const entry = JSON.parse(line) as Rec
+      const review = reviews.find(one => one.session_id === entry.session_id)
+      return review === undefined ? line : jqText({ ...entry, reviewed_outcome: review.was, reviewed_reason: review.reason })
+    })
+    .join('\n')
 }
 
 // ---------------------------------------------------------------- native Windows

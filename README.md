@@ -69,7 +69,7 @@ The tools are registered when the mod becomes active and are named `mcp__session
 | --- | --- |
 | `launch_worker` | Starts or resumes a headless `claude -p` worker as a background task, picks the licence for a fresh launch with the configured licence picker command (or uses the default config directory), finds its pid and session id and registers it in the worker registry. |
 | `acknowledge_workers` | Marks finished workers as acknowledged (`reported` true); `keep: true` also marks them as needed for a resume. |
-| `retire_workers` | Removes finished, acknowledged, clean workers from the registry and appends the removed entries to `cleared.jsonl`. |
+| `retire_workers` | Removes finished, acknowledged, clean workers from the registry and appends the removed entries to `cleared.jsonl`. The optional `reviewed` input maps a session id (full, or the first 8 characters) to a non-empty reason the orchestrator wrote after reading the transcript and finding the stored outcome (`login`, `limit`, `killed`) wrong, or the work deliberately abandoned: for that session only the outcome check is skipped, and the entry's log line gets `reviewed_outcome` (the stored kind) and `reviewed_reason`; the answer says `Retired with review: <id> (was <kind>: <reason>)` and the debug trace's guard line carries both. |
 | `open_point` | Adds, answers, closes, holds or releases an entry of `open-points.json`. Settled entries older than 7 days move to `open-points-archive.md`. |
 | `queue_task` | Adds, updates or removes a task of `task-queue.json`. |
 | `record_decision` | Appends one numbered line to a section of `agreed-decisions.md`; the section is created when missing. |
@@ -80,7 +80,7 @@ Inbox: every worker gets a session name with `-n` and accepts messages from othe
 
 Registry entry: `launch_worker` records `title`, `pid`, `session_id`, `name`, `socket_path`, `config_dir`, `cwd`, `model`, `effort`, `result_file`, `err_file` and `started_at`, the time the launch started the run in epoch seconds; a resume sets the new run's `started_at` and drops the previous run's `ended_at`. Entries written before these two fields existed stay valid without them. `name` and `socket_path` come from the worker's sessions file `<config_dir>/sessions/<pid>.json` (`name` and `messagingSocketPath`), read with the session id; `name` falls back to the name the launch passed. A claude that writes no socket (an older version) gives an entry without `socket_path`, and a resume then writes `socket_path: null` so the previous run's socket is not kept. The socket is valid only while the pid lives. The launch answer names both.
 
-`acknowledge_workers` and `retire_workers` refuse a worker whose process is alive. `retire_workers` also refuses a worker that is marked keep, whose outcome is not `clean` or that a queued or running task names.
+`acknowledge_workers` and `retire_workers` refuse a worker whose process is alive. `retire_workers` also refuses a worker that is marked keep, whose outcome is not `clean` (unless `reviewed` gives a reason for it) or that a queued or running task names. A `reviewed` entry never lifts the other refusals (a live, kept, unclassified, queue-named or unknown session), and one without a reason, or naming a session that is not in `session_ids`, is refused.
 
 ### Options
 
