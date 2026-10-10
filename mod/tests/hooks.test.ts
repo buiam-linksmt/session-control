@@ -49,6 +49,8 @@ type World = {
 const MISSING = new Set<string>()
 // Paths that read as missing until the first sleep, like a session file the engine writes a moment late.
 const LATE = new Set<string>()
+// Paths that are there but cannot be read (over the read cap, say).
+const UNREADABLE = new Set<string>()
 
 function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText = REGISTRY_TEXT): World {
   const w: World = { bash: [], spawned: false, writes: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
@@ -65,6 +67,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   })
   on('fs.read', ($, e) => {
     if (MISSING.has(e.path) || LATE.has(e.path)) throw new Error(`ENOENT ${e.path}`)
+    if (UNREADABLE.has(e.path)) throw new Error(`EFBIG ${e.path}`)
     if (e.path === REGISTRY_PATH) return { value: registryText }
     if (e.path === '/work/orch/CLAUDE.md') return { value: '# Role: Session Orchestrator\n' }
     if (e.path === '/work/new/thin.md') return { value: 'Just do the work.' }
@@ -78,6 +81,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     w.writes.push({ path: e.path, text: e.text })
     return { value: undefined }
   })
+  // A path the read above refuses is missing, unless it is one that cannot be read.
+  on('fs.exists', ($, e) => ({ value: UNREADABLE.has(e.path) }))
   on('process.run', ($, e) => {
     w.runs.push([...e.argv])
     const ok = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
@@ -99,7 +104,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === 'sleep') LATE.clear()
     if (e.argv[0] === 'mkdir' || e.argv[0] === 'sleep' || e.argv[0] === 'rm') return { value: { ...ok, stdout: '' } }
     if (e.argv[0] === 'mv') {
-      const text = w.writes.find(one => one.path === e.argv[2])?.text
+      // The newest write of that name: the mocked clock stands still, so temp names repeat.
+      const text = w.writes.filter(one => one.path === e.argv[2]).at(-1)?.text
       if (text !== undefined) w.writes.push({ path: String(e.argv[3]), text })
       return { value: { ...ok, stdout: '' } }
     }
@@ -123,6 +129,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
 }
 
 const start = (cwd: string, isInteractive = true) => ({ cwd, surface: null, isInteractive })
+/** The registry as the plugin last wrote it. */
+const lastRegistry = (w: World) => JSON.parse(w.writes.filter(one => one.path === REGISTRY_PATH).at(-1)?.text ?? '[]') as Record<string, unknown>[]
 const PANE_PROPS = { title: 'Session control', isFocused: false, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 36 } }
 
 const stubPanel = (on: On) => {
@@ -331,11 +339,10 @@ describe('launch_worker', () => {
     expect(String(bash?.command)).toContain('/.claude/session-control/runs/')
     expect(String(bash?.command)).not.toContain("'/work/new/result.json'")
     expect(String(bash?.command)).toContain('2>')
-    const register = w.runs.find(argv => argv[2] === REGISTER_SCRIPT)
-    expect(register).toBeDefined()
-    expect(register?.[5]).toContain('"pid":7001')
-    expect(register?.[5]).toContain('"cwd":"/work/new"')
-    expect(register?.[6]).toBe('new')
+    // Registered as new: appended to the registry it read, with the real pid and the launch dir.
+    const after = lastRegistry(w)
+    expect(after.length).toBe(JSON.parse(REGISTRY_TEXT).length + 1)
+    expect(after.at(-1)).toMatchObject({ pid: 7001, session_id: 'abcdabcd-0000-4000-8000-000000000001', cwd: '/work/new' })
     expect(w.runs.some(argv => argv.join(' ') === '/fixture/bin/pick --need 40')).toBe(true)
   })
 
@@ -355,9 +362,37 @@ describe('launch_worker', () => {
     try {
       const out = await $.tool.call({ tool: TOOL, ...args } as never)
       expect(String(out.result)).toContain('Launched pid 7001')
-      expect(w.runs.some(argv => argv[2] === REGISTER_SCRIPT)).toBe(true)
+      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(true)
     } finally {
       LATE.clear()
+    }
+  })
+
+  test('a missing registry is registered into as an empty one', { options: OPTIONS }, async ($, on) => {
+    MISSING.add(REGISTRY_PATH)
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toContain('registered')
+      expect(lastRegistry(w)).toEqual([expect.objectContaining({ pid: 7001, cwd: '/work/new' })] as never)
+    } finally {
+      MISSING.clear()
+    }
+  })
+
+  test('a registry that is there but cannot be read is never overwritten', { options: OPTIONS }, async ($, on) => {
+    UNREADABLE.add(REGISTRY_PATH)
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      // The fixture's `test -e` answers every file as missing, so activation's own helper-file creation is not counted.
+      const before = w.writes.length
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toContain('registry write FAILED: the registry cannot be read')
+      expect(w.writes.slice(before).some(one => one.path.startsWith(REGISTRY_PATH))).toBe(false)
+    } finally {
+      UNREADABLE.clear()
     }
   })
 
@@ -469,15 +504,18 @@ describe('launch_worker', () => {
     const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), finished]))
     on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
     await $.session.start(start(ORCH_DIR))
-    const clears = () => w.runs.filter(argv => argv[0] === 'sh' && String(argv[3]) === 'session-clear')
+    // The cleared log is written before the registry, so a log write marks a removal.
+    const clears = () => w.writes.filter(one => one.path.endsWith('/cleared.jsonl'))
     await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)
     expect(clears().length).toBe(0)
     const out = await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [finished.session_id.slice(0, 8), 'aaaaaaaa'] } as never)
     expect(String(out.result)).toContain('Retired: f1f1f1f1.')
     expect(String(out.result)).toContain('its process is alive')
     expect(clears().length).toBe(1)
-    expect(clears()[0]?.slice(-1)).toEqual([finished.session_id])
-    expect(clears()[0]?.[5]).toContain('cleared.jsonl')
+    expect(clears()[0]?.text.trimEnd().split('\n').map(line => JSON.parse(line).session_id)).toEqual([finished.session_id])
+    expect(clears()[0]?.path).toBe(`${HOME}/.claude/session-control/runs/cleared.jsonl`)
+    expect(lastRegistry(w).some(one => one.session_id === finished.session_id)).toBe(false)
+    expect(lastRegistry(w).some(one => one.session_id === SID_ALIVE)).toBe(true)
   })
 
   test('open_point and record_decision edit the helper files, back them up first, and report a refusal', { options: OPTIONS }, async ($, on) => {
@@ -497,13 +535,15 @@ describe('launch_worker', () => {
     const finished = { title: 'finished clean', session_id: 'f2f2f2f2-0000-4000-8000-000000000002', config_dir: '/fixture/lic/a', reported: false, outcome: { kind: 'clean', summary: 'clean: done' } }
     const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), finished]))
     await $.session.start(start(ORCH_DIR))
-    const acks = () => w.runs.filter(argv => argv[0] === 'sh' && String(argv[3]) === 'session-ack')
+    const acks = () => w.writes.filter(one => one.path === REGISTRY_PATH)
+    const before = acks().length
     const out = await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['f2f2f2f2', 'aaaaaaaa'], keep: true } as never)
     expect(String(out.result)).toContain('Acknowledged and kept: f2f2f2f2.')
     expect(String(out.result)).toContain('its process is alive')
-    expect(acks().length).toBe(1)
-    expect(acks()[0]).toContain('keep')
-    expect(acks()[0]?.slice(-1)).toEqual([finished.session_id])
+    expect(acks().length).toBe(before + 1)
+    const after = lastRegistry(w)
+    expect(after.find(one => one.session_id === finished.session_id)).toMatchObject({ reported: true, keep: true })
+    expect(after.filter(one => one.reported === true && one.keep === true).map(one => one.session_id)).toEqual([finished.session_id])
   })
 
   test('seated inline the panel is one box behind tabs, at most 11 rows, and a tab switches the box', { options: OPTIONS }, async ($, on) => {

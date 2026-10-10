@@ -8,11 +8,11 @@ import { backupName, dirOf, freshText, localDate, tmpPath } from './store'
 import {
   LAUNCH_SCHEMA,
   PROBE_SCRIPT,
-  REGISTER_SCRIPT,
   ACK_SCHEMA,
-  ACK_SCRIPT,
-  CLEAR_SCRIPT,
   RETIRE_SCHEMA,
+  ackEntries,
+  registerEntry,
+  removeEntries,
   retireVerdict,
   buildLaunchArgv,
   ackPeerNote,
@@ -55,7 +55,7 @@ import {
   rowStatus,
   slugify,
 } from './core'
-import type { LaunchArgs, PresentedPoint, ProcFacts, SectionBox, SectionId } from './core'
+import type { LaunchArgs, PresentedPoint, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -154,6 +154,38 @@ async function writeAtomic($: EngineInterface, path: string, text: string, expec
   return true
 }
 
+/**
+ * One registry edit: read the text, edit it, write it through writeAtomic against the text read; when another
+ * writer changed the file meanwhile, read and edit once more. A missing file is `missing` when given, else there is
+ * nothing to edit; a file that is there but cannot be read is never written. Answers what went wrong, if anything.
+ */
+async function editRegistry($: EngineInterface, edit: (text: string) => Promise<RegistryEdit>, missing?: string): Promise<string | undefined> {
+  const path = await registryPath($)
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const text = await $.fs.read(path).catch(() => undefined)
+    if (text === undefined && (await $.fs.exists(path).catch(() => true))) return 'the registry cannot be read'
+    const base = text ?? missing
+    if (base === undefined) return undefined
+    const edited = await edit(base)
+    if (!edited.ok) return edited.error
+    if (edited.text === text) return undefined
+    try {
+      if (await writeAtomic($, path, edited.text, text)) return undefined
+    } catch (err) {
+      return String(err)
+    }
+  }
+  return 'the registry changed while it was being edited; nothing written'
+}
+
+/** Appends lines to a log file; one that is there but cannot be read is never overwritten. */
+async function appendLog($: EngineInterface, path: string, lines: string): Promise<string | undefined> {
+  const old = await $.fs.read(path).catch(() => undefined)
+  if (old === undefined && (await $.fs.exists(path).catch(() => true))) return `${path} cannot be read`
+  await $.fs.write(path, (old ?? '') + lines)
+  return undefined
+}
+
 /** Backups are written once per file, tool and day, before the first change of that day. */
 async function backupOnce($: EngineInterface, file: string, tool: string, today: string, text: string): Promise<void> {
   const backup = orchPath(`backups/${backupName(file, tool, today)}`)
@@ -200,7 +232,7 @@ async function runsPath($: EngineInterface): Promise<string> {
 
 const shortIds = (ids: readonly string[]) => (ids.length === 0 ? 'none' : ids.map(id => id.slice(0, 8)).join(', '))
 
-const writeFailed = (ran: { exitCode: number; stderr: string }) => `registry write FAILED (exit ${ran.exitCode}): ${ran.stderr.slice(0, 120)}`
+const writeFailed = (why: string) => `registry write FAILED: ${why.slice(0, 120)}`
 
 /** A worker whose recorded pid is gone: classify, maybe merge into the registry, toast. */
 async function complete($: EngineInterface, entry: SessionEntry, taskStatus: string | undefined): Promise<void> {
@@ -355,8 +387,8 @@ async function acknowledge($: EngineInterface, ids: readonly string[], keep: boo
     else done.push(entry.session_id)
   }
   if (done.length > 0) {
-    const ran = await $.process.run(['sh', '-c', ACK_SCRIPT, 'session-ack', await registryPath($), keep ? 'keep' : 'plain', ...done], { timeoutMs: 10_000 })
-    if (ran.exitCode !== 0) return { deny: `${PLUGIN}: ${writeFailed(ran)}` }
+    const failed = await editRegistry($, async text => ackEntries(text, done, keep))
+    if (failed !== undefined) return { deny: `${PLUGIN}: ${writeFailed(failed)}` }
     await refresh($)
   }
   return { result: `Acknowledged${keep ? ' and kept' : ''}: ${shortIds(done)}.${refused.length === 0 ? '' : ` Refused: ${refused.join('; ')}.`}` }
@@ -369,11 +401,21 @@ async function retire($: EngineInterface, ids: readonly string[]) {
   const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => '')
   const verdict = retireVerdict(reg.entries, reg.facts, queueText, ids)
   if (verdict.removable.length > 0) {
-    const ran = await $.process.run(
-      ['sh', '-c', CLEAR_SCRIPT, 'session-clear', await registryPath($), `${await runsPath($)}/cleared.jsonl`, ...verdict.removable],
-      { timeoutMs: 10_000 },
-    )
-    if (ran.exitCode !== 0) return { deny: `${PLUGIN}: ${writeFailed(ran)}` }
+    const log = `${await runsPath($)}/cleared.jsonl`
+    // The removed entries are logged before the registry is written; a second attempt logs only what is new.
+    const logged = new Set<string>()
+    const failed = await editRegistry($, async text => {
+      const edited = removeEntries(text, verdict.removable)
+      if (!edited.ok) return edited
+      const lines = edited.removed.split('\n').filter(line => line !== '' && !logged.has(line))
+      if (lines.length > 0) {
+        const problem = await appendLog($, log, lines.map(line => `${line}\n`).join(''))
+        if (problem !== undefined) return { ok: false, error: `${problem}; nothing removed` }
+        for (const line of lines) logged.add(line)
+      }
+      return edited
+    })
+    if (failed !== undefined) return { deny: `${PLUGIN}: ${writeFailed(failed)}` }
     await refresh($)
   }
   const removed = shortIds(verdict.removable)
@@ -461,11 +503,9 @@ async function spawnWorker(
   }
   if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
   const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files)
-  const registered = await $.process.run(
-    ['sh', '-c', REGISTER_SCRIPT, 'session-register', await registryPath($), JSON.stringify(entry), verdict.resumeSid ? 'resume' : 'new'],
-    { timeoutMs: 10_000 },
-  )
-  const note = registered.exitCode === 0 ? 'registered' : writeFailed(registered)
+  // A missing registry starts as an empty one, as REGISTER_SCRIPT starts it.
+  const failed = await editRegistry($, async text => registerEntry(text, entry, verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
+  const note = failed === undefined ? 'registered' : writeFailed(failed)
   await refresh($)
   return {
     result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Result: ${files.result}; errors: ${files.err}.`,
