@@ -6,7 +6,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { tailLines } from '../hooks/core'
+import { tailLines, workerName } from '../hooks/core'
 import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, TAIL_SHAPED_SCRIPT } from '../hooks/host-posix'
 import {
   MAX_ANSWER_CHARS,
@@ -20,9 +20,12 @@ import {
   plainText,
   redactCounted,
   sessionWritesText,
+  shownName,
+  shownSessionId,
   transcriptWrites,
   workerTailText,
 } from '../hooks/inspect'
+import { REDACTED, redact } from '../hooks/trace'
 import { newerInMap } from './fake-helper'
 import { NOW_MS, NOW_SEC } from './fixtures'
 
@@ -272,6 +275,45 @@ describe('list_sessions', () => {
       '- orphan (no registry entry) | pid 4101 | age 2m05s | cwd /m/work/alive | config_dir /m/cfg',
       '- orphan (no registry entry) | pid 4999 | age 40m00s | cwd /m/elsewhere | config_dir /m/lic/b',
     ])
+  })
+
+  test('the session names the launch gives and the session ids are shown as they are; a title keeps its redaction', { options: OPTIONS }, async ($, on) => {
+    // Real-shaped names: what workerName gives for real titles, a uniqueness suffix among them. Each is a run of 32 or
+    // more letters, digits and dashes, which the redaction takes for a token in free text.
+    const at = Date.UTC(2026, 9, 11, 12, 0, 0)
+    const names = [
+      workerName('session-control T2a write tools', at),
+      workerName('NADIR manual tests for 946665, 946670 and 946671', at),
+      `${workerName('Windows support for the mod panel', at)}-2`,
+      workerName('fix token refresh', at),
+    ]
+    expect(names).toEqual(['w-session-control-t2a-writ-261011120000', 'w-nadir-manual-tests-for-9-261011120000', 'w-windows-support-for-the-261011120000-2', 'w-fix-token-refresh-261011120000'])
+    expect(names.slice(0, 3).every(name => redact(name) === REDACTED)).toBe(true)
+    const sids = ['5e551011-aaaa-4aaa-8aaa-aaaaaaaaaaa1', '5e551011-bbbb-4bbb-8bbb-bbbbbbbbbbb2', '5e551011-cccc-4ccc-8ccc-ccccccccccc3', '5e551011-dddd-4ddd-8ddd-ddddddddddd4']
+    const entries = names.map((name, n) => ({ title: n === 0 ? `T2a with ${CANARIES.github} in the title` : `worker ${n}`, session_id: sids[n], name, config_dir: CFG, cwd: '/m/work/named', model: 'haiku', effort: 'low', reported: true }))
+    // A name the launch never gives (a hand edit, another tool) is free text: a token in it goes.
+    entries.push({ title: 'foreign', session_id: '5e551011-eeee-4eee-8eee-eeeeeeeeeee5', name: `my ${CANARIES.anthropic}`, config_dir: CFG, cwd: '/m/work/named', model: 'haiku', effort: 'low', reported: true })
+    const w = world(on, entries)
+    const got = await call($, w, 'list_sessions')
+    expectReadOnly(got)
+    for (const [n, name] of names.entries()) expect(got.text).toContain(`| session_id ${sids[n]} | name ${name} | pid -`)
+    expect(got.text).toContain(`- finished | T2a with ${REDACTED} in the title | session_id ${sids[0]} | name ${names[0]} |`)
+    expect(got.text).toContain(`| name my ${REDACTED} | pid -`)
+    expectNoCanary(got.text)
+    // The headings of the tools that name one session show the id as it is too.
+    const tail = await $.tool.call({ tool: tool('worker_tail'), session_id: sids[0] } as never)
+    expect(String((tail as { result?: unknown }).result).split('\n')[0]).toBe(`worker_tail for session ${sids[0]} "T2a with ${REDACTED} in the title"`)
+  })
+
+  test('shownName and shownSessionId: the mod\'s forms as they are, anything else cleaned and redacted', () => {
+    expect(shownName('w-session-control-t2a-writ-261011120000')).toBe('w-session-control-t2a-writ-261011120000')
+    expect(shownName('w-a-261011120000-12')).toBe('w-a-261011120000-12')
+    // Not the launch's form: upper case, a blank, control characters, over 64 characters.
+    expect(shownName(`W-${'a1'.repeat(20)}`)).toBe(`W-${REDACTED}`)
+    expect(shownName('w-a b\u001b[31m')).toBe('w-a b')
+    expect(shownName(`w-${'a1b2c3d4e5-'.repeat(6)}261011120000`)).toBe(REDACTED)
+    expect(shownSessionId(SID_CLEAN)).toBe(SID_CLEAN)
+    expect(shownSessionId(`x ${CANARIES.github}`)).toBe(`x ${REDACTED}`)
   })
 
   test('a registry that does not parse is a refusal, nothing written', { options: OPTIONS }, async ($, on) => {

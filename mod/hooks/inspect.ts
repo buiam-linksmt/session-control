@@ -2,10 +2,12 @@
 // panel_snapshot): their schemas and the plain text each answers with. No `$`, no I/O: register.tsx reads the
 // registry, the probe, the run files, the transcripts and the listing, and hands them here. Every text that comes from
 // a file (titles, outcome summaries, reports, transcript lines, open points, file names) goes through `clean`: the
-// debug trace's redaction (trace.ts), and no terminal control characters. Every answer is bounded.
+// debug trace's redaction (trace.ts), and no terminal control characters. The mod's own identifiers, a session id and
+// a session name in the forms the engine and the launch give them, are shown as they are (shownSessionId, shownName).
+// Every answer is bounded.
 
 import type { SessionEntry, SessionRow, SessionRowStatus, SessionSnapshot } from '../types'
-import { classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, paneWidths, statusLabel, rowStatus, winPath, wrapText } from './core'
+import { WORKER_NAME, classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, paneWidths, statusLabel, rowStatus, winPath, wrapText } from './core'
 import type { PresentedPoint, ProcFacts, QueuedTask } from './core'
 import type { NewerFiles } from './host'
 import { REDACTED, redact } from './trace'
@@ -102,6 +104,26 @@ function oneLine(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
 }
 
+/** A session id as the engine gives it: a UUID. */
+const SESSION_UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+/**
+ * A registry entry's session id as an answer shows it: a UUID as it is, never redacted (the engine made it); anything
+ * else in the field is free text, cleaned and cut like a title.
+ */
+export function shownSessionId(value: string): string {
+  return SESSION_UUID.test(value) ? value : oneLine(value, 80)
+}
+
+/**
+ * A registry entry's session name as an answer shows it: a name of the form the launch gives (`w-<slug>-<yyMMddHHmmss>`,
+ * WORKER_NAME, at most 64 characters) as it is, never redacted: the redaction takes such a long run of letters and
+ * digits for a token. Anything else in the field is free text, cleaned and cut.
+ */
+export function shownName(value: string): string {
+  return WORKER_NAME.test(value) && value.length <= 64 ? value : oneLine(value, 300)
+}
+
 /** The head of a text: at most `max` characters, and how many were cut. */
 export function headOf(text: string, max: number): { text: string; cut: number } {
   return text.length <= max ? { text, cut: 0 } : { text: text.slice(0, max), cut: text.length - max }
@@ -136,13 +158,13 @@ export function matchSession(entries: readonly SessionEntry[], id: string): Sess
   const exact = hits.find(one => one.session_id.toLowerCase() === key)
   if (exact !== undefined) return { entry: exact }
   if (key.length < 8 || hits.length === 0) return { error: `no registry entry has the session id ${oneLine(id, 40)} (give the full id or its first 8 characters; list_sessions shows the registry)` }
-  if (hits.length > 1) return { error: `${hits.length} registry entries start with ${oneLine(id, 40)}: give more of the id (${hits.map(one => one.session_id).join(', ')})` }
+  if (hits.length > 1) return { error: `${hits.length} registry entries start with ${oneLine(id, 40)}: give more of the id (${hits.map(one => shownSessionId(one.session_id)).join(', ')})` }
   return { entry: hits[0] as SessionEntry & { session_id: string } }
 }
 
 /** One line naming the session: its id and title. */
 function heading(tool: string, entry: SessionEntry & { session_id: string }): string {
-  return `${tool} for session ${entry.session_id} "${oneLine(typeof entry.title === 'string' ? entry.title : '(untitled)', 120)}"`
+  return `${tool} for session ${shownSessionId(entry.session_id)} "${oneLine(typeof entry.title === 'string' ? entry.title : '(untitled)', 120)}"`
 }
 
 /** Whether the entry's recorded pid is its live process, said as a line. */
@@ -206,8 +228,8 @@ export function listSessionsText(rows: readonly SessionRow[], entries: readonly 
       [
         `- ${statusLabel(row.status)}`,
         oneLine(row.title, 120),
-        `session_id ${row.sid ?? '-'}`,
-        `name ${field(entry.name)}`,
+        `session_id ${row.sid === undefined ? '-' : shownSessionId(row.sid)}`,
+        `name ${typeof entry.name === 'string' && entry.name !== '' ? shownName(entry.name) : '-'}`,
         `pid ${row.pid ?? '-'}`,
         `elapsed ${elapsed}`,
         `model ${oneLine(row.model, 40)}/${oneLine(row.effort, 20)}`,
