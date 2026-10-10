@@ -1,7 +1,8 @@
 // The Node.js helper behind the host interface: withHelper wraps an adapter so that its file operations (and on Linux
 // the process probe) run in one `node mod/helper/host.mjs <op>` process each, with the request as JSON on stdin. Node
-// is looked for once, at the first operation that needs it: none, or one older than HELPER_MIN_NODE, leaves the
-// adapter's own operations in place for the whole load. A call that fails (Node cannot start, times out, answers
+// is looked for at the first operation that needs it: none, or one older than HELPER_MIN_NODE, leaves the adapter's
+// own operations in place, and the first operation HELPER_REDETECT_MS or more after that lookup looks again, so
+// installing Node needs no reload; once found it stays for the load. A call that fails (Node cannot start, times out, answers
 // what is not one JSON object or answers ok:false) falls back to the adapter's own operation for that call, and the
 // port is told the operation and a fixed code, never a message or content; an append that timed out is the exception
 // (appendNotRepeated).
@@ -20,6 +21,9 @@ export const HELPER_SCRIPT = 'helper/host.mjs'
 /** The oldest Node major version the helper runs on. */
 export const HELPER_MIN_NODE = 22
 
+/** How long after a lookup that found no usable Node the next helper operation looks again. */
+export const HELPER_REDETECT_MS = 10 * 60_000
+
 /** How the helper is started: the node executable and the helper's absolute path. */
 export type HelperSetup = { node: string; script: string }
 
@@ -33,7 +37,7 @@ export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'batch'> } & Record<s
 export type HelperAnswer = { ok: true; fields: Record<string, unknown> } | { ok: false; code: string; at?: number }
 
 /**
- * What the port is told: Node's detection once per load, and each fallback (`isQuiet`: of an untraced operation, the
+ * What the port is told: Node's detection, each time its outcome changes; and each fallback (`isQuiet`: of an untraced operation, the
  * trace's own write among them; `isRepeated` false: an append that timed out, not made again).
  */
 export type HelperNote =
@@ -114,25 +118,50 @@ const rotateRequest = (plan: RotatePlan) => ({ path: plan.path, adding: plan.add
  */
 export function withHelper(base: Host, setup: HelperSetup): Host {
   let ready: Promise<boolean> | undefined
+  /** When the last lookup started (the port's clock), and what the port was last told of Node. */
+  let checkedAt = 0
+  let toldNode: string | undefined
 
-  /** Node, looked for once: `node --version`, untraced, accepted from HELPER_MIN_NODE on. */
+  /** Tells the port Node's state when it differs from what it was last told: one note per change, not per lookup. */
+  function noteNode(port: HostPort, note: HelperNote & { kind: 'node' }): void {
+    const told = JSON.stringify(note)
+    if (told === toldNode) return
+    toldNode = told
+    port.noteHelper(note)
+  }
+
+  /** Node, looked for: `node --version`, untraced, accepted from HELPER_MIN_NODE on. */
   async function detect(port: HostPort): Promise<boolean> {
+    checkedAt = await port.now()
     let ran: ProcessRunResult
     try {
       ran = await port.run([setup.node, '--version'], { timeoutMs: VERSION_TIMEOUT_MS }, true)
     } catch (err) {
-      port.noteHelper({ kind: 'node', isActive: false, reason: rejectionCode(err) === 'TIMEOUT' ? 'timeout' : 'not-found' })
+      noteNode(port, { kind: 'node', isActive: false, reason: rejectionCode(err) === 'TIMEOUT' ? 'timeout' : 'not-found' })
       return false
     }
     const major = ran.exitCode === 0 ? nodeMajor(ran.stdout) : undefined
     if (major === undefined) {
-      port.noteHelper({ kind: 'node', isActive: false, reason: ran.exitCode === 0 ? 'version-unreadable' : `exit-${ran.exitCode}` })
+      noteNode(port, { kind: 'node', isActive: false, reason: ran.exitCode === 0 ? 'version-unreadable' : `exit-${ran.exitCode}` })
       return false
     }
     const version = ran.stdout.trim()
     const isActive = major >= HELPER_MIN_NODE
-    port.noteHelper(isActive ? { kind: 'node', isActive, version } : { kind: 'node', isActive, version, reason: 'too-old' })
+    noteNode(port, isActive ? { kind: 'node', isActive, version } : { kind: 'node', isActive, version, reason: 'too-old' })
     return isActive
+  }
+
+  /**
+   * Whether the helper is there: the first operation looks for Node; while none (or an old one) was found, the first
+   * operation HELPER_REDETECT_MS after the last lookup looks again. Operations at the same time share one lookup.
+   */
+  async function isReady(port: HostPort): Promise<boolean> {
+    const current = ready
+    if (current === undefined) return (ready = detect(port))
+    if (await current) return true
+    const now = await port.now()
+    if (ready === current && now - checkedAt >= HELPER_REDETECT_MS) ready = detect(port)
+    return ready ?? current
   }
 
   /** One helper call; the trace shows the operation and the given fields, never the request. */
@@ -160,8 +189,7 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
     fallback: (failed: HelperAnswer & { ok: false }) => Promise<T>,
     unrepeated?: T,
   ): Promise<T> {
-    ready ??= detect(port)
-    if (!(await ready)) return fallback({ ok: false, code: 'NO_NODE' })
+    if (!(await isReady(port))) return fallback({ ok: false, code: 'NO_NODE' })
     const answer = await call(port, op, request, isQuiet, shown)
     const value = answer.ok ? use(answer.fields) : undefined
     if (value !== undefined) return value

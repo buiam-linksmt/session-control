@@ -8,7 +8,7 @@ import type { On, ProcessRunResult } from 'claude-code'
 
 import { parseProcFacts, tailLines } from '../hooks/core'
 import type { Host, HostPort, RotatePlan } from '../hooks/host'
-import { CALL_CODES, HELPER_MIN_NODE, appendNotRepeated, appendText, fallbackFields, fallbackToast, nodeMajor, readAnswer, rejectionCode, withHelper } from '../hooks/host-helper'
+import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, appendNotRepeated, appendText, fallbackFields, fallbackToast, nodeMajor, readAnswer, rejectionCode, withHelper } from '../hooks/host-helper'
 import type { HelperNote } from '../hooks/host-helper'
 import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
@@ -37,6 +37,8 @@ type Sim = {
   /** What `node --version` prints; null: node cannot start. */
   version: string | null
   answering: Answering
+  /** The port's clock, epoch milliseconds. */
+  nowMs: number
 }
 
 /** A path as the adapters give it (C:\x and C:/x alike). */
@@ -55,7 +57,7 @@ const helperAnswer = (files: Map<string, string>, op: string, request: Request) 
 
 /** The simulated machine: the adapters' own commands (sh, mv, rm, PowerShell's scripts) and node, answered as the system would. */
 function machine(answering: Answering = 'real', version: string | null = 'v24.14.0\n'): Sim {
-  return { files: new Map(), runs: [], notes: [], version, answering }
+  return { files: new Map(), runs: [], notes: [], version, answering, nowMs: NOW_MS }
 }
 
 function runOn(sim: Sim, argv: readonly string[], stdin?: string): ProcessRunResult {
@@ -137,7 +139,7 @@ function portOf(sim: Sim, cap = Infinity): HostPort {
       if (text === undefined) throw new Error(`ENOENT ${path}`)
       return { kind: 'file', size: text.length, mtimeMs: NOW_MS, isLink: false } as never
     },
-    now: async () => NOW_MS,
+    now: async () => sim.nowMs,
     sleep: async () => undefined,
     env: async name => (name === 'SystemRoot' ? 'C:\\Windows' : '/m/home'),
     runsDir: async () => '/m/runs',
@@ -461,6 +463,75 @@ describe('withHelper on Linux', () => {
     expect(calls(sim).map(one => one.op).sort()).toEqual(['append', 'probe'])
   })
 
+  test('no Node: looked for again at the first operation 10 minutes after the last lookup, not before; Node installed meanwhile is taken', async () => {
+    const sim = machine('real', null)
+    const host = helped()
+    const port = portOf(sim)
+    expect(HELPER_REDETECT_MS).toBe(600_000)
+    await host.probe(port, [])
+    expect(lookups(sim).length).toBe(1)
+    // Node is installed four minutes on; the operations before the interval do not look for it.
+    sim.nowMs += 240_000
+    sim.version = 'v24.14.0\n'
+    await host.probe(port, [])
+    sim.nowMs += HELPER_REDETECT_MS - 240_000 - 1
+    await host.append(port, '/m/log', ['x'], false, () => undefined)
+    expect(lookups(sim).length).toBe(1)
+    expect(calls(sim)).toEqual([])
+    // At the interval, the next operation looks again, finds it and uses it.
+    sim.nowMs += 1
+    await host.append(port, '/m/log', ['y'], false, () => undefined)
+    expect(lookups(sim).length).toBe(2)
+    expect(calls(sim).map(one => one.op)).toEqual(['append'])
+    expect(sim.files.get('/m/log')).toBe('x\ny\n')
+    // One note per change of state: none found, then found.
+    expect(sim.notes).toEqual([
+      { kind: 'node', isActive: false, reason: 'not-found' },
+      { kind: 'node', isActive: true, version: 'v24.14.0' },
+    ])
+    // Found, it stays for the load: an hour on, no lookup.
+    sim.nowMs += 3_600_000
+    await host.probe(port, [])
+    expect(lookups(sim).length).toBe(2)
+  })
+
+  test('Node still missing at each later lookup: a lookup every 10 minutes at most, and no new note until its state changes', async () => {
+    const sim = machine('real', null)
+    const host = helped()
+    const port = portOf(sim)
+    for (let minute = 0; minute <= 25; minute++) {
+      sim.nowMs = NOW_MS + minute * 60_000
+      await host.probe(port, [])
+    }
+    // Looked for at minutes 0, 10 and 20.
+    expect(lookups(sim).length).toBe(3)
+    expect(sim.notes).toEqual([{ kind: 'node', isActive: false, reason: 'not-found' }])
+    // An old Node turns up: a change of state, one note; still old ten minutes on: no note.
+    sim.version = 'v20.18.1\n'
+    sim.nowMs = NOW_MS + 30 * 60_000
+    await host.probe(port, [])
+    sim.nowMs = NOW_MS + 40 * 60_000
+    await host.probe(port, [])
+    expect(lookups(sim).length).toBe(5)
+    expect(sim.notes).toEqual([
+      { kind: 'node', isActive: false, reason: 'not-found' },
+      { kind: 'node', isActive: false, version: 'v20.18.1', reason: 'too-old' },
+    ])
+    expect(calls(sim)).toEqual([])
+  })
+
+  test('operations at the same time after the interval share one new lookup', async () => {
+    const sim = machine('real', null)
+    const host = helped()
+    const port = portOf(sim)
+    await host.probe(port, [])
+    sim.nowMs += HELPER_REDETECT_MS
+    sim.version = 'v24.14.0\n'
+    await Promise.all([host.probe(port, []), host.append(port, '/m/log', ['x'], false, () => undefined), host.removeFile(port, '/m/none')])
+    expect(lookups(sim).length).toBe(2)
+    expect(calls(sim).map(one => one.op).sort()).toEqual(['append', 'probe', 'removeFile'])
+  })
+
   test('the other members are the adapter\'s own', () => {
     const host = helped()
     for (const name of ['homeDir', 'launchCommand', 'findNewWorker', 'launchChecks', 'createFile', 'makeDir', 'pause'] as const) expect(host[name]).toBe(posixHost[name])
@@ -617,6 +688,33 @@ describe('helper options, through the plugin', () => {
     await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
     expect(nodeRuns(w)).toEqual([['/opt/none/node', '--version']])
     expect(probes(w).every(argv => argv[0] === 'sh')).toBe(true)
+  })
+
+  test('no Node at the start, installed later: the mock clock\'s ticks look again after 10 minutes, the helper takes over, one trace line per change', { options: { ...PLUGIN_OPTIONS, debug: true } }, async ($, on) => {
+    const w = world(on, 'node', 'real', null)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const versions = () => nodeRuns(w).filter(argv => argv[1] === '--version').length
+    expect(versions()).toBe(1)
+    // Five minutes of poll ticks: the built-in probe each time, no lookup.
+    await w.clock.advance(300_000)
+    expect(versions()).toBe(1)
+    expect(probes(w).every(argv => argv[0] === 'sh')).toBe(true)
+    // Node is installed; at the first tick 10 minutes after the lookup it is found and runs the probe from then on.
+    w.sim.version = 'v24.14.0\n'
+    const before = probes(w).length
+    await w.clock.advance(300_000)
+    expect(versions()).toBe(2)
+    const later = probes(w).slice(before)
+    expect(later.at(-1)?.[0]).toBe('node')
+    expect(later.filter(argv => argv[0] === 'node').length).toBeGreaterThan(0)
+    await w.clock.advance(600_000)
+    expect(versions()).toBe(2)
+    const trace = (w.sim.files.get('/m/home/.claude/session-control/runs/trace.log') ?? '').trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(trace.filter(line => line.event === 'helper').map(({ ts: _ts, seq: _seq, ...rest }) => rest)).toEqual([
+      { event: 'helper', isActive: false, reason: 'not-found' },
+      { event: 'helper', isActive: true, version: 'v24.14.0' },
+    ])
+    expect(trace.filter(line => line.event === 'helper.fallback')).toEqual([])
   })
 
   test('helper failures: a helper.fallback trace line each, with the operation and the code, and one toast for the load', { options: { ...PLUGIN_OPTIONS, debug: true } }, async ($, on) => {
