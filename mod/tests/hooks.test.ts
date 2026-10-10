@@ -336,10 +336,33 @@ describe('tool surface', () => {
   test('the six tools keep their names, descriptions and schemas', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await $.session.start(start(ORCH_DIR))
-    expect(w.tools.map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
-    // Changed on purpose by feature/retire-reviewed: retire_workers gained the optional `reviewed` input and a longer
-    // description; the other five tools are unchanged (was 5222:a22910df).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('6072:68e1b3f1')
+    // The first six as they were; feature/inspect-tools registers its read-only tools after them (the full list:
+    // the next test).
+    expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
+    // Changed on purpose by feature/inspect-tools: five read-only inspection tools (list_sessions, read_result,
+    // worker_tail, session_writes, panel_snapshot) are registered after the six; the six are unchanged (the next test
+    // pins their own fingerprint, 6072:68e1b3f1, this line's value before the change).
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('8936:7c7b35fc')
+  })
+
+  test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    expect(w.tools.map(tool => tool.name)).toEqual([
+      'launch_worker',
+      'acknowledge_workers',
+      'retire_workers',
+      'open_point',
+      'queue_task',
+      'record_decision',
+      'list_sessions',
+      'read_result',
+      'worker_tail',
+      'session_writes',
+      'panel_snapshot',
+    ])
+    // The six tools before feature/inspect-tools keep their names, descriptions and schemas byte for byte.
+    expect(fingerprint(JSON.stringify(w.tools.slice(0, 6)))).toBe('6072:68e1b3f1')
   })
 })
 
@@ -382,7 +405,9 @@ describe('session-control board', () => {
   test('session.start registers, gathers with one probe call, gathers the rows', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await $.session.start(start(ORCH_DIR + '/'))
-    expect(w.registered).toEqual(['/session-control', 'launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
+    // The command and the first six tools, as before feature/inspect-tools; the read-only tools registered after them
+    // are pinned by 'tool surface > the registered tool names, in order'.
+    expect(w.registered.slice(0, 7)).toEqual(['/session-control', 'launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     const probes = w.runs.filter(argv => argv[0] === 'sh')
     expect(probes.length).toBe(1)
     expect(probes[0]).toContain(`pid:4101|/fixture/lic/a`)

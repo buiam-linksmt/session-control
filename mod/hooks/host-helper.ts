@@ -12,8 +12,8 @@ import type { ProcessRunResult } from 'claude-code'
 import type { SessionEntry } from '../types'
 import { parseProcFacts, probeArgs } from './core'
 import type { ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RotatePlan } from './host'
-import { NEWER_MAX, readTail } from './host-shared'
+import type { Host, HostPort, NewerFiles, RotatePlan, TailShape } from './host'
+import { NEWER_MAX, PANE_TAIL, TAIL_SHAPED_MAX_BYTES, readTail } from './host-shared'
 
 /** The helper's entry point under the plugin's directory. */
 export const HELPER_SCRIPT = 'helper/host.mjs'
@@ -55,9 +55,6 @@ const LISTING_TIMEOUT_MS = 30_000
 
 /** How long `node --version` may take. */
 const VERSION_TIMEOUT_MS = 5_000
-
-/** The lines and width of a transcript tail (as the adapters' tail). */
-const TAIL = { lines: 600, width: 20000 } as const
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 
@@ -288,20 +285,25 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
       return appended.problem
     },
 
-    /** On Windows a transcript under the read cap is read and cut in the engine first, as the adapter does: no process. */
-    async tail(port: HostPort, path: string): Promise<string | undefined> {
+    /**
+     * On Windows a transcript under the read cap is read and cut in the engine first, as the adapter does: no process.
+     * A shaped tail asks the helper to keep TAIL_SHAPED_MAX_BYTES at most, the newest lines.
+     */
+    async tail(port: HostPort, path: string, shape?: TailShape): Promise<string | undefined> {
+      const { lines, width } = shape ?? PANE_TAIL
       if (base.platform === 'windows') {
-        const read = await readTail(port, path, TAIL.lines, TAIL.width)
+        const read = await readTail(port, path, lines, width)
         if (read !== undefined) return read
       }
+      const request = shape === undefined ? { path, lines, width } : { path, lines, width, maxBytes: TAIL_SHAPED_MAX_BYTES }
       return through(
         port,
         'tail',
-        { path, lines: TAIL.lines, width: TAIL.width },
+        request,
         false,
         { path },
         fields => (typeof fields.text === 'string' ? { text: fields.text } : undefined),
-        async () => ({ text: await base.tail(port, path) }),
+        async () => ({ text: await base.tail(port, path, shape) }),
       ).then(found => found.text)
     },
 

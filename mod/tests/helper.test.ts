@@ -8,10 +8,11 @@ import type { On, ProcessRunResult } from 'claude-code'
 
 import { parseProcFacts, tailLines } from '../hooks/core'
 import type { Host, HostPort, RotatePlan } from '../hooks/host'
-import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, appendNotRepeated, appendText, fallbackFields, fallbackToast, nodeMajor, readAnswer, rejectionCode, withHelper } from '../hooks/host-helper'
+import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, appendNotRepeated, appendText, fallbackFields, fallbackToast, newerAnswer, nodeMajor, readAnswer, rejectionCode, withHelper } from '../hooks/host-helper'
+import { TAIL_SHAPED_MAX_BYTES } from '../hooks/host-shared'
 import type { HelperNote } from '../hooks/host-helper'
-import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, posixHost } from '../hooks/host-posix'
-import { FILES_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, TAIL_SHAPED_SCRIPT, posixHost } from '../hooks/host-posix'
+import { FILES_PS1, NEWER_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
 import { helperAnswer as fakeHelper } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
@@ -114,6 +115,13 @@ function runOn(sim: Sim, argv: readonly string[], stdin?: string): ProcessRunRes
     }
   }
   if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/probe.ps1')) return ran(WIN_PROBE_OUT)
+  // The listing's own scripts print one fixed file of the work folder; a shaped tail cuts as tail and cut do.
+  if (cmd === 'sh' && script === NEWER_SCRIPT) return ran('1700000001.5000000000\t/m/work/a.txt\nN\t1\n')
+  if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/newer.ps1')) return ran('1700000001.500\tC:\\m\\work\\a.txt\r\nN\t1\r\n')
+  if (cmd === 'sh' && script === TAIL_SHAPED_SCRIPT) {
+    const text = sim.files.get(keyOf(argv[4] ?? ''))
+    return text === undefined ? ran('', 1) : ran(tailLines(text, Number(argv[5]), Number(argv[6])))
+  }
   throw new Error(`unexpected command ${argv.join(' ')}`)
 }
 
@@ -536,6 +544,59 @@ describe('withHelper on Linux', () => {
     const host = helped()
     for (const name of ['homeDir', 'launchCommand', 'findNewWorker', 'launchChecks', 'createFile', 'makeDir', 'pause'] as const) expect(host[name]).toBe(posixHost[name])
     expect(host.platform).toBe('linux')
+  })
+})
+
+describe('withHelper: the listing and the shaped tail', () => {
+  test('filesNewerThan is one helper call with its request and a 30 s limit; a shaped tail asks the helper to keep the newest bytes', async () => {
+    const sim = machine()
+    const host = helped()
+    const timeouts: (number | undefined)[] = []
+    const base = portOf(sim)
+    const port: HostPort = { ...base, run: (argv, init, isQuiet, shown) => (timeouts.push(init?.timeoutMs), base.run(argv, init, isQuiet, shown)) }
+    sim.files.set('/m/work/a.txt', 'x')
+    sim.files.set('/m/runs/t.jsonl', 'a\nbb\nc\n')
+    expect(await host.filesNewerThan(port, '/m/work', 1700000000.9)).toEqual({ files: [], total: 0 })
+    expect(await host.tail(port, '/m/runs/t.jsonl', { lines: 2, width: 1 })).toBe('b\nc\n')
+    expect(calls(sim)).toEqual([
+      { op: 'filesNewerThan', request: { dir: '/m/work', since: 1700000000, max: 200 } },
+      { op: 'tail', request: { path: '/m/runs/t.jsonl', lines: 2, width: 1, maxBytes: TAIL_SHAPED_MAX_BYTES } },
+    ])
+    // The lookup, then the listing at 30 s and the tail at the usual 10 s.
+    expect(timeouts).toEqual([5_000, 30_000, 10_000])
+    expect(fallbacks(sim)).toEqual([])
+  })
+
+  for (const [name, answer, code] of [
+    ['an answer of the wrong shape', '{"ok":true,"files":"nope","total":1}', 'BAD_ANSWER'],
+    ['a directory the helper does not find', '{"ok":false,"code":"NOT_FOUND"}', 'NOT_FOUND'],
+  ] as const) {
+    test(`filesNewerThan: ${name} falls back to NEWER_SCRIPT for that call, told by its code`, async () => {
+      const sim = machine(() => ran(answer, answer.includes('"ok":true') ? 0 : 1))
+      const host = helped()
+      expect(await host.filesNewerThan(portOf(sim), '/m/work', 1700000000)).toEqual({ files: [{ path: '/m/work/a.txt', mtimeMs: 1700000001500 }], total: 1 })
+      expect(fallbacks(sim)).toEqual([{ kind: 'fallback', op: 'filesNewerThan', code, isQuiet: false }])
+      expect(sim.runs.filter(one => one.argv[0] === 'sh').map(one => one.argv.slice(2))).toEqual([[NEWER_SCRIPT, 'session-newer', '/m/work', '1700000000', '200']])
+    })
+  }
+
+  test('on Windows the listing goes through the helper, and a failed call through NEWER_PS1, its paths in the stored form', async () => {
+    const sim = machine('spawn')
+    const host = helped(windowsHost)
+    expect(await host.filesNewerThan(portOf(sim), 'C:/m/work', 1700000000)).toEqual({ files: [{ path: 'C:/m/work/a.txt', mtimeMs: 1700000001500 }], total: 1 })
+    expect(sim.files.get('/m/runs/newer.ps1')).toBe(NEWER_PS1)
+    expect(fallbacks(sim)).toEqual([{ kind: 'fallback', op: 'filesNewerThan', code: 'SPAWN', isQuiet: false }])
+  })
+
+  test('newerAnswer takes an array of path and mtime pairs with a whole count no smaller than the list, and nothing else', () => {
+    const one = { path: '/a', mtimeMs: 1 }
+    expect(newerAnswer({ files: [one], total: 3 })).toEqual({ files: [one], total: 3 })
+    expect(newerAnswer({ files: [{ ...one, extra: 'x' }], total: 1 })).toEqual({ files: [one], total: 1 })
+    expect(newerAnswer({ files: [one], total: 0 })).toBeUndefined()
+    expect(newerAnswer({ files: [one], total: 1.5 })).toBeUndefined()
+    expect(newerAnswer({ files: [{ path: '/a' }], total: 1 })).toBeUndefined()
+    expect(newerAnswer({ files: 'x', total: 1 })).toBeUndefined()
+    expect(newerAnswer({ total: 0 })).toBeUndefined()
   })
 })
 

@@ -51,6 +51,9 @@ export type WorkerWant = { dir: string; configDir: string; model: string }
 /** One rotation of the trace: the file, the bytes about to go in, the files kept, the size limit and the renames. */
 export type RotatePlan = { path: string; adding: number; keep: number; maxBytes: number; moves: readonly (readonly [string, string])[] }
 
+/** How much of a transcript a tail reads: its last `lines`, each cut to `width` characters. */
+export type TailShape = { lines: number; width: number }
+
 /** What filesNewerThan answers: the newest files first (at most NEWER_MAX of host-shared.ts), each with its mtime, and how many there are in all. */
 export type NewerFiles = { files: { path: string; mtimeMs: number }[]; total: number }
 
@@ -124,8 +127,11 @@ export type Host = {
   renameOver(port: HostPort, tmp: string, path: string, text: string): Promise<void>
   /** Appends lines to a log without reading it; `onRan` gets the exit code; answers what went wrong. */
   append(port: HostPort, path: string, lines: readonly string[], isQuiet: boolean, onRan: (exitCode: number) => void): Promise<string | undefined>
-  /** The last 600 lines of a transcript, each cut to 20000 characters; undefined when it cannot be read. */
-  tail(port: HostPort, path: string): Promise<string | undefined>
+  /**
+   * The last 600 lines of a transcript, each cut to 20000 characters, or with `shape` its last `lines` cut to `width`
+   * (the newest kept under the engine's output cap: TAIL_SHAPED_MAX_BYTES); undefined when it cannot be read.
+   */
+  tail(port: HostPort, path: string, shape?: TailShape): Promise<string | undefined>
   /**
    * The regular files under `dir` whose mtime is after `epochSeconds`, newest first, at most NEWER_MAX with the true
    * count: paths and mtimes only. A directory named `.git` is not entered and no symbolic link (or Windows reparse

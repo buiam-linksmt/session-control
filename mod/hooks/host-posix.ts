@@ -6,8 +6,8 @@
 import type { SessionEntry } from '../types'
 import { findNewWorker, isDefaultConfigDir, defaultConfigDir, parseProcFacts, probeArgs, transcriptPath } from './core'
 import type { LaunchArgs, ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RotatePlan, WorkerWant } from './host'
-import { NEWER_MAX, bashLaunchCommand, parseNewerListing, rotateAndAppendWith, writeAtomicWith } from './host-shared'
+import type { Host, HostPort, NewerFiles, RotatePlan, TailShape, WorkerWant } from './host'
+import { NEWER_MAX, TAIL_SHAPED_MAX_BYTES, bashLaunchCommand, parseNewerListing, rotateAndAppendWith, writeAtomicWith } from './host-shared'
 import { dirOf } from './store'
 
 /**
@@ -76,6 +76,12 @@ nl='
 '
 find "$d" -name .git -prune -o -type f ! -path "*$nl*" -newermt "@$t" -printf '%T@\t%p\n' 2>/dev/null |
   sort -t "$(printf '\t')" -k1,1nr -k2,2 | awk -v max="$max" 'NR <= max { print } END { printf "N\t%d\n", NR }'`
+
+/**
+ * A tail with a shape of its own: args are the file, the lines, the width and the most bytes kept, the newest (the
+ * first line kept may then be cut at its start).
+ */
+export const TAIL_SHAPED_SCRIPT = 'tail -n "$2" "$1" | cut -c1-"$3" | tail -c "$4"'
 
 /** Removes a file with `rm -f`; it counts as gone. */
 async function removeFile(port: HostPort, path: string, isQuiet = false): Promise<boolean> {
@@ -162,9 +168,13 @@ export const posixHost: Host = {
     onRan(ran.exitCode)
     return ran.exitCode === 0 ? undefined : `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`
   },
-  /** tail and cut, so one huge tool result cannot push the newest rows out. */
-  async tail(port: HostPort, path: string): Promise<string | undefined> {
-    const ran = await port.run(['sh', '-c', 'tail -n 600 "$1" | cut -c1-20000', 'session-tail', path], { timeoutMs: 5_000 })
+  /** tail and cut, so one huge tool result cannot push the newest rows out; a shaped tail keeps the newest bytes. */
+  async tail(port: HostPort, path: string, shape?: TailShape): Promise<string | undefined> {
+    const argv =
+      shape === undefined
+        ? ['sh', '-c', 'tail -n 600 "$1" | cut -c1-20000', 'session-tail', path]
+        : ['sh', '-c', TAIL_SHAPED_SCRIPT, 'session-tail', path, String(shape.lines), String(shape.width), String(TAIL_SHAPED_MAX_BYTES)]
+    const ran = await port.run(argv, { timeoutMs: shape === undefined ? 5_000 : 15_000 })
     return ran.exitCode === 0 ? ran.stdout : undefined
   },
   /** NEWER_SCRIPT under sh: find, sort and awk, nothing written. */

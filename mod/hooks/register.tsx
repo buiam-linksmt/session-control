@@ -22,10 +22,26 @@ import {
   utf8Bytes,
 } from './trace'
 import { selectHost } from './host'
-import type { Host, HostEnvName, HostPort } from './host'
+import type { Host, HostEnvName, HostPort, TailShape } from './host'
 import { HELPER_SCRIPT, fallbackFields, fallbackToast, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
+import {
+  LIST_SESSIONS_SCHEMA,
+  PANEL_SNAPSHOT_SCHEMA,
+  READ_RESULT_CHARS,
+  READ_RESULT_SCHEMA,
+  SESSION_WRITES_SCHEMA,
+  TAIL_LINES,
+  WORKER_TAIL_SCHEMA,
+  firstTimestamp,
+  listSessionsText,
+  matchSession,
+  panelSnapshotText,
+  readResultText,
+  sessionWritesText,
+  workerTailText,
+} from './inspect'
 import {
   LAUNCH_SCHEMA,
   ACK_SCHEMA,
@@ -89,6 +105,14 @@ const ACK_TOOL = 'mcp__session-control__acknowledge_workers'
 const POINT_TOOL = 'mcp__session-control__open_point'
 const QUEUE_TOOL = 'mcp__session-control__queue_task'
 const DECISION_TOOL = 'mcp__session-control__record_decision'
+const LIST_TOOL = 'mcp__session-control__list_sessions'
+const RESULT_TOOL = 'mcp__session-control__read_result'
+const TAIL_TOOL = 'mcp__session-control__worker_tail'
+const WRITES_TOOL = 'mcp__session-control__session_writes'
+const SNAPSHOT_TOOL = 'mcp__session-control__panel_snapshot'
+
+/** How much of a transcript read_result reads when the whole is over the read cap: a final report can be one long row. */
+const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
 
 const snapshot = atom({ plugin: 'session-control', key: 'snapshot' } as const, null)
 const pendingNotes = atom({ plugin: 'session-control', key: 'pendingNotes' } as const, [])
@@ -918,6 +942,124 @@ async function spawnWorker(
   }
 }
 
+// ---------------------------------------------------------------- the read-only inspection tools (inspect.ts)
+// They read the registry, the probe, run files, transcripts and directory listings; they write nothing, start no
+// process but the probe, the transcript tail and the listing, and answer plain text that inspect.ts redacts and bounds.
+
+/** The registry entry a tool names, with the registry and the probe; or the refusal (an unknown or ambiguous id among them). */
+async function sessionAsked($: EngineInterface, id: unknown) {
+  const reg = await registryAndFacts($)
+  if ('deny' in reg) return reg
+  const found = matchSession(reg.entries, typeof id === 'string' ? id : '')
+  if ('error' in found) return { deny: `${PLUGIN}: ${found.error}` }
+  return { ...reg, entry: found.entry }
+}
+
+/**
+ * A worker's transcript: the whole file when $.fs reads it (under 4 MiB), else its tail (host.tail, in `shape` when
+ * given); or why it cannot be read.
+ */
+async function transcriptText($: EngineInterface, entry: SessionEntry, shape?: TailShape): Promise<{ text: string; isWhole: boolean; path: string } | { missing: string; path?: string }> {
+  const machine = await hostOf($)
+  const path = machine.transcriptPath(entry)
+  if (path === undefined) return { missing: 'the entry lacks the config_dir, cwd or session_id that place it' }
+  const whole = await $.fs.read(path).catch(() => undefined)
+  if (whole !== undefined) return { text: whole, isWhole: true, path }
+  const tail = await machine.tail(portOf($), path, shape)
+  return tail === undefined ? { missing: `${path} cannot be read`, path } : { text: tail, isWhole: false, path }
+}
+
+/** list_sessions: the panel's rows from a fresh probe, finished ones too unless left out. */
+async function listSessions($: EngineInterface, includeFinished: boolean) {
+  const reg = await registryAndFacts($)
+  if ('deny' in reg) return reg
+  const nowSec = Math.floor((await $.clock.now()) / 1000)
+  return { result: listSessionsText(buildRows(reg.entries, reg.facts, nowSec), reg.entries, reg.facts, nowSec, includeFinished) }
+}
+
+/** read_result: the result file, its error file and, for the chatter fallback, the transcript. */
+async function readResult($: EngineInterface, id: unknown, maxChars: unknown) {
+  const asked = await sessionAsked($, id)
+  if ('deny' in asked) return asked
+  const { entry, facts } = asked
+  const file = typeof entry.result_file === 'string' && entry.result_file !== '' ? entry.result_file : undefined
+  const resultText = file === undefined ? undefined : await $.fs.read(file).catch(() => undefined)
+  const isThere = file !== undefined && resultText === undefined ? await $.fs.exists(file).catch(() => false) : false
+  const resultMissing =
+    file === undefined ? 'the entry names no result file' : resultText !== undefined ? undefined : isThere ? 'the result file cannot be read (over the 4 MiB read cap?)' : 'the result file is not there (the run has not ended, or wrote none)'
+  const errText = typeof entry.err_file === 'string' && entry.err_file !== '' ? await $.fs.read(entry.err_file).catch(() => '') : ''
+  const transcript = await transcriptText($, entry, REPORT_TAIL)
+  const chars = typeof maxChars === 'number' && Number.isFinite(maxChars) ? Math.min(READ_RESULT_CHARS.max, Math.max(READ_RESULT_CHARS.min, Math.floor(maxChars))) : READ_RESULT_CHARS.default
+  return {
+    result: readResultText({
+      entry,
+      facts,
+      ...(resultText === undefined ? {} : { resultText }),
+      ...(resultMissing === undefined ? {} : { resultMissing }),
+      errText,
+      ...('text' in transcript ? { transcript: { text: transcript.text, isWhole: transcript.isWhole } } : { transcriptMissing: transcript.missing }),
+      maxChars: chars,
+    }),
+  }
+}
+
+/** worker_tail: the log pane's tail of the transcript, its age and the process. */
+async function workerTail($: EngineInterface, id: unknown, lines: unknown) {
+  const asked = await sessionAsked($, id)
+  if ('deny' in asked) return asked
+  const { entry, facts } = asked
+  const wanted = typeof lines === 'number' && Number.isFinite(lines) ? Math.min(TAIL_LINES.max, Math.max(1, Math.floor(lines))) : TAIL_LINES.default
+  const path = (await hostOf($)).transcriptPath(entry)
+  const tail = path === undefined ? undefined : await transcriptTail($, path)
+  const nowSec = (await $.clock.now()) / 1000
+  const statSec = path === undefined ? undefined : await $.fs.stat(path).then(one => one.mtimeMs / 1000, () => undefined)
+  const mtime = facts.transcriptMtime.get(entry.session_id) ?? statSec
+  return {
+    result: workerTailText({
+      entry,
+      facts,
+      ...(path === undefined ? {} : { path }),
+      ...(mtime === undefined ? {} : { ageSec: Math.max(0, nowSec - mtime) }),
+      ...(tail === undefined ? {} : { lines: summarizeTranscript(tail, wanted) }),
+      wanted,
+    }),
+  }
+}
+
+/** session_writes: the start from the transcript (or the entry), the listing under the cwd (host.filesNewerThan). */
+async function sessionWrites($: EngineInterface, id: unknown) {
+  const asked = await sessionAsked($, id)
+  if ('deny' in asked) return asked
+  const { entry } = asked
+  if (typeof entry.cwd !== 'string' || entry.cwd === '') return { deny: `${PLUGIN}: the entry of ${entry.session_id} has no cwd to list` }
+  const machine = await hostOf($)
+  const transcript = await transcriptText($, entry)
+  const first = 'text' in transcript && transcript.isWhole ? firstTimestamp(transcript.text) : undefined
+  const startedMs = typeof entry.started_at === 'number' ? entry.started_at * 1000 : undefined
+  const why = 'text' in transcript ? (transcript.isWhole ? 'the transcript has no timestamp' : 'the transcript is over the read cap, so its first timestamp cannot be read; a resumed session\'s earlier runs are not covered') : transcript.missing
+  const start = first !== undefined ? { ms: first, source: "the transcript's first timestamp" } : startedMs !== undefined ? { ms: startedMs, source: `the entry's started_at, because ${why}` } : undefined
+  if (start === undefined) return { deny: `${PLUGIN}: no start time for ${entry.session_id}: ${why}, and the entry has no started_at` }
+  const listing = await machine.filesNewerThan(portOf($), machine.nativePath(entry.cwd), Math.floor(start.ms / 1000))
+  return {
+    result: sessionWritesText({
+      entry,
+      start,
+      listing,
+      orchestratorDir: config.orchestratorDir,
+      registryPath: await registryPath($),
+      isWindows: machine.platform === 'windows',
+      ...('text' in transcript ? { transcript: { text: transcript.text, isWhole: transcript.isWhole } } : {}),
+    }),
+  }
+}
+
+/** panel_snapshot: the panel's own atoms, as the last poll left them, drawn as text; nothing gathered. */
+async function panelSnapshot($: EngineInterface) {
+  const [snap, queue, list, sel, view, pointSel, exp] = await Promise.all([read($, snapshot), read($, queued), read($, points), read($, selected), read($, watch), read($, selectedPoint), read($, expanded)])
+  const log = sel !== null && view !== null ? { title: view.title, lines: view.lines } : null
+  return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, log, expanded: log === null ? exp : null, nowMs: await $.clock.now() }) }
+}
+
 /** Turn the board on: register the launch tool, start the poll once, gather. */
 async function activate($: EngineInterface): Promise<void> {
   isActive = true
@@ -955,6 +1097,32 @@ async function activate($: EngineInterface): Promise<void> {
       ['open_point', 'Add, answer, close, hold or release an open point in open-points.json; settled entries older than 7 days rotate into the archive; the file is backed up once per day.', POINT_SCHEMA],
       ['queue_task', 'Add, update or remove a task in task-queue.json; the file is backed up once per day.', QUEUE_SCHEMA],
       ['record_decision', 'Append one numbered line to a unit section of agreed-decisions.md (the section is created when missing); backed up once per day.', DECISION_SCHEMA],
+    ] as const) {
+      await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
+    }
+    // The read-only inspection tools: they change nothing and answer plain text, redacted and bounded.
+    for (const [name, description, schema] of [
+      [
+        'list_sessions',
+        'Read-only. Every worker registry row as the panel shows it (title, session id, name, cwd, config dir, model, effort, status, pid, elapsed, outcome, cost) and each live headless claude process no entry claims (orphan: pid, cwd, config dir, age; licence probes left out), after a count line.',
+        LIST_SESSIONS_SCHEMA,
+      ],
+      [
+        'read_result',
+        "Read-only. A worker's final report: its result file's .result, or, when that is chatter or missing, the last substantial assistant message of its transcript; with the source used, the outcome, cost, duration, turns, is_error and subtype. Redacted as the debug trace is (the count said); the head kept up to max_chars, the cut said.",
+        READ_RESULT_SCHEMA,
+      ],
+      [
+        'worker_tail',
+        "Read-only. The last lines of a worker's transcript, summarised as the panel's log shows them, with the seconds since the transcript was last written and whether its process is alive.",
+        WORKER_TAIL_SCHEMA,
+      ],
+      [
+        'session_writes',
+        "Read-only. The files a session wrote under its cwd since its transcript's first timestamp (by mtime, .git left out, newest first, at most 200 with the true count), each one under the orchestrator directory or the registry flagged, and the transcript's own writes to either.",
+        SESSION_WRITES_SCHEMA,
+      ],
+      ['panel_snapshot', 'Read-only. The text the side panel shows now: the sessions rows, the queued work and the open points (and the log, when one is open), as plain text.', PANEL_SNAPSHOT_SCHEMA],
     ] as const) {
       await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
     }
@@ -1021,14 +1189,16 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
 
 /**
  * A tool hook's work: the call's line with the named fields of its input, the work, the answer's line (the refusal or
- * the mod's own result text, as traceMessage keeps them), then the lines written.
+ * the mod's own result text, as traceMessage keeps them; with `isResultText` only its length: an inspection tool's
+ * answer quotes files and transcripts, which the trace never holds), then the lines written.
  */
-async function tracedTool<T extends object>($: EngineInterface, tool: string, e: unknown, fields: readonly string[], work: () => Promise<T>): Promise<T> {
+async function tracedTool<T extends object>($: EngineInterface, tool: string, e: unknown, fields: readonly string[], work: () => Promise<T>, isResultText = false): Promise<T> {
   if (isTracing) trace($, 'tool.call', { tool, ...pickFields(e, fields) })
   return traced($, async () => {
     const answer = await work()
     if (isTracing) {
-      const text = 'deny' in answer ? messageFields(String(answer.deny), 'deny') : 'result' in answer ? { result: traceMessage(String(answer.result), TRACE_MAX_STRING) } : {}
+      const shown = (result: string) => (isResultText ? { resultChars: result.length } : { result: traceMessage(result, TRACE_MAX_STRING) })
+      const text = 'deny' in answer ? messageFields(String(answer.deny), 'deny') : 'result' in answer ? shown(String(answer.result)) : {}
       trace($, 'tool.result', { tool, ...text })
     }
     return answer
@@ -1197,6 +1367,32 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => {
     traceError($, 'retire_workers', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: retire_workers failed` }
+  })
+
+  // The inspection tools: read-only; their answers reach the trace as a length only.
+  on('tool.call', { tool: LIST_TOOL }, ($, e) => tracedTool($, 'list_sessions', e, ['include_finished'], () => listSessions($, plain(e).include_finished !== false), true)).catch(($, e, next) => {
+    traceError($, 'list_sessions', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: list_sessions failed` }
+  })
+
+  on('tool.call', { tool: RESULT_TOOL }, ($, e) => tracedTool($, 'read_result', e, ['session_id', 'max_chars'], () => readResult($, plain(e).session_id, plain(e).max_chars), true)).catch(($, e, next) => {
+    traceError($, 'read_result', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: read_result failed` }
+  })
+
+  on('tool.call', { tool: TAIL_TOOL }, ($, e) => tracedTool($, 'worker_tail', e, ['session_id', 'lines'], () => workerTail($, plain(e).session_id, plain(e).lines), true)).catch(($, e, next) => {
+    traceError($, 'worker_tail', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: worker_tail failed` }
+  })
+
+  on('tool.call', { tool: WRITES_TOOL }, ($, e) => tracedTool($, 'session_writes', e, ['session_id'], () => sessionWrites($, plain(e).session_id), true)).catch(($, e, next) => {
+    traceError($, 'session_writes', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: session_writes failed` }
+  })
+
+  on('tool.call', { tool: SNAPSHOT_TOOL }, ($, e) => tracedTool($, 'panel_snapshot', e, [], () => panelSnapshot($), true)).catch(($, e, next) => {
+    traceError($, 'panel_snapshot', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: panel_snapshot failed` }
   })
 
   // The launch's fields are paths, names and numbers; the title is free text and stays out (its slug is in the run's

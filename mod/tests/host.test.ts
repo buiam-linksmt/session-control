@@ -15,7 +15,7 @@ import type { Host, HostPort } from '../hooks/host'
 import { withHelper } from '../hooks/host-helper'
 import { withPowerShellLaunch } from '../hooks/host-powershell'
 import { NEWER_MAX } from '../hooks/host-shared'
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, posixHost } from '../hooks/host-posix'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT, TAIL_SHAPED_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, NEWER_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
 import { helperAnswer, newerInMap } from './fake-helper'
 import { NOW_MS } from './fixtures'
@@ -108,6 +108,10 @@ function machine(env: Record<string, string>): Machine {
     if (cmd === 'sh' && script?.startsWith('tail -n 600 ')) {
       const text = files.get(keyOf(argv[4] ?? ''))
       return text === undefined ? ran('', 1) : ran(tailLines(text, 600, 20000))
+    }
+    if (cmd === 'sh' && script === TAIL_SHAPED_SCRIPT) {
+      const text = files.get(keyOf(argv[4] ?? ''))
+      return text === undefined ? ran('', 1) : ran(tailLines(text, Number(argv[5]), Number(argv[6])).slice(-Number(argv[7])))
     }
     if (cmd === 'sh' && script === ROTATE_SCRIPT) {
       const path = argv[4] ?? ''
@@ -295,6 +299,15 @@ describe('host contract', () => {
       const tail = await host.tail(port, `${root}/t.jsonl`)
       expect(tail?.split('\n').slice(0, -1)).toEqual([...lines.slice(100, 699), 'x'.repeat(20000)])
       expect(await host.tail(port, `${root}/missing.jsonl`)).toBeUndefined()
+    })
+
+    test(`${one.name}: a tail with a shape gives the last lines asked, each cut to the width asked; a missing file is undefined`, async () => {
+      const m = machine(one.env)
+      const port = portOf(m, runs)
+      const lines = Array.from({ length: 50 }, (_, line) => (line === 49 ? 'y'.repeat(300) : `row ${line}`))
+      m.files.set(keyOf(`${root}/t.jsonl`), `${lines.join('\n')}\n`)
+      expect(await host.tail(port, `${root}/t.jsonl`, { lines: 5, width: 100 })).toBe([...lines.slice(45, 49), 'y'.repeat(100)].map(line => `${line}\n`).join(''))
+      expect(await host.tail(port, `${root}/missing.jsonl`, { lines: 5, width: 100 })).toBeUndefined()
     })
 
     test(`${one.name}: createFile and the directories a fresh environment and a launch need`, async () => {

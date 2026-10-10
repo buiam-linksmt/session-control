@@ -5,7 +5,7 @@ import type { FsStat } from 'claude-code'
 
 import type { LaunchArgs } from './core'
 import { buildLaunchArgv, tailLines } from './core'
-import type { Host, HostPort, LaunchTarget, NewerFiles, RotatePlan } from './host'
+import type { Host, HostPort, LaunchTarget, NewerFiles, RotatePlan, TailShape } from './host'
 import { tmpPath } from './store'
 
 /**
@@ -57,6 +57,12 @@ export async function clockPause(port: HostPort, seconds: number): Promise<void>
 export function bashLaunchCommand(args: LaunchArgs, target: LaunchTarget, resultFile: string, errFile: string): string {
   return buildLaunchArgv(args, target, resultFile, errFile)[2] ?? ''
 }
+
+/** The transcript tail of the log pane: its last 600 lines, each cut to 20000 characters. */
+export const PANE_TAIL: TailShape = { lines: 600, width: 20000 }
+
+/** A tail with a shape of its own keeps at most this many bytes, the newest, under the engine's 4 MiB output cap. */
+export const TAIL_SHAPED_MAX_BYTES = 3 * 1024 * 1024
 
 /** The most paths filesNewerThan answers; `total` counts them all. */
 export const NEWER_MAX = 200

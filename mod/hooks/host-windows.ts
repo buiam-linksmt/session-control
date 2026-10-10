@@ -18,8 +18,8 @@ import {
   winPath,
 } from './core'
 import type { LaunchArgs, ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RotatePlan, WorkerWant } from './host'
-import { NEWER_MAX, bashLaunchCommand, clockPause, parseNewerListing, readTail, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
+import type { Host, HostPort, NewerFiles, RotatePlan, TailShape, WorkerWant } from './host'
+import { NEWER_MAX, PANE_TAIL, bashLaunchCommand, clockPause, parseNewerListing, readTail, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
 
 /**
  * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
@@ -358,15 +358,16 @@ export const windowsHost: Host = {
     await removeFile(port, added, isQuiet)
     return `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`
   },
-  /** A read, or the file script for a transcript over the read cap. */
-  async tail(port: HostPort, path: string): Promise<string | undefined> {
-    const text = await readTail(port, path, 600, 20000)
+  /** A read, or the file script for a transcript over the read cap (an answer the engine cut counts as unread). */
+  async tail(port: HostPort, path: string, shape?: TailShape): Promise<string | undefined> {
+    const { lines, width } = shape ?? PANE_TAIL
+    const text = await readTail(port, path, lines, width)
     if (text !== undefined) return text
-    const ran = await runScript(port, 'files.ps1', FILES_PS1, ['tail', path, '600', '20000']).catch((err: unknown) => {
+    const ran = await runScript(port, 'files.ps1', FILES_PS1, ['tail', path, String(lines), String(width)]).catch((err: unknown) => {
       port.traceError('transcript tail', err)
       return undefined
     })
-    return ran?.exitCode === 0 ? ran.stdout : undefined
+    return ran?.exitCode === 0 && (shape === undefined || !ran.isStdoutTruncated) ? ran.stdout : undefined
   },
   /** NEWER_PS1, its paths taken in the native C:/... form; nothing written but the script itself, as every script here. */
   async filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined> {
