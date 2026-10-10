@@ -90,6 +90,7 @@ Defaults are those of `mod/.claude-plugin/plugin.json`.
 | `pollSeconds` | `5` | How often the session state is gathered. |
 | `runsDir` | `~/.claude/session-control/runs` | Directory for the result and error files of launched workers. A leading `~` is the home directory. |
 | `licencePickCommand` | empty | Command that picks the licence for a fresh worker launch; `{need}` is replaced by the headroom percent. It prints one absolute config directory and exits 0, or exits 3 when no licence has room. Empty: workers start with the default config directory. |
+| `debug` | `false` | Append a debug trace to `trace.log` in the runs directory (see Development). `SESSION_CONTROL_DEBUG=1` in the environment switches it on too. |
 
 Set them in the settings under `pluginConfigs`. A mod loaded with `--plugin-dir` is keyed `session-control@inline`:
 
@@ -116,6 +117,8 @@ python3 -I mod/tests/probe-selftest.py
 ```
 
 `claude plugin test` runs the `*.test.ts` files in `mod/tests/`. `probe-selftest.py` extracts the process probe from `mod/hooks/core.ts`, checks that it parses under `sh -n` and runs it against a fixture configuration directory.
+
+To see what the mod does, start `claude` with `SESSION_CONTROL_DEBUG=1` in the environment (or the `debug` option): the mod appends one JSON line per event, command run (argv, exit code, duration, the start of stderr), file write (path and size), guard verdict and caught error to `trace.log` in the runs directory, rotated at 2 MiB with three files kept, and never logs file contents, command output, prompts or credentials. `sh mod/tests/e2e-smoke.sh` is an end-to-end smoke test against the real `claude` in a scratch directory it removes afterwards: a haiku orchestrator launches one haiku worker and, where tmux exists, an interactive session opens the panel; it costs a few cents and prints one line per check.
 
 After a change to the mod, run the validation and the tests before relying on it.
 
