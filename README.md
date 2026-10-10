@@ -74,7 +74,7 @@ The tools are registered when the mod becomes active and are named `mcp__session
 | `queue_task` | Adds, updates or removes a task of `task-queue.json`. |
 | `record_decision` | Appends one numbered line to a section of `agreed-decisions.md`; the section is created when missing. |
 
-`launch_worker` refuses, among other cases: a launch directory that is the orchestrator directory or `$HOME`; a missing or empty prompt file; a prompt that lacks a foreground wait, the `git status -sb` report line or the no-attribution instruction (a prompt that says "skill test" is exempt); a resume of a live session; a licence pick that exits 3 or prints nothing usable. A worker is started as `claude -p -n <name> --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions --output-format json` with `CLAUDE_CONFIG_DIR` set to the picked configuration directory and `CLAUDE_CODE_EFFORT_LEVEL` set to the requested effort.
+`launch_worker` refuses, among other cases: a launch directory that is the orchestrator directory or `$HOME`; a missing or empty prompt file; a prompt that lacks a foreground wait, the `git status -sb` report line or the no-attribution instruction (a prompt that says "skill test" is exempt); a resume of a live session; a licence pick that exits 3 or prints nothing usable. A worker is started as `claude -p -n <name> --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions --output-format json` with `CLAUDE_CONFIG_DIR` set to the picked configuration directory and `CLAUDE_CODE_EFFORT_LEVEL` set to the requested effort, through the Bash tool; on native Windows with the `launchRoute` option at `powershell`, through the PowerShell tool instead (see PowerShell launch route).
 
 Inbox: every worker gets a session name with `-n` and accepts messages from other sessions on the machine (`crossSessionInbound` set to `accept` through `--settings`), so the orchestrator can send a running worker a message by its name. The name is `w-`, the slug of the title cut to 24 characters, and the launch time in UTC as `yyMMddHHmmss` (for example `w-fix-the-parser-261010143117`): letters, digits and dashes, at most 39 characters before a uniqueness suffix; a name already in the registry or given out by the same session gets `-2`, `-3` and so on. The uniqueness check covers only the registry and the session's own names, so two orchestrator sessions starting workers with the same title in the same second can still get the same name. A resume passes the same two flags and keeps the entry's name, so a session answers to one name across resumes; an entry without a name (launched before names existed) gets a fresh one. The worker's exit is still detected through the background task's notification.
 
@@ -97,6 +97,7 @@ Defaults are those of `mod/.claude-plugin/plugin.json`.
 | `debug` | `false` | Append a debug trace to `trace.log` in the runs directory (see Development). `SESSION_CONTROL_DEBUG=1` in the environment switches it on too. |
 | `helper` | `auto` | `auto`: the file operations (and on Linux the process probe) run through the Node helper when Node 22 or newer is found, each call falling back to the built-in operation when the helper fails. `off`: the built-in operations only. Any other value counts as `auto`. |
 | `nodePath` | empty | The node executable the helper runs with; a leading `~/` is the home directory. Empty: `node` from the PATH. |
+| `launchRoute` | `bash` | `bash`: workers start through the Bash tool (on native Windows Claude Code offers it only when it finds Git Bash). `powershell`: on native Windows they start through the PowerShell tool instead (see PowerShell launch route); on Linux and WSL the option changes nothing. Any other value counts as `bash`. |
 
 Set them in the settings under `pluginConfigs`. A mod loaded with `--plugin-dir` is keyed `session-control@inline`:
 
@@ -123,7 +124,7 @@ node --test mod/tests/helper.test.mjs
 python3 -I mod/tests/probe-selftest.py
 ```
 
-`claude plugin test` runs the `*.test.ts` files in `mod/tests/` (the Node helper there simulated, see `fake-helper.ts`). `node --test mod/tests/helper.test.mjs` (Node 22 or newer) runs the helper itself as the mod does, one process per request: every operation, the protocol errors and their fixed codes, appends from many processes at once, the tail of a large file against `tail | cut`, and the probe of a fake `/proc` tree against the shell probe's recorded output, with a canary in the fake environment that must never reach an answer. `probe-selftest.py` extracts the process probe from `mod/hooks/host-posix.ts`, checks that it parses under `sh -n` and runs it against a fixture configuration directory. On WSL, `python3 -I mod/tests/windows-selftest.py` runs the Windows PowerShell scripts, the launch line in Git Bash and, with `C:\Program Files\nodejs\node.exe` (or `SC_WIN_NODE`), the helper's file operations in a Windows temp folder.
+`claude plugin test` runs the `*.test.ts` files in `mod/tests/` (the Node helper there simulated, see `fake-helper.ts`). `node --test mod/tests/helper.test.mjs` (Node 22 or newer) runs the helper itself as the mod does, one process per request: every operation, the protocol errors and their fixed codes, appends from many processes at once, the tail of a large file against `tail | cut`, and the probe of a fake `/proc` tree against the shell probe's recorded output, with a canary in the fake environment that must never reach an answer. The fake tree is handed to the helper with `SC_HELPER_PROC_ROOT`, which the helper honours only together with `SC_HELPER_TEST=1`; a test checks that the variable alone leaves the live `/proc`. `probe-selftest.py` extracts the process probe from `mod/hooks/host-posix.ts`, checks that it parses under `sh -n` and runs it against a fixture configuration directory. On WSL, `python3 -I mod/tests/windows-selftest.py` runs the Windows PowerShell scripts, the launch line in Git Bash, the PowerShell launch route's command under Windows PowerShell 5.1 and (with `pwsh.exe` on the PATH) PowerShell 7 with `node.exe` standing in for `claude.exe` (see PowerShell launch route; it needs `node` on the WSL side to render the command) and, with `C:\Program Files\nodejs\node.exe` (or `SC_WIN_NODE`), the helper's file operations in a Windows temp folder.
 
 To see what the mod does, set `SESSION_CONTROL_DEBUG=1` in the environment (or the `debug` option). A session where the board is on (the orchestrator directory, or after `/session-control`) then appends one JSON line per event to `trace.log` in the runs directory: commands run (argv with the mod's scripts by name, exit code, duration, stderr size), file writes (path and size), guard verdicts and caught errors (a kind and a message whose quoted text and echoed output become `…`). It never logs credentials, file contents, command output, prompt or transcript text, the environment, a worker's title or the licence picker's command (only whether one is set, and at a launch its executable's name and argument count); text that looks like a token becomes `[redacted]`. Any other session, a worker included, writes nothing. The trace is rotated at about 2 MiB (sessions share it), three files kept.
 
@@ -150,7 +151,8 @@ An adapter never holds `$` (the validator follows `$` only into functions of `re
 | `pause` | the wait between discovery checks |
 | `launchArgs`, `launchChecks`, `launchFacts` | the launch's paths in stored form, the prompt-file and dir checks, the platform's facts for the launch guard |
 | `pickerArgv` | the licence picker's argv as run, or why it is refused |
-| `launchTool`, `launchCommand`, `launchToolHint` | the tool a worker starts through (`Bash`), its command text, the hint when the tool is missing |
+| `launchTool`, `launchCommand`, `launchToolHint` | the tool a worker starts through (`Bash`, or `PowerShell` on the PowerShell launch route), its command text, the hint when the tool is missing |
+| `launchPidFile`, `launchRefusal` | the pid file the command writes (PowerShell route only), and why the route cannot start a launch (PowerShell route only: a prompt file or runs directory with `[`, `]` or a backtick) |
 | `createFile`, `prepareHelperDirs`, `prepareRunsDir`, `makeDir` | a missing file with its directory, and the directories a fresh environment and a launch need |
 | `writeAtomic`, `renameOver`, `removeFile` | the registry write through a temp file and a rename, the rename, the removal |
 | `append` | lines added to a log without reading it |
@@ -158,7 +160,7 @@ An adapter never holds `$` (the validator follows `$` only into functions of `re
 | `rotate` | the trace's rotation |
 | `rotateAndAppend` | the trace's write: the rotation when one is due, then the append (one process with the helper) |
 
-`mod/tests/host.test.ts` runs one contract against both adapters, alone and behind the Node helper, and checks the selection.
+`mod/tests/host.test.ts` runs one contract against both adapters and the Windows adapter on the PowerShell launch route, each alone and behind the Node helper, and checks the selection. With the `launchRoute` option at `powershell` on native Windows, `withPowerShellLaunch` (`host-powershell.ts`) lays the route over the Windows adapter before the helper wraps it.
 
 ## Node helper
 
@@ -170,7 +172,7 @@ An adapter never holds `$` (the validator follows `$` only into functions of `re
 4. Operations: `probe` (Linux: `/proc` read natively, printed as `PROBE_SCRIPT` prints it, `CLAUDE_CONFIG_DIR` the only value taken from a process environment, `procStart` and `sessionId` the only fields taken from a sessions file), `writeAtomic`, `renameOver`, `removeFile`, `append` (one write on an append descriptor), `tail` (the last 600 lines from the end of the file, each cut to 20000 characters, the answer kept under the engine's 4 MiB output cap by leaving out the oldest lines), `rotate`.
 5. `batch` runs a list of file operations in order in one process and stops at the first failure, answering its position.
 
-`withHelper` in `mod/hooks/host-helper.ts` puts the helper in front of the chosen adapter. Node is looked for once per load, at the first operation that needs it (`node --version`, untraced): without Node, or with one older than 22, the adapter's own operations run for the whole load, with one `helper` trace line and no error. A call that fails (Node cannot start or times out, its output is cut, is not one JSON object, or answers `ok:false`) falls back to the adapter's own operation for that call: the trace gets a `helper.fallback` line with the operation and the code, and the first fallback of the load raises one toast (`helper fallback: <op>`). On Windows the process probe stays `PROBE_PS1` (Node's standard library cannot list processes) and a transcript under the read cap is still read in the engine; the helper replaces the PowerShell file script. The trace's own write goes as one batch (rotation, then append). The built-in adapters stay as the fallback.
+`withHelper` in `mod/hooks/host-helper.ts` puts the helper in front of the chosen adapter. Node is looked for at the first operation that needs it (`node --version`, untraced): without Node, or with one older than 22, the adapter's own operations run, with a `helper` trace line and no error. While no usable Node was found, the first helper-needing operation 10 minutes or more after the last lookup looks again, so a Node installed meanwhile is taken without a reload; operations at the same moment share one lookup, and a Node once found stays for the load. The `helper` trace line is written once per change of state (not found, too old, found), not at every lookup. A call that fails (Node cannot start or times out, its output is cut, is not one JSON object, or answers `ok:false`) falls back to the adapter's own operation for that call: the trace gets a `helper.fallback` line with the operation and the code, and the first fallback of the load raises one toast (`helper fallback: <op>`). The one exception is an append (a log line, or the trace's own rotate-and-append batch) that timed out: the helper may have written it already, so it is not made again. Its `helper.fallback` line carries `isRepeated: false`, the toast reads `helper fallback: append (timed out, not repeated)`, and the lines may be missing from the log but are never in it twice. Every other failure of an append (Node not starting, an exit code with no answer, an answer that is not JSON, `ok:false`) means nothing was written, and the adapter appends. On Windows the process probe stays `PROBE_PS1` (Node's standard library cannot list processes) and a transcript under the read cap is still read in the engine; the helper replaces the PowerShell file script. The trace's own write goes as one batch (rotation, then append). The built-in adapters stay as the fallback.
 
 Cost measured on the machines it targets (medians: of 100 runs on Linux; on Windows of 20 single operations, 5 batches and one tail, timed from WSL through interop):
 
@@ -185,6 +187,47 @@ Cost measured on the machines it targets (medians: of 100 runs on Linux; on Wind
 | Windows | tail of a 3.1 MB file | 100 ms | |
 
 On Linux the helper costs one Node start per call where the built-in operations cost a few milliseconds (the probe is about even); on Windows it is about 2.5 times faster per operation than PowerShell, and a batch costs one Node start for all of its operations.
+
+## PowerShell launch route
+
+On native Windows the engine offers its Bash tool only when it finds Git Bash. With the `launchRoute` option at `powershell`, `launch_worker` starts the worker through the engine's PowerShell tool instead (PowerShell 7 or Windows PowerShell 5.1, whichever the tool runs; the engine offers that tool by default only when it does not find Git Bash, otherwise with `CLAUDE_CODE_USE_POWERSHELL_TOOL=1`). The default, `bash`, is the route described above, unchanged; on Linux and WSL the option changes nothing. `hooks/host-powershell.ts` builds the command; for a fresh launch with a picked config directory it reads:
+
+```powershell
+$env:PSModulePath = "$PSHOME\Modules"
+$ErrorActionPreference = 'Stop'
+$env:CLAUDE_CODE_EFFORT_LEVEL = 'high'
+$env:CLAUDE_CONFIG_DIR = 'C:/Users/u/.claude/lic-b'
+$exe = (Get-Command claude.exe -ErrorAction Stop).Source
+$p = Start-Process -FilePath $exe -ArgumentList '-p --model opus -n w-fix-the-parser-261010143117 --settings "{\"crossSessionInbound\":\"accept\"}" --dangerously-skip-permissions --output-format json' -WorkingDirectory 'C:/work/my project' -RedirectStandardInput 'C:/Users/u/scratch/prompt.md' -RedirectStandardOutput 'C:/Users/u/.claude/session-control/runs/20261010143117-fix-the-parser.json' -RedirectStandardError 'C:/Users/u/.claude/session-control/runs/20261010143117-fix-the-parser.err' -NoNewWindow -PassThru
+$null = $p.Handle
+Set-Content -LiteralPath 'C:/Users/u/.claude/session-control/runs/20261010143117-fix-the-parser.pid' -Value $p.Id -Encoding Ascii
+$p.WaitForExit()
+exit $p.ExitCode
+```
+
+- **Flags**: those of the Bash route, in its order (`--resume <session id>` right after the model for a resume), with no prompt argument: the prompt reaches `claude.exe` on standard input from the prompt file, so it never meets the command-line length limit and no PowerShell encoding touches it. The result and error files are `claude.exe`'s own standard output and error (Start-Process's redirections: the bytes go through as written). `CLAUDE_CONFIG_DIR` is set only when the worker does not inherit the config directory, as on the Bash route.
+- **Quoting**: Windows PowerShell 5.1 joins Start-Process's argument list with blanks and quotes nothing, so the arguments go as one string, each quoted by the C runtime's command-line rules that `claude.exe` parses with: a plain word stays as it is (so the probe still finds `--model opus`), anything with a blank or a double quote goes in double quotes with its quotes, and the backslashes before them, escaped. The `--settings` JSON thus arrives as one argument under 5.1 and 7 alike. Every value then sits in a PowerShell literal that keeps the whole command in printable ASCII: single-quoted with its quotes doubled, or, for a value with other characters (a user folder `José`), double-quoted with `$([char]0x....)` for each of them, so the command reads the same whatever encoding the tool hands it on in.
+- **Wildcards**: Start-Process reads `-WorkingDirectory` and its redirection paths as wildcard patterns. The launch directory is escaped (each `[`, `]`, `*`, `?` and backtick behind a backtick), which both versions read back as the path. No spelling of a redirection path with `[`, `]` or a backtick reaches both versions (plain, the pattern finds no file; escaped, PowerShell 7 looks for the backticks themselves, and 5.1 does for standard input), so on this route a prompt file or runs directory holding one of them is refused before anything runs, with a message naming the path.
+- **Refusal without the tool**: when the session has no PowerShell tool the launch is refused (`the worker could not be started through the PowerShell tool (...); nothing was launched.`) with the hint to start the orchestrator with `CLAUDE_CODE_USE_POWERSHELL_TOOL=1` or to set the option back to `bash`; there is no silent fall back to the Bash tool.
+- **Pid**: the launch guards and the pid discovery are the Windows adapter's, unchanged. The command writes `claude.exe`'s pid to `<runs>/<stamp>-<slug>.pid`; after discovery the mod reads it as one more fact: the `worker.found` trace line says whether it matches the probe's pid (`same`, `differs`, `unread`), and the answer names it when it differs. The registry takes the probe's pid either way.
+- **Exit**: the command waits for `claude.exe` and exits with its exit code, so the tool's background exit notification carries it.
+
+Verified on the Windows host (Windows PowerShell 5.1.22621, PowerShell 7.6.6), from WSL, with `mod/tests/windows-selftest.py`. It renders the command with the real `powershellLaunchCommand` and runs it as a script under both versions, with `node.exe` and a stub script standing in for `claude.exe`. Three layouts ran under each version: a fresh launch inheriting the config directory, with blanks and a quote in its paths; a picked config directory with brackets, a backtick and non-ASCII letters in the launch directory; and a resume. In each run:
+- the argv arrived intact, the name and the settings JSON as single arguments;
+- the prompt arrived byte for byte, including non-ASCII text, quotes and CRLF and LF line ends;
+- the result file was UTF-8 with no BOM;
+- the pid file held the child's pid;
+- the exit code came back (0, 3 and 1);
+- the working directory was right;
+- `CLAUDE_CONFIG_DIR` was inherited or set as asked.
+
+A prompt file under a bracketed folder failed at Start-Process under both versions, as the refusal says. The mocked tests cover the command text (with and without a picker, a resume, blanks and quotes in paths, a title with quotes), the option on Windows and on Linux, and the refusals.
+
+Not verified: no Windows claude session was started through this route by this change (the live proof is the user's to sign off). An earlier scratch variant of this command (the same Start-Process shape, without `-n` and `--settings`) did run one live haiku worker through the PowerShell tool, a fresh launch with a plain ASCII layout. Still unproven live:
+- a resume, whose prompt also arrives on standard input;
+- non-ASCII or bracketed launch directories;
+- the way the tool itself hands the command to PowerShell (the dry runs ran it as a `-File` script);
+- whether stopping the background task, or its time limit, also ends the `claude.exe` that Start-Process started.
 
 ## Layout
 
@@ -202,11 +245,13 @@ mod/
   hooks/host-shared.ts          host operations both adapters do alike
   hooks/host-posix.ts           Linux and WSL adapter and its sh scripts
   hooks/host-windows.ts         native Windows adapter and its PowerShell scripts
+  hooks/host-powershell.ts      the PowerShell launch route over the Windows adapter (launchRoute powershell)
   hooks/host-helper.ts          withHelper: the Node helper in front of an adapter, with fallback
   helper/host.mjs               the Node helper's entry point (protocol.mjs, ops.mjs, files.mjs, linux.mjs)
   hooks/bookkeeping.ts          edits of open points, queue and decisions
   hooks/store.ts                initial helper-file text, dates, paths
-  tests/                        *.test.ts, fixtures.ts, fake-helper.ts, helper.test.mjs, probe-selftest.py,
+  tests/                        *.test.ts (powershell.test.ts among them), fixtures.ts, fake-helper.ts,
+                                helper.test.mjs, probe-selftest.py,
                                 windows-selftest.py, e2e-smoke.sh
   types/index.d.ts              state contract of the panel
 ```
