@@ -1,5 +1,6 @@
 // The host interface: every operation of the mod that differs per operating system or needs a process, behind one
-// type with two adapters, host-posix.ts (Linux and WSL) and host-windows.ts (native Windows).
+// type with two adapters, host-posix.ts (Linux and WSL) and host-windows.ts (native Windows). register.tsx picks the
+// adapter once per load with selectHost and never branches on the platform itself.
 //
 // An adapter never holds `$`: the validator follows `$` only into functions of register.tsx itself, never across an
 // import. register.tsx hands each operation a HostPort instead, the engine facilities it may use, built over the
@@ -9,6 +10,8 @@ import type { FsStat, ProcessRunInit, ProcessRunResult } from 'claude-code'
 
 import type { SessionEntry } from '../types'
 import type { LaunchArgs, LaunchFacts, ProcFact, ProcFacts } from './core'
+import { posixHost } from './host-posix'
+import { windowsHost } from './host-windows'
 
 /** The environment variables an adapter reads, each by a literal name in register.tsx. */
 export type HostEnvName = 'HOME' | 'USERPROFILE' | 'SystemRoot'
@@ -155,3 +158,10 @@ type Unlisted = Exclude<keyof Host, (typeof HOST_MEMBERS)[number]>
 const isListComplete: Unlisted extends never ? true : never = true
 void isListComplete
 
+/**
+ * The one platform choice: native Windows, told by positive signs only (OS is Windows_NT and USERPROFILE a
+ * drive-letter path), takes the Windows adapter; anything else, WSL included, the Linux one.
+ */
+export function selectHost(env: { OS?: string; USERPROFILE?: string }): Host {
+  return env.OS === 'Windows_NT' && /^[A-Za-z]:[\\/]/.test(env.USERPROFILE ?? '') ? windowsHost : posixHost
+}

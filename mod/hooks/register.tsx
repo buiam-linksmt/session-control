@@ -4,7 +4,7 @@ import type { EngineInterface, ProcessRunInit, ProcessRunResult, Register } from
 import type { SessionEntry, SessionOutcome } from '../types'
 import { DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, editOpenPoints, editQueue } from './bookkeeping'
 import type { Edit } from './bookkeeping'
-import { backupName, dirOf, freshText, localDate, tmpPath } from './store'
+import { backupName, dirOf, freshText, localDate } from './store'
 import {
   TRACE_FILE,
   TRACE_KEEP,
@@ -21,16 +21,10 @@ import {
   traceMessage,
   utf8Bytes,
 } from './trace'
-import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from './host-posix'
-import { FILES_PS1, PROBE_PS1 } from './host-windows'
+import { selectHost } from './host'
+import type { Host, HostEnvName, HostPort } from './host'
 import {
   LAUNCH_SCHEMA,
-  findNewWindowsWorker,
-  isSameWinPath,
-  windowsPickerRefusal,
-  isWinAbsolute,
-  tailLines,
-  winPath,
   ACK_SCHEMA,
   RETIRE_SCHEMA,
   ackEntries,
@@ -38,9 +32,6 @@ import {
   removeEntries,
   retireVerdict,
   annotateCleared,
-  buildLaunchArgv,
-  defaultConfigDir,
-  isDefaultConfigDir,
   ackPeerNote,
   addPeerNote,
   buildRows,
@@ -49,7 +40,6 @@ import {
   classifyResult,
   expandHome,
   findBySid,
-  findNewWorker,
   lintReport,
   formatHeader,
   boxAt,
@@ -71,15 +61,12 @@ import {
   parseOpenPoints,
   parseQueuedWork,
   newRegistryEntry,
-  parseProcFacts,
   parseRegistry,
   parseTaskNotification,
   pickArgv,
   pickWatched,
   summarizeTranscript,
-  transcriptPath,
   unackedPeers,
-  probeArgs,
   rowStatus,
   slugify,
   launchName,
@@ -87,7 +74,7 @@ import {
   reportCheck,
   resultReport,
 } from './core'
-import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
+import type { ExpandableId, LaunchArgs, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, SectionBox, SectionId } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -146,6 +133,8 @@ let displayTick: { cancel: () => void } | undefined
 const DISPLAY_TICK_MS = 1000
 let lastError: string | undefined
 let isDirectWriteNoted = false
+/** The host adapter of this load (hostOf); a hot reload, or a test's fresh register, chooses again. */
+let host: Host | undefined
 const harvested = new Set<string>()
 /** Session names this session gave to launches: two launches in the same second still get different names. */
 const issuedNames = new Set<string>()
@@ -282,8 +271,7 @@ async function writeTrace($: EngineInterface, lines: readonly string[]): Promise
     if (needsRotation((await $.fs.stat(path).catch(() => undefined))?.size ?? 0, adding)) await rotateTrace($, path, adding)
     let problem = await appendLog($, path, chunk, true)
     // Outside the orchestrator directory nothing may have made the runs directory yet (Windows' append makes it).
-    if (problem !== undefined && !(await isWindows($))) {
-      await $.process.run(['mkdir', '-p', dirOf(path)], { timeoutMs: 5_000 })
+    if (problem !== undefined && (await (await hostOf($)).makeDir(portOf($), dirOf(path)))) {
       problem = await appendLog($, path, chunk, true)
     }
     if (problem !== undefined) return problem
@@ -291,22 +279,9 @@ async function writeTrace($: EngineInterface, lines: readonly string[]): Promise
   return undefined
 }
 
-/**
- * Rotates the trace: ROTATE_SCRIPT on Linux, which checks the size again itself; on Windows each rename of
- * rotationMoves by the file script, where a file another session moved meanwhile is no failure.
- */
+/** Rotates the trace through the host: it keeps TRACE_KEEP files under TRACE_MAX_BYTES each. */
 async function rotateTrace($: EngineInterface, path: string, adding: number): Promise<void> {
-  if (!(await isWindows($))) {
-    const argv = ['sh', '-c', ROTATE_SCRIPT, 'session-trace', path, String(TRACE_KEEP - 1), String(TRACE_MAX_BYTES), String(adding)]
-    const ran = await $.process.run(argv, { timeoutMs: 10_000 })
-    if (ran.exitCode !== 0) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
-    return
-  }
-  for (const [from, to] of rotationMoves(path)) {
-    if (!(await $.fs.exists(from).catch(() => false))) continue
-    const ran = await runScript($, 'files.ps1', FILES_PS1, ['move', from, to], 10_000, true)
-    if (ran.exitCode !== 0 && (await $.fs.exists(from).catch(() => true))) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`)
-  }
+  await (await hostOf($)).rotate(portOf($), { path, adding, keep: TRACE_KEEP, maxBytes: TRACE_MAX_BYTES, moves: rotationMoves(path) })
 }
 
 /** Runs a hook's work and then writes the trace lines it made. */
@@ -318,44 +293,54 @@ async function traced<T>($: EngineInterface, work: () => Promise<T>): Promise<T>
   }
 }
 
-// Native Windows takes its own branch of each machine call below; anything else, WSL included, takes the Linux one,
-// whose commands stay what they were.
+// Every machine call goes through the host adapter (host.ts): host-posix.ts on Linux and WSL, host-windows.ts on
+// native Windows. hostOf is the one place the platform is chosen; nothing else here branches on it.
 
-/** Native Windows, told by positive signs only: OS is Windows_NT and USERPROFILE a drive-letter path. Anything else is Linux. */
-async function isWindows($: EngineInterface): Promise<boolean> {
-  return (await $.env.get('OS')) === 'Windows_NT' && /^[A-Za-z]:[\\/]/.test((await $.env.get('USERPROFILE')) ?? '')
+/** The adapter of this load, chosen once by selectHost from OS and USERPROFILE at the first hook that needs it (session.start). */
+async function hostOf($: EngineInterface): Promise<Host> {
+  if (host === undefined) host = selectHost({ OS: await $.env.get('OS'), USERPROFILE: await $.env.get('USERPROFILE') })
+  return host
 }
 
-/** Windows PowerShell 5.1 by absolute path: on Windows `bash` is the WSL launcher, and sh, mv and pwsh are not on the PATH a command gets. */
-async function powershell($: EngineInterface): Promise<string> {
-  const root = (await $.env.get('SystemRoot')) ?? 'C:\\Windows'
-  return `${root.replace(/[\\/]+$/, '')}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`
+/** The engine facilities the adapter may use, over this hook's `$`: the adapter never holds `$` itself. */
+function portOf($: EngineInterface): HostPort {
+  return {
+    run: (argv, init, isQuiet, shown) => run($, argv, init, isQuiet, shown),
+    read: path => $.fs.read(path),
+    write: (path, text, isQuiet) => write($, path, text, isQuiet),
+    exists: path => $.fs.exists(path),
+    stat: path => $.fs.stat(path),
+    now: () => $.clock.now(),
+    sleep: ms => $.clock.sleep(ms),
+    env: name => hostEnv($, name),
+    runsDir: () => runsPath($),
+    traceError: (where, err) => traceError($, where, err),
+    noteDirectWrite: text => noteDirectWrite($, text),
+  }
 }
 
-/** One of the mod's PowerShell scripts in the runs directory, written when it is not there as it should be (which makes the directory). */
-async function ensureScript($: EngineInterface, name: string, text: string, isQuiet = false): Promise<string> {
-  const path = `${await runsPath($)}/${name}`
-  if ((await $.fs.read(path).catch(() => undefined)) !== text) await write($, path, text, isQuiet)
-  return path
+/** An environment variable the adapter reads, each by its literal name. */
+async function hostEnv($: EngineInterface, name: HostEnvName): Promise<string | undefined> {
+  if (name === 'HOME') return $.env.get('HOME')
+  if (name === 'USERPROFILE') return $.env.get('USERPROFILE')
+  return $.env.get('SystemRoot')
 }
 
-/** Runs one of the mod's PowerShell scripts with -File: its text never crosses a command line. */
-async function runScript($: EngineInterface, name: string, text: string, args: readonly string[], timeoutMs = 10_000, isQuiet = false) {
-  const path = await ensureScript($, name, text, isQuiet)
-  return run($, [await powershell($), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path, ...args], { timeoutMs }, isQuiet)
+/** A file was written over directly, not through a rename (Windows, when its rename fails): said once per load. */
+function noteDirectWrite($: EngineInterface, text: string): void {
+  if (isDirectWriteNoted) return
+  isDirectWriteNoted = true
+  $.ui.toast(toastText(TOAST_TITLES.directWrite, text), { timeoutMs: 10000 })
 }
 
 async function homeDir($: EngineInterface): Promise<string> {
-  const home = await $.env.get('HOME')
-  if (!(await isWindows($))) return home ?? '/root'
-  // Git Bash hands on HOME as /c/Users/...; without a usable one the profile folder is home. Native form either way.
-  return winPath(home !== undefined && isWinAbsolute(home) ? home : ((await $.env.get('USERPROFILE')) ?? ''))
+  return (await hostOf($)).homeDir(portOf($))
 }
 
-/** A path from the settings with `~` expanded; on Windows in the native form the mod stores. */
+/** A path from the settings with `~` expanded, in the form the host stores. */
 async function settingPath($: EngineInterface, setting: string): Promise<string> {
-  const path = expandHome(setting, await homeDir($))
-  return (await isWindows($)) ? winPath(path) : path
+  const machine = await hostOf($)
+  return machine.nativePath(expandHome(setting, await machine.homeDir(portOf($))))
 }
 
 async function registryPath($: EngineInterface): Promise<string> {
@@ -367,60 +352,9 @@ async function readRegistryText($: EngineInterface): Promise<string> {
   return $.fs.read(path).catch(() => '')
 }
 
-/**
- * Write a file through a temporary sibling and a rename, so a reader never sees half a file. When `expected` is
- * given the file is read again just before the rename: if another writer changed it meanwhile nothing is
- * written and false is returned.
- */
+/** Writes a file through a temporary sibling and a rename (host.writeAtomic); false when `expected` no longer holds. */
 async function writeAtomic($: EngineInterface, path: string, text: string, expected?: string): Promise<boolean> {
-  const tmp = tmpPath(path, await $.clock.now())
-  await write($, tmp, text)
-  if (expected !== undefined && (await $.fs.read(path).catch(() => undefined)) !== expected) {
-    await removeFile($, tmp)
-    return false
-  }
-  await renameOver($, tmp, path, text)
-  return true
-}
-
-/** Removes a file: `rm -f` on Linux; on Windows the file script, best effort. Answers whether it went. */
-async function removeFile($: EngineInterface, path: string, isQuiet = false): Promise<boolean> {
-  if (await isWindows($)) {
-    const ran = await runScript($, 'files.ps1', FILES_PS1, ['remove', path], 10_000, isQuiet).catch((err: unknown) => {
-      if (!isQuiet) traceError($, 'remove', err)
-      return undefined
-    })
-    return ran?.exitCode === 0
-  }
-  await run($, ['rm', '-f', path], { timeoutMs: 5_000 }, isQuiet)
-  return true
-}
-
-/**
- * Puts the temp file in the file's place: `mv -f` on Linux. On Windows the file script; when it cannot run or fails,
- * the text is written over the file directly (the caller has checked it is still the one expected), and that write,
- * which a reader can see half done, is reported once.
- */
-async function renameOver($: EngineInterface, tmp: string, path: string, text: string): Promise<void> {
-  if (!(await isWindows($))) {
-    const ran = await run($, ['mv', '-f', tmp, path], { timeoutMs: 5_000 })
-    if (ran.exitCode !== 0) throw new Error(`rename failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
-    return
-  }
-  const ran = await runScript($, 'files.ps1', FILES_PS1, ['move', tmp, path]).catch((err: unknown) => {
-    traceError($, 'rename', err)
-    return { exitCode: -1, stderr: String(err) }
-  })
-  if (ran.exitCode === 0) return
-  await write($, path, text)
-  // The script's own remove; when that cannot run either, $.fs (which cannot remove) empties the temp file instead.
-  const isRemoved = await removeFile($, tmp)
-  if (!isRemoved) await write($, tmp, '')
-  if (!isDirectWriteNoted) {
-    isDirectWriteNoted = true
-    const leftover = isRemoved ? '' : `; the temp file ${tmp} could not be removed and was emptied`
-    $.ui.toast(toastText(TOAST_TITLES.directWrite, `the rename failed (${ran.stderr.trim().slice(0, 100)}); ${path} was written directly, not atomically${leftover}`), { timeoutMs: 10000 })
-  }
+  return (await hostOf($)).writeAtomic(portOf($), path, text, expected)
 }
 
 /**
@@ -448,26 +382,12 @@ async function editRegistry($: EngineInterface, edit: (text: string) => Promise<
   return 'the registry changed while it was being edited; nothing written'
 }
 
-/**
- * Appends lines to a log file without reading it, so a log of any size takes them: APPEND_SCRIPT on Linux; on
- * Windows the lines go to a file of their own, which the file script appends and removes. Answers what went wrong.
- */
+/** Appends lines to a log file without reading it, so a log of any size takes them (host.append). Answers what went wrong. */
 async function appendLog($: EngineInterface, path: string, lines: readonly string[], isQuiet = false): Promise<string | undefined> {
   const traceAppend = (exitCode: number) => {
     if (isTracing && !isQuiet) trace($, 'fs.append', { path, bytes: utf8Bytes(lines.join('\n')) + 1, lines: lines.length, exitCode })
   }
-  if (!(await isWindows($))) {
-    const ran = await run($, ['sh', '-c', APPEND_SCRIPT, 'session-log', lines.join('\n'), path], { timeoutMs: 10_000 }, isQuiet)
-    traceAppend(ran.exitCode)
-    return ran.exitCode === 0 ? undefined : `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`
-  }
-  const added = `${path}.add.${await $.clock.now()}`
-  await write($, added, lines.map(line => `${line}\n`).join(''), isQuiet)
-  const ran = await runScript($, 'files.ps1', FILES_PS1, ['append', added, path], 10_000, isQuiet).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
-  traceAppend(ran.exitCode)
-  if (ran.exitCode === 0) return undefined
-  await removeFile($, added, isQuiet)
-  return `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`
+  return (await hostOf($)).append(portOf($), path, lines, isQuiet, traceAppend)
 }
 
 /** Backups are written once per file, tool and day, before the first change of that day. */
@@ -481,14 +401,7 @@ async function ensureFile($: EngineInterface, path: string, file: string): Promi
   const initial = freshText(file)
   if (initial === undefined) return
   if ((await $.fs.read(path).catch(() => undefined)) !== undefined) return
-  if (await isWindows($)) {
-    // $.fs.write makes the directories; a file that is there but cannot be read is left alone.
-    if (!(await $.fs.exists(path).catch(() => true))) await write($, path, initial)
-    return
-  }
-  if ((await run($, ['test', '-e', path], { timeoutMs: 5_000 })).exitCode === 0) return
-  await run($, ['mkdir', '-p', dirOf(path)], { timeoutMs: 5_000 })
-  await write($, path, initial)
+  await (await hostOf($)).createFile(portOf($), path, initial)
 }
 
 /** Fresh environment: the helper files, the backup directory and the runs directory exist before anything reads them. */
@@ -497,25 +410,12 @@ async function ensureHelperFiles($: EngineInterface): Promise<void> {
     await ensureFile($, orchPath(file), file)
   }
   await ensureFile($, await registryPath($), 'headless-sessions.json')
-  // On Windows writing the file script makes the runs directory; the backups directory comes with the first backup.
-  if (await isWindows($)) await ensureScript($, 'files.ps1', FILES_PS1)
-  else await run($, ['mkdir', '-p', orchPath('backups'), await runsPath($)], { timeoutMs: 5_000 })
+  await (await hostOf($)).prepareHelperDirs(portOf($), orchPath('backups'))
 }
 
-/**
- * The process facts: PROBE_SCRIPT under sh on Linux; on Windows PROBE_PS1, which also looks for sessions files under
- * `configDirs`. A Windows probe that fails is an error: read as no process at all it would mark every worker dead.
- */
+/** The process facts (host.probe); `configDirs` are where the probe may look for sessions files too. */
 async function probe($: EngineInterface, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
-  if (await isWindows($)) {
-    const ran = await runScript($, 'probe.ps1', PROBE_PS1, [...probeArgs(entries), ...configDirs.map(dir => `c:${dir}`)], 20_000)
-    if (ran.exitCode !== 0) throw new Error(`the process probe failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 160)}`)
-    return parseProcFacts(ran.stdout.replace(/\r/g, ''))
-  }
-  const ran = await run($, ['sh', '-c', PROBE_SCRIPT, 'session-probe', ...probeArgs(entries)], {
-    timeoutMs: 10_000,
-  })
-  return parseProcFacts(ran.stdout)
+  return (await hostOf($)).probe(portOf($), entries, configDirs)
 }
 
 /** The registry entries with the live process facts, or the refusal when the registry cannot be read. */
@@ -631,7 +531,7 @@ async function refreshWatch($: EngineInterface): Promise<void> {
   if (!isActive || sid === null) return
   const parsed = parseRegistry(await readRegistryText($))
   const entry = parsed.ok ? parsed.entries.find(one => one.session_id === sid) : undefined
-  const path = entry === undefined ? undefined : transcriptPath(entry, await isWindows($))
+  const path = entry === undefined ? undefined : (await hostOf($)).transcriptPath(entry)
   const title = entry?.title ?? sid.slice(0, 8)
   if (path === undefined) {
     await update($, watch, () => ({ title, lines: ['no transcript path for this entry'] }))
@@ -643,22 +543,9 @@ async function refreshWatch($: EngineInterface): Promise<void> {
   if (!isSame(await read($, watch), next)) await update($, watch, () => next)
 }
 
-/**
- * The last 600 lines of a transcript, each cut to 20000 characters, so one huge tool result cannot push the newest
- * rows out: tail and cut on Linux; on Windows a read, or the file script for a transcript over the read cap.
- */
+/** The last 600 lines of a transcript, each cut to 20000 characters, so one huge tool result cannot push the newest rows out (host.tail). */
 async function transcriptTail($: EngineInterface, path: string): Promise<string | undefined> {
-  if (!(await isWindows($))) {
-    const ran = await run($, ['sh', '-c', 'tail -n 600 "$1" | cut -c1-20000', 'session-tail', path], { timeoutMs: 5_000 })
-    return ran.exitCode === 0 ? ran.stdout : undefined
-  }
-  const text = await $.fs.read(path).catch(() => undefined)
-  if (text !== undefined) return tailLines(text, 600, 20000)
-  const ran = await runScript($, 'files.ps1', FILES_PS1, ['tail', path, '600', '20000']).catch((err: unknown) => {
-    traceError($, 'transcript tail', err)
-    return undefined
-  })
-  return ran?.exitCode === 0 ? ran.stdout : undefined
+  return (await hostOf($)).tail(portOf($), path)
 }
 
 function tick($: EngineInterface): void {
@@ -804,34 +691,29 @@ async function retire($: EngineInterface, ids: readonly string[], reviewed: Read
 }
 
 async function launch($: EngineInterface, given: LaunchArgs) {
-  const isWin = await isWindows($)
-  // On Windows the schema's leading / is Git Bash's /c/...: from here on, and in the registry, the native C:/... form.
-  const native = (path: unknown) => (typeof path === 'string' ? winPath(path) : path) as string
-  const args = isWin ? { ...given, dir: native(given.dir), prompt_file: native(given.prompt_file) } : given
+  const machine = await hostOf($)
+  // The launch's paths in the form the host stores, from here on and in the registry (on Windows C:/..., never /c/...).
+  const args = machine.launchArgs(given)
   const home = await homeDir($)
   const reg = await registryAndFacts($)
   if ('deny' in reg) return reg
-  const { promptFileOk, dirOk } = await launchChecks($, args, isWin)
+  const { promptFileOk, dirOk } = await machine.launchChecks(portOf($), args)
   const promptText = await $.fs.read(args.prompt_file).catch(() => undefined)
   const resumeSid = typeof args.resume_sid === 'string' ? args.resume_sid : undefined
   // Without a picker command a fresh launch inherits the machine's default configuration: the orchestrator's own
   // CLAUDE_CONFIG_DIR when it has one, else <home>/.claude, which is what the registry records.
   const picker = config.licencePickCommand.trim()
   const own = await ownConfigDir($)
-  const defaultDir = defaultConfigDir(home, own, isWin)
+  const defaultDir = machine.defaultConfigDir(home, own)
   let pick: { exitCode: number; stdout: string; stderr?: string } | undefined
   if (resumeSid === undefined && picker === '') pick = { exitCode: 0, stdout: defaultDir }
   else if (resumeSid === undefined) {
-    const argv = pickArgv(picker, args.need ?? 40, home)
-    if (isWin) {
-      const refusal = windowsPickerRefusal(argv)
-      if (refusal !== undefined) {
-        trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(refusal, 'reason') })
-        return { deny: `${PLUGIN}: ${refusal}` }
-      }
-      argv[0] = winPath(argv[0] ?? '')
+    const picked = machine.pickerArgv(pickArgv(picker, args.need ?? 40, home))
+    if ('refusal' in picked) {
+      trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(picked.refusal, 'reason') })
+      return { deny: `${PLUGIN}: ${picked.refusal}` }
     }
-    pick = await run($, argv, { timeoutMs: 20_000 }, false, shownPicker(argv))
+    pick = await run($, picked.argv, { timeoutMs: 20_000 }, false, shownPicker(picked.argv))
   }
   const verdict = checkLaunch(args, {
     home,
@@ -843,31 +725,13 @@ async function launch($: EngineInterface, given: LaunchArgs) {
     promptFileOk,
     dirOk,
     missingItems: promptText === undefined ? undefined : missingPromptItems(promptText),
-    ...(isWin ? { isWindows: true, promptChars: promptText?.length, promptLead: promptText?.slice(0, 200) } : {}),
+    ...machine.launchFacts(promptText),
   })
   trace($, 'guard', verdict.ok ? { tool: 'launch_worker', isOk: true, configDir: verdict.configDir, resumeSid: verdict.resumeSid } : { tool: 'launch_worker', isOk: false, ...messageFields(verdict.reason, 'reason') })
   if (!verdict.ok) return { deny: `${PLUGIN}: ${verdict.reason}` }
   // No CLAUDE_CONFIG_DIR on the line: a fresh launch without a picker, or a resume under the default directory.
-  const isConfigInherited = picker === '' && (verdict.resumeSid === undefined || isDefaultConfigDir(verdict.configDir, defaultDir, isWin))
+  const isConfigInherited = picker === '' && (verdict.resumeSid === undefined || machine.isDefaultConfigDir(verdict.configDir, defaultDir))
   return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, own)
-}
-
-/** Whether the prompt file is there and not empty, and the dir is a directory: `test -s` and `test -d` on Linux, $.fs.stat on Windows. */
-async function launchChecks($: EngineInterface, args: LaunchArgs, isWin: boolean): Promise<{ promptFileOk: boolean; dirOk: boolean }> {
-  if (isWin) {
-    const prompt = await $.fs.stat(args.prompt_file).catch(() => undefined)
-    const dir = await $.fs.stat(args.dir).catch(() => undefined)
-    return { promptFileOk: prompt?.kind === 'file' && prompt.size > 0, dirOk: dir?.kind === 'dir' }
-  }
-  const promptCheck = await run($, ['test', '-s', args.prompt_file], { timeoutMs: 5_000 })
-  const dirCheck = await run($, ['test', '-d', args.dir], { timeoutMs: 5_000 })
-  return { promptFileOk: promptCheck.exitCode === 0, dirOk: dirCheck.exitCode === 0 }
-}
-
-/** Waits a few seconds: `sleep` on Linux, the engine's clock on Windows, which has no sleep to start. */
-async function pause($: EngineInterface, seconds: number): Promise<void> {
-  if (await isWindows($)) await $.clock.sleep(seconds * 1000)
-  else await run($, ['sleep', String(seconds)], { timeoutMs: 5_000 })
 }
 
 /** Start the worker as a background Bash task, find its real pid and session, register it. */
@@ -879,46 +743,41 @@ async function spawnWorker(
   before: ProcFacts,
   own: string | undefined,
 ) {
-  const isWin = await isWindows($)
+  const machine = await hostOf($)
+  const port = portOf($)
   const runsDir = await runsPath($)
-  // The launch's redirections need the runs directory: mkdir on Linux; on Windows writing the file script makes it.
-  if (isWin) await ensureScript($, 'files.ps1', FILES_PS1)
-  else await run($, ['mkdir', '-p', runsDir], { timeoutMs: 5_000 })
+  // The launch's redirections need the runs directory.
+  await machine.prepareRunsDir(port, runsDir)
   const nowMs = await $.clock.now()
   const stamp = new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const base = `${runsDir}/${stamp}-${slugify(args.title)}`
   const files = { result: `${base}.json`, err: `${base}.err` }
   const name = launchName(args.title, nowMs, entries, verdict.resumeSid, issuedNames)
   issuedNames.add(name)
-  const command = buildLaunchArgv(args, { ...verdict, name }, files.result, files.err)[2] ?? ''
+  const command = machine.launchCommand(args, { ...verdict, name }, files.result, files.err)
   const known = new Set(before.claude.map(one => one.pid))
   const launchedAt = await $.clock.now()
   trace($, 'worker.start', { configDir: verdict.configDir, isConfigDirSet: verdict.isConfigInherited !== true, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
   // The engine's own background task: its exit notification reaches the session.
   try {
     await $.tool.call({
-      tool: 'Bash',
+      tool: machine.launchTool,
       command,
       description: `session-control worker: ${args.title}`.slice(0, 100),
       run_in_background: true,
       timeout: launchTimeoutMs(args),
     })
   } catch (err) {
-    // On Windows the engine offers the Bash tool only when it finds Git Bash, which it may miss for a per-user Git
-    // whose mingw64 git.exe comes first on the PATH (a session started from Git Bash).
-    const hint = isWin ? ' On Windows Claude Code offers the Bash tool only when it finds Git Bash: start the orchestrator with CLAUDE_CODE_GIT_BASH_PATH set to Git\\bin\\bash.exe.' : ''
+    const hint = machine.launchToolHint
     trace($, 'error', { where: 'worker.start', ...messageFields(errorText(err)) })
     return { deny: `${PLUGIN}: the worker could not be started through the Bash tool (${errorText(err).slice(0, 160)}); nothing was launched.${hint}` }
   }
-  let worker: ReturnType<typeof findNewWorker>
+  let worker: ProcFact | undefined
   for (let attempt = 0; attempt < 15 && worker === undefined; attempt++) {
-    await pause($, 2)
+    await machine.pause(port, 2)
     const facts = await probe($, entries, [verdict.configDir])
-    // On Linux the probe reads the worker's CLAUDE_CONFIG_DIR from its environment: an inherited one is the
-    // orchestrator's own, or none. On Windows it reads where the worker's sessions file is: the config dir itself.
-    const seen = verdict.isConfigInherited === true && !isWin ? (own ?? '') : verdict.configDir
-    const want = { dir: args.dir, configDir: seen, model: args.model }
-    worker = isWin ? findNewWindowsWorker(facts, want, known, ((await $.clock.now()) - launchedAt) / 1000) : findNewWorker(facts, want, known)
+    const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model }
+    worker = await machine.findNewWorker(port, facts, want, known, launchedAt)
   }
   if (worker === undefined) {
     trace($, 'worker.missing', { seconds: 30 })
@@ -936,11 +795,11 @@ async function spawnWorker(
       break
     }
     if (sessionId !== '') break
-    await pause($, 1)
+    await machine.pause(port, 1)
   }
   // The socket can follow the session id by a moment: a few more reads, then the entry goes without it.
   for (let attempt = 0; attempt < 3 && fromFile.sessionId !== undefined && fromFile.socketPath === undefined; attempt++) {
-    await pause($, 1)
+    await machine.pause(port, 1)
     const again = sessionFileFacts(await $.fs.read(sessionPath).catch(() => ''))
     if (again.sessionId === fromFile.sessionId) fromFile = again
   }
@@ -1014,19 +873,19 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
     description: 'Session-control panel: open or close the side panel (sessions, queued work, open points)',
   })
   // Without the option, the orchestrator directory is the one whose CLAUDE.md is the orchestrator's.
-  // On Windows both are taken in the native form and compared as Windows compares paths.
-  const isWin = await isWindows($)
-  const cwd = isWin ? winPath(sessionCwd) : sessionCwd.replace(/\/+$/, '')
+  // Both are taken in the host's path form and compared as the host compares paths.
+  const machine = await hostOf($)
+  const cwd = machine.sessionDir(sessionCwd)
   if (config.orchestratorDir === '' && (await $.fs.read(`${cwd}/CLAUDE.md`).catch(() => '')).startsWith(ORCHESTRATOR_HEADING)) {
     config.orchestratorDir = cwd
   }
-  if (isWin && config.orchestratorDir !== '') config.orchestratorDir = winPath(config.orchestratorDir)
-  const isHere = isWin ? isSameWinPath(cwd, config.orchestratorDir) : cwd === config.orchestratorDir.replace(/\/+$/, '')
+  if (config.orchestratorDir !== '') config.orchestratorDir = machine.nativePath(config.orchestratorDir)
+  const isHere = machine.isSameDir(cwd, config.orchestratorDir)
   if (isTraceWanted) {
     // The picker command is a command line of its own: the trace says only whether one is set.
     const { pollMs, registrySetting, licencePickCommand, ...rest } = config
     const options = { ...rest, registryPath: registrySetting, pollSeconds: pollMs / 1000, licencePickCommand: licencePickCommand.trim() === '' ? 'empty' : 'set' }
-    traceStart = { cwd, platform: isWin ? 'windows' : 'linux', isOrchestratorDir: config.orchestratorDir !== '' && isHere, options }
+    traceStart = { cwd, platform: machine.platform, isOrchestratorDir: config.orchestratorDir !== '' && isHere, options }
   }
   if (config.orchestratorDir !== '' && isHere) await activate($)
 }
@@ -1102,6 +961,7 @@ function pickFields(e: unknown, names: readonly string[]): Record<string, unknow
 
 export const register: Register = (on, options) => {
   isDirectWriteNoted = false
+  host = undefined
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),

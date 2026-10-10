@@ -1160,8 +1160,9 @@ export function annotateCleared(removed: string, reviews: readonly RetireReview[
 // ---------------------------------------------------------------- native Windows
 
 // Native Windows (Claude Code on Windows, Git Bash as the Bash tool's shell) has no sh, jq, mv or /proc on the
-// PATH a command starts with. register.tsx detects it from the environment and only then takes the Windows
-// branches below; on Linux and WSL none of them runs.
+// PATH a command starts with. The functions below serve the Windows adapter (host-windows.ts), which selectHost picks
+// from the environment, and the Windows cases of the pure checks above, which only that adapter switches on; on
+// Linux and WSL none of them runs.
 
 /**
  * A Windows path in the one form the mod stores and passes on: drive letter upper case, `/` separators, no
