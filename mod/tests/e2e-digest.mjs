@@ -17,7 +17,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, basename, entriesOf, finish, firstLine, globIn, grepF, isErrorFalse, join, keepOut, kit, lastLine, lineCount, linesOf,
+  CFG_DEFAULT, IS_WINDOWS, MOD, awaitOrchestrator, basename, entriesOf, finish, firstLine, globIn, grepF, isErrorFalse, join, keepOut, kit, lastLine, lineCount, linesOf,
   localDate, native, ours, pidExists, processesNaming, readJson, readOr, regularFiles, removeTree, requireClaude, resultText, scratch,
   scratchSettings, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -153,7 +153,10 @@ const filesAfter = regularFiles(S)
 fs.writeFileSync(join(S, 'files-after.txt'), filesAfter.map(f => f + '\n').join(''))
 const before = new Set(filesBefore)
 const ignored = [/\/runs\/trace\.log/, /\/orch\/backups\//, /\/files-before\.txt$/, /\/files-after\.txt$/, /\/orchestrator\.(json|err)$/, /\/out-[12]\.txt$/]
-const NEW = filesAfter.filter(f => !before.has(f) && !ignored.some(re => re.test(f)))
+// On native Windows the board writes its process probe script into the runs directory at its start (README, Windows):
+// that one file, by its exact path.
+const PROBE_SCRIPT = IS_WINDOWS ? native(join(RUNS, 'probe.ps1')) : undefined
+const NEW = filesAfter.filter(f => !before.has(f) && !ignored.some(re => re.test(f)) && f !== PROBE_SCRIPT)
 if (NEW.length === 0) pass('no file besides the trace, the registry backup and the run outputs was created')
 else fail(`no file besides the trace, the registry backup and the run outputs was created: ${NEW.join('\n')}`)
 // Between a turn_digest call line and its answer line, no line of a write.

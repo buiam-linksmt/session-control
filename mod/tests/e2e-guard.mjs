@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // End-to-end test of the sign-off guard on the orchestrator's own commands against the real claude, in a scratch
 // directory it makes and removes. Run with `node mod/tests/e2e-guard.mjs` (Node 22 or newer); the test itself needs no
-// sh, grep, tr, sed, jq or cygpath. The orchestrator is told to run `git branch -D`, `cat` and `jq` through its Bash
-// tool, so the `cat` and `jq` steps need those tools on the PATH of the session's Bash tool (on Windows, Git Bash's,
-// which may lack jq).
+// sh, grep, tr, sed, jq or cygpath. The orchestrator is told to run `git branch -D`, `cat` and a node script through
+// its Bash tool, so `cat` (Git Bash has it on Windows) and this Node (by its absolute path) must run there.
 //
 // A headless haiku orchestrator (capped at --max-budget-usd 0.25) runs in a scratch orchestrator directory and is told
-// to (1) run `git -C <scratch repo> branch -D e2e-scratch` through Bash, (2) run `cat task-queue.json` and (3) `jq` over
-// it, (4) Read and then Edit its CLAUDE.md, (5) call open_point add. Its transcript must show (1) refused by the
+// to (1) run `git -C <scratch repo> branch -D e2e-scratch` through Bash, (2) run `cat task-queue.json` and (3) a node
+// script that reads it as JSON and prints its number of tasks, (4) Read and then Edit its CLAUDE.md, (5) call
+// open_point add. Its transcript must show (1) refused by the
 // sign-off guard before it runs, (2) to (4) run, (5) answered by the tool; on disk the scratch repo's branch must still
 // be there, task-queue.json byte for byte as seeded, open-points.json must hold the point the tool added and CLAUDE.md
 // the edit. Everything is in the scratch directory; the transcript stays under the default configuration. One line per
@@ -16,18 +16,13 @@
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, IS_WINDOWS, MOD, awaitOrchestrator, byteSize, callCounts, entriesOf, finish, globIn, grepF, isErrorFalse, join, keepOut, kit, native, ours,
-  processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings, startClaude, toolUses,
-  transcriptOf, which, writeJson, writeLines,
+  CFG_DEFAULT, MOD, awaitOrchestrator, byteSize, callCounts, entriesOf, finish, globIn, grepF, isErrorFalse, join, keepOut, kit, native, ours,
+  nodeCommand, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings, startClaude, toolUses,
+  transcriptOf, writeJson, writeLines, writeScript,
 } from './lib/e2e.mjs'
 
 const { pass, fail, info } = kit
 const CLAUDE = requireClaude()
-// Step (3) runs jq through the orchestrator's Bash tool, whose PATH on Linux and WSL is this one.
-if (!IS_WINDOWS && which('jq') === undefined) {
-  fail('jq is on the PATH')
-  process.exit(1)
-}
 let orch
 const S = scratch('session-control-e2e-guard', dir => {
   if (orch?.alive() && ours(orch.pid, dir)) orch.stop()
@@ -54,13 +49,16 @@ writeJson(join(ORCH, 'open-points.json'), { points: [] })
 writeLines(join(ORCH, 'open-points-archive.md'), '# Open points archive')
 fs.writeFileSync(REG, '[]\n')
 fs.copyFileSync(join(ORCH, 'task-queue.json'), join(S, 'queue-before.json'))
+// Step (3): the file read as JSON, its number of tasks printed (what `jq '.tasks | length'` prints).
+const COUNT_TASKS = join(S, 'count-tasks.mjs')
+writeScript(COUNT_TASKS, "import { readFileSync } from 'node:fs'\nconsole.log(JSON.parse(readFileSync(process.argv[2], 'utf8')).tasks.length)\n")
 const SETTINGS = scratchSettings(native(ORCH), native(REG), native(RUNS), 5)
 const O = native(ORCH)
 fs.writeFileSync(join(S, 'instruction.txt'),
   'This is an automated test of a guard. Do exactly these five steps, one after the other, each one once, even when a step is refused (then go on with the next step), and nothing else:\n' +
   `1. Run this Bash command (a scratch repository made for this test): git -C ${native(REPO)} branch -D e2e-scratch\n` +
   `2. Run this Bash command: cat ${O}/task-queue.json\n` +
-  `3. Run this Bash command: jq '.tasks | length' ${O}/task-queue.json\n` +
+  `3. Run this Bash command: ${nodeCommand(COUNT_TASKS, `${O}/task-queue.json`)}\n` +
   `4. Use the Read tool on ${O}/CLAUDE.md, then the Edit tool on ${O}/CLAUDE.md to replace SCRATCH-LINE-ONE with SCRATCH-LINE-EDITED.\n` +
   '5. Call mcp__session-control__open_point with action "add", id "e2e-p1", title "A test point.", detail "Added by the guard test.", recommendation "None."\n' +
   'Then answer with one line: done.\n')
@@ -96,7 +94,7 @@ const str = value => (typeof value === 'string' ? value : '')
 for (const [tool, test, name] of [
   ['Bash', input => str(input.command).startsWith('git '), 'branch'],
   ['Bash', input => str(input.command).startsWith('cat '), 'cat'],
-  ['Bash', input => str(input.command).startsWith('jq '), 'jq'],
+  ['Bash', input => str(input.command).includes('count-tasks.mjs'), 'node'],
   ['Edit', input => str(input.file_path).endsWith('CLAUDE.md'), 'edit'],
   ['mcp__session-control__open_point', input => input.id === 'e2e-p1', 'point'],
 ]) {
@@ -112,8 +110,8 @@ check('branch', 'ERROR', '(1) git branch -D through Bash is refused')
 check('branch', 'refused by the sign-off guard: git branch -D is branch -D over unpushed work', '(1) by the sign-off guard')
 check('cat', 'OK', '(2) cat task-queue.json runs')
 check('cat', '"e2e-t"', '(2) and shows the file')
-check('jq', 'OK', '(3) jq over task-queue.json runs')
-check('jq', '1', '(3) and answers')
+check('node', 'OK', '(3) a node read of task-queue.json runs')
+check('node', '1', '(3) and answers')
 check('edit', 'OK', '(4) Edit of CLAUDE.md runs')
 check('point', 'OK', '(5) open_point add runs')
 check('point', 'open-points.json: added e2e-p1', '(5) the tool added the point')

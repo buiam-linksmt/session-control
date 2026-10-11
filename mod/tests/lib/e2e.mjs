@@ -58,6 +58,18 @@ export function isExecutable(path) {
 
 /** A path as claude and the mod take it: C:/... on Windows, unchanged elsewhere. */
 export const native = path => (IS_WINDOWS ? path.replaceAll('\\', '/') : path)
+/**
+ * A path as the mod prints one it made itself (a config dir it found, a file a listing gives, a folder it flags): on
+ * Windows the C:/... form it stores (winPath of hooks/core.ts: / separators, an upper-case drive letter, no doubled or
+ * trailing separator); elsewhere unchanged. A path the mod prints from the registry or a transcript keeps the form it
+ * was written in there.
+ */
+export function shown(path) {
+  if (!IS_WINDOWS) return path
+  const slashed = native(path).replace(/^([a-z]):/, (_, drive) => `${drive.toUpperCase()}:`)
+  const cut = ((/^\/\/[^/]/.test(slashed) ? '/' : '') + slashed.replace(/\/{2,}/g, '/')).replace(/\/+$/, '')
+  return /^[A-Z]:$/.test(cut) ? `${cut}/` : cut
+}
 /** Its /c/... form on Windows (Git Bash's), unchanged elsewhere. */
 export const msys = path => native(path).replace(/^([A-Za-z]):\//, '/$1/')
 

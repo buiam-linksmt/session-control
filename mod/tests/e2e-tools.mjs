@@ -20,10 +20,11 @@
 // the scratch directory goes.
 
 import * as fs from 'node:fs'
+import { sep } from 'node:path'
 import {
   CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, globIn, grepF, iso, isErrorFalse, join, keepOut, kit,
   localDate, native, nodeMajor, ours, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, sanitized, scratch,
-  scratchSettings, shortId, startClaude, toolUses, touchAgo, transcriptOf, writeJson, writeLines,
+  scratchSettings, shortId, shown, startClaude, toolUses, touchAgo, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
 
 const { pass, fail, info } = kit
@@ -158,10 +159,12 @@ info(`tool calls of the orchestrator: ${callCounts(entries)}`)
 check('list_sessions', 'session rows:', 'the count line comes first')
 if (/session rows*:/.test(firstLine(readOr(outPath('list_sessions'))))) pass('list_sessions: the first line is the count')
 else fail('list_sessions: the first line is the count')
-check('list_sessions', `- finished | e2e clean worker | session_id ${SID_CLEAN} | name w-e2e-clean-1 | pid - | elapsed 5m00s | model haiku/low | cwd ${S}/work-clean | config_dir ${CFG} | outcome clean (clean: The parser is done; 14 tests pass.) | cost USD 0.42`, 'the clean row with every field')
+// A registry field is printed as the registry holds it (seeded with join: backslashes on Windows); a path the mod makes
+// itself (a listing, a folder it flags) in its own form (shown: C:/... on Windows).
+check('list_sessions', `- finished | e2e clean worker | session_id ${SID_CLEAN} | name w-e2e-clean-1 | pid - | elapsed 5m00s | model haiku/low | cwd ${join(S, 'work-clean')} | config_dir ${CFG} | outcome clean (clean: The parser is done; 14 tests pass.) | cost USD 0.42`, 'the clean row with every field')
 check('list_sessions', `- finished-unreported | e2e chatter worker | session_id ${SID_CHATTER} |`, 'the chatter row, finished-unreported')
 check('list_sessions', `| e2e writer | session_id ${SID_WRITER} |`, 'the writer row')
-lacks('list_sessions', `| cwd ${ORCH} | config_dir `, 'the orchestrator itself is no orphan row (its cwd is an e2e scratch orch directory)')
+for (const form of new Set([ORCH, shown(ORCH)])) lacks('list_sessions', `| cwd ${form} | config_dir `, 'the orchestrator itself is no orphan row (its cwd is an e2e scratch orch directory)')
 
 check('read_result', 'source: the transcript, its last substantial assistant message', 'the chatter fallback reads the transcript')
 check('read_result', 'because the result file .result is chatter (Done.)', 'it says why')
@@ -178,12 +181,13 @@ check('worker_tail', 'last 4 lines (of 5 asked)', 'the summarised lines, as many
 check('worker_tail', '  < <task-notification>done</task-notification>', 'a tool result as the log pane shows it')
 
 check('session_writes', `since: ${iso(NOW - 600).replace(/\.000Z$/, 'Z')} (the transcript's first timestamp`, 'the start is the first transcript timestamp')
-check('session_writes', `  ${ORCH}/task-queue.json  [ORCHESTRATOR DIR]`, 'a helper file under the orchestrator directory is flagged')
-check('session_writes', `  ${REG}  [REGISTRY]`, 'the registry is flagged')
-check('session_writes', `  ${S}/work/new.txt`, 'a file written after the start is listed')
-lacks('session_writes', `${S}/work/old.txt`, 'a file older than the start is not')
-lacks('session_writes', `${S}/.git/`, 'nothing under .git')
-check('session_writes', `- Edit of ${ORCH}/open-points.json`, "the transcript's own write under the orchestrator directory")
+check('session_writes', `  ${shown(ORCH)}/task-queue.json  [ORCHESTRATOR DIR]`, 'a helper file under the orchestrator directory is flagged')
+check('session_writes', `  ${shown(REG)}  [REGISTRY]`, 'the registry is flagged')
+check('session_writes', `  ${shown(S)}/work/new.txt`, 'a file written after the start is listed')
+for (const form of new Set([`${shown(S)}/work/old.txt`, join(S, 'work', 'old.txt')])) lacks('session_writes', form, 'a file older than the start is not')
+for (const form of new Set([`${shown(S)}/.git/`, `${join(S, '.git')}${sep}`])) lacks('session_writes', form, 'nothing under .git')
+// The transcript's tool input as the test wrote it.
+check('session_writes', `- Edit of ${join(ORCH, 'open-points.json')}`, "the transcript's own write under the orchestrator directory")
 
 check('panel_snapshot', 'SESSIONS', 'the sessions section')
 check('panel_snapshot', 'e2e chatter worker', 'a session row')

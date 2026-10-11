@@ -24,7 +24,7 @@ import * as fs from 'node:fs'
 import {
   CFG_DEFAULT, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, globIn, grepF, isErrorFalse, join, jqPick, jsonValues, keepOut, kit, linesOf,
   localDate, native, nodeCommand, ours, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch,
-  scratchSettings, shortId, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
+  scratchSettings, shortId, shown, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
 
 const { pass, fail, info } = kit
@@ -318,7 +318,7 @@ else pass('no temporary file left in the orchestrator directory')
 // ---------------------------------------------------------------- list_sessions
 check('list', 'session row', 'the count line')
 lacks('list', SID, 'the retired worker is no row')
-lacks('list', `| cwd ${ORCH} | config_dir `, 'the orchestrator itself is no orphan row (its cwd is an e2e scratch orch directory)')
+for (const form of new Set([ORCH, shown(ORCH)])) lacks('list', `| cwd ${form} | config_dir `, 'the orchestrator itself is no orphan row (its cwd is an e2e scratch orch directory)')
 
 // ---------------------------------------------------------------- the trace keeps no prompt or section text
 const trace = readOr(TRACE)

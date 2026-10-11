@@ -22,7 +22,7 @@ import * as fs from 'node:fs'
 import {
   CFG_DEFAULT, HAS_PROC, HOME, LIB_URL, MOD, awaitOrchestrator, byteSize, callCounts, cmdline, entriesOf, finish, globIn, grepF, isErrorFalse, join,
   jqPick, keepOut, kit, linesOf, native, nodeCommand, nodeMajor, ours, procCwd, procPids, processesNaming, readJson, readOr, removeTree, requireClaude,
-  resultText, scratch, scratchSettings, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
+  resultText, scratch, scratchSettings, shown, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
 
 const { pass, fail, skip, info } = kit
@@ -80,7 +80,8 @@ const subdirs = (dir, test) => {
 const expectedAll = [CFG_DEFAULT]
 if (isLicence(join(HOME, '.claude'))) expectedAll.push(join(HOME, '.claude'))
 for (const d of [...subdirs(join(HOME, '.claude'), name => !name.startsWith('.')), ...subdirs(HOME, name => name.startsWith('.claude-'))]) if (isLicence(d)) expectedAll.push(d)
-const EXPECTED = [...new Set(expectedAll)]
+// As the mod prints a directory it found (shown: C:/... on Windows), each once.
+const EXPECTED = [...new Set(expectedAll.map(shown))]
 const COUNT = EXPECTED.filter(d => d !== '').length
 info(`licences expected by presence: ${COUNT} (${EXPECTED.join(' ')})`)
 if (!isLicence(MAIN_DIR)) {
@@ -164,8 +165,8 @@ info(`tool calls of the orchestrator: ${callCounts(entries)}`)
 // ---------------------------------------------------------------- list_licences
 check('list', `${COUNT} licence`, '(1) the count of the licences found by presence')
 for (const d of EXPECTED.join(' ').split(/\s+/).filter(Boolean)) check('list', `| config_dir ${d} | source `, `(1) ${d} is listed`)
-check('list', `- default | config_dir ${CFG_DEFAULT} | source default | logged_in `, "(1) the orchestrator's own directory is the default")
-check('list', `| config_dir ${MAIN_DIR} | source `, '(1) the main licence is listed')
+check('list', `- default | config_dir ${shown(CFG_DEFAULT)} | source default | logged_in `, "(1) the orchestrator's own directory is the default")
+check('list', `| config_dir ${shown(MAIN_DIR)} | source `, '(1) the main licence is listed')
 check('list', 'neither is opened', '(1) the answer says logged_in is presence only')
 
 // ---------------------------------------------------------------- probe_licence_usage
@@ -175,7 +176,7 @@ const N_FIG = probeLines.filter(l => /\| five_hour [0-9-]/.test(l)).length
 const N_ERR = probeLines.filter(l => l.includes('| error ')).length
 if (N_FIG + N_ERR === COUNT) pass(`(2) one row per licence (${N_FIG} with figures, ${N_ERR} with a code)`)
 else fail(`(2) one row per licence (${N_FIG} + ${N_ERR} of ${COUNT})`)
-check('probe', `(config_dir ${MAIN_DIR}) | five_hour `, '(2) the main licence has its figures')
+check('probe', `(config_dir ${shown(MAIN_DIR)}) | five_hour `, '(2) the main licence has its figures')
 check('probe', 'can be stale', '(2) the answer says the figures can be stale')
 check('again', 'from the cache)', '(3) the second call answers from the cache')
 check('again', '| cached yes', '(3) its rows say cached')
@@ -184,13 +185,13 @@ check('launch-refused', 'refused: config_dir is not a discovered licence (discov
 check('launch-refused', 'nothing was launched', '(5) nothing was launched')
 
 // ---------------------------------------------------------------- launch_worker with the main licence
-check('launch', `config_dir ${MAIN_DIR}, registered.`, '(6) launched under the main licence and registered')
+check('launch', `config_dir ${shown(MAIN_DIR)}, registered.`, '(6) launched under the main licence and registered')
 check('launch', '(config_dir given; the licence picker was not run)', '(6) the answer says the picker was not run')
 // Every entry with the title, as jq gives them: two entries give two lines, and each check below fails.
 const reg = readJson(REG)
 const ENTRY_CFG = jqPick(reg, 'e2e licence pong', 'config_dir')
-if (ENTRY_CFG === MAIN_DIR) pass(`(6) the registry entry's config_dir is ${MAIN_DIR}`)
-else fail(`(6) the registry entry's config_dir is ${MAIN_DIR} (got '${ENTRY_CFG}')`)
+if (ENTRY_CFG === shown(MAIN_DIR)) pass(`(6) the registry entry's config_dir is ${shown(MAIN_DIR)}`)
+else fail(`(6) the registry entry's config_dir is ${shown(MAIN_DIR)} (got '${ENTRY_CFG}')`)
 const WSID = jqPick(reg, 'e2e licence pong', 'session_id')
 const OUTCOME = jqPick(reg, 'e2e licence pong', 'outcome.kind', 'none')
 if (OUTCOME === 'clean') pass('(6) the worker finished clean')
