@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { DIGEST_MAX_LINES, digestStoreKey, digestText, lastCallOf, withEvent } from '../hooks/digest'
+import { DIGEST_MAX_LINES, digestKeyDir, digestStoreKey, digestText, lastCallOf, withEvent } from '../hooks/digest'
 import { ORPHAN_GRACE_SEC, STALL_SEC } from '../hooks/notices'
 import { localDate } from '../hooks/store'
 import { NOW_MS, RESULTS } from './fixtures'
@@ -144,6 +144,17 @@ describe('turn_digest', () => {
     expect(text.split('\n')[0]).toBe(
       `turn_digest: since the last call at ${new Date(NOW_MS - 600_000).toISOString().slice(0, 19).replace('T', ' ')} UTC (10m00s ago); the mod was loaded again at ${new Date(NOW_MS).toISOString().slice(0, 19).replace('T', ' ')} UTC and keeps what happened from then on only`,
     )
+  })
+
+  test('the key of an orchestrator directory that is gone is dropped at the load\'s first notice pass; this directory\'s and other keys stay', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on, { [digestStoreKey('/w/gone')]: { lastCallAt: 1 }, [digestStoreKey(ORCH)]: { lastCallAt: 2 }, 'other:/w/gone': 3 })
+    seedOrch(world)
+    await startOrch($)
+    expect([...store.keys()].sort()).toEqual([digestStoreKey(ORCH), 'other:/w/gone'].sort())
+    expect(digestKeyDir(digestStoreKey('/w/gone'))).toBe('/w/gone')
+    expect(digestKeyDir('digest:')).toBeUndefined()
+    expect(digestKeyDir('notices:/w/gone')).toBeUndefined()
   })
 
   test('a registry that cannot be read: the state line says so', { options: OPTIONS }, async ($, on) => {

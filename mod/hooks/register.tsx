@@ -59,7 +59,7 @@ import {
 import type { LockSeen, Notice, NoticeState, RegistryWatch } from './notices'
 import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from './drift'
 import { HOLDER_FILES, LOCK_EVERY_SEC, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from './locks'
-import { DIGEST_SCHEMA, digestStoreKey, digestText, lastCallOf, withEvent } from './digest'
+import { DIGEST_SCHEMA, digestKeyDir, digestStoreKey, digestText, lastCallOf, withEvent } from './digest'
 import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
@@ -676,11 +676,14 @@ async function noticeStateOf($: EngineInterface): Promise<NoticeState> {
   return noticeState
 }
 
-/** Drops the notice state of an orchestrator directory that is no longer there (a scratch directory removed), once per load. */
+/**
+ * Drops the notice state and the turn_digest time of an orchestrator directory that is no longer there (a scratch
+ * directory removed), once per load.
+ */
 async function pruneNoticeKeys($: EngineInterface, own: string): Promise<void> {
   const keys = await $.store.keys().catch(() => [] as string[])
   for (const key of keys) {
-    const dir = noticeKeyDir(key)
+    const dir = noticeKeyDir(key) ?? digestKeyDir(key)
     if (dir === undefined || key === own) continue
     if (!(await $.fs.exists(dir).catch(() => true))) await $.store.delete(key).catch(() => undefined)
   }

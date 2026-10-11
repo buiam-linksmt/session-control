@@ -28,6 +28,11 @@ export function digestStoreKey(orchestratorDir: string): string {
   return `digest:${orchestratorDir}`
 }
 
+/** The orchestrator directory a $.store key of turn_digest belongs to; undefined for any other key. */
+export function digestKeyDir(key: string): string | undefined {
+  return key.startsWith('digest:') && key.length > 'digest:'.length ? key.slice('digest:'.length) : undefined
+}
+
 /** The last call's time (epoch ms) a stored value holds; undefined for none or a damaged value. */
 export function lastCallOf(value: unknown): number | undefined {
   const at = value !== null && typeof value === 'object' ? (value as { lastCallAt?: unknown }).lastCallAt : undefined
