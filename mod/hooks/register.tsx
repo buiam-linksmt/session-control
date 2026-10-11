@@ -35,6 +35,7 @@ import {
   isRegistrySound,
   isRepoDue,
   isRetireDue,
+  lockStep,
   markOrphan,
   moreToastText,
   noticeKeyDir,
@@ -53,8 +54,9 @@ import {
   stallStep,
   unitStep,
 } from './notices'
-import type { Notice, NoticeState, RegistryWatch } from './notices'
+import type { LockSeen, Notice, NoticeState, RegistryWatch } from './notices'
 import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from './drift'
+import { HOLDER_FILES, LOCK_EVERY_SEC, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from './locks'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
 import type { ProtectedFile } from './guard'
@@ -201,6 +203,8 @@ type Config = {
   notices: 'on' | 'off'
   /** The source mod folder the loaded mod is compared with (drift.ts); empty: `<orchestrator directory>/mod`; `off`: no band. */
   modSource: string
+  /** The lock folders of the lock-holder notice (locks.ts), comma separated; empty: off. */
+  lockDirs: string
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -217,6 +221,7 @@ let config: Config = {
   launchRoute: 'bash',
   notices: 'on',
   modSource: '',
+  lockDirs: '',
 }
 let isActive = false
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
@@ -263,6 +268,8 @@ let registryWatch: RegistryWatch = {}
 let driftEvery = DRIFT_EVERY_SEC
 let driftAt: number | undefined
 let isDriftChecking = false
+/** When the lock check last ran (epoch ms). */
+let lockAt: number | undefined
 
 // The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
 // wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
@@ -806,13 +813,68 @@ async function queueChanged($: EngineInterface): Promise<void> {
 }
 
 /**
- * The notice that does not read the registry, after the poll's own: registry-unreadable, at every refresh. Nothing with
- * the notices option off.
+ * The notices that do not read the registry, after the poll's own: registry-unreadable (every refresh) and, from the
+ * poll's timer at most once per LOCK_EVERY_SEC with lockDirs set, lock-holder. Nothing with the notices option off: no
+ * lock folder is read then.
  */
-async function sideNotices($: EngineInterface, nowMs: number, isRegistryOk: boolean, toasts: ToastBudget): Promise<void> {
-  // Nothing to do (a sound registry with no episode open): no pass at all, the poll stays as cheap.
-  if (isRegistryOk && registryWatch.since === undefined) return
-  await withNotices($, () => registryStep(registryWatch, isRegistryOk, nowMs), toasts, 'poll')
+async function sideNotices($: EngineInterface, nowMs: number, isRegistryOk: boolean, isTick: boolean, toasts: ToastBudget): Promise<void> {
+  const isLockDue = isTick && config.lockDirs.trim() !== '' && (lockAt === undefined || nowMs - lockAt >= LOCK_EVERY_SEC * 1000)
+  // Nothing to do (a sound registry with no episode open, no lock check due): no pass at all, the poll stays as cheap.
+  if (isRegistryOk && registryWatch.since === undefined && !isLockDue) return
+  await withNotices($, async state => {
+    const notices = registryStep(registryWatch, isRegistryOk, nowMs)
+    const machine = await hostOf($)
+    const dirs = lockDirsOf(config.lockDirs).map(dir => machine.nativePath(dir))
+    if (isLockDue && dirs.length > 0) {
+      lockAt = nowMs
+      const read = await readLocks($, dirs)
+      notices.push(...lockStep(state, read.seen, read.dirsRead))
+    }
+    return notices
+  }, toasts, 'poll')
+}
+
+/**
+ * The locks of the lock folders (locks.ts): each folder listed, each lock's holder file read, the holders' pids probed
+ * at once. Read-only: nothing under a lock folder is written, moved or removed. A folder that cannot be listed is left
+ * out of `dirsRead` (its locks are not forgotten); a probe that fails tells nothing.
+ */
+async function readLocks($: EngineInterface, dirs: readonly string[]): Promise<{ seen: LockSeen[]; dirsRead: string[] }> {
+  const dirsRead: string[] = []
+  const found: { lock: string; text: string; holder: NonNullable<ReturnType<typeof lockHolder>> }[] = []
+  for (const dir of dirs) {
+    const entries = await $.fs.list(dir).catch(() => undefined)
+    if (entries === undefined) continue
+    dirsRead.push(dir)
+    for (const one of lockCandidates(dir, entries)) {
+      let text: string | undefined
+      if (one.isFolder) {
+        for (const name of HOLDER_FILES) {
+          text = await $.fs.read(`${one.lock}/${name}`).catch(() => undefined)
+          if (text !== undefined) break
+        }
+      } else {
+        text = await $.fs.read(one.lock).catch(() => undefined)
+      }
+      const holder = text === undefined ? undefined : lockHolder(text)
+      if (text !== undefined && holder !== undefined) found.push({ lock: one.lock, text, holder })
+    }
+  }
+  if (found.length === 0) return { seen: [], dirsRead }
+  const facts = await probe($, found.map(one => ({ pid: one.holder.pid, config_dir: '' }))).catch((err: unknown) => {
+    traceError($, 'locks.probe', err)
+    return undefined
+  })
+  if (facts === undefined) return { seen: [], dirsRead: [] }
+  const isLinux = (await hostOf($)).platform === 'linux'
+  const seen = found.map(one => {
+    const proof = facts.pidProof.get(one.holder.pid)
+    const isAlive = facts.pidComm.has(one.holder.pid) || proof !== undefined
+    const isDead = isHolderDead(one.holder, { isAlive, ...(proof === undefined ? {} : { startTicks: proof.startTicks }) }, isLinux)
+    return { lock: one.lock, fingerprint: lockFingerprint(one.text), pid: one.holder.pid, isJson: one.holder.isJson, isDead }
+  })
+  trace($, 'locks', { dirs: dirs.length, dirsRead: dirsRead.length, locks: seen.length, dead: seen.filter(one => one.isDead).length })
+  return { seen, dirsRead }
 }
 
 /**
@@ -885,7 +947,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   if (!parsed.ok) {
     // The last good rows stay on screen under the warning.
     await showError($, problem === undefined ? parsed.error : `${parsed.error}; ${problem}`, now)
-    await sideNotices($, now, false, toasts)
+    await sideNotices($, now, false, isTick, toasts)
     toastMore($, toasts)
     if (isTick) void driftCheck($, now)
     return
@@ -899,7 +961,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   noteError($, next.error)
   if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
   await pollNotices($, parsed.entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
-  await sideNotices($, now, isRegistrySound(registryText), toasts)
+  await sideNotices($, now, isRegistrySound(registryText), isTick, toasts)
   toastMore($, toasts)
   // The drift check, at most once per its interval, from the poll's timer and on its own: a hash of the two folders
   // never holds the poll.
@@ -1857,9 +1919,9 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
   if (config.orchestratorDir !== '') config.orchestratorDir = machine.nativePath(config.orchestratorDir)
   const isHere = machine.isSameDir(cwd, config.orchestratorDir)
   if (isTraceWanted) {
-    // The picker command is a command line of its own: the trace says only whether one is set. modSource is left to
-    // the drift line (whether a source is there).
-    const { pollMs, registrySetting, licencePickCommand, modSource, ...rest } = config
+    // The picker command is a command line of its own: the trace says only whether one is set. modSource and lockDirs
+    // are left to the drift and locks lines (whether a source is there, how many folders were read).
+    const { pollMs, registrySetting, licencePickCommand, modSource, lockDirs, ...rest } = config
     const options = { ...rest, registryPath: registrySetting, pollSeconds: pollMs / 1000, licencePickCommand: licencePickCommand.trim() === '' ? 'empty' : 'set' }
     traceStart = { cwd, platform: machine.platform, isOrchestratorDir: config.orchestratorDir !== '' && isHere, options }
   }
@@ -1967,6 +2029,7 @@ export const register: Register = (on, options) => {
   driftEvery = DRIFT_EVERY_SEC
   driftAt = undefined
   isDriftChecking = false
+  lockAt = undefined
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
@@ -1980,6 +2043,7 @@ export const register: Register = (on, options) => {
     launchRoute: options.launchRoute === 'powershell' ? 'powershell' : 'bash',
     notices: options.notices === 'off' ? 'off' : 'on',
     modSource: String(options.modSource ?? ''),
+    lockDirs: String(options.lockDirs ?? ''),
   }
   isTraceWanted = config.debug
   isTracing = false

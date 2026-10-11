@@ -21,6 +21,7 @@ export type NoticeKind =
   | 'open-point-age'
   | 'retire-due'
   | 'repo-state'
+  | 'lock-holder'
   | 'registry-unreadable'
   | 'mod-drift'
 
@@ -94,6 +95,11 @@ export type NoticeState = {
   retireCheckAt?: number
   /** When the repo-state check last ran git (epoch ms). */
   repoAt?: number
+  /**
+   * Per lock path told by lock-holder: the fingerprint of the content it was told for; a changed content re-arms it.
+   * Absent until a lock is told, so the stored state of a mod with lockDirs off is as before.
+   */
+  locks?: Record<string, string>
   /** The changed files (one per line) the last mod-drift notice was told for; absent while the trees match. */
   drift?: string
 }
@@ -141,6 +147,10 @@ export function parseNoticeState(value: unknown): NoticeState {
   for (const key of ['retireAt', 'retireCheckAt', 'repoAt'] as const) {
     const at = finite(value[key])
     if (at !== undefined) state[key] = at
+  }
+  if (isRecord(value.locks)) {
+    const locks = Object.fromEntries(Object.entries(value.locks).filter((one): one is [string, string] => typeof one[1] === 'string'))
+    if (Object.keys(locks).length > 0) state.locks = locks
   }
   if (typeof value.drift === 'string' && value.drift !== '') state.drift = value.drift
   return state
@@ -514,6 +524,40 @@ export function registryStep(watch: RegistryWatch, isSound: boolean, nowMs: numb
   watch.isTold = true
   const minutes = Math.floor((nowMs - since) / 60_000)
   return [{ kind: 'registry-unreadable', message: `the registry has been unreadable for ${minutes} min: the registry-based notices are paused`, fields: { minutes } }]
+}
+
+// ---------------------------------------------------------------- lock-holder
+
+/** One lock as the check read it: its path, the content's fingerprint, the holder and whether it is gone. */
+export type LockSeen = { lock: string; fingerprint: string; pid: number; isJson: boolean; isDead: boolean }
+
+/**
+ * lock-holder (decision win-27): each lock whose holder is gone is told once per content (its fingerprint); a lock
+ * whose content changes is told again when its holder is gone again. A lock no longer there is forgotten, as is one
+ * whose holder is alive. `seen` holds the locks read at this check; `dirsRead` the lock folders that could be listed
+ * (a lock under a folder that could not be read is kept, not forgotten).
+ */
+export function lockStep(state: NoticeState, seen: readonly LockSeen[], dirsRead: readonly string[]): Notice[] {
+  const told = state.locks ?? {}
+  const present = new Map(seen.map(one => [one.lock, one]))
+  const under = (lock: string) => dirsRead.some(dir => lock.startsWith(`${dir.replace(/[\\/]+$/, '')}/`))
+  for (const lock of Object.keys(told)) {
+    const one = present.get(lock)
+    if ((one === undefined && under(lock)) || (one !== undefined && !one.isDead)) delete told[lock]
+  }
+  const notices: Notice[] = []
+  for (const one of seen) {
+    if (!one.isDead || told[one.lock] === one.fingerprint) continue
+    told[one.lock] = one.fingerprint
+    notices.push({
+      kind: 'lock-holder',
+      message: `lock ${oneLine(one.lock, 160)} is held by pid ${one.pid}, which is no longer alive (${one.isJson ? 'its JSON pid' : 'the first number of its holder file'}); the mod leaves the lock as it is: release it with the tool that took it`,
+      fields: { pid: one.pid, isJson: one.isJson },
+    })
+  }
+  if (Object.keys(told).length > 0) state.locks = told
+  else delete state.locks
+  return notices
 }
 
 // ---------------------------------------------------------------- mod-drift
