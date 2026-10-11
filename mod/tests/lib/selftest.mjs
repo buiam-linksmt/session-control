@@ -80,3 +80,56 @@ export function pyEqual(a, b) {
   const keys = Object.keys(a)
   return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key) && pyEqual(a[key], b[key]))
 }
+
+// Built from char codes: every UTF-16 unit from DEL up (an astral character is two), and Python's line boundaries.
+const PAST_ASCII = new RegExp(`[\\x7f-${String.fromCharCode(0xffff)}]`, 'g')
+const LINE_BREAKS = new RegExp(`\\r\\n|[\\n\\r\\v\\f\\x1c\\x1d\\x1e\\x85${String.fromCharCode(0x2028, 0x2029)}]`)
+
+/**
+ * Python's `json.dumps(value)`: ", " and ": " between items unless `separators` says otherwise, and with `ensureAscii`
+ * (Python's default) every character outside ' '..'~' that JSON does not escape anyway written as \uXXXX (a character
+ * past U+FFFF as its two surrogates), as Python writes them.
+ */
+export function pyJson(value, { ensureAscii = true, separators = [', ', ': '] } = {}) {
+  const [item, key] = separators
+  const one = v => pyJson(v, { ensureAscii, separators })
+  if (Array.isArray(value)) return `[${value.map(one).join(item)}]`
+  if (value !== null && typeof value === 'object') return `{${Object.entries(value).map(([k, v]) => `${one(k)}${key}${one(v)}`).join(item)}}`
+  if (typeof value === 'string') {
+    const text = JSON.stringify(value)
+    return ensureAscii ? text.replace(PAST_ASCII, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`) : text
+  }
+  return JSON.stringify(value)
+}
+
+/** Python's `str.splitlines()`: split at every line boundary Python knows, none kept, no empty last item. */
+export function pySplitlines(text) {
+  const parts = text.split(LINE_BREAKS)
+  if (parts.length > 0 && parts[parts.length - 1] === '') parts.pop()
+  return parts
+}
+
+/** Python's slice of a string, `text[start:end]`, counted in code points as Python counts (a character past U+FFFF is one). */
+export const pySlice = (text, start, end) => Array.from(text).slice(start, end).join('')
+
+/** Python's `int(text)` of a decimal: anything else is an error. */
+export function pyInt(text) {
+  const trimmed = String(text).trim()
+  if (!/^[+-]?\d+$/.test(trimmed)) throw new Error(`invalid literal for int(): ${JSON.stringify(text)}`)
+  return Number(trimmed)
+}
+
+/** Python's `str.isdigit()` for the ASCII digits these tests read. */
+export const isDigits = text => /^[0-9]+$/.test(text)
+
+/** statistics.median of a non-empty list of numbers. */
+export function median(values) {
+  const sorted = [...values].sort((a, b) => a - b)
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+/** time.sleep without a process: blocks this thread for the milliseconds given. */
+export function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}

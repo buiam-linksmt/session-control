@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
-import { pyLiteral, after, before, pyTruthy, pyEqual } from './lib/selftest.mjs'
+import { after, before, pyEqual, pyJson, pyLiteral, pyTruthy } from './lib/selftest.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const made = []
@@ -45,13 +45,6 @@ function run(argv, timeoutSec) {
 }
 /** json.dump(value, file): the Python default layout (", " and ": "; jq reads it either way). */
 const dumpPy = (value, path) => write(path, pyJson(value))
-function pyJson(value) {
-  if (Array.isArray(value)) return `[${value.map(pyJson).join(', ')}]`
-  if (value !== null && typeof value === 'object') return `{${Object.entries(value).map(([k, v]) => `${pyJson(k)}: ${pyJson(v)}`).join(', ')}}`
-  // ensure_ascii: every character past ASCII as \uXXXX.
-  if (typeof value === 'string') return JSON.stringify(value).replace(/[\u0080-￿]/g, ch => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`)
-  return JSON.stringify(value)
-}
 
 try {
   const src = fs.readFileSync(join(HERE, '..', 'hooks', 'core.ts'), 'utf8')
@@ -200,7 +193,7 @@ try {
     log = `${appendDir}/cleared.jsonl`
     const big = '{"x":"' + 'y'.repeat(5 * 1024 * 1024) + '"}\n'
     write(log, big)
-    const lines = '{"session_id":"a","t":"café"}\n{"session_id":"b"}'
+    const lines = '{"session_id":"a","t":"caf\u{e9}"}\n{"session_id":"b"}'
     r = run(['sh', '-c', append, 'session-log', lines, log], 30)
     check(r.returncode === 0 && r.stderr === '', r)
     check(read(log) === big + lines + '\n')
