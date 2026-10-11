@@ -21,6 +21,7 @@ export type NoticeKind =
   | 'open-point-age'
   | 'retire-due'
   | 'repo-state'
+  | 'registry-unreadable'
   | 'mod-drift'
 
 /** One notice: its kind, its message (one line) and the trace's fields (ids, counts and switches only, never free text). */
@@ -45,6 +46,8 @@ export const RETIRE_CHECK_SEC = 60
 export const REPO_EVERY_SEC = 3600
 /** Tracked changes older than this, with no worker alive, are told by repo-state. */
 export const REPO_CHANGE_AGE_SEC = 30 * 60
+/** An unsound registry (isRegistrySound) read at every poll for this long is told once per episode (registryStep). */
+export const REGISTRY_UNREADABLE_SEC = 5 * 60
 /** How many ids a notice that counts lists before `and N more`. */
 export const NOTICE_IDS_SHOWN = 3
 /** The most notice lines waiting for the next prompt, the closing `more` line included (pendingWith). */
@@ -485,6 +488,32 @@ export function repoStep(state: NoticeState, git: GitState | undefined, nowMs: n
   if (isStaleChange) parts.push(`has ${git.changed.length} tracked ${git.changed.length === 1 ? 'file' : 'files'} uncommitted, the oldest change ${formatAge((nowMs - (oldest as number)) / 1000)} old`)
   if (parts.length === 0) return []
   return [{ kind: 'repo-state', message: `the orchestrator directory ${parts.join(' and ')}, with no worker alive: run audit_state`, fields: { isOffDefault, isStaleChange, changed: git.changed.length } }]
+}
+
+// ---------------------------------------------------------------- registry-unreadable
+
+/**
+ * The registry-unreadable episode of this load: when the first unsound read of a row was (epoch ms) and whether it was
+ * told. Kept in memory, not in $.store: the stored notice state stays as it was through an unsound registry (mod-20).
+ */
+export type RegistryWatch = { since?: number; isTold?: boolean }
+
+/**
+ * registry-unreadable: an unsound read (isRegistrySound false) starts an episode, and one that has lasted
+ * REGISTRY_UNREADABLE_SEC or more is told once; a sound read ends it, so the next episode is told again. The
+ * registry-based notices stay frozen meanwhile, as pollNotices freezes them.
+ */
+export function registryStep(watch: RegistryWatch, isSound: boolean, nowMs: number): Notice[] {
+  if (isSound) {
+    delete watch.since
+    delete watch.isTold
+    return []
+  }
+  const since = watch.since ?? (watch.since = nowMs)
+  if (watch.isTold === true || nowMs - since < REGISTRY_UNREADABLE_SEC * 1000) return []
+  watch.isTold = true
+  const minutes = Math.floor((nowMs - since) / 60_000)
+  return [{ kind: 'registry-unreadable', message: `the registry has been unreadable for ${minutes} min: the registry-based notices are paused`, fields: { minutes } }]
 }
 
 // ---------------------------------------------------------------- mod-drift

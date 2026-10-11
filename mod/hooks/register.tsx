@@ -47,12 +47,13 @@ import {
   pendingWith,
   pointStep,
   pruneHarvested,
+  registryStep,
   repoStep,
   retireStep,
   stallStep,
   unitStep,
 } from './notices'
-import type { Notice, NoticeState } from './notices'
+import type { Notice, NoticeState, RegistryWatch } from './notices'
 import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from './drift'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
@@ -256,6 +257,8 @@ let noticeSaved = ''
 let noticeChain: Promise<void> = Promise.resolve()
 /** A $.store failure is traced once per load: a store that keeps failing would add a line at every change. */
 let isStoreFailTraced = false
+/** The registry-unreadable episode of this load (notices.ts, registryStep): in memory only. */
+let registryWatch: RegistryWatch = {}
 /** The drift check's interval (drift.ts, driftEverySec), when it last ran (epoch ms) and whether one runs now. */
 let driftEvery = DRIFT_EVERY_SEC
 let driftAt: number | undefined
@@ -803,6 +806,16 @@ async function queueChanged($: EngineInterface): Promise<void> {
 }
 
 /**
+ * The notice that does not read the registry, after the poll's own: registry-unreadable, at every refresh. Nothing with
+ * the notices option off.
+ */
+async function sideNotices($: EngineInterface, nowMs: number, isRegistryOk: boolean, toasts: ToastBudget): Promise<void> {
+  // Nothing to do (a sound registry with no episode open): no pass at all, the poll stays as cheap.
+  if (isRegistryOk && registryWatch.since === undefined) return
+  await withNotices($, () => registryStep(registryWatch, isRegistryOk, nowMs), toasts, 'poll')
+}
+
+/**
  * The loaded-mod drift check (drift.ts): at most once per driftEvery seconds (the start, then from the poll), the loaded
  * plugin's folder ($.plugin.root) and the source mod folder hashed by one host.hashTrees call; the band shows the
  * difference, and its first sight of a set of changed files is one mod-drift notice (with the notices option on). A
@@ -872,6 +885,8 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   if (!parsed.ok) {
     // The last good rows stay on screen under the warning.
     await showError($, problem === undefined ? parsed.error : `${parsed.error}; ${problem}`, now)
+    await sideNotices($, now, false, toasts)
+    toastMore($, toasts)
     if (isTick) void driftCheck($, now)
     return
   }
@@ -884,6 +899,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   noteError($, next.error)
   if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
   await pollNotices($, parsed.entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
+  await sideNotices($, now, isRegistrySound(registryText), toasts)
   toastMore($, toasts)
   // The drift check, at most once per its interval, from the poll's timer and on its own: a hash of the two folders
   // never holds the poll.
@@ -1947,6 +1963,7 @@ export const register: Register = (on, options) => {
   noticeSaved = ''
   noticeChain = Promise.resolve()
   isStoreFailTraced = false
+  registryWatch = {}
   driftEvery = DRIFT_EVERY_SEC
   driftAt = undefined
   isDriftChecking = false

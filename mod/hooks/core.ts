@@ -331,6 +331,7 @@ export const TOAST_TITLES = {
   'open-point-age': 'Open point waiting',
   'retire-due': 'Housekeeping due',
   'repo-state': 'Repository state',
+  'registry-unreadable': 'Registry unreadable',
   'mod-drift': 'Mod out of date',
   // The one summary toast of the notices past the toast cap of a refresh.
   moreNotices: 'More notices',
@@ -348,6 +349,7 @@ export const TOAST_TITLES = {
   | 'open-point-age'
   | 'retire-due'
   | 'repo-state'
+  | 'registry-unreadable'
   | 'mod-drift'
   | 'moreNotices',
   string
