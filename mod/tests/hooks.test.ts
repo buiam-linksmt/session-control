@@ -357,7 +357,9 @@ describe('tool surface', () => {
     // stop_worker; every tool before it keeps its own pin (the next test).
     // Changed on purpose again by feature/licence-tools (15209:9b0c2251 before): list_licences (604:8cb60265) is
     // registered after turn_digest; every tool before it keeps its own pin (the next test).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('15814:a639e0f9')
+    // Changed on purpose again by feature/licence-tools (15814:a639e0f9 before): probe_licence_usage (872:606c21ff) is
+    // registered after list_licences; every tool before it keeps its own pin (the next test).
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('16687:1371ae1b')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -384,6 +386,8 @@ describe('tool surface', () => {
       'turn_digest',
       // Added on purpose by feature/licence-tools, after turn_digest: every tool before it is unchanged.
       'list_licences',
+      // Added on purpose by feature/licence-tools, after list_licences: every tool before it is unchanged.
+      'probe_licence_usage',
     ])
     // Each tool's own pin. Unchanged since before feature/write-tools, byte for byte: the five of the first six after
     // launch_worker (together 4689:d2b85bc0) and the six inspection tools (together 3428:1484e7b6). The first six
@@ -410,6 +414,7 @@ describe('tool surface', () => {
       turn_digest: '635:cbba99b4',
       // Added on purpose by feature/licence-tools.
       list_licences: '604:8cb60265',
+      probe_licence_usage: '872:606c21ff',
     })
     expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4689:d2b85bc0')
     expect(fingerprint(JSON.stringify(w.tools.slice(6, 12)))).toBe('3428:1484e7b6')

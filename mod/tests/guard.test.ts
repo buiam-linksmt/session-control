@@ -63,6 +63,8 @@ const SCENARIOS: Record<string, Record<string, unknown>> = {
   turn_digest: {},
   // Writes no file: directory listings and the presence of two files, kept in memory.
   list_licences: {},
+  // Writes no file: the probe's two windows are kept in memory (no claude on the mock machine: NO_CLAUDE).
+  probe_licence_usage: {},
 }
 
 const answerOf = (answer: unknown) => {

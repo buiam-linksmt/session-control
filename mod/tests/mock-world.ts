@@ -3,12 +3,14 @@
 // system would, the probe included (its P, A and T lines computed from the table, the sessions files and the
 // transcripts in the map). With `isHelper` Node 22 answers and the helper's operations run over the same map and table
 // (fake-helper.ts). Every write to the machine is recorded with how it was made, so a test can see what the plugin
-// wrote. Not a test file itself: stop.test.ts and guard.test.ts use it.
+// wrote. `claude -p /usage` (natively or through the helper's probeUsage) answers from `usage` per config directory.
+// Not a test file itself: stop.test.ts and guard.test.ts use it.
 
 import { mock } from 'claude-code/testing'
 import type { FsStat, On } from 'claude-code'
 
 import { tailLines } from '../hooks/core'
+import { USAGE_ARGS, parseUsage } from '../hooks/usage'
 import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, STOP_SCRIPT, TAIL_SHAPED_SCRIPT, TREE_SCRIPT } from '../hooks/host-posix'
 import { helperAnswer, newerInMap, removeRegularInMap, stopInTable, throughLinks, treeInTable } from './fake-helper'
 import type { ProcTable } from './fake-helper'
@@ -19,6 +21,16 @@ export const ORCH = '/w/orch'
 export const REGISTRY = `${HOME}/.claude/headless-sessions.json`
 export const RUNS = `${HOME}/.claude/session-control/runs`
 export const OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: true }
+
+/**
+ * What `claude -p /usage` answers for a config directory: its text (and stderr, exit code), or no claude, or no answer in
+ * time. On the native route both of the last make the run reject; the test kit turns a hook's throw into its own
+ * rejection ("no implementation"), so only the helper route can tell TIMEOUT from NO_CLAUDE here.
+ */
+export type UsageFake = { stdout: string; stderr?: string; exitCode?: number } | 'missing' | 'timeout'
+
+/** One usage probe the plugin made: the directory (`inherited` when CLAUDE_CONFIG_DIR was left out) and the route. */
+export type UsageRun = { configDir: string; isInherited: boolean; via: 'native' | 'helper'; argv: string[]; cwd?: string; stdin?: string }
 
 /** One write the plugin made: the path and how (`fs.write`, `mv`, `append`, `rm`, `helper:<op>`). */
 export type Written = { path: string; via: string }
@@ -52,6 +64,18 @@ export type World = {
   git?: (args: readonly string[]) => { exitCode: number; stdout: string }
   /** The mocked clock, which moves only when a test advances it. */
   clock: ReturnType<typeof mock.clock>
+  /** What `claude -p /usage` answers per CLAUDE_CONFIG_DIR (`inherited` when it is left out); a directory not here: no claude. */
+  usage: Map<string, UsageFake>
+  /** Every usage probe, in order. */
+  usageRuns: UsageRun[]
+  /** The most usage probes that were running at once. */
+  usageMaxInFlight: number
+  /**
+   * Knobs of the usage probe: `linger` leaves each probe's claude process in the table (as the probe would show it
+   * while it runs); `hold` keeps each probe running until the promise settles; `stepMs` moves the clock on that much
+   * per probe; `onRun` is told when a probe starts.
+   */
+  usageKnobs: { linger?: boolean; hold?: Promise<void>; stepMs?: number; onRun?: () => void }
 }
 
 const ok = (stdout = '', exitCode = 0) => ({ exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
@@ -98,6 +122,10 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     unreadable: new Set(),
     mtimes: new Map(),
     clock: mock.clock(on, { now: NOW_MS }),
+    usage: new Map(),
+    usageRuns: [],
+    usageMaxInFlight: 0,
+    usageKnobs: {},
   }
   const { files, links } = world
   const real = (path: string) => throughLinks(links, path.replace(/\/+$/, ''))
@@ -106,6 +134,25 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
   const write = (path: string, text: string, via: string) => {
     files.set(real(path), text)
     record(path, via)
+  }
+  let usageInFlight = 0
+  /** One usage probe over `world.usage`: the fake's answer after the knobs (a process left in the table, a hold, the clock moved on). */
+  const usageProbe = async <T,>(run: UsageRun, answer: (fake: UsageFake) => T): Promise<T> => {
+    world.usageRuns.push(run)
+    usageInFlight++
+    world.usageMaxInFlight = Math.max(world.usageMaxInFlight, usageInFlight)
+    try {
+      world.usageKnobs.onRun?.()
+      if (world.usageKnobs.linger === true) {
+        const pid = 8100 + world.usageRuns.length
+        world.table.procs.set(pid, { ppid: 1, start: String(pid), state: 'S', comm: 'claude', claude: { cwd: run.cwd ?? '/', configDir: run.isInherited ? '' : run.configDir, cmdline: `claude ${USAGE_ARGS.join(' ')}`, elapsedSec: 1 } })
+      }
+      if (world.usageKnobs.hold !== undefined) await world.usageKnobs.hold
+      if (world.usageKnobs.stepMs !== undefined) await world.clock.advance(world.usageKnobs.stepMs)
+      return answer(world.usage.get(run.isInherited ? 'inherited' : run.configDir) ?? 'missing')
+    } finally {
+      usageInFlight--
+    }
   }
   mock.env(on, { HOME, ...opts.env })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -161,6 +208,13 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
       if (world.breaks.has('helper')) return { value: { ...ok('', 1), stderr: 'Error: Cannot find module' } }
       const op = argv[2] ?? ''
       const request = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+      if (op === 'probeUsage') {
+        const isInherited = request.isInherited === true
+        return usageProbe({ configDir: String(request.configDir), isInherited, via: 'helper', argv }, fake => {
+          const parsed = fake === 'missing' ? { ok: false, code: 'NO_CLAUDE' } : fake === 'timeout' ? { ok: false, code: 'TIMEOUT' } : parseUsage(fake.stdout, fake.stderr, fake.exitCode)
+          return { value: ok(JSON.stringify(parsed), parsed.ok ? 0 : 1) }
+        })
+      }
       const steps = op === 'batch' ? (request.ops as Record<string, unknown>[]) : [{ op, ...request }]
       for (const step of steps) {
         if (['writeAtomic', 'append', 'rotate'].includes(String(step.op))) record(String(step.path), `helper:${String(step.op)}`)
@@ -169,6 +223,15 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
       }
       const answer = helperAnswer(files, op, request, probeLines(world, (request.args as string[] | undefined) ?? []), real, new Map(), links, world.table)
       return { value: ok(JSON.stringify(answer), answer.ok === true ? 0 : 1) }
+    }
+    if (cmd === 'claude' && argv.slice(1).join(' ') === USAGE_ARGS.join(' ')) {
+      const configDir = e.init?.env?.CLAUDE_CONFIG_DIR
+      const run: UsageRun = { configDir: configDir ?? '', isInherited: configDir === undefined, via: 'native', argv, ...(e.init?.cwd === undefined ? {} : { cwd: e.init.cwd }), ...(e.init?.stdin === undefined ? {} : { stdin: e.init.stdin }) }
+      return usageProbe(run, fake => {
+        if (fake === 'missing') throw new Error('spawn claude ENOENT')
+        if (fake === 'timeout') throw new Error('the command timed out after 15000 ms')
+        return { value: { ...ok(fake.stdout, fake.exitCode ?? 0), stderr: fake.stderr ?? '' } }
+      })
     }
     if (cmd === 'sh' && script === PROBE_SCRIPT) return { value: ok(probeLines(world, argv.slice(4))) }
     if (cmd === 'sh' && script === TREE_SCRIPT) {

@@ -152,8 +152,8 @@ import {
   resultReport,
   isWinAbsolute,
 } from './core'
-import { LIST_LICENCES_SCHEMA, SCAN_CACHE_MS, licenceCandidates, licenceDirsOf, licenceOf, listLicencesText } from './licences'
-import type { Licence, LicenceScan } from './licences'
+import { LIST_LICENCES_SCHEMA, PROBE_USAGE_SCHEMA, SCAN_CACHE_MS, findLicence, hasProbeRoom, isUsageFresh, licenceCandidates, licenceDirsOf, licenceOf, listLicencesText, probeUsageText } from './licences'
+import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
 import type { ComposedPrompt, ExpandableId, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId } from './core'
 
 const PLUGIN = 'session-control'
@@ -176,6 +176,7 @@ const ARCHIVE_TOOL = 'mcp__session-control__archive_decisions'
 const STOP_TOOL = 'mcp__session-control__stop_worker'
 const DIGEST_TOOL = 'mcp__session-control__turn_digest'
 const LICENCES_TOOL = 'mcp__session-control__list_licences'
+const USAGE_TOOL = 'mcp__session-control__probe_licence_usage'
 /** The engine tools the helper-file guard looks at (guard.ts): the file tools by their path, Bash and PowerShell by their command. */
 const GUARDED_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell)$/
 
@@ -292,6 +293,14 @@ let digestDropped = 0
 let loadedAt = 0
 /** The licence tools' directory scan (licences.ts), kept SCAN_CACHE_MS in memory; `key` the home, default and option it was made for. */
 let licenceScan: { key: string; scan: LicenceScan } | undefined
+/** probe_licence_usage's answers per licence directory (licences.ts, isUsageFresh), in memory for the load. */
+const usageSeen = new Map<string, UsageSeen>()
+/**
+ * Whether a call is probing now: at most one `claude -p /usage` runs at a time, across calls too. A call that finds one
+ * running does not wait for it (a wait on another call's work would count against the hook's own 10 s budget): it
+ * answers from memory and names the rest for the next call.
+ */
+let isUsageProbing = false
 
 // The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
 // wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
@@ -1969,6 +1978,66 @@ async function listLicences($: EngineInterface) {
   }
 }
 
+/**
+ * probe_licence_usage: the discovered licences (or the one asked, by its config_dir or name; any other is refused),
+ * each answered from memory while its probe is fresh, else probed by the host (host.probeUsage), one after the other. A
+ * probe starts only while one more fits in USAGE_CALL_BUDGET_MS from the call's start and no other call is probing;
+ * the licences left are named for the next call.
+ */
+async function probeLicenceUsage($: EngineInterface, asked: unknown) {
+  const startedAt = await $.clock.now()
+  const { scan } = await scanLicences($)
+  let targets: readonly Licence[] = scan.licences
+  if (asked !== undefined) {
+    const one = typeof asked === 'string' ? findLicence(scan.licences, asked, await sameDirOf($)) : undefined
+    if (one === undefined) {
+      trace($, 'guard', { tool: 'probe_licence_usage', isOk: false, reason: 'not-discovered' })
+      return { deny: `${PLUGIN}: not a discovered licence` }
+    }
+    targets = [one]
+  }
+  const isOwnUnset = (await ownConfigDir($)) === undefined
+  const isElsewhere = isUsageProbing
+  if (!isElsewhere) isUsageProbing = true
+  try {
+    const rows = await probeEach($, targets, isOwnUnset, startedAt, !isElsewhere)
+    return { result: `${probeUsageText(rows, await $.clock.now())}${isElsewhere ? '\nAnother call was probing: this one probed nothing and answered from memory.' : ''}` }
+  } finally {
+    if (!isElsewhere) isUsageProbing = false
+  }
+}
+
+/** The rows of probeLicenceUsage, in the licences' order; the default directory a launch inherits is probed without CLAUDE_CONFIG_DIR. */
+async function probeEach($: EngineInterface, targets: readonly Licence[], isOwnUnset: boolean, startedAt: number, canProbe: boolean): Promise<UsageRow[]> {
+  const machine = await hostOf($)
+  const rows: UsageRow[] = []
+  for (const licence of targets) {
+    const nowMs = await $.clock.now()
+    const kept = usageSeen.get(licence.configDir)
+    if (kept !== undefined && isUsageFresh(kept, nowMs)) {
+      rows.push({ licence, seen: kept, isCached: true })
+      trace($, 'licences.usage', { configDir: licence.configDir, isCached: true, ...(kept.result.ok ? {} : { code: kept.result.code }) })
+      continue
+    }
+    if (!canProbe || !hasProbeRoom(nowMs - startedAt)) {
+      rows.push({ licence, isCached: false })
+      continue
+    }
+    let result: UsageSeen['result']
+    try {
+      result = await machine.probeUsage(portOf($), licence.configDir, isOwnUnset && licence.source === 'default')
+    } catch (err) {
+      traceError($, 'probe_licence_usage', err)
+      result = { ok: false, code: 'FAILED' }
+    }
+    const seen = { at: await $.clock.now(), result }
+    usageSeen.set(licence.configDir, seen)
+    rows.push({ licence, seen, isCached: false })
+    trace($, 'licences.usage', { configDir: licence.configDir, isCached: false, ...(result.ok ? {} : { code: result.code }) })
+  }
+  return rows
+}
+
 /** Turn the board on: register the launch tool, start the poll once, gather. */
 async function activate($: EngineInterface): Promise<void> {
   isActive = true
@@ -2081,6 +2150,14 @@ async function activate($: EngineInterface): Promise<void> {
         'the default directory a launch without a picker uses, ~/.claude, ~/.claude/<name>, ~/.claude-<name> and the licenceDirs option. Per licence: config_dir, name, ' +
         'source (default, home, child, dash, explicit), logged_in (the two files are there) and the registry sessions under it (live, in all). The directory scan is kept 60 s.',
       inputSchema: LIST_LICENCES_SCHEMA as unknown as Record<string, unknown>,
+    })
+    await $.tool.register({
+      name: 'probe_licence_usage',
+      description:
+        "Read-only. The usage of the discovered licences (or of the one config_dir names, by its path or name): per licence the five-hour session window and the seven-day all-models window " +
+        "(floored percent and reset, as the CLI's claude -p /usage shows them, no model turn), age_seconds and cached, or a fixed code (NO_CLAUDE, TIMEOUT, NOT_LOGGED_IN, PARSE, FAILED). " +
+        'A probe is kept 60 s (a failed one 15 s); probes run one at a time and a call takes at most 40 s: licences left are named for the next call. No credential is read; the figures can be stale.',
+      inputSchema: PROBE_USAGE_SCHEMA as unknown as Record<string, unknown>,
     })
   }
   if (!isPolling) {
@@ -2223,6 +2300,8 @@ export const register: Register = (on, options) => {
   digestDropped = 0
   loadedAt = 0
   licenceScan = undefined
+  usageSeen.clear()
+  isUsageProbing = false
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
@@ -2464,6 +2543,11 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: LICENCES_TOOL }, ($, e) => tracedTool($, 'list_licences', e, [], () => listLicences($), true)).catch(($, e, next) => {
     traceError($, 'list_licences', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: list_licences failed` }
+  })
+
+  on('tool.call', { tool: USAGE_TOOL }, ($, e) => tracedTool($, 'probe_licence_usage', e, ['config_dir'], () => probeLicenceUsage($, plain(e).config_dir), true)).catch(($, e, next) => {
+    traceError($, 'probe_licence_usage', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: probe_licence_usage failed` }
   })
 
   // The launch's fields are paths, names, numbers and switches; the title and the section are free text and stay out

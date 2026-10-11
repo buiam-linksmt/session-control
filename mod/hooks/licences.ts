@@ -8,10 +8,25 @@ import type { SessionEntry } from '../types'
 import { rowStatus } from './core'
 import type { ProcFacts } from './core'
 import { bounded, clean } from './inspect'
+import { USAGE_TIMEOUT_MS } from './usage'
+import type { UsageProbe, UsageWindow } from './usage'
 
 // ---------------------------------------------------------------- schemas
 
 export const LIST_LICENCES_SCHEMA = { type: 'object', additionalProperties: false, properties: {} } as const
+
+export const PROBE_USAGE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    config_dir: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 4096,
+      description: 'One discovered licence (list_licences): its config_dir, or its name. Absent: every discovered licence, one after the other.',
+    },
+  },
+} as const
 
 // ---------------------------------------------------------------- discovery
 
@@ -171,3 +186,72 @@ export function listLicencesText(input: {
   if (scan.ignored > 0) lines.push(`${scan.ignored} licenceDirs entr${scan.ignored === 1 ? 'y is' : 'ies are'} not an absolute path and ignored.`)
   return bounded(lines.join('\n'))
 }
+
+// ---------------------------------------------------------------- probe_licence_usage
+
+/** How long a probe's windows are kept per licence: a call within answers from memory and says so. */
+export const USAGE_CACHE_MS = 60_000
+
+/** How long a failed probe is kept: a code is tried again sooner than a figure. */
+export const USAGE_FAIL_CACHE_MS = 15_000
+
+/**
+ * The most one probe_licence_usage call takes: the engine documents no limit for a plugin tool's call (a hook's own
+ * 10 s budget does not count the `$` calls it waits on), and the mod holds the call to this.
+ */
+export const USAGE_CALL_BUDGET_MS = 40_000
+
+/** The most one probe can take: claude's USAGE_TIMEOUT_MS, and the helper's start around it (USAGE_CALL_TIMEOUT_MS). */
+export const USAGE_PROBE_WORST_MS = USAGE_TIMEOUT_MS + 5_000
+
+/** One probe's answer and when it was made (epoch ms). */
+export type UsageSeen = { at: number; result: UsageProbe }
+
+/** Whether a kept probe still answers: windows for USAGE_CACHE_MS, a code for USAGE_FAIL_CACHE_MS. */
+export function isUsageFresh(seen: UsageSeen, nowMs: number): boolean {
+  const age = nowMs - seen.at
+  return age >= 0 && age < (seen.result.ok ? USAGE_CACHE_MS : USAGE_FAIL_CACHE_MS)
+}
+
+/** Whether one more probe fits in the call's budget after `elapsedMs`, at its worst. */
+export const hasProbeRoom = (elapsedMs: number) => elapsedMs + USAGE_PROBE_WORST_MS <= USAGE_CALL_BUDGET_MS
+
+/** One licence of the answer: its probe (`isCached` when from memory), or not probed (no room left in the call). */
+export type UsageRow = { licence: Licence; seen?: UsageSeen; isCached: boolean }
+
+const windowText = (label: string, one: UsageWindow | null) => (one === null ? `${label} -` : `${label} ${one.percent}%${one.resets === '' ? '' : ` (resets ${clean(one.resets)})`}`)
+
+/** The window of the rows with the highest percent, said as `<percent>% (<name>)`, or `-`. */
+function highest(rows: readonly UsageRow[], pick: (result: UsageProbe & { ok: true }) => UsageWindow | null): string {
+  let best: { percent: number; name: string } | undefined
+  for (const row of rows) {
+    const result = row.seen?.result
+    const one = result?.ok === true ? pick(result) : null
+    if (one !== null && (best === undefined || one.percent > best.percent)) best = { percent: one.percent, name: row.licence.name }
+  }
+  return best === undefined ? '-' : `${best.percent}% (${clean(best.name)})`
+}
+
+/**
+ * probe_licence_usage's answer: one summary line, one line per licence (the 5-hour and 7-day all-models windows, or the
+ * fixed code; age_seconds and cached), the licences left for the next call, and how far the figures can be trusted.
+ */
+export function probeUsageText(rows: readonly UsageRow[], nowMs: number): string {
+  const probed = rows.filter(row => row.seen !== undefined)
+  const fromCache = probed.filter(row => row.isCached).length
+  const left = rows.filter(row => row.seen === undefined)
+  const lines = [
+    `Usage of ${probed.length} licence${probed.length === 1 ? '' : 's'} (${probed.length - fromCache} probed now, ${fromCache} from the cache): highest five_hour ${highest(probed, one => one.five)}, highest seven_day ${highest(probed, one => one.seven)}.`,
+  ]
+  for (const row of probed.slice(0, MAX_LICENCES)) {
+    const seen = row.seen as UsageSeen
+    const age = Math.max(0, Math.floor((nowMs - seen.at) / 1000))
+    const figures = seen.result.ok ? [windowText('five_hour', seen.result.five), windowText('seven_day', seen.result.seven)] : [`error ${seen.result.code}`]
+    lines.push([`- ${clean(row.licence.name)} (config_dir ${clean(row.licence.configDir)})`, ...figures, `age_seconds ${age}`, `cached ${row.isCached ? 'yes' : 'no'}`].join(' | '))
+  }
+  if (probed.length > MAX_LICENCES) lines.push(`(${probed.length - MAX_LICENCES} more licences not shown)`)
+  if (left.length > 0) lines.push(`${left.length} more not probed: call again (${left.slice(0, 10).map(row => clean(row.licence.name)).join(', ')}${left.length > 10 ? ', ...' : ''}).`)
+  lines.push('The figures are what the CLI\'s /usage shows: they can be stale (up to an hour when its own fetch fails), percents are floored and resets are as the CLI words them.')
+  return bounded(lines.join('\n'))
+}
+
