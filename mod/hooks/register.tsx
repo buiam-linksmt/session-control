@@ -65,6 +65,7 @@ import {
   SESSION_WRITES_SCHEMA,
   TAIL_LINES,
   WORKER_TAIL_SCHEMA,
+  clean,
   firstTimestamp,
   isUnder,
   listSessionsText,
@@ -600,8 +601,11 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   const reportNote = outcome.kind === 'clean' ? reportCheck(resultReport(resultText)) : undefined
   harvested.add(key)
   trace($, 'completion', { session_id: sid, pid: entry.pid, outcome: outcome.kind, isWritten: config.completionWrites, isReportNoted: reportNote !== undefined })
-  const who = entry.title ?? sid.slice(0, 8)
-  const label = `${who}: ${outcome.summary}`
+  // The note's free text (the entry's title, the outcome's summary from the result file) goes through the redaction the
+  // tools and the notices use, before the toast and the note; the session id the engine made stays readable.
+  const title: unknown = entry.title
+  const who = title === undefined || title === null ? sid.slice(0, 8) : clean(String(title))
+  const label = `${who}: ${clean(outcome.summary)}`
   if (config.completionWrites) {
     // Read again right before writing, so the window against the licence
     // daemon's own writes is as short as this API allows (no lock, no rename).

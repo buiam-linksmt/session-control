@@ -975,3 +975,49 @@ describe('notices.ts: the caps', () => {
     expect([ORPHANS_SHOWN, ORPHAN_PIDS_LISTED, TOASTS_PER_PASS, PENDING_NOTICES_MAX]).toEqual([5, 10, 3, 30])
   })
 })
+
+// ---------------------------------------------------------------- completion notes redacted (decision mod-20)
+
+describe('completion notes', () => {
+  const TITLE_CANARY = 'sk-canarytitle00000000'
+  const RESULT_CANARY = 'ghp_canaryresult0000000000'
+  const ERROR_CANARY = 'sk-canaryerror000000000'
+  const notification = ($: { prompt: { submit: (e: never) => Promise<unknown> } }) =>
+    $.prompt.submit({ text: 'notification', wait: false, origin: { kind: 'task-notification' } } as never) as Promise<{ context?: readonly unknown[] }>
+  const completions = (sent: { context?: readonly unknown[] }) => (sent.context ?? []).map(String).filter(line => line.startsWith('session-control completions: '))
+  const REPORT_CHECK = 'report check: report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes'
+
+  test('a canary in the title and one in the result summary: redacted in the note and the toast; the rest of the wording as before', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries: [{ ...UNIT_ENTRY, title: `rotate ${TITLE_CANARY} worker` }] })
+    world.files.set(`${RUNS}/unit.json`, JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: `Done; the canary ${RESULT_CANARY} was revoked and replaced.`, session_id: SID_UNIT }))
+    await start($)
+    const toast = world.toasts.find(text => text.startsWith('Session finished · '))
+    expect(toast).toBe('Session finished · rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.')
+    const notes = completions(await notification($))
+    expect(notes).toEqual([`session-control completions: rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.; rotate [redacted] worker: ${REPORT_CHECK}`])
+    const everything = JSON.stringify([world.toasts, notes])
+    for (const canary of [TITLE_CANARY, RESULT_CANARY]) expect(everything).not.toContain(canary)
+  })
+
+  test('a canary in a failed run\'s message: redacted; no title: the session id\'s first 8 characters, readable; a usual title and summary unchanged', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    const usual = { ...UNIT_ENTRY, pid: 4301, session_id: SID_FREE, result_file: `${RUNS}/usual.json`, section: undefined }
+    const untitled = { ...UNIT_ENTRY, title: undefined, section: undefined }
+    seed(world, { entries: [untitled, usual] })
+    world.files.set(`${RUNS}/unit.json`, JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, result: `push refused for ${ERROR_CANARY}`, session_id: SID_UNIT }))
+    world.files.set(`${RUNS}/usual.json`, RESULTS.clean)
+    await start($)
+    const notes = completions(await notification($))
+    expect(notes).toEqual([
+      `session-control completions: ${SID_UNIT.slice(0, 8)}: error: push refused for [redacted]; ` +
+        `unit worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.; unit worker: ${REPORT_CHECK}`,
+    ])
+    expect(world.toasts).toContain(`Session failed · ${SID_UNIT.slice(0, 8)}: error: push refused for [redacted]`)
+    expect(world.toasts.join('\n')).not.toContain(ERROR_CANARY)
+  })
+})
