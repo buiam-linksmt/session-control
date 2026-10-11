@@ -27,6 +27,7 @@ import {
 import { REDACTED, redact } from '../hooks/trace'
 import { helperAnswer } from './fake-helper'
 import { NOW_MS, NOW_SEC } from './fixtures'
+import { OPTIONS as WORLD_OPTIONS, ORCH as WORLD_ORCH, REGISTRY as WORLD_REGISTRY, mockWorld } from './mock-world'
 
 const HOME = '/m/home'
 const ORCH = '/m/work/orch'
@@ -582,6 +583,18 @@ describe('panel_snapshot', () => {
     expect(text).not.toContain('LOG ')
     expect(text).not.toContain('\u001b')
     expectNoCanary(text)
+  })
+
+  test('the age is that of the last poll, which runs at every interval while the rows stay the same', { options: WORLD_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    world.files.set(`${WORLD_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
+    world.files.set(WORLD_REGISTRY, '[]\n')
+    await $.session.start({ cwd: WORLD_ORCH, surface: null, isInteractive: true })
+    // 49 polls of the default 5 s over unchanged rows, then 2 s more.
+    for (let gone = 0; gone < 245; gone += 5) await world.clock.advance(5000)
+    await world.clock.advance(2000)
+    const out = (await $.tool.call({ tool: tool('panel_snapshot') } as never)) as { result?: unknown }
+    expect(String(out.result).split('\n')[0]).toBe("panel_snapshot: the panel's text as of its last poll 2 s ago, at 120 columns.")
   })
 
   test('with a session log open, its lines follow the sessions, as the panel shows them', { options: OPTIONS }, async ($, on) => {

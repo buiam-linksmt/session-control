@@ -8,7 +8,7 @@ import type { SessionEntry } from '../types'
 import { defaultConfigDir, findNewWindowsWorker, isDefaultConfigDir, isSameWinPath, isWinAbsolute, parseProcFacts, probeArgs, transcriptPath, windowsPickerRefusal, winPath } from './core'
 import type { LaunchInput, ProcFacts } from './core'
 import type { HostPort, Platform, ProcTree, StopReport, StopStep, StopTarget, WorkerWant } from './host'
-import { STOP_WAIT_SECONDS, bashLaunchCommand, clockPause, parseStopOutput, statLaunchChecks, treeOf, unstoppable, writeIfAbsent } from './host-shared'
+import { bashLaunchCommand, clockPause, parseStopOutput, statLaunchChecks, treeOf, unstoppable, writeIfAbsent } from './host-shared'
 
 /**
  * How far a sessions file's `startedAt` may sit from its process's creation for the pid to count as that process,
@@ -307,12 +307,16 @@ async function stillAlive(port: HostPort, targets: readonly string[], sleepSec: 
   return new Set(parseStopOutput(ran.stdout).final.filter(one => one.status === 'alive').map(one => one.pid))
 }
 
+/** How long a stop on Windows re-checks after `taskkill /T /F`, in seconds of wall-clock time. */
+const KILL_WAIT_SECONDS = 3
+
 /**
  * The stop on Windows, in short steps (each one process, so no wait falls on the engine's clock): the tree by
- * TREE_PS1's list unless given; then for the root, and after it for every descendant still alive: `taskkill /PID <pid>
- * /T` (a console process without a window refuses that and needs /F; the exit code is recorded), a re-check every
- * second for up to STOP_WAIT_SECONDS, `taskkill /PID <pid> /T /F` to one still there, re-checks for up to 3 seconds;
- * then the end state of each.
+ * TREE_PS1's list unless given; then for the root, and after it for every descendant still alive, `taskkill /PID <pid>
+ * /T /F` (taskkill without /F asks a process's windows to close, and claude.exe, a console process without a window of
+ * its own, always refuses it: "can only be terminated forcefully", exit 128, also for the console host of its Git Bash),
+ * re-checks about every second for up to KILL_WAIT_SECONDS of wall-clock time, each check reporting the seconds that
+ * really passed; then the end state of each.
  */
 async function stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport> {
   const listed = tree === undefined ? await listTree(port, target) : { tree, notes: [] }
@@ -331,35 +335,22 @@ async function stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTr
       else if (!alive.has(one.pid)) steps.push({ kind: 'skip', pid: one.pid, reason: 'gone' })
       else {
         const atMs = await port.now()
-        const ran = await port.run([exe, '/PID', String(one.pid), '/T'], { timeoutMs: 15_000 })
-        steps.push({ kind: 'signal', pid: one.pid, signal: 'taskkill /T', atMs, exitCode: ran.exitCode })
+        const ran = await port.run([exe, '/PID', String(one.pid), '/T', '/F'], { timeoutMs: 15_000 })
+        steps.push({ kind: 'signal', pid: one.pid, signal: 'taskkill /T /F', atMs, exitCode: ran.exitCode })
         live.push(one)
       }
     }
     if (live.length === 0) return
-    let waited = 0
+    // At most one check per second of the wait, and never past it by the clock: a check takes as long as PowerShell
+    // takes to start, so the seconds said are the clock's, never the count of checks.
+    const startedAt = await port.now()
     let left = await stillAlive(port, live.map(key), 0)
-    while (waited < STOP_WAIT_SECONDS && left.size > 0) {
+    for (let checks = 0; left.size > 0 && checks < KILL_WAIT_SECONDS && (await port.now()) - startedAt < KILL_WAIT_SECONDS * 1000; checks++) {
       left = await stillAlive(port, live.map(key), 1)
-      waited++
-    }
-    const checkedAt = await port.now()
-    for (const one of live) steps.push({ kind: 'check', pid: one.pid, atMs: checkedAt, status: left.has(one.pid) ? 'alive' : 'gone', waitedSec: waited })
-    const rest = live.filter(one => left.has(one.pid))
-    if (rest.length === 0) return
-    for (const one of rest) {
-      const atMs = await port.now()
-      const ran = await port.run([exe, '/PID', String(one.pid), '/T', '/F'], { timeoutMs: 15_000 })
-      steps.push({ kind: 'signal', pid: one.pid, signal: 'taskkill /T /F', atMs, exitCode: ran.exitCode })
-    }
-    let after = 0
-    left = await stillAlive(port, rest.map(key), 0)
-    while (after < 3 && left.size > 0) {
-      left = await stillAlive(port, rest.map(key), 1)
-      after++
     }
     const doneAt = await port.now()
-    for (const one of rest) steps.push({ kind: 'check', pid: one.pid, atMs: doneAt, status: left.has(one.pid) ? 'alive' : 'gone', waitedSec: after })
+    const waitedSec = Math.max(0, Math.round((doneAt - startedAt) / 1000))
+    for (const one of live) steps.push({ kind: 'check', pid: one.pid, atMs: doneAt, status: left.has(one.pid) ? 'alive' : 'gone', waitedSec })
   }
   const root = listing.root ?? target
   await group([root])

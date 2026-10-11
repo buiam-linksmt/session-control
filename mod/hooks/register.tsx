@@ -262,6 +262,11 @@ let displayTick: { cancel: () => void } | undefined
 /** The display tick's period: it only moves the `now` atom on, so the pane redraws its elapsed column. */
 const DISPLAY_TICK_MS = 1000
 let lastError: string | undefined
+/**
+ * When the board last gathered (epoch ms): every poll sets it, while the snapshot atom's `at` moves only with the rows,
+ * so an unchanged panel does not redraw; panel_snapshot tells the age of this one.
+ */
+let polledAt: number | undefined
 /** The operations whose untraced helper call failed and was traced this load: once each, as each later line would be written by the write that failed. */
 const quietFailuresTraced = new Set<string>()
 /** Whether the toast that no usable Node is found was shown since Node was last found (or since the load). */
@@ -1079,7 +1084,8 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   const files = await loadPoints($)
   // Without a usable Node nothing is tracked: no probe, completion, notice or drift check runs.
   if (!(await nodeReady($))) {
-    await showNodeMissing($, await $.clock.now())
+    polledAt = await $.clock.now()
+    await showNodeMissing($, polledAt)
     return
   }
   isNodeWarned = false
@@ -1088,6 +1094,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   const parsed = parseRegistry(registryText ?? '')
   const toasts = toastBudget()
   const now = await $.clock.now()
+  polledAt = now
   // A registry that cannot be read may be one that is not there (yet): registry-unreadable tells only one that is.
   const isRegistryMissing = registryText === undefined && !(await $.fs.exists(await registryPath($)).catch(() => true))
   if (!parsed.ok) {
@@ -1873,7 +1880,7 @@ async function sessionWrites($: EngineInterface, id: unknown) {
 async function panelSnapshot($: EngineInterface) {
   const [snap, queue, list, sel, view, pointSel, exp] = await Promise.all([read($, snapshot), read($, queued), read($, points), read($, selected), read($, watch), read($, selectedPoint), read($, expanded)])
   const log = sel !== null && view !== null ? { title: view.title, lines: view.lines } : null
-  return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, log, expanded: log === null ? exp : null, nowMs: await $.clock.now() }) }
+  return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, log, expanded: log === null ? exp : null, nowMs: await $.clock.now(), ...(polledAt === undefined ? {} : { polledAt }) }) }
 }
 
 /**
@@ -2384,6 +2391,7 @@ function pickFields(e: unknown, names: readonly string[]): Record<string, unknow
 export const register: Register = (on, options) => {
   quietFailuresTraced.clear()
   isNodeWarned = false
+  polledAt = undefined
   host = undefined
   temp = undefined
   isGuarded = false

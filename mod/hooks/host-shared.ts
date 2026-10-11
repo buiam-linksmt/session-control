@@ -39,7 +39,7 @@ export const TAIL_SHAPED_MAX_BYTES = 3 * 1024 * 1024
 /** The most paths filesNewerThan answers; `total` counts them all. */
 export const NEWER_MAX = 200
 
-/** How long a stop waits after the first signal, in one-second re-checks, before the second (KILL, taskkill /F). */
+/** How long a stop on Linux waits after TERM, in one-second re-checks, before KILL (Windows sends no gentle signal first: host-windows.ts). */
 export const STOP_WAIT_SECONDS = 10
 
 /** How long a stop may run in one process: the root's wait and the descendants' wait, each with the re-checks after KILL. */

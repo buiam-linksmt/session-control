@@ -89,8 +89,8 @@ export type StopTarget = { pid: number; start: string }
 export type StopStatus = 'gone' | 'exited' | 'alive'
 
 /**
- * One step of a stop: a signal sent (Linux `TERM`, `KILL`; Windows `taskkill /T`, `taskkill /T /F`) with its time in
- * epoch milliseconds and the exit code of the call; a check after it with the seconds waited; or a process not
+ * One step of a stop: a signal sent (Linux `TERM`, `KILL`; Windows `taskkill /T /F`) with its time in epoch
+ * milliseconds and the exit code of the call; a check after it with the seconds waited; or a process not
  * signalled (`gone`: no longer the process listed, or a zombie; `own`: this session's process or one of its ancestors).
  */
 export type StopStep =
@@ -213,8 +213,9 @@ export type Host = {
    * Stops a process and its descendants, and answers what it did (stop_worker). The tree is listed before the first
    * signal (unless `tree`, a listing made before, is given). Nothing is signalled when the root no longer has the start
    * asked or is this session's own process or one of its ancestors. Then the root: Linux `TERM`, re-checks every second
-   * for up to STOP_WAIT_SECONDS, `KILL`, re-checks for up to 3 seconds; Windows `taskkill /T`, the same re-checks,
-   * `taskkill /T /F`. Then every descendant still alive the same way. A process is signalled only while it still has
+   * for up to STOP_WAIT_SECONDS, `KILL`, re-checks for up to 3 seconds; Windows `taskkill /T /F` at once (claude.exe, a
+   * console process without a window, refuses taskkill without /F), re-checks for up to 3 seconds of wall-clock time.
+   * Then every descendant still alive the same way. A process is signalled only while it still has
    * the start the listing found, so a pid reused meanwhile is never touched. The waits run inside the operation's own
    * processes, never on the engine's clock. Rejects when the tree cannot be listed or the stop cannot run (on Linux
    * also when the helper's stop failed: what it did is then told by the Abort check after it).

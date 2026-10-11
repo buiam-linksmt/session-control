@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const HOST = join(HERE, '..', 'helper', 'host.mjs')
 const IS_LINUX = process.platform === 'linux'
+const IS_WINDOWS = process.platform === 'win32'
 const has = cmd => spawnSync('sh', ['-c', `command -v ${cmd}`]).status === 0
 /** Node strips the types of a .ts file by itself (Node 23.6 or newer, or 22 with the flag): the fixtures and core.ts load as they are. */
 const HAS_TS = Boolean(process.features?.typescript)
@@ -84,7 +85,15 @@ test('protocol: a file-system failure is a fixed code, never the message (which 
     // The directory to make is a file.
     assertFailure(helper('writeAtomic', { path: join(dir, 'file', 'under-a-file.json'), text: 'x' }), 'EXISTS', dir)
     assertFailure(helper('append', { path: join(dir, 'file', 'log'), text: 'x' }), 'EXISTS', dir)
-    assertFailure(helper('removeFile', { path: join(dir, 'file', 'x') }), 'NOT_DIR', dir)
+    // A path under a regular file: Linux's unlink says ENOTDIR (NOT_DIR). Windows has no such answer for it: the path is
+    // not found, which removeFile's contract answers as a file that is not there (nothing removed, the file untouched).
+    if (IS_WINDOWS) {
+      const under = helper('removeFile', { path: join(dir, 'file', 'x') })
+      assert.equal(under.code, 0)
+      assert.deepEqual(under.answer, { ok: true, removed: false })
+      assert.equal(under.stderr, '')
+      assert.equal(fs.readFileSync(join(dir, 'file'), 'utf8'), 'secret content line\n')
+    } else assertFailure(helper('removeFile', { path: join(dir, 'file', 'x') }), 'NOT_DIR', dir)
     assertFailure(helper('renameOver', { from: join(dir, 'missing.tmp'), to: join(dir, 'file') }), 'NOT_FOUND', dir)
     assertFailure(helper('tail', { path: dir, lines: 5, width: 10 }), 'IS_DIR', dir)
     if (IS_LINUX && process.getuid?.() !== 0) {

@@ -710,9 +710,10 @@ try {
   }
 
   // --- the stop of stop_worker on Windows: TREE_PS1 lists a throwaway node.exe tree (a parent that started one
-  // child), then taskkill.exe through cmd.exe stops it the way the Windows adapter does: /T, the re-check by TREE_PS1's
-  // check, /T /F, the re-check. A second node.exe outside the tree must survive, a start that is not the process's
-  // own reads as gone, and the listing names this script's own ancestors. No claude starts.
+  // child), then taskkill.exe through cmd.exe stops it the way the Windows adapter does: /T /F at once (a console
+  // process without a window refuses taskkill without /F), then the re-checks by TREE_PS1's check for up to 3 s. A
+  // second node.exe outside the tree must survive, a start that is not the process's own reads as gone, and the listing
+  // names this script's own ancestors. No claude starts.
   nodeWin = process.env.SC_WIN_NODE || (IS_WINDOWS ? process.execPath : 'C:\\Program Files\\nodejs\\node.exe')
   node = toWsl(nodeWin)
   if (!exists(node)) {
@@ -766,23 +767,16 @@ try {
       ;[code, out, err] = run('tree.ps1', treePs1, 'check', '0', `${rootPid}:${rootStart}`, `${childPid}:${childStart}`, `${rootPid}:${pyInt(rootStart) + 1}`)
       check(code === 0 && isDeepStrictEqual(pySplitlines(out), [`F\t${rootPid}\talive\t`, `F\t${childPid}\talive\t`, `F\t${rootPid}\tgone\t`]), out)
       const steps = []
-      let r = runBytes([CMD, '/c', 'taskkill', '/PID', String(rootPid), '/T'], { timeout: 60, cwd: work })
-      steps.push(`taskkill /T exit ${r.returncode}`)
+      const r = runBytes([CMD, '/c', 'taskkill', '/PID', String(rootPid), '/T', '/F'], { timeout: 60, cwd: work })
+      steps.push(`taskkill /T /F exit ${r.returncode}`)
       let left = null
-      let waited
-      for (waited = 0; waited < 4; waited++) {
-        ;[code, out, err] = run('tree.ps1', treePs1, 'check', waited ? '1' : '0', `${rootPid}:${rootStart}`, ...tree.map(([pid, start]) => `${pid}:${start}`))
+      const killedAt = Date.now()
+      for (let checks = 0; checks <= 3; checks++) {
+        ;[code, out, err] = run('tree.ps1', treePs1, 'check', checks ? '1' : '0', `${rootPid}:${rootStart}`, ...tree.map(([pid, start]) => `${pid}:${start}`))
         left = pySplitlines(out).filter(l => l.split('\t')[2] === 'alive').map(l => l.split('\t')[1])
-        if (left.length === 0) break
+        if (left.length === 0 || Date.now() - killedAt >= 3000) break
       }
-      if (waited === 4) waited = 3
-      steps.push(`after ${waited} s: ${left.length} alive`)
-      if (left.length > 0) {
-        r = runBytes([CMD, '/c', 'taskkill', '/PID', String(rootPid), '/T', '/F'], { timeout: 60, cwd: work })
-        steps.push(`taskkill /T /F exit ${r.returncode}`)
-        ;[code, out, err] = run('tree.ps1', treePs1, 'check', '1', `${rootPid}:${rootStart}`, ...tree.map(([pid, start]) => `${pid}:${start}`))
-        left = pySplitlines(out).filter(l => l.split('\t')[2] === 'alive').map(l => l.split('\t')[1])
-      }
+      steps.push(`after ${Math.round((Date.now() - killedAt) / 1000)} s by the clock: ${left.length} alive`)
       await parent.wait(60)
       check(left.length === 0, [left, steps])
       ;[code, out, err] = run('tree.ps1', treePs1, 'check', '0', `${rootPid}:${rootStart}`, ...tree.map(([pid, start]) => `${pid}:${start}`), `${byPid}:${byStart}`)

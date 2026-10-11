@@ -95,6 +95,8 @@ export type SimProc = {
    * that exec'd it, which is gone, so only the MSYS process table links it to the tree.
    */
   msysParent?: number
+  /** A process even taskkill /F cannot end (access denied: exit 1). */
+  isUnkillable?: boolean
 }
 /**
  * `msys`, Windows: the folder of the MSYS process table TREE_PS1 reads (Git's usr/bin), and whether that table cannot be
@@ -187,18 +189,20 @@ export function checkInTable(table: ProcTable, targets: readonly string[]): stri
   return targets.map(one => `F\t${one.split(':')[0]}\t${sameIn(table, Number(one.split(':')[0]), one.split(':')[1] ?? '') ? 'alive' : 'gone'}\t\n`).join('')
 }
 
-/** taskkill /PID <pid> /T (and /F) over the table: the process and its descendants; without /F a stubborn one stays (exit 128). */
+/** taskkill /PID <pid> /T (and /F) over the table: the process and its descendants; without /F a stubborn one stays (exit 128), an unkillable one always (exit 1). */
 export function taskkillInTable(table: ProcTable, pid: number, isForced: boolean): number {
   const tree = [pid]
   for (let at = 0; at < tree.length; at++) for (const [child, one] of table.procs) if (one.ppid === tree[at] && !tree.includes(child)) tree.push(child)
   if (!table.procs.has(pid)) return 128
   let isRefused = false
+  let isDenied = false
   for (const one of tree.reverse()) {
     table.signals.push({ pid: one, signal: isForced ? 'taskkill /F' : 'taskkill' })
-    if (isForced || table.procs.get(one)?.isStubborn !== true) table.procs.delete(one)
+    if (table.procs.get(one)?.isUnkillable === true) isDenied = true
+    else if (isForced || table.procs.get(one)?.isStubborn !== true) table.procs.delete(one)
     else isRefused = true
   }
-  return isRefused ? 128 : 0
+  return isDenied ? 1 : isRefused ? 128 : 0
 }
 
 /** The helper's answer to one request over the map of files; `probeOut` is what its probe prints; `mtimes` the files' mtimes in ms. */

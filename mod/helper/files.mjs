@@ -21,10 +21,20 @@ function pause(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 }
 
+/** Whether a path is a directory now (a link is followed); false when it is not there or cannot be looked at. */
+function isDirectory(file) {
+  try {
+    return fs.statSync(file).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 /**
  * Renames over an existing file. On Linux rename(2) replaces the target in one step. On Windows Node's rename is
  * MoveFileEx with MOVEFILE_REPLACE_EXISTING, also one step, which fails while another process holds the target open
- * without delete sharing: that is tried again for up to RENAME_RETRY_MS.
+ * without delete sharing: that is tried again for up to RENAME_RETRY_MS. A target that is a directory is refused with
+ * IS_DIR on both: Linux says EISDIR, Windows EPERM (or EACCES), which is never tried again then.
  */
 export function renameReplacing(from, to) {
   const until = Date.now() + RENAME_RETRY_MS
@@ -33,6 +43,7 @@ export function renameReplacing(from, to) {
       fs.renameSync(from, to)
       return
     } catch (err) {
+      if (isTransient(err) && err?.code !== 'EBUSY' && isDirectory(to)) throw new HelperError('IS_DIR')
       if (!isTransient(err) || Date.now() >= until) throw err
       pause(wait)
     }

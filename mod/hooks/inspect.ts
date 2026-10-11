@@ -551,11 +551,13 @@ export function panelSnapshotText(input: {
   log: { title: string; lines: readonly string[] } | null
   expanded: string | null
   nowMs: number
+  /** When the board last gathered (epoch ms), which moves at every poll; the snapshot's own `at` moves only with its rows. */
+  polledAt?: number
 }): string {
   const { snap } = input
   if (snap === null) return 'panel_snapshot: the panel has no rows yet (the board has not gathered once).'
   const width = SNAPSHOT_COLUMNS - 4
-  const ago = Math.max(0, Math.round((input.nowMs - snap.at) / 1000))
+  const ago = Math.max(0, Math.round((input.nowMs - Math.max(snap.at, input.polledAt ?? snap.at)) / 1000))
   const out = [`panel_snapshot: the panel's text as of its last poll ${ago} s ago, at ${SNAPSHOT_COLUMNS} columns${input.expanded === null ? '' : `; the ${input.expanded} section is expanded`}${input.log === null ? '' : '; a log is open'}.`, '']
   const clock = { nowSec: Math.floor(input.nowMs / 1000), probedSec: Math.floor(snap.at / 1000) }
   const rows = snap.rows.map(row => ({ ...row, title: oneLine(row.title, 200) }))

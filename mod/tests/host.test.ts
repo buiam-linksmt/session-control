@@ -46,6 +46,8 @@ type Machine = {
   sleeps: number[]
   /** The processes the stop of stop_worker sees, and every signal sent to one. */
   table: ProcTable
+  /** The machine's clock (epoch ms) as HostPort.now reads it; each TREE_PS1 check moves it on by its sleep and `checkMs`, the time PowerShell takes to start. */
+  clock: { ms: number; checkMs: number }
   read(path: string): string
   exists(path: string): boolean
   stat(path: string): FsStat
@@ -60,6 +62,7 @@ function machine(env: Record<string, string>): Machine {
   const removals: string[] = []
   const runs: string[][] = []
   const table: ProcTable = { procs: new Map(), own: [900, 1], signals: [], nowMs: NOW_MS }
+  const clock = { ms: NOW_MS, checkMs: 0 }
   const isDir = (path: string) => [...files.keys()].some(file => file.startsWith(`${keyOf(path).replace(/\/+$/, '')}/`))
   const read = (path: string) => {
     const text = files.get(keyOf(path))
@@ -97,6 +100,7 @@ function machine(env: Record<string, string>): Machine {
     if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/tree.ps1')) {
       expect(files.get(keyOf(argv[6]))).toBe(TREE_PS1)
       const [op, a = '', b = ''] = argv.slice(7)
+      if (op === 'check') clock.ms += Number(a) * 1000 + clock.checkMs
       const out = op === 'list' ? treeInTable(table, Number(a), b, true) : checkInTable(table, argv.slice(9))
       return ran(out.replace(/\n/g, '\r\n'))
     }
@@ -107,7 +111,7 @@ function machine(env: Record<string, string>): Machine {
     }
     throw new Error(`unexpected command ${argv.join(' ')}`)
   }
-  const result: Machine = { env, files, mtimes, links, removals, runs, sleeps: [], table, read, exists: path => files.has(keyOf(path)) || isDir(path), stat, run }
+  const result: Machine = { env, files, mtimes, links, removals, runs, sleeps: [], table, clock, read, exists: path => files.has(keyOf(path)) || isDir(path), stat, run }
   return result
 }
 
@@ -135,7 +139,7 @@ function portOf(m: Machine, runsDir: string, notes: string[] = []): HostPort {
     },
     exists: async path => m.exists(path),
     stat: async path => m.stat(path),
-    now: async () => NOW_MS,
+    now: async () => m.clock.ms,
     sleep: async ms => {
       m.sleeps.push(ms)
     },
@@ -423,8 +427,11 @@ describe('host contract', () => {
       const firstSignal = m.runs.findIndex(argv => argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))
       expect(listedAt).toBeGreaterThanOrEqual(0)
       expect(firstSignal).toBeGreaterThan(listedAt)
-      expect(signalsOf(report.steps)).toEqual(one.platform === 'linux' ? ['5000 TERM', '5001 TERM', '5002 TERM', '5002 KILL'] : ['5000 taskkill /T', '5002 taskkill /T', '5002 taskkill /T /F'])
-      expect(report.steps.filter(step => step.kind === 'check' && step.status === 'gone').map(step => step.pid).sort()).toEqual(one.platform === 'linux' ? [5000, 5001, 5002] : [5000, 5002])
+      // Windows sends no gentle taskkill first (a console process without a window refuses it): /T /F to the root takes
+      // its whole Windows tree, the one that ignores the gentle signal with it.
+      expect(signalsOf(report.steps)).toEqual(one.platform === 'linux' ? ['5000 TERM', '5001 TERM', '5002 TERM', '5002 KILL'] : ['5000 taskkill /T /F'])
+      expect(report.steps.filter(step => step.kind === 'check' && step.status === 'gone').map(step => step.pid).sort()).toEqual(one.platform === 'linux' ? [5000, 5001, 5002] : [5000])
+      if (one.platform === 'windows') expect(m.table.signals.every(sent => sent.signal === 'taskkill /F')).toBe(true)
       expect(report.final).toEqual([5000, 5001, 5002].map(pid => ({ pid, status: 'gone', state: '' })))
       expect([...m.table.procs.keys()]).toEqual([6000])
       expect(m.table.signals.some(sent => sent.pid === 6000)).toBe(false)
@@ -456,7 +463,7 @@ describe('host contract', () => {
         expect(report.notes).toEqual([
           'the MSYS process table of C:/Program Files/Git/usr/bin (Git Bash) was read before the first signal: 1 program the worker started through Git Bash, whose Windows parent has exited, is among the descendants listed, each with its MSYS parent',
         ])
-        expect(signalsOf(report.steps).filter(sent => sent.startsWith('5003 '))).not.toEqual([])
+        expect(signalsOf(report.steps)).toEqual(['5000 taskkill /T /F', '5003 taskkill /T /F'])
         expect(report.final).toEqual([5000, 5001, 5002, 5003].map(pid => ({ pid, status: 'gone', state: '' })))
         expect([...m.table.procs.keys()].sort()).toEqual([6000, 6001, 6002])
         expect(m.table.signals.some(sent => [6000, 6001, 6002].includes(sent.pid))).toBe(false)
@@ -477,6 +484,26 @@ describe('host contract', () => {
         const plain = machine(one.env)
         seedTree(plain)
         expect((await host.stopProcessTree(portOf(plain, runs), { pid: 5000, start: '100' })).notes).toEqual([])
+      })
+
+      test(`${one.name}: stopProcessTree sends taskkill /T /F at once, and its re-checks report the seconds of the clock, never the count of checks`, async () => {
+        const m = machine(one.env)
+        m.table.procs.set(5000, { ppid: 1, start: '100', state: '', comm: 'claude.exe', isUnkillable: true })
+        m.table.procs.set(6000, { ppid: 1, start: '50', state: '', comm: 'claude.exe' })
+        // Each check is a PowerShell start that takes 2.5 s: after the signal one check at once, one after a second's
+        // sleep, and the 3 s of the wait are over (6 s by the clock).
+        m.clock.checkMs = 2500
+        const report = await host.stopProcessTree(portOf(m, runs), { pid: 5000, start: '100' })
+        expect(signalsOf(report.steps)).toEqual(['5000 taskkill /T /F'])
+        expect(report.steps.filter(step => step.kind === 'signal').map(step => (step.kind === 'signal' ? step.exitCode : -1))).toEqual([1])
+        expect(report.steps.filter(step => step.kind === 'check')).toEqual([{ kind: 'check', pid: 5000, atMs: NOW_MS + 3 * 2500 + 1000, status: 'alive', waitedSec: 6 }])
+        expect(report.final).toEqual([{ pid: 5000, status: 'alive', state: '' }])
+        expect(m.table.signals).toEqual([{ pid: 5000, signal: 'taskkill /F' }])
+        // Quick checks: one a second, three in the 3 s.
+        const quick = machine(one.env)
+        quick.table.procs.set(5000, { ppid: 1, start: '100', state: '', comm: 'claude.exe', isUnkillable: true })
+        const fast = await host.stopProcessTree(portOf(quick, runs), { pid: 5000, start: '100' })
+        expect(fast.steps.filter(step => step.kind === 'check').map(step => (step.kind === 'check' ? step.waitedSec : -1))).toEqual([3])
       })
     }
 
