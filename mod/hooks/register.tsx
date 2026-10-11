@@ -63,9 +63,9 @@ import { HOLDER_FILES, LOCK_EVERY_SEC, isHolderDead, lockCandidates, lockDirsOf,
 import { DIGEST_SCHEMA, digestKeyDir, digestStoreKey, digestText, lastCallOf, withEvent } from './digest'
 import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
-import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
+import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles, signoffDenyText, signoffVerdict } from './guard'
 import { findSecrets, secretScanLine, tallyFromAnswer, tallyOf } from './secrets'
-import { promptLint } from './lint'
+import { promptLint, signoffLint } from './lint'
 import type { SecretTally } from './secrets'
 import type { ProtectedFile } from './guard'
 import type { StopReport } from './host'
@@ -1441,10 +1441,14 @@ async function launch($: EngineInterface, given: LaunchInput) {
   }
   // The prompt lint (lint.ts): a likely secret or a prompt over the size cap is refused before anything runs, the
   // licence picker included; a missing branch or decision section is a warning in the answer.
+  // The sign-off guard (lint.ts, README Sign-off guard) refuses a prompt that instructs a force-push, a remote deletion,
+  // reset --hard, a forced clean or branch -D as a step, a skill test's too; it warns on a push to main or develop.
   const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text)
-  if (lint.refusal !== undefined) {
-    trace($, 'guard', { tool: 'launch_worker', isOk: false, check: 'prompt-lint', ...messageFields(lint.refusal, 'reason') })
-    return { deny: `${PLUGIN}: ${lint.refusal}; nothing was launched` }
+  const signoff = composed === undefined ? { warnings: [] as string[] } : signoffLint(composed.text)
+  const lintRefusal = lint.refusal ?? signoff.refusal
+  if (lintRefusal !== undefined) {
+    trace($, 'guard', { tool: 'launch_worker', isOk: false, check: lint.refusal === undefined ? 'sign-off' : 'prompt-lint', ...messageFields(lintRefusal, 'reason') })
+    return { deny: `${PLUGIN}: ${lintRefusal}; nothing was launched` }
   }
   const runsDir = await runsPath($)
   const nowMs = await $.clock.now()
@@ -1503,7 +1507,7 @@ async function launch($: EngineInterface, given: LaunchInput) {
   }
   // No CLAUDE_CONFIG_DIR on the line: a fresh launch without a picker, or a resume under the default directory.
   const isConfigInherited = picker === '' && (verdict.resumeSid === undefined || machine.isDefaultConfigDir(verdict.configDir, defaultDir))
-  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, name, own, fromEntry, warnings: lint.warnings })
+  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, name, own, fromEntry, warnings: [...lint.warnings, ...signoff.warnings] })
 }
 
 /** Start the worker as a background task of the host's launch tool, find its real pid and session, register it. */
@@ -1804,6 +1808,19 @@ async function guardRefusal($: EngineInterface, input: Record<string, unknown>):
   if (hit === undefined) return undefined
   trace($, 'guard', { check: 'helper-file', tool, file: hit.name, isOk: false })
   return denyText(tool, hit, `a write of ${normalPath(target, active.cwd, active.isWindows)}`)
+}
+
+/**
+ * The sign-off guard on the orchestrator's own Bash and PowerShell commands (guard.ts, README Sign-off guard): a git
+ * force-push, remote deletion, reset --hard, forced clean or branch -D is refused; undefined lets the call on.
+ */
+function signoffRefusal($: EngineInterface, input: Record<string, unknown>): string | undefined {
+  const tool = String(input.tool ?? '')
+  if (tool !== 'Bash' && tool !== 'PowerShell') return undefined
+  const hit = signoffVerdict(typeof input.command === 'string' ? input.command : '', tool === 'PowerShell' ? 'powershell' : 'bash')
+  if (hit === undefined) return undefined
+  trace($, 'guard', { check: 'sign-off', tool, action: hit.how, isOk: false })
+  return signoffDenyText(tool, hit)
 }
 
 /** A directory's entries ($.fs.list), a folder's mtime from $.fs.stat; undefined when it is not there. */
@@ -2311,7 +2328,7 @@ export const register: Register = (on, options) => {
   // re-entry, or its own reads failed) the handler decides on the call's text alone, without the links resolved.
   on('tool.call', { tool: GUARDED_TOOLS }, async ($, e, next) => {
     if (guard === undefined || next.origin.plugin === PLUGIN) return next(e)
-    const refusal = await guardRefusal($, plain(e))
+    const refusal = signoffRefusal($, plain(e)) ?? (await guardRefusal($, plain(e)))
     return refusal === undefined ? next(e) : { deny: refusal }
   }).catch(($, e, next) => {
     if (next.called) return next(e)
@@ -2320,6 +2337,8 @@ export const register: Register = (on, options) => {
     const input = plain(e)
     const tool = String(input.tool ?? '')
     if (tool === 'Bash' || tool === 'PowerShell') {
+      const signoff = signoffVerdict(typeof input.command === 'string' ? input.command : '', tool === 'PowerShell' ? 'powershell' : 'bash')
+      if (signoff !== undefined) return { deny: signoffDenyText(tool, signoff) }
       const hit = commandVerdict(typeof input.command === 'string' ? input.command : '', active.files, tool === 'PowerShell' ? 'powershell' : 'bash')
       return hit === undefined ? next(e) : { deny: denyText(tool, hit.file, hit.how) }
     }

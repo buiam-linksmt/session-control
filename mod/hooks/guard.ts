@@ -692,3 +692,99 @@ export function denyText(tool: string, file: ProtectedFile, how: string): string
     `jq without an output redirection); CLAUDE.md, backups/ and reports/ stay editable by hand.`
   )
 }
+
+// ---------------------------------------------------------------- the sign-off guard on the orchestrator's commands
+
+/** What the sign-off guard refused in a command: the git action as written short, and its place on the sign-off list. */
+export type SignoffHit = { how: string; what: string }
+
+/** git's own options before the subcommand that take a value as the next word. */
+const GIT_OPTION_WITH_VALUE = /^(-C|-c|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--config-env)$/
+
+/** A short option cluster (`-fu`, `-df`) that holds a letter. */
+const hasShort = (arg: string, letter: string) => /^-[a-zA-Z]+$/.test(arg) && arg.slice(1).includes(letter)
+
+/**
+ * The sign-off action a git command runs, or undefined: a push with --force, -f, --force-with-lease or a `+` refspec
+ * (a force-push), with --delete, -d or a `:ref` refspec (a remote branch or tag deletion); reset --hard; clean with -f
+ * or --force; branch -D, or -d/--delete with -f/--force.
+ */
+export function gitSignoffAction(args: readonly string[]): SignoffHit | undefined {
+  let at = 0
+  while (at < args.length && (args[at] ?? '').startsWith('-')) at += GIT_OPTION_WITH_VALUE.test(args[at] ?? '') ? 2 : 1
+  const sub = args[at] ?? ''
+  const rest = args.slice(at + 1)
+  if (sub === 'push') {
+    if (rest.some(arg => arg === '--force' || arg.startsWith('--force-with-lease') || hasShort(arg, 'f') || /^\+./.test(arg))) return { how: 'git push --force', what: 'a force-push or history rewrite' }
+    if (rest.some(arg => arg === '--delete' || hasShort(arg, 'd') || /^:./.test(arg))) return { how: 'git push --delete', what: 'deleting a remote branch or tag' }
+  }
+  if (sub === 'reset' && rest.includes('--hard')) return { how: 'git reset --hard', what: 'reset --hard over uncommitted work' }
+  if (sub === 'clean' && rest.some(arg => arg === '--force' || hasShort(arg, 'f'))) return { how: 'git clean -f', what: 'clean over uncommitted work' }
+  if (sub === 'branch') {
+    const isDelete = rest.some(arg => arg === '--delete' || hasShort(arg, 'd'))
+    const isForce = rest.some(arg => arg === '--force' || hasShort(arg, 'f'))
+    if (rest.some(arg => hasShort(arg, 'D')) || (isDelete && isForce)) return { how: 'git branch -D', what: 'branch -D over unpushed work' }
+  }
+  return undefined
+}
+
+/**
+ * Whether a Bash or PowerShell command of the orchestrator runs one of the git actions of the sign-off list
+ * (gitSignoffAction), read as commandVerdict reads a command: heredoc bodies that data sinks read and quoted arguments
+ * are text; `sh -c`, `bash -c`, `eval`, `powershell -Command`, substitutions and a heredoc or here-string a shell reads
+ * are code; git's options before the subcommand are passed over.
+ */
+export function signoffVerdict(command: string, dialect: 'bash' | 'powershell', depth = 0): SignoffHit | undefined {
+  if (!/\bgit/i.test(command) || depth > 3) return undefined
+  const isPowerShell = dialect === 'powershell'
+  const { text, heredocs } = isPowerShell ? { text: command, heredocs: [] } : cutHeredocs(command)
+  const segments = segmentsOf(text, isPowerShell)
+  if (!isPowerShell) {
+    for (const inner of substitutionsOf(text)) {
+      const hit = signoffVerdict(inner, 'bash', depth + 1)
+      if (hit !== undefined) return hit
+    }
+    for (const heredoc of heredocs) {
+      const at = segments.findIndex(segment => segment.words.some(one => one.text === heredoc.mark))
+      const feed = feedOf(segments, Math.max(0, at))
+      const inners = [...(heredoc.isQuoted ? [] : substitutionsOf(heredoc.body, true)), ...(feed.kind === 'code' || feed.kind === 'lines' ? [heredoc.body] : [])]
+      for (const inner of inners) {
+        const hit = signoffVerdict(inner, 'bash', depth + 1)
+        if (hit !== undefined) return hit
+      }
+    }
+  }
+  for (const [index, segment] of segments.entries()) {
+    const { name, args } = commandOf(segment)
+    if (name === 'git' || name === 'git.exe') {
+      const hit = gitSignoffAction(args)
+      if (hit !== undefined) return hit
+    }
+    for (const fed of segment.hereStrings) {
+      if (feedOf(segments, index).kind !== 'code') continue
+      const hit = signoffVerdict(fed, 'bash', depth + 1)
+      if (hit !== undefined) return hit
+    }
+    if (SHELLS.test(name) || name === 'eval') {
+      const codeAt = args.findIndex(arg => /^(-c|\/c|\/k)$/i.test(arg))
+      const code = name === 'eval' ? args.join(' ') : codeAt >= 0 ? args.slice(codeAt + 1).join(' ') : ''
+      const inner = code === '' ? undefined : signoffVerdict(code, 'bash', depth + 1)
+      if (inner !== undefined) return inner
+    }
+    if (POWERSHELLS.test(name)) {
+      const codeAt = args.findIndex(arg => /^-(c|command)$/i.test(arg))
+      const inner = codeAt < 0 ? undefined : signoffVerdict(args.slice(codeAt + 1).join(' '), 'powershell', depth + 1)
+      if (inner !== undefined) return inner
+    }
+  }
+  return undefined
+}
+
+/** The sign-off guard's refusal of an orchestrator command. */
+export function signoffDenyText(tool: string, hit: SignoffHit): string {
+  return (
+    `session-control: refused by the sign-off guard: ${hit.how} is ${hit.what}, an action on the sign-off list (${tool}). The orchestrator never runs it ` +
+    "itself: this repository's rules give pushes and resets to workers, and this one needs the user's go-ahead in this conversation, which the mod cannot see. " +
+    'Raise an open point for the go-ahead; with it the user runs the step or says how.'
+  )
+}

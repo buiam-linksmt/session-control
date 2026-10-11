@@ -35,7 +35,7 @@ export function sentencesOf(text: string): string[] {
  * doesn't, mustn't, shan't, cannot, can't, refrain, avoid, forbidden, prohibited, disallowed, stop before, a sign-off, a
  * go-ahead. A sentence with one of them counts as saying the worker must not do what it names.
  */
-export const NEGATION = /\b(?:no|not|never|nothing|neither|nor|without|don't|doesn't|mustn't|shan't|cannot|can't|refrain|avoid|forbidden|prohibited|disallowed)\b|\bstop before\b|\bsign-?off\b|\bgo-ahead\b/i
+export const NEGATION = /(?<![\w-])(?:no|not|never|nothing|neither|nor|without|don't|doesn't|mustn't|shan't|cannot|can't|refrain|avoid|forbidden|prohibited|disallowed)(?![\w-])|\bstop before\b|\bsign-?off\b|\bgo-ahead\b/i
 
 /**
  * A branch named: the word branch with a name after it in the same sentence (in backticks or quotes, a gitflow name, or
@@ -83,4 +83,87 @@ export function promptLint(prompt: string): PromptLint {
     warnings.push('the prompt asks to commit, push or work on a branch but names no branch (an existing one by exact name, or "create one" with its gitflow prefix) and no decision section; the worker may pick one itself')
   }
   return { warnings }
+}
+
+// ---------------------------------------------------------------- the sign-off guard on the prompt (README, Sign-off guard)
+
+/** The actions on the sign-off list the prompt guard refuses as a step, each with what the refusal calls it. */
+/** What may stand between a git verb and its flag: one command's words, no backtick, quote, parenthesis or separator. */
+const SPAN = String.raw`[^\n\`'"()|;&]`
+
+const SIGNOFF_ACTIONS: readonly { label: string; pattern: RegExp }[] = [
+  { label: 'a force-push', pattern: /\bforce[- ]?push(?:es|ed|ing)?\b/gi },
+  { label: 'a force-push', pattern: new RegExp(String.raw`\bpush\b${SPAN}{0,80}?\s(?:--force(?:-with-lease)?(?:=[^\s\`'"]*)?|-[a-zA-Z]*f[a-zA-Z]*|\+[\w./:-]+)(?=[\s\`'",;:.!?)]|$)`, 'gi') },
+  { label: 'a remote branch or tag deletion', pattern: new RegExp(String.raw`\bpush\b${SPAN}{0,80}?\s(?:--delete|-[a-zA-Z]*d[a-zA-Z]*)(?=[\s\`'",;:.!?)]|$)`, 'gi') },
+  { label: 'a remote branch or tag deletion', pattern: /\bpush\s+(?:-[-\w]*\s+)*[\w.@/-]+\s+:[\w./-]+/gi },
+  { label: 'reset --hard', pattern: new RegExp(String.raw`\breset\b${SPAN}{0,40}?\s--hard\b`, 'gi') },
+  { label: 'a forced clean', pattern: new RegExp(String.raw`\bclean\b${SPAN}{0,40}?\s(?:--force|-[a-zA-Z]*f[a-zA-Z]*)(?=[\s\`'",;:.!?)]|$)`, 'gi') },
+  { label: 'branch -D', pattern: new RegExp(String.raw`\bbranch\b${SPAN}{0,40}?\s(?:-D|-[a-zA-Z]*(?:d[a-zA-Z]*f|f[a-zA-Z]*d)[a-zA-Z]*)(?=[\s\`'",;:.!?)]|$)`, 'g') },
+  { label: 'branch -D', pattern: new RegExp(String.raw`\bbranch\b${SPAN}{0,40}?\s(?:-d|--delete)\b${SPAN}{0,40}?\s(?:-f|--force)\b`, 'g') },
+  { label: 'branch -D', pattern: new RegExp(String.raw`\bbranch\b${SPAN}{0,40}?\s(?:-f|--force)\b${SPAN}{0,40}?\s(?:-d|--delete)\b`, 'g') },
+]
+
+/** A push to main or develop named in a sentence: warned, since the project's push policy decides whether it needs a go-ahead. */
+const PROTECTED_PUSH = /\bpush(?:es|ed|ing)?\b[^\n]{0,80}?\b(main|develop)\b|\b(main|develop)\b[^\n]{0,40}?\bpush(?:es|ed|ing)?\b/gi
+
+/** Words that turn a clause around: a negation on the other side of one does not cover the action. */
+const CONTRAST = /\b(?:but|however|then|instead|yet|otherwise)\b/gi
+
+/** The negation window: this many words before the action, this many after, in its sentence. */
+export const NEGATION_WORDS_BEFORE = 12
+export const NEGATION_WORDS_AFTER = 6
+
+/**
+ * Whether the action at `start` to `end` of a sentence is said not to be done: a negation (NEGATION) in the same
+ * sentence, at most NEGATION_WORDS_BEFORE words before it or NEGATION_WORDS_AFTER words after it, with no contrast word
+ * (but, however, then, instead, yet, otherwise) between the two.
+ */
+export function isNegatedAt(sentence: string, start: number, end: number): boolean {
+  let before = sentence.slice(0, start)
+  const contrasts = [...before.matchAll(CONTRAST)]
+  const lastContrast = contrasts[contrasts.length - 1]
+  if (lastContrast !== undefined) before = before.slice((lastContrast.index ?? 0) + lastContrast[0].length)
+  const beforeWords = before.split(/\s+/).filter(one => one !== '').slice(-NEGATION_WORDS_BEFORE).join(' ')
+  let after = sentence.slice(end)
+  const firstContrast = after.search(CONTRAST)
+  if (firstContrast >= 0) after = after.slice(0, firstContrast)
+  const afterWords = after.split(/\s+/).filter(one => one !== '').slice(0, NEGATION_WORDS_AFTER).join(' ')
+  return NEGATION.test(beforeWords) || NEGATION.test(afterWords)
+}
+
+export type SignoffLint = { refusal?: string; warnings: string[] }
+
+/**
+ * The sign-off guard on a worker prompt: each sentence that instructs a force-push, a remote branch or tag deletion,
+ * reset --hard, a forced clean or branch -D, with no negation in its window (isNegatedAt), refuses the launch, naming
+ * the actions and their lines; a push to main or develop with none warns. A skill test is not exempt.
+ */
+export function signoffLint(prompt: string): SignoffLint {
+  const found: { label: string; line: number }[] = []
+  const warned = new Set<string>()
+  for (const [index, line] of prompt.split('\n').entries()) {
+    for (const sentence of sentencesOf(line)) {
+      for (const action of SIGNOFF_ACTIONS) {
+        action.pattern.lastIndex = 0
+        for (const match of sentence.matchAll(action.pattern)) {
+          const at = match.index ?? 0
+          if (!isNegatedAt(sentence, at, at + match[0].length) && !found.some(one => one.label === action.label && one.line === index + 1)) found.push({ label: action.label, line: index + 1 })
+        }
+      }
+      for (const match of sentence.matchAll(PROTECTED_PUSH)) {
+        const at = match.index ?? 0
+        if (!isNegatedAt(sentence, at, at + match[0].length)) warned.add((match[1] ?? match[2] ?? '').toLowerCase())
+      }
+    }
+  }
+  const warnings = [...warned].sort().map(branch => `the prompt names a push to ${branch}: a push to a protected branch needs the user's go-ahead where the project's push policy asks (a Standing decision push-<project>); check it before the worker pushes`)
+  if (found.length === 0) return { warnings }
+  const listed = found.map(one => `${one.label} on line ${one.line}`).join(', ')
+  return {
+    refusal:
+      `refused by the sign-off guard: the prompt instructs ${listed} as a step for the worker; that needs the user's go-ahead in this conversation, a sign-off item the mod cannot see. ` +
+      'Raise an open point for the go-ahead and launch without the step; with the go-ahead the user runs it or says how, and a prompt may tell the worker to stop before it and report. ' +
+      'A sentence that tells the worker not to do it (never, do not, stop before) passes',
+    warnings,
+  }
 }

@@ -5,6 +5,7 @@
 // line of the launch's answer. Every canary is an invented string, joined at run time.
 
 import { describe, expect, test } from 'claude-code/testing'
+import type { On } from 'claude-code'
 
 import { RULES_BLOCK, composePrompt } from '../hooks/core'
 import { NEGATION, PROMPT_MAX_CHARS, isSkillTest, promptLint, sentencesOf } from '../hooks/lint'
@@ -74,7 +75,7 @@ describe('lint.ts', () => {
 
 const TOOL = 'mcp__session-control__launch_worker'
 
-async function orchestrator($: Parameters<Parameters<typeof test>[2]>[0], on: Parameters<Parameters<typeof test>[2]>[1]): Promise<World> {
+async function orchestrator($: { session: { start: (e: never) => Promise<unknown> } }, on: On): Promise<World> {
   const world = mockWorld(on)
   world.files.set(`${ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
   world.files.set(REGISTRY, '[]\n')
