@@ -11,6 +11,7 @@ import type { FsEntry, FsStat, ProcessRunInit, ProcessRunResult } from 'claude-c
 import type { SessionEntry } from '../types'
 import type { LaunchArgs, LaunchFacts, LaunchInput, ProcFact, ProcFacts } from './core'
 import type { HelperNote } from './host-helper'
+import type { UsageProbe } from './usage'
 import { posixHost } from './host-posix'
 import { windowsHost } from './host-windows'
 
@@ -231,6 +232,15 @@ export type Host = {
   rotate(port: HostPort, plan: RotatePlan): Promise<void>
   /** The trace's write, untraced: the rotation when one is given, then the append; answers what went wrong with the append. */
   rotateAndAppend(port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan): Promise<string | undefined>
+
+  // ---- licences
+  /**
+   * The usage of one config directory (probe_licence_usage): `claude -p /usage --no-session-persistence` with
+   * CLAUDE_CONFIG_DIR set to it (left out when `isInherited`: the machine's default directory, as a launch without a
+   * picker leaves it out), no shell, stdin closed, the cwd a neutral root, at most USAGE_TIMEOUT_MS (usage.ts). Answers
+   * the 5-hour and 7-day all-models windows or a fixed code; the CLI's text is never returned, traced or written.
+   */
+  probeUsage(port: HostPort, configDir: string, isInherited: boolean): Promise<UsageProbe>
 }
 
 /** Every operation and field of Host: the contract test checks both adapters against this list. */
@@ -271,6 +281,7 @@ export const HOST_MEMBERS = [
   'stopProcessTree',
   'rotate',
   'rotateAndAppend',
+  'probeUsage',
 ] as const satisfies readonly (keyof Host)[]
 
 // A member added to Host and not to the list fails to compile here.

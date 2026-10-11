@@ -14,6 +14,7 @@ import {
   TAIL_SHAPED_MAX_BYTES,
   bashLaunchCommand,
   nativeHashTrees,
+  nativeUsageProbe,
   parseNewerListing,
   parseStopOutput,
   removeOutcomeOfExit,
@@ -318,4 +319,6 @@ export const posixHost: Host = {
     if (ran.exitCode !== 0) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.slice(0, 100)}`)
   },
   rotateAndAppend: (port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan) => rotateAndAppendWith(posixHost, port, path, lines, rotation),
+  /** `claude` from the PATH, in `/`: the probe reads no project's files (nativeUsageProbe). */
+  probeUsage: (port: HostPort, configDir: string, isInherited: boolean) => nativeUsageProbe(port, 'claude', configDir, isInherited, '/'),
 }

@@ -14,7 +14,9 @@ rename over an existing file (also while another process holds it open), append,
 file with CRLF line ends and non-ASCII text, filesNewerThan over the tree NEWER_PS1 listed (the junction neither
 followed nor listed), hashTree over two copies of a mod folder (the SHA-256 of each file against Python's, a junction
 in hooks neither followed nor hashed, the generated .claude-plugin/types and tests left out, the fixed codes), and a
-batch of 20 operations, with the time per batch. Without that node.exe it prints `skipped`."""
+batch of 20 operations, with the time per batch; then probeUsage's process shape: claude.exe looked up on a PATH of
+one scratch folder without a shell (a copy of node.exe stands in, so no claude starts), a claude.cmd alone and an
+empty PATH answered NO_CLAUDE. Without that node.exe it prints `skipped`."""
 import ast, hashlib, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -619,6 +621,47 @@ try:
             code, out, err = run('files.ps1', files, 'append', w('ps.add'), w('ps.log'))
             ps_ms.append((time.perf_counter() - started) * 1000)
             assert code == 0, err
+        # probeUsage on Windows, its process shape only, with no claude: a launcher run by the same node.exe gives the
+        # helper a PATH of one scratch folder. There a copy of node.exe named claude.exe stands in for claude: the
+        # helper must find it by the PATH without a shell, and node.exe refuses the probe's arguments (bad option, exit
+        # 9), which the helper answers as the fixed code FAILED with no text. A folder holding only a claude.cmd (an npm
+        # shim) is NO_CLAUDE, since no shell runs it; an empty folder is NO_CLAUDE. The PATH never holds the folder of a
+        # real claude.exe, so none can start. The usage text itself is parsed alike on every platform (helper.test.mjs).
+        fake_dir = os.path.join(work, 'fake claude')
+        cmd_dir = os.path.join(work, 'cmd only')
+        empty_dir = os.path.join(work, 'no claude')
+        for one in (fake_dir, cmd_dir, empty_dir):
+            os.makedirs(one)
+        linked = subprocess.run([PS, '-NoProfile', '-NonInteractive', '-Command',
+                                 f"Copy-Item -LiteralPath '{node_win}' -Destination '{to_win(fake_dir, chr(92))}\\claude.exe'"],
+                                capture_output=True, text=True, timeout=60, cwd='/mnt/c')
+        assert linked.returncode == 0 and os.path.exists(os.path.join(fake_dir, 'claude.exe')), linked.stderr[:300]
+        open(os.path.join(cmd_dir, 'claude.cmd'), 'w').write('@echo Current session: 1%% used\r\n')
+        open(os.path.join(work, 'usage-launcher.js'), 'w').write(
+            "const { spawnSync } = require('node:child_process')\n"
+            "const [host, dir, request] = process.argv.slice(2)\n"
+            "const env = { ...process.env }\n"
+            "for (const key of Object.keys(env)) if (key.toUpperCase() === 'PATH') delete env[key]\n"
+            "env.PATH = dir\n"
+            "const ran = spawnSync(process.execPath, [host, 'probeUsage'], { input: request, env, timeout: 60000 })\n"
+            "process.stdout.write(JSON.stringify({ status: ran.status, out: String(ran.stdout), err: String(ran.stderr) }))\n")
+
+        def usage_probe(path_dir, config_dir):
+            r = subprocess.run([node, f'{win}/usage-launcher.js', host, to_win(path_dir, chr(92)), json.dumps({'configDir': config_dir})],
+                               capture_output=True, timeout=120, cwd=work)
+            assert r.returncode == 0, r.stderr[:300]
+            ran = json.loads(r.stdout.decode('utf-8'))
+            assert ran['err'] == '', ran['err'][:300]
+            return ran['status'], json.loads(ran['out'])
+
+        config_dir = to_win(os.path.join(work, 'licence'))
+        for path_dir, want in ((fake_dir, 'FAILED'), (cmd_dir, 'NO_CLAUDE'), (empty_dir, 'NO_CLAUDE')):
+            status, answer = usage_probe(path_dir, config_dir)
+            assert (status, answer) == (1, {'ok': False, 'code': want}), (path_dir, status, answer)
+        status, answer = usage_probe(fake_dir, 'relative\\dir')
+        assert (status, answer) == (1, {'ok': False, 'code': 'BAD_REQUEST'}), answer
+        print('windows-usage-selftest: ok (claude.exe found on the PATH without a shell and answered as a fixed code; a claude.cmd alone and an empty PATH are NO_CLAUDE; no claude started)')
+
         print(f'windows-helper-selftest: ok (node {version}; rename over a held file {held_ms:.0f} ms; tail of {size / 1e6:.1f} MB {tail_ms:.0f} ms; filesNewerThan {newer_ms:.0f} ms; hashTree of two mod folders {hash_ms:.0f} ms; '
               f'a batch of 20 operations: median {statistics.median(batch_ms):.0f} ms per batch (runs {", ".join(f"{one:.0f}" for one in batch_ms)}); '
               f'the same 20 as single helper runs {sum(single_ms):.0f} ms in all (median {statistics.median(single_ms):.0f} ms each); '

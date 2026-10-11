@@ -26,6 +26,7 @@ import {
   bashLaunchCommand,
   clockPause,
   nativeHashTrees,
+  nativeUsageProbe,
   parseNewerListing,
   parseStopOutput,
   readTail,
@@ -581,4 +582,12 @@ export const windowsHost: Host = {
     }
   },
   rotateAndAppend: (port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan) => rotateAndAppendWith(windowsHost, port, path, lines, rotation),
+  /**
+   * `claude.exe` from the PATH (no shell, so an npm `claude.cmd` shim is not run: NO_CLAUDE), in the root of the home
+   * folder's drive (nativeUsageProbe). Not run on a live Windows host yet.
+   */
+  async probeUsage(port: HostPort, configDir: string, isInherited: boolean) {
+    const drive = /^[A-Z]:\//.exec(await windowsHost.homeDir(port))?.[0]
+    return nativeUsageProbe(port, 'claude.exe', winPath(configDir), isInherited, drive)
+  },
 }

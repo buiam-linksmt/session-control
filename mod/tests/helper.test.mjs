@@ -965,3 +965,144 @@ test('hashTree: a root that is not there or is a file, a bad request, over 500 f
     fs.rmSync(top, { recursive: true, force: true })
   }
 })
+
+// ---------------------------------------------------------------- probeUsage (usage.mjs)
+
+/** Node strips the types of a .ts file by itself (Node 23.6 or newer, or 22 with the flag): the parser twin and the fixtures load as they are. */
+const HAS_TS = Boolean(process.features?.typescript)
+
+test('probeUsage parser: the helper and the native fallback (hooks/usage.ts) give each recorded and written case its answer, and the same answer on mixed texts', { skip: !HAS_TS }, async () => {
+  const { parseUsage } = await import('../helper/usage.mjs')
+  const twin = await import('../hooks/usage.ts')
+  const { USAGE_CASES } = await import('./usage-fixtures.ts')
+  assert.ok(USAGE_CASES.length >= 20)
+  for (const one of USAGE_CASES) {
+    const args = [one.stdout, one.stderr ?? '', one.exitCode ?? 0]
+    assert.deepEqual(parseUsage(...args), one.expect, one.name)
+    assert.deepEqual(twin.parseUsage(...args), one.expect, one.name)
+  }
+  // Lines of every case shuffled together, with a fixed seed: both parsers agree on each mix.
+  const pool = USAGE_CASES.flatMap(one => one.stdout.split('\n').slice(0, 30))
+  let seed = 7
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648)
+  for (let round = 0; round < 300; round++) {
+    const text = Array.from({ length: 1 + (next() % 12) }, () => pool[next() % pool.length]).join(next() % 2 === 0 ? '\n' : '\r\n')
+    const exitCode = next() % 3 === 0 ? 1 : 0
+    assert.deepEqual(parseUsage(text, '', exitCode), twin.parseUsage(text, '', exitCode), JSON.stringify(text).slice(0, 200))
+  }
+})
+
+/**
+ * A fake `claude` first on the PATH, in a scratch folder: it records its arguments, cwd, CLAUDE_CONFIG_DIR and what it
+ * read on stdin, and answers by the last component of CLAUDE_CONFIG_DIR (`inherited` when unset): `ok` and `inherited`
+ * the recorded text of a licence, `login` a login prompt, `slow` five seconds of nothing (its pid written first),
+ * `empty` nothing, `fail` an API error, `long` the text and then 2 MB more, `garbage` a text with no window.
+ */
+async function fakeClaude() {
+  const { USAGE_FIXTURES } = await import('./usage-fixtures.ts')
+  const top = scratch()
+  const bin = join(top, 'bin')
+  fs.mkdirSync(bin)
+  fs.writeFileSync(join(top, 'usage.txt'), USAGE_FIXTURES.recordedMain)
+  const script = `#!/bin/sh
+rec="${top}/rec"
+case "\${CLAUDE_CONFIG_DIR-}" in "") name=inherited ;; *) name=$(basename "$CLAUDE_CONFIG_DIR") ;; esac
+{ printf 'args=%s\\n' "$*"; printf 'cwd=%s\\n' "$(pwd)"; printf 'cfg=%s\\n' "\${CLAUDE_CONFIG_DIR-unset}"; printf 'stdin=%s\\n' "$(cat | wc -c | tr -d ' ')"; } > "$rec-$name"
+case "$name" in
+  ok|inherited) cat "${top}/usage.txt" ;;
+  login) echo 'Not logged in · Please run /login'; exit 1 ;;
+  slow) echo $$ > "$rec-slow.pid"; sleep 5 ;;
+  empty) ;;
+  fail) echo 'API Error: 500 Internal server error'; exit 1 ;;
+  long) cat "${top}/usage.txt"; yes 'filler line of the long output' | head -n 70000 ;;
+  garbage) echo 'Something else entirely' ;;
+esac
+`
+  fs.writeFileSync(join(bin, 'claude'), script, { mode: 0o755 })
+  const cfg = name => {
+    const dir = join(top, 'cfg', name)
+    fs.mkdirSync(dir, { recursive: true })
+    return dir
+  }
+  const run = (request, env = {}) => helper('probeUsage', request, { PATH: `${bin}:${process.env.PATH}`, ...env })
+  const record = name => Object.fromEntries(fs.readFileSync(join(top, `rec-${name}`), 'utf8').trim().split('\n').map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]))
+  return { top, bin, cfg, run, record }
+}
+
+const MAIN_WINDOWS = { five: { percent: 12, resets: 'Oct 11, 11:20am (Europe/Budapest)' }, seven: { percent: 41, resets: 'Oct 16, 1pm (Europe/Budapest)' } }
+
+test('probeUsage: claude -p /usage --no-session-persistence with CLAUDE_CONFIG_DIR set, in /, stdin closed; only the two windows come back', { skip: !IS_LINUX || !HAS_TS }, async () => {
+  const fake = await fakeClaude()
+  try {
+    const dir = fake.cfg('ok')
+    const got = fake.run({ configDir: dir })
+    assert.equal(got.code, 0, got.stdout)
+    assert.deepEqual(got.answer, { ok: true, ...MAIN_WINDOWS })
+    assert.equal(got.stderr, '')
+    assert.ok(!got.stdout.includes(dir) && !got.stdout.includes('subscription') && !got.stdout.includes('Fable'), got.stdout)
+    assert.deepEqual(fake.record('ok'), { args: '-p /usage --no-session-persistence', cwd: '/', cfg: dir, stdin: '0' })
+    // Nothing written beside the record of the fake: the text is never put on disk.
+    assert.deepEqual(fs.readdirSync(fake.top).sort(), ['bin', 'cfg', 'rec-ok', 'usage.txt'])
+    assert.deepEqual(fs.readdirSync(dir), [])
+  } finally {
+    fs.rmSync(fake.top, { recursive: true, force: true })
+  }
+})
+
+test('probeUsage: isInherited leaves CLAUDE_CONFIG_DIR out, even when the helper itself has one', { skip: !IS_LINUX || !HAS_TS }, async () => {
+  const fake = await fakeClaude()
+  try {
+    const got = fake.run({ configDir: fake.cfg('default'), isInherited: true }, { CLAUDE_CONFIG_DIR: join(fake.top, 'cfg', 'elsewhere') })
+    assert.deepEqual(got.answer, { ok: true, ...MAIN_WINDOWS })
+    assert.equal(fake.record('inherited').cfg, 'unset')
+  } finally {
+    fs.rmSync(fake.top, { recursive: true, force: true })
+  }
+})
+
+test('probeUsage: each failure is its fixed code alone (NOT_LOGGED_IN, FAILED, PARSE, NO_CLAUDE), with no text, path or environment', { skip: !IS_LINUX || !HAS_TS }, async () => {
+  const fake = await fakeClaude()
+  try {
+    for (const [name, code] of [['login', 'NOT_LOGGED_IN'], ['fail', 'FAILED'], ['empty', 'PARSE'], ['garbage', 'PARSE']]) {
+      const dir = fake.cfg(name)
+      assertFailure(fake.run({ configDir: dir }), code, dir)
+    }
+    // No claude on the PATH at all.
+    const dir = fake.cfg('ok')
+    assertFailure(helper('probeUsage', { configDir: dir }, { PATH: join(fake.top, 'cfg') }), 'NO_CLAUDE', dir)
+    // A request without a directory, or with a relative one, runs nothing.
+    assertFailure(fake.run({}), 'BAD_REQUEST')
+    assertFailure(fake.run({ configDir: '' }), 'BAD_REQUEST')
+    assertFailure(fake.run({ configDir: 'cfg/ok' }), 'BAD_REQUEST')
+    assertFailure(fake.run({ configDir: 7 }), 'BAD_REQUEST')
+  } finally {
+    fs.rmSync(fake.top, { recursive: true, force: true })
+  }
+})
+
+test('probeUsage: an output past the 1 MiB cap stops claude and the windows at its top are read', { skip: !IS_LINUX || !HAS_TS }, async () => {
+  const fake = await fakeClaude()
+  try {
+    assert.deepEqual(fake.run({ configDir: fake.cfg('long') }).answer, { ok: true, ...MAIN_WINDOWS })
+  } finally {
+    fs.rmSync(fake.top, { recursive: true, force: true })
+  }
+})
+
+test('probeUsage: past its time claude is killed and the answer is TIMEOUT; the shortened time counts only with SC_HELPER_TEST=1', { skip: !IS_LINUX || !HAS_TS }, async () => {
+  const fake = await fakeClaude()
+  try {
+    const dir = fake.cfg('slow')
+    const started = Date.now()
+    assertFailure(fake.run({ configDir: dir }, { SC_HELPER_TEST: '1', SC_HELPER_USAGE_TIMEOUT_MS: '500' }), 'TIMEOUT', dir)
+    assert.ok(Date.now() - started < 4000)
+    const pid = Number(fs.readFileSync(join(fake.top, 'rec-slow.pid'), 'utf8'))
+    assert.throws(() => process.kill(pid, 0), /ESRCH/)
+    // Without the test switch the variable is ignored: the five seconds pass and the empty text is PARSE, not TIMEOUT.
+    const again = Date.now()
+    assertFailure(fake.run({ configDir: dir }, { SC_HELPER_USAGE_TIMEOUT_MS: '500' }), 'PARSE', dir)
+    assert.ok(Date.now() - again >= 4500)
+  } finally {
+    fs.rmSync(fake.top, { recursive: true, force: true })
+  }
+})

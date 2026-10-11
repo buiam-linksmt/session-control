@@ -16,6 +16,9 @@
 //   hashTree      {root, dirs, files}                 -> {files: [{path, sha256}], total}    read-only, links not followed
 //   processTree   {pid, start}                        -> {out}       Linux only: the lines of TREE_SCRIPT (read-only)
 //   stopProcesses {wait, targets: ['<pid>:<start>']}  -> {out}       Linux only: the lines of STOP_SCRIPT (signals sent)
+//   probeUsage    {configDir, isInherited?}           -> {five, seven}  `claude -p /usage` for that config directory: each
+//                                                                    window {percent, resets} or null; codes NO_CLAUDE,
+//                                                                    TIMEOUT, NOT_LOGGED_IN, PARSE, FAILED (usage.mjs)
 //   batch         {ops: [{op, ...request}, ...]}      -> {results}   file operations in order, in this one process;
 //                                                                    the first failure stops it: {ok:false, code, at}
 

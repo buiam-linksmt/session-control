@@ -23,6 +23,12 @@ export const CODES = Object.freeze([
   'CROSS_DEVICE',
   'IO',
   'INTERNAL',
+  // The usage probe's own (usage.mjs): the answer of probe_licence_usage for one licence, not a failure of the helper.
+  'NO_CLAUDE',
+  'TIMEOUT',
+  'NOT_LOGGED_IN',
+  'PARSE',
+  'FAILED',
 ])
 
 /** Node's error codes as the helper's own; anything else from the file system is IO. */

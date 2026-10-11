@@ -13,6 +13,8 @@ import type { SessionEntry } from '../types'
 import { parseProcFacts, probeArgs } from './core'
 import type { ProcFacts } from './core'
 import type { Host, HostPort, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopTarget, TailShape, TreeHashes, TreeSpec } from './host'
+import { isUsageCode, usageAnswer } from './usage'
+import type { UsageProbe } from './usage'
 import { NEWER_MAX, PANE_TAIL, STOP_TIMEOUT_MS, STOP_WAIT_SECONDS, TAIL_SHAPED_MAX_BYTES, parseStopOutput, readTail, stopTargets, unstoppable } from './host-shared'
 
 /** The helper's entry point under the plugin's directory. */
@@ -28,10 +30,10 @@ export const HELPER_REDETECT_MS = 10 * 60_000
 export type HelperSetup = { node: string; script: string }
 
 /** The helper's operations as its protocol names them. */
-export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'hashTree' | 'processTree' | 'stopProcesses' | 'batch'
+export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'hashTree' | 'processTree' | 'stopProcesses' | 'probeUsage' | 'batch'
 
 /** One step of a batch: a file operation and its request. */
-export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'processTree' | 'stopProcesses' | 'batch'> } & Record<string, unknown>
+export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'processTree' | 'stopProcesses' | 'probeUsage' | 'batch'> } & Record<string, unknown>
 
 /** What a helper call came to: its answer's fields, or the fixed code it failed with. */
 export type HelperAnswer = { ok: true; fields: Record<string, unknown> } | { ok: false; code: string; at?: number }
@@ -55,6 +57,9 @@ const LISTING_TIMEOUT_MS = 30_000
 
 /** How long `node --version` may take. */
 const VERSION_TIMEOUT_MS = 5_000
+
+/** How long a probeUsage call may take: the helper's own 15 s bound on claude, and Node's start. */
+export const USAGE_CALL_TIMEOUT_MS = 20_000
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 
@@ -134,14 +139,26 @@ export function treeAnswer(fields: unknown): TreeHashes | undefined {
   return { method: 'sha256', files }
 }
 
+/**
+ * What a probeUsage call answers for: the windows of an `ok` answer, or one of the probe's own codes (NO_CLAUDE,
+ * TIMEOUT, NOT_LOGGED_IN, PARSE, FAILED), which are the answer and no fallback. A call that timed out is TIMEOUT too:
+ * claude may have run its whole time already, and a native probe after it would run it again. Undefined: the helper
+ * itself failed (Node did not start, an answer that is not JSON or not the answer expected, any other code), and the
+ * native probe runs in its place.
+ */
+export function usageOfCall(answer: HelperAnswer): UsageProbe | undefined {
+  if (answer.ok) return usageAnswer(answer.fields)
+  return isUsageCode(answer.code) ? { ok: false, code: answer.code } : undefined
+}
+
 /** The rotation request of a plan. */
 const rotateRequest = (plan: RotatePlan) => ({ path: plan.path, adding: plan.adding, maxBytes: plan.maxBytes, moves: plan.moves.map(([from, to]) => [from, to]) })
 
 /**
  * The adapter with its listed operations run by the helper: probe and stopProcessTree (Linux only: on Windows the
  * process rows stay on PROBE_PS1, and the stop on TREE_PS1 and taskkill), writeAtomic, renameOver, removeFile,
- * removeRegularFile (the same helper operation with `regularOnly`), append, tail, rotate, filesNewerThan and
- * rotateAndAppend (one batch). Every other member is the adapter's own.
+ * removeRegularFile (the same helper operation with `regularOnly`), append, tail, rotate, filesNewerThan,
+ * rotateAndAppend (one batch) and probeUsage (on both platforms). Every other member is the adapter's own.
  */
 export function withHelper(base: Host, setup: HelperSetup): Host {
   let ready: Promise<boolean> | undefined
@@ -407,6 +424,20 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
       const done = await base.stopProcessTree(port, target, listing)
       const cut = code === 'TIMEOUT' ? '; it was cut off after it started, so signals it sent before that are not in this record' : ''
       return { ...done, notes: [`the helper's stop failed (${code})${cut}; the native stop ran over the same listing and signalled only processes that still had their listed start`, ...done.notes] }
+    },
+
+    /**
+     * The usage probe in one helper process (both platforms: claude.exe from the PATH on Windows, without a shell). The
+     * probe's own codes are the answer (usageOfCall); a failure of the helper itself falls back to the native probe.
+     */
+    async probeUsage(port: HostPort, configDir: string, isInherited: boolean): Promise<UsageProbe> {
+      if (!(await isReady(port))) return base.probeUsage(port, configDir, isInherited)
+      const request = isInherited ? { configDir, isInherited: true } : { configDir }
+      const answer = await call(port, 'probeUsage', request, false, { configDir, isInherited }, USAGE_CALL_TIMEOUT_MS)
+      const probed = usageOfCall(answer)
+      if (probed !== undefined) return probed
+      port.noteHelper({ kind: 'fallback', op: 'probeUsage', code: answer.ok ? 'BAD_ANSWER' : answer.code, isQuiet: false })
+      return base.probeUsage(port, configDir, isInherited)
     },
 
     async rotate(port: HostPort, plan: RotatePlan): Promise<void> {

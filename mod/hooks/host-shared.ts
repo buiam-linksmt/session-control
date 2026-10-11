@@ -7,6 +7,8 @@ import type { LaunchArgs } from './core'
 import { buildLaunchArgv, tailLines } from './core'
 import type { Host, HostPort, LaunchTarget, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopStatus, StopStep, StopTarget, TailShape, TreeHashes, TreeProc, TreeSpec } from './host'
 import { tmpPath } from './store'
+import { USAGE_ARGS, USAGE_TIMEOUT_MS, parseUsage } from './usage'
+import type { UsageProbe } from './usage'
 
 /**
  * Write a file through a temporary sibling and a rename, so a reader never sees half a file. When `expected` is
@@ -313,4 +315,22 @@ export async function nativeHashTrees(port: HostPort, roots: readonly string[], 
     trees.push({ method: 'cyrb53', files })
   }
   return trees
+}
+
+/**
+ * The usage probe without the helper (both adapters): `claude -p /usage --no-session-persistence` through the port's
+ * run, CLAUDE_CONFIG_DIR set over the session's own environment (left out when `isInherited`), stdin closed at once,
+ * the cwd `cwd`, at most USAGE_TIMEOUT_MS; the text parsed here (usage.ts) and dropped. The trace shows only that a
+ * probe ran, for which directory, its exit code and the size of stderr: never the text.
+ */
+export async function nativeUsageProbe(port: HostPort, claude: string, configDir: string, isInherited: boolean, cwd: string | undefined): Promise<UsageProbe> {
+  const init = { stdin: '', timeoutMs: USAGE_TIMEOUT_MS, ...(cwd === undefined ? {} : { cwd }), ...(isInherited ? {} : { env: { CLAUDE_CONFIG_DIR: configDir } }) }
+  let ran: Awaited<ReturnType<HostPort['run']>>
+  try {
+    ran = await port.run([claude, ...USAGE_ARGS], init, false, { usage: 'probe', configDir, isInherited })
+  } catch (err) {
+    // The run rejects when claude cannot start or is still running at the timeout (it is killed then).
+    return { ok: false, code: /timed? ?out|timeout/i.test(err instanceof Error ? err.message : String(err)) ? 'TIMEOUT' : 'NO_CLAUDE' }
+  }
+  return parseUsage(ran.stdout, ran.stderr, ran.exitCode)
 }

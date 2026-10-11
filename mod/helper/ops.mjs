@@ -3,6 +3,7 @@
 import { FILE_OPS } from './files.mjs'
 import { probe } from './linux.mjs'
 import { processTree, stopProcesses } from './stop.mjs'
+import { probeUsage } from './usage.mjs'
 import { HelperError, failure } from './protocol.mjs'
 
 /** The most operations one batch carries. */
@@ -43,6 +44,8 @@ export function answer(op, request) {
     // The stop of stop_worker (Linux only, as the probe): never in a batch.
     if (op === 'processTree') return { ok: true, ...processTree(request) }
     if (op === 'stopProcesses') return { ok: true, ...stopProcesses(request) }
+    // The usage probe of probe_licence_usage: one claude process, never in a batch.
+    if (op === 'probeUsage') return { ok: true, ...probeUsage(request) }
     return { ok: true, ...runFileOp(op, request) }
   } catch (err) {
     return failure(err)
