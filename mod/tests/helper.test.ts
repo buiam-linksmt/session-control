@@ -766,6 +766,29 @@ describe('helper options, through the plugin', () => {
     expect(w.toasts.length).toBe(1)
   })
 
+  test('without Node, every helper file there: the writing tools answer the fixed refusal, each file keeps its bytes and no backup appears', { options: PLUGIN_OPTIONS, timeoutMs: 15_000 }, async ($, on) => {
+    const w = world(on, undefined)
+    // Each file holds what the tool's edit would take (a section to archive, a queue to add to), so a tool that got
+    // past the Node gate would back it up through $.fs.write before its helper write failed.
+    const seeded = new Map([
+      ['/m/home/.claude/headless-sessions.json', `${JSON.stringify([{ title: 'w', pid: 4242, session_id: SID, config_dir: '/m/cfg', cwd: '/m/work' }])}\n`],
+      [`${ORCH}/task-queue.json`, `${JSON.stringify({ tasks: [{ id: 't0', title: 'An older task', status: 'queued' }] }, null, 2)}\n`],
+      [`${ORCH}/open-points.json`, `${JSON.stringify({ points: [] }, null, 2)}\n`],
+      [`${ORCH}/open-points-archive.md`, '# Open points archive\n'],
+      [`${ORCH}/agreed-decisions.md`, '# Agreed decisions\n\n## Unit\nu-0. A decision.\n'],
+      [`${ORCH}/agreed-decisions-archive.md`, '# Agreed decisions archive\n'],
+    ])
+    for (const [path, text] of seeded) w.sim.files.set(path, text)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    for (const tool of ['queue_task', 'open_point', 'record_decision', 'launch_worker', 'archive_decisions']) {
+      const input = TOOL_CALLS.find(([name]) => name === tool)?.[1] ?? {}
+      expect({ tool, answer: await answerOf($, tool, input) }).toEqual({ tool, answer: { text: NODE_REFUSAL, isRefused: true } })
+    }
+    expect(new Map(w.sim.files)).toEqual(seeded)
+    expect([...w.sim.files.keys()].filter(path => path.includes('/backups'))).toEqual([])
+    expect(w.argv.filter(argv => argv[0] !== 'node')).toEqual([])
+  })
+
   test('with Node 20: one lookup, the same warning and refusal', { options: PLUGIN_OPTIONS }, async ($, on) => {
     const w = world(on, 'node', 'real', 'v20.18.1\n')
     await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
