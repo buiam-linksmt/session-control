@@ -59,7 +59,7 @@ import {
 } from './notices'
 import type { LockSeen, Notice, NoticeState, RegistryWatch } from './notices'
 import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from './drift'
-import { HOLDER_FILES, LOCK_EVERY_SEC, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from './locks'
+import { HOLDER_FILES, LOCK_EVERY_SEC, holderState, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from './locks'
 import { DIGEST_SCHEMA, digestKeyDir, digestStoreKey, digestText, lastCallOf, withEvent } from './digest'
 import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
@@ -466,6 +466,7 @@ function portOf($: EngineInterface): HostPort {
   return {
     run: (argv, init, isQuiet, shown) => run($, argv, init, isQuiet, shown),
     read: path => $.fs.read(path),
+    readBytes: path => $.fs.read(path, { as: 'bytes' }),
     write: (path, text, isQuiet) => write($, path, text, isQuiet),
     exists: path => $.fs.exists(path),
     stat: path => $.fs.stat(path),
@@ -848,12 +849,13 @@ async function queueChanged($: EngineInterface): Promise<void> {
  * poll's timer at most once per LOCK_EVERY_SEC with lockDirs set, lock-holder. Nothing with the notices option off: no
  * lock folder is read then.
  */
-async function sideNotices($: EngineInterface, nowMs: number, isRegistryOk: boolean, isTick: boolean, toasts: ToastBudget): Promise<void> {
+async function sideNotices($: EngineInterface, nowMs: number, isRegistryOk: boolean, isTick: boolean, toasts: ToastBudget, isRegistryMissing = false): Promise<void> {
   const isLockDue = isTick && config.lockDirs.trim() !== '' && (lockAt === undefined || nowMs - lockAt >= LOCK_EVERY_SEC * 1000)
+  if (!isRegistryMissing) registryWatch.isSeen = true
   // Nothing to do (a sound registry with no episode open, no lock check due): no pass at all, the poll stays as cheap.
   if (isRegistryOk && registryWatch.since === undefined && !isLockDue) return
   await withNotices($, async state => {
-    const notices = registryStep(registryWatch, isRegistryOk, nowMs)
+    const notices = registryStep(registryWatch, isRegistryOk, nowMs, isRegistryMissing)
     const machine = await hostOf($)
     const dirs = lockDirsOf(config.lockDirs).map(dir => machine.nativePath(dir))
     if (isLockDue && dirs.length > 0) {
@@ -901,8 +903,8 @@ async function readLocks($: EngineInterface, dirs: readonly string[]): Promise<{
   const seen = found.map(one => {
     const proof = facts.pidProof.get(one.holder.pid)
     const isAlive = facts.pidComm.has(one.holder.pid) || proof !== undefined
-    const isDead = isHolderDead(one.holder, { isAlive, ...(proof === undefined ? {} : { startTicks: proof.startTicks }) }, isLinux)
-    return { lock: one.lock, fingerprint: lockFingerprint(one.text), pid: one.holder.pid, isJson: one.holder.isJson, isDead }
+    const state = holderState(one.holder, { isAlive, ...(proof === undefined ? {} : { startTicks: proof.startTicks, ...(proof.state === undefined ? {} : { state: proof.state }) }) }, isLinux)
+    return { lock: one.lock, fingerprint: lockFingerprint(one.text), pid: one.holder.pid, isJson: one.holder.isJson, isDead: state !== 'alive', ...(state === 'alive' ? {} : { why: state }) }
   })
   trace($, 'locks', { dirs: dirs.length, dirsRead: dirsRead.length, locks: seen.length, dead: seen.filter(one => one.isDead).length })
   return { seen, dirsRead }
@@ -1023,10 +1025,12 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   const parsed = parseRegistry(registryText ?? '')
   const toasts = toastBudget()
   const now = await $.clock.now()
+  // A registry that cannot be read may be one that is not there (yet): registry-unreadable tells only one that is.
+  const isRegistryMissing = registryText === undefined && !(await $.fs.exists(await registryPath($)).catch(() => true))
   if (!parsed.ok) {
     // The last good rows stay on screen under the warning.
     await showError($, problem === undefined ? parsed.error : `${parsed.error}; ${problem}`, now)
-    await sideNotices($, now, false, isTick, toasts)
+    await sideNotices($, now, false, isTick, toasts, isRegistryMissing)
     toastMore($, toasts)
     if (isTick) void driftCheck($, now)
     return
@@ -1040,7 +1044,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   noteError($, next.error)
   if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
   await pollNotices($, parsed.entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
-  await sideNotices($, now, isRegistrySound(registryText), isTick, toasts)
+  await sideNotices($, now, isRegistrySound(registryText), isTick, toasts, isRegistryMissing)
   toastMore($, toasts)
   // The drift check, at most once per its interval, from the poll's timer and on its own: a hash of the two folders
   // never holds the poll.
@@ -2410,12 +2414,19 @@ export const register: Register = (on, options) => {
 
   // The loaded-mod drift band (decision win-35): one dim line above the prompt while the loaded mod differs from the
   // source mod folder, as the engine's own "Update installed" line; a survey, or nothing to say, leaves the band to the
-  // engine. It is no notice: the notices option does not switch it off (modSource off does).
+  // engine. It is no notice: the notices option does not switch it off (modSource off does). The line goes above what
+  // the band would draw without it (`next(e)`: another plugin's band beneath, or the engine's own), which stays.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const band = await read($, driftBand)
     if (band === null || e.props.hasSurvey) return next(e)
-    const { Text } = $.ui.resolve(e)
-    return <Text dimColor>{band.text}</Text>
+    const below = await next(e)
+    const { Box, Text } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        <Text dimColor>{band.text}</Text>
+        {below}
+      </Box>
+    )
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

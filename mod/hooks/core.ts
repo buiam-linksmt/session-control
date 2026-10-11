@@ -46,8 +46,11 @@ export type ProcFacts = {
   claude: ProcFact[]
   /** comm of each registry pid that still exists (any name). */
   pidComm: Map<number, string>
-  /** Abort-check evidence per registry pid: /proc stat field 22 and the sessions file's own claim. */
-  pidProof: Map<number, { startTicks: string; fileStart: string; fileSid: string }>
+  /**
+   * Abort-check evidence per registry pid: /proc stat field 22 and the sessions file's own claim; on Linux also the
+   * process state letter (field 3: `Z` a zombie), absent on Windows and from an older probe.
+   */
+  pidProof: Map<number, { startTicks: string; fileStart: string; fileSid: string; state?: string }>
   /** Newest transcript mtime (epoch seconds) per session id. */
   transcriptMtime: Map<string, number>
 }
@@ -89,7 +92,7 @@ export function parseProcFacts(stdout: string): ProcFacts {
       const pid = Number(cols[1])
       if (Number.isInteger(pid)) {
         facts.pidComm.set(pid, cols[2] ?? '')
-        facts.pidProof.set(pid, { startTicks: cols[3] ?? '', fileStart: cols[4] ?? '', fileSid: cols[5] ?? '' })
+        facts.pidProof.set(pid, { startTicks: cols[3] ?? '', fileStart: cols[4] ?? '', fileSid: cols[5] ?? '', ...(cols[6] === undefined || cols[6] === '' ? {} : { state: cols[6] }) })
       }
     } else if (tag === 'T' && cols.length >= 3) {
       const mtime = Number(cols[2])

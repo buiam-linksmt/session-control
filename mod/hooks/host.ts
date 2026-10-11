@@ -23,6 +23,11 @@ export type HostPort = {
   run(argv: readonly string[], init?: ProcessRunInit, isQuiet?: boolean, shown?: Record<string, unknown>): Promise<ProcessRunResult>
   /** `$.fs.read`: rejects when the file is missing or over the read cap. */
   read(path: string): Promise<string>
+  /**
+   * `$.fs.read` with `{ as: "bytes" }`: the file's bytes as `{ base64 }`; an engine (or a test's port) that answers
+   * text instead is taken as it answers. Absent: the text is read.
+   */
+  readBytes?(path: string): Promise<string | { base64: string }>
   /** `$.fs.write` (which makes the directories); traced unless `isQuiet`. */
   write(path: string, text: string, isQuiet?: boolean): Promise<void>
   /** `$.fs.exists`. */

@@ -297,6 +297,21 @@ export const TREE_MAX_FILES = 500
 /** The largest file hashTree hashes; a larger one is TOO_LARGE. */
 export const TREE_MAX_FILE_BYTES = 8 * 1024 * 1024
 
+/**
+ * The bytes a drift digest is taken over: each CRLF folded to LF, so a copy whose line ends differ hashes alike; a file
+ * that holds a NUL byte (binary-looking) keeps its bytes as they are.
+ */
+export function driftBytes(bytes) {
+  if (bytes.includes(0)) return bytes
+  const out = Buffer.allocUnsafe(bytes.length)
+  let size = 0
+  for (let at = 0; at < bytes.length; at++) {
+    if (bytes[at] === 0x0d && bytes[at + 1] === 0x0a) continue
+    out[size++] = bytes[at]
+  }
+  return out.subarray(0, size)
+}
+
 /** A folder or file name of hashTree's request: a relative path of plain names, no `.` or `..` part, no empty part. */
 function treePart(value) {
   if (typeof value !== 'string' || value === '' || value.includes('\0') || /^([\\/]|[A-Za-z]:)/.test(value)) throw new HelperError('BAD_REQUEST')
@@ -321,12 +336,23 @@ function lstatOrUndefined(file) {
   }
 }
 
+/** Whether a folder on the way from `root` to `rel` (not `rel` itself) is a symbolic link (on Windows also a junction). */
+function isLinkOnTheWay(root, rel) {
+  const parts = rel.split('/')
+  for (let at = 1; at < parts.length; at++) {
+    const stat = lstatOrUndefined(joined(root, parts.slice(0, at).join('/')))
+    if (stat === undefined || stat.isSymbolicLink()) return true
+  }
+  return false
+}
+
 /**
  * `{root, dirs, files}`: the SHA-256 of the regular files directly in each folder of `dirs` and of each file of
- * `files`, all relative to `root`, as `{files: [{path, sha256}], total}` sorted by path: relative paths and hex digests
+ * `files` (over driftBytes: line ends folded, a file with a NUL byte as it is), all relative to `root`, as `{files: [{path, sha256}], total}` sorted by path: relative paths and hex digests
  * only. Read-only. `root` is followed when it is a link (the engine names the plugin's folder); inside it nothing is:
  * an entry (a folder of `dirs`, a file in it, a file of `files`) is taken by lstat, and a symbolic link (on Windows
- * also a junction) is passed over, as is a folder in a folder of `dirs`. A folder of `dirs` or a file of `files` that
+ * also a junction) is passed over, as is a folder in a folder of `dirs`, and an entry with a link among the folders on
+ * its way (`.claude-plugin` linked elsewhere: its plugin.json is passed over). A folder of `dirs` or a file of `files` that
  * is not there counts as empty or absent. `root` itself must be a directory (NOT_FOUND, NOT_DIR); more than
  * TREE_MAX_FILES files, or one over TREE_MAX_FILE_BYTES, is TOO_LARGE.
  */
@@ -342,16 +368,16 @@ export function hashTree(request) {
     found.push(rel)
   }
   for (const dir of dirs) {
-    const stat = lstatOrUndefined(joined(root, dir))
+    const stat = isLinkOnTheWay(root, dir) ? undefined : lstatOrUndefined(joined(root, dir))
     if (stat === undefined || !stat.isDirectory()) continue
     for (const name of fs.readdirSync(joined(root, dir)).sort()) take(`${dir}/${name}`, lstatOrUndefined(joined(root, `${dir}/${name}`)))
   }
-  for (const file of files) take(file, lstatOrUndefined(joined(root, file)))
+  for (const file of files) take(file, isLinkOnTheWay(root, file) ? undefined : lstatOrUndefined(joined(root, file)))
   const unique = [...new Set(found)].sort()
   const hashed = unique.map(rel => {
     const bytes = fs.readFileSync(joined(root, rel))
     if (bytes.length > TREE_MAX_FILE_BYTES) throw new HelperError('TOO_LARGE')
-    return { path: rel, sha256: createHash('sha256').update(bytes).digest('hex') }
+    return { path: rel, sha256: createHash('sha256').update(driftBytes(bytes)).digest('hex') }
   })
   return { files: hashed, total: hashed.length }
 }

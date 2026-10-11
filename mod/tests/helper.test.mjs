@@ -597,9 +597,9 @@ const RECORDED = [
   'P\t100\tclaude\t8765\t<root>/work dir\t<cfg>\tclaude -p --model opus -- hello there next line ',
   'P\t2000\tclaude\t3765\t/\t\tclaude --resume abc ',
   'P\t4\tclaude\t28765\t\t\t',
-  'A\t100\tclaude\t9000000\t9000000\tsid-a',
-  'A\t2000\tclaude\t9500000\t\t',
-  'A\t4\tclaude\t7000000\t7000000\t',
+  'A\t100\tclaude\t9000000\t9000000\tsid-a\tS',
+  'A\t2000\tclaude\t9500000\t\t\tS',
+  'A\t4\tclaude\t7000000\t7000000\t\tS',
   'T\tsid-a\t1700000000',
   '',
 ].join('\n')
@@ -867,6 +867,25 @@ test('hashTree: no symbolic link inside the root is followed or hashed (a file l
   }
 })
 
+test('hashTree: a link among the folders on the way is not followed either: plugin.json under a linked .claude-plugin is passed over', { skip: process.platform === 'win32' }, () => {
+  const top = scratch()
+  try {
+    const root = join(top, 'mod')
+    modTree(root, { '.claude-plugin/plugin.json': undefined, '.claude-plugin/types/claude-code.d.ts': undefined })
+    const outside = join(top, 'outside')
+    fs.mkdirSync(outside)
+    fs.writeFileSync(join(outside, 'plugin.json'), 'canary-outside-plugin\n')
+    fs.rmSync(join(root, '.claude-plugin'), { recursive: true, force: true })
+    fs.symlinkSync(outside, join(root, '.claude-plugin'))
+    const run = helper('hashTree', { root, dirs: ['hooks', 'helper', 'types'], files: ['.claude-plugin/plugin.json', 'hooks/core.ts'] })
+    assert.equal(run.code, 0, run.stdout)
+    assert.deepEqual(run.answer.files.map(file => file.path), ['helper/host.mjs', 'hooks/core.ts', 'hooks/register.tsx', 'types/index.d.ts'])
+    assert.ok(!run.stdout.includes(sha256('canary-outside-plugin\n')), run.stdout)
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true })
+  }
+})
+
 test('hashTree: a folder or file of the request that is not there counts as empty or absent; one changed byte changes its digest only', () => {
   const top = scratch()
   try {
@@ -882,6 +901,30 @@ test('hashTree: a folder or file of the request that is not there counts as empt
     assert.deepEqual(Object.keys(two), ['hooks/core.ts', 'hooks/register.tsx', 'types/index.d.ts'])
     assert.notEqual(one['hooks/core.ts'], two['hooks/core.ts'])
     assert.equal(one['hooks/register.tsx'], two['hooks/register.tsx'])
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true })
+  }
+})
+
+test('hashTree: line ends do not count (CRLF and LF copies hash alike, as LF does); one changed byte still counts; a file with a NUL byte keeps its bytes', () => {
+  const top = scratch()
+  try {
+    const a = join(top, 'a')
+    const b = join(top, 'b')
+    const c = join(top, 'c')
+    modTree(a, { 'hooks/core.ts': 'export const core = 1\nline two\n', 'helper/bin.dat': 'x\0y\nz\n' })
+    modTree(b, { 'hooks/core.ts': 'export const core = 1\r\nline two\r\n', 'helper/bin.dat': 'x\0y\r\nz\r\n' })
+    modTree(c, { 'hooks/core.ts': 'export const core = 1\r\nline twO\r\n', 'helper/bin.dat': 'x\0y\nz\n' })
+    const run = helper('batch', { ops: [a, b, c].map(root => ({ op: 'hashTree', root, ...SPEC })) })
+    assert.equal(run.code, 0, run.stdout)
+    const [one, two, three] = run.answer.results.map(result => Object.fromEntries(result.files.map(file => [file.path, file.sha256])))
+    assert.equal(one['hooks/core.ts'], two['hooks/core.ts'])
+    assert.equal(one['hooks/core.ts'], sha256('export const core = 1\nline two\n'))
+    assert.notEqual(two['hooks/core.ts'], three['hooks/core.ts'])
+    // A binary-looking file is hashed as it is: CRLF against LF differs there, and its digest is that of its bytes.
+    assert.notEqual(one['helper/bin.dat'], two['helper/bin.dat'])
+    assert.equal(two['helper/bin.dat'], sha256('x\0y\r\nz\r\n'))
+    assert.equal(one['helper/bin.dat'], three['helper/bin.dat'])
   } finally {
     fs.rmSync(top, { recursive: true, force: true })
   }

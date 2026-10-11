@@ -140,13 +140,25 @@ out() {
 has() { grep -F -q -- "$2" "$S/out-$1.txt"; }
 check() { if has "$1" "$2"; then pass "$1: $3"; else fail "$1: $3 (missing: $2)"; fi; }
 lacks() { if has "$1" "$2"; then fail "$1: $3 (found: $2)"; else pass "$1: $3"; fi; }
-for spec in 'launch_worker 1 launch' 'close_worker 1 close' 'retire_workers 1 hostile' 'archive_decisions 1 archive-refused' 'archive_decisions 2 archive' 'list_sessions 1 list'; do
+# The launch call that launched: the first launch_worker call whose answer says "Launched pid " (a refused or failed
+# call before it, a retry of the model's, is passed over); the first call when none did, so the checks below fail.
+LAUNCH_N=1
+_n=0
+for _id in $(jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use" and .name == "mcp__session-control__launch_worker") | .id' "$OT" 2>/dev/null); do
+  _n=$((_n + 1))
+  if jq -r --arg id "$_id" 'select(.type == "user") | .message.content[]? | select(.type == "tool_result" and .tool_use_id == $id) | .content | if type == "string" then . else (map(select(.type == "text") | .text) | join("\n")) end' "$OT" 2>/dev/null | grep -F -q 'Launched pid '; then
+    LAUNCH_N=$_n
+    break
+  fi
+done
+info "launch_worker calls: $_n; judged: call $LAUNCH_N (the first that launched)"
+for spec in "launch_worker $LAUNCH_N launch" 'close_worker 1 close' 'retire_workers 1 hostile' 'archive_decisions 1 archive-refused' 'archive_decisions 2 archive' 'list_sessions 1 list'; do
   set -- $spec
   if out "$1" "$2" "$3"; then pass "$3: $1 call $2 was made and answered ($(wc -c < "$S/out-$3.txt" | tr -d ' ') bytes)"; else fail "$3: $1 call $2 was made and answered"; : > "$S/out-$3.txt"; fi
 done
 CALLS=$(jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use") | .name' "$OT" 2>/dev/null | sort | uniq -c | tr -s ' ' | tr '\n' ';')
 info "tool calls of the orchestrator: $CALLS"
-INPUT=$(jq -c 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use" and .name == "mcp__session-control__launch_worker") | .input' "$OT" 2>/dev/null | head -n 1)
+INPUT=$(jq -c 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use" and .name == "mcp__session-control__launch_worker") | .input' "$OT" 2>/dev/null | sed -n "${LAUNCH_N}p")
 if printf '%s' "$INPUT" | jq -e --arg s "$FREE" '.prompt != null and .prompt_file == null and .section == $s and .rules == null' >/dev/null 2>&1; then pass 'launch: called with an inline prompt and the section, no prompt_file, rules left to the default'; else fail "launch: called with an inline prompt and the section, no prompt_file, rules left to the default: $INPUT"; fi
 
 # ---------------------------------------------------------------- launch_worker and the prompt file it wrote

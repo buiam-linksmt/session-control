@@ -2,7 +2,7 @@
 // host contract (host.test.ts) and the helper's own tests on the mock engine (helper.test.ts). Not a test file itself.
 
 import { tailLines } from '../hooks/core'
-import { cyrb53 } from '../hooks/host-shared'
+import { cyrb53, driftText } from '../hooks/host-shared'
 
 type Request = Record<string, unknown>
 
@@ -221,7 +221,7 @@ export function treeInMap(files: Map<string, string>, links: ReadonlyMap<string,
     }
   }
   for (const name of names) if (files.has(`${top}/${name}`) && !links.has(`${top}/${name}`)) found.add(name)
-  return [...found].sort().map(rel => ({ path: rel, sha256: cyrb53(files.get(`${top}/${rel}`) ?? '').padStart(64, '0') }))
+  return [...found].sort().map(rel => ({ path: rel, sha256: cyrb53(driftText(files.get(`${top}/${rel}`) ?? '')).padStart(64, '0') }))
 }
 
 /** `$.fs.list` over the map: the direct entries of `dir`, a file or a folder each, an entry in `links` as a link (`other`). */

@@ -7,10 +7,10 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { TOAST_TITLES } from '../hooks/core'
-import { LOCK_EVERY_SEC, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from '../hooks/locks'
+import { TOAST_TITLES, parseProcFacts } from '../hooks/core'
+import { LOCK_EVERY_SEC, holderState, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from '../hooks/locks'
 import { REGISTRY_UNREADABLE_SEC, freshNoticeState, lockStep, noticeStoreKey, parseNoticeState, registryStep } from '../hooks/notices'
-import type { LockSeen } from '../hooks/notices'
+import type { LockSeen, RegistryWatch } from '../hooks/notices'
 import { NOW_MS } from './fixtures'
 import { HOME, OPTIONS, ORCH, REGISTRY, mockWorld } from './mock-world'
 import type { World } from './mock-world'
@@ -30,6 +30,14 @@ const jsonLock = (pid: number, start: string) => JSON.stringify({ lock: 'jammer1
 
 const deadText = (lock: string, pid: number, how = 'the first number of its holder file') =>
   `lock ${lock} is held by pid ${pid}, which is no longer alive (${how}); the mod leaves the lock as it is: release it with the tool that took it`
+
+/** A holder whose pid is alive but belongs to a process started at another time than the lock records. */
+const reusedText = (lock: string, pid: number) =>
+  `lock ${lock} is held by pid ${pid}, which is no longer running as that process (its JSON pid; the pid now belongs to a process started at another time); the mod leaves the lock as it is: release it with the tool that took it`
+
+/** A holder that has exited and is a zombie its parent has not reaped. */
+const zombieText = (lock: string, pid: number, how = 'the first number of its holder file') =>
+  `lock ${lock} is held by pid ${pid}, which has exited: it is a zombie its parent has not reaped (${how}); the mod leaves the lock as it is: release it with the tool that took it`
 
 /** What the plugin wrote or ran under the lock folders: nothing, ever. */
 const touched = (world: World) => [
@@ -106,9 +114,28 @@ describe('lock-holder', () => {
         deadText(`${LOCKS}/deploy`, 5003),
         deadText(`${LOCKS}/server.pid`, 5001),
         deadText(`${OTHER_LOCKS}/dds1.lock`, 5300, 'its JSON pid'),
-        // jammer2's pid is alive but started at another time than the lock records: the holder is gone.
-        deadText(`${OTHER_LOCKS}/jammer2.lock`, 5200, 'its JSON pid'),
+        // jammer2's pid is alive but started at another time than the lock records: the holder is gone, and the notice
+        // says the pid is no longer that process.
+        reusedText(`${OTHER_LOCKS}/jammer2.lock`, 5200),
       ].sort(),
+    )
+    expect(touched(world)).toEqual([])
+  })
+
+  test('a zombie holder (state Z in /proc/<pid>/stat, as the probe reads it) is dead, as NADIR\'s StackLocks reclaim takes it; its notice says so', { options: LOCK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seedOrch(world)
+    world.table.procs.set(5400, { ppid: 1, start: '9100', state: 'Z', comm: 'python3' })
+    world.table.procs.set(5500, { ppid: 1, start: '9200', state: 'S', comm: 'python3' })
+    world.files.set(`${LOCKS}/zombie.pid`, '5400\n')
+    world.files.set(`${OTHER_LOCKS}/jammer1.lock`, jsonLock(5400, '9100'))
+    world.files.set(`${OTHER_LOCKS}/alive.lock`, jsonLock(5500, '9200'))
+    await startOrch($)
+    await poll(world, 10)
+    expect(noticeLines(await userPrompt($)).map(line => line.slice('session-control notice: lock-holder: '.length)).sort()).toEqual(
+      [zombieText(`${LOCKS}/zombie.pid`, 5400), zombieText(`${OTHER_LOCKS}/jammer1.lock`, 5400, 'its JSON pid')].sort(),
     )
     expect(touched(world)).toEqual([])
   })
@@ -257,6 +284,20 @@ describe('registry-unreadable', () => {
     expect(toastsOf(world.toasts, 'orphan')).toEqual([])
   })
 
+  test('registryStep: a registry file that is not there and was never seen is no episode (a fresh machine); seen once, then gone, it is; an existing unreadable or empty one is', () => {
+    const fresh: RegistryWatch = {}
+    expect(registryStep(fresh, false, NOW_MS, true)).toEqual([])
+    expect(registryStep(fresh, false, NOW_MS + REGISTRY_UNREADABLE_SEC * 1000 + 1000, true)).toEqual([])
+    expect(fresh.since).toBeUndefined()
+    // Seen (the caller marks a read that found the file), then gone for 5 minutes: told.
+    const seen: RegistryWatch = { isSeen: true }
+    expect(registryStep(seen, false, NOW_MS + 1000, true)).toEqual([])
+    expect(registryStep(seen, false, NOW_MS + 1000 + REGISTRY_UNREADABLE_SEC * 1000, true).map(one => one.kind)).toEqual(['registry-unreadable'])
+    const empty: RegistryWatch = {}
+    expect(registryStep(empty, false, NOW_MS)).toEqual([])
+    expect(registryStep(empty, false, NOW_MS + REGISTRY_UNREADABLE_SEC * 1000).map(one => one.kind)).toEqual(['registry-unreadable'])
+  })
+
   test('the notices option off: never told', { options: { ...POLL_OPTIONS, notices: 'off' }, timeoutMs: 30_000 }, async ($, on) => {
     const world = mockWorld(on)
     storeOf(on)
@@ -397,6 +438,19 @@ describe('locks.ts', () => {
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, true)).toBe(true)
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, false)).toBe(false)
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '' }, true)).toBe(false)
+  })
+
+  test('holderState: gone, reused (Linux, a JSON pid_start that differs), zombie (Linux, state Z), alive; a zombie and a reused pid are dead; Windows compares neither', () => {
+    expect(holderState({ pid: 1, isJson: false }, { isAlive: false }, true)).toBe('gone')
+    expect(holderState({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, true)).toBe('reused')
+    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe('zombie')
+    expect(holderState({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe('zombie')
+    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'S' }, true)).toBe('alive')
+    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, state: 'Z' }, false)).toBe('alive')
+    expect(isHolderDead({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe(true)
+    // The probe's A line carries the state as its seventh column; an older line without it has none.
+    expect(parseProcFacts('A\t7\tpython3\t100\t\t\tZ\n').pidProof.get(7)?.state).toBe('Z')
+    expect(parseProcFacts('A\t7\tpython3\t100\t\t\n').pidProof.get(7)?.state).toBeUndefined()
   })
 
   test('lockStep: told once per content; a changed content re-arms; a lock gone or alive again is forgotten; a folder not read keeps its locks', () => {

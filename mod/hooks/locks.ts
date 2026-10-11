@@ -90,13 +90,25 @@ export function lockHolder(text: string): LockHolder | undefined {
   return pid === undefined ? undefined : { pid, isJson: false }
 }
 
+/** What became of a lock's holder: alive, gone (no such pid), reused (the pid belongs to a later process) or a zombie. */
+export type HolderState = 'alive' | 'gone' | 'reused' | 'zombie'
+
 /**
- * Whether the holder is gone, from the probe's facts of its pid: the pid no longer exists, or (Linux, a JSON lock with
- * `pid_start`) the process that has it now started at another time. A zombie still has its pid and counts as alive.
+ * The holder's state, from the probe's facts of its pid: gone when the pid no longer exists; on Linux reused when the
+ * process that has it now started at another time than a JSON lock's `pid_start` says, and a zombie (state `Z` in
+ * /proc/<pid>/stat: it has exited, its parent has not reaped it) counts as gone too, as the NADIR project's
+ * StackLocks.py reclaim treats it. On Windows neither is compared.
  */
-export function isHolderDead(holder: LockHolder, proof: { isAlive: boolean; startTicks?: string }, isLinux: boolean): boolean {
-  if (!proof.isAlive) return true
-  return isLinux && holder.start !== undefined && proof.startTicks !== undefined && proof.startTicks !== '' && proof.startTicks !== holder.start
+export function holderState(holder: LockHolder, proof: { isAlive: boolean; startTicks?: string; state?: string }, isLinux: boolean): HolderState {
+  if (!proof.isAlive) return 'gone'
+  if (isLinux && proof.state === 'Z') return 'zombie'
+  if (isLinux && holder.start !== undefined && proof.startTicks !== undefined && proof.startTicks !== '' && proof.startTicks !== holder.start) return 'reused'
+  return 'alive'
+}
+
+/** Whether the holder is gone in any of holderState's ways. */
+export function isHolderDead(holder: LockHolder, proof: { isAlive: boolean; startTicks?: string; state?: string }, isLinux: boolean): boolean {
+  return holderState(holder, proof, isLinux) !== 'alive'
 }
 
 /** A short stable fingerprint of a lock's content: a changed lock re-arms its notice. */

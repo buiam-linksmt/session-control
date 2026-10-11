@@ -541,15 +541,17 @@ export function repoStep(state: NoticeState, git: GitState | undefined, nowMs: n
  * The registry-unreadable episode of this load: when the first unsound read of a row was (epoch ms) and whether it was
  * told. Kept in memory, not in $.store: the stored notice state stays as it was through an unsound registry (mod-20).
  */
-export type RegistryWatch = { since?: number; isTold?: boolean }
+export type RegistryWatch = { since?: number; isTold?: boolean; isSeen?: boolean }
 
 /**
  * registry-unreadable: an unsound read (isRegistrySound false) starts an episode, and one that has lasted
  * REGISTRY_UNREADABLE_SEC or more is told once; a sound read ends it, so the next episode is told again. The
  * registry-based notices stay frozen meanwhile, as pollNotices freezes them.
  */
-export function registryStep(watch: RegistryWatch, isSound: boolean, nowMs: number): Notice[] {
-  if (isSound) {
+export function registryStep(watch: RegistryWatch, isSound: boolean, nowMs: number, isMissing = false): Notice[] {
+  // A registry file that is not there and was never seen in this load (`isSeen`, which the caller marks at each read
+  // that finds the file) is a fresh machine, not an episode; one seen and then gone is.
+  if (isSound || (isMissing && watch.isSeen !== true)) {
     delete watch.since
     delete watch.isTold
     return []
@@ -564,7 +566,14 @@ export function registryStep(watch: RegistryWatch, isSound: boolean, nowMs: numb
 // ---------------------------------------------------------------- lock-holder
 
 /** One lock as the check read it: its path, the content's fingerprint, the holder and whether it is gone. */
-export type LockSeen = { lock: string; fingerprint: string; pid: number; isJson: boolean; isDead: boolean }
+export type LockSeen = { lock: string; fingerprint: string; pid: number; isJson: boolean; isDead: boolean; why?: 'gone' | 'reused' | 'zombie' }
+
+/** How a lock-holder notice says what became of the holder (`how`: where the pid was read). */
+function holderGone(one: LockSeen, how: string): string {
+  if (one.why === 'reused') return `which is no longer running as that process (${how}; the pid now belongs to a process started at another time)`
+  if (one.why === 'zombie') return `which has exited: it is a zombie its parent has not reaped (${how})`
+  return `which is no longer alive (${how})`
+}
 
 /**
  * lock-holder (decision win-27): each lock whose holder is gone is told once per content (its fingerprint); a lock
@@ -586,7 +595,7 @@ export function lockStep(state: NoticeState, seen: readonly LockSeen[], dirsRead
     told[one.lock] = one.fingerprint
     notices.push({
       kind: 'lock-holder',
-      message: `lock ${oneLine(one.lock, 160)} is held by pid ${one.pid}, which is no longer alive (${one.isJson ? 'its JSON pid' : 'the first number of its holder file'}); the mod leaves the lock as it is: release it with the tool that took it`,
+      message: `lock ${oneLine(one.lock, 160)} is held by pid ${one.pid}, ${holderGone(one, one.isJson ? 'its JSON pid' : 'the first number of its holder file')}; the mod leaves the lock as it is: release it with the tool that took it`,
       fields: { pid: one.pid, isJson: one.isJson },
     })
   }

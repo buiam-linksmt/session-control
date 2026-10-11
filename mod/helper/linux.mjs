@@ -37,6 +37,14 @@ function startTicks(pid) {
   return at < 0 ? '' : (stat.slice(at + 2).split(' ')[19] ?? '')
 }
 
+/** A pid's state letter (field 3 of /proc/<pid>/stat: R, S, D, Z, ...), or '' when it cannot be read. */
+function procState(pid) {
+  const stat = readText(`${PROC}/${pid}/stat`)
+  if (stat === undefined) return ''
+  const at = stat.lastIndexOf(') ')
+  return at < 0 ? '' : (stat.slice(at + 2).split(' ')[0] ?? '')
+}
+
 /** The comm of a pid without its newline (`read -r` also drops blanks at both ends), or undefined. */
 function comm(pid) {
   const text = readText(`${PROC}/${pid}/comm`)
@@ -120,7 +128,7 @@ function proofLine(arg) {
   }
   const ticks = startTicks(pid)
   const file = sessionFields(`${dir}/sessions/${pid}.json`)
-  return `A\t${pid}\t${comm(pid) ?? ''}\t${ticks}\t${file.procStart}\t${file.sessionId}\n`
+  return `A\t${pid}\t${comm(pid) ?? ''}\t${ticks}\t${file.procStart}\t${file.sessionId}\t${procState(pid)}\n`
 }
 
 /** The T line of a `t:<session id>|<config dir>` argument: the newest <config dir>/projects/*\/<sid>.jsonl. */

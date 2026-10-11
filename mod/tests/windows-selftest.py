@@ -547,7 +547,8 @@ try:
         answer, _ = helper('filesNewerThan', {'dir': w('no such folder'), 'since': T, 'max': 1})
         assert answer == {'ok': False, 'code': 'NOT_FOUND'}, answer
         # hashTree (the drift band): two copies of a mod folder that differ in one file; the SHA-256 of each file as
-        # Python computes it over the same bytes (CRLF and non-ASCII kept); a junction in hooks out of the folder (made
+        # Python computes it over the same bytes with each CRLF folded to LF (line ends do not count; a file with a NUL
+        # byte keeps its bytes; non-ASCII kept); a junction in hooks out of the folder (made
         # with New-Item, no admin right) neither followed nor hashed; .claude-plugin/types, tests and a nested folder
         # never; paths relative with / on Windows too; a missing root and a bad request are fixed codes.
         mod_files = {
@@ -580,7 +581,10 @@ try:
             assert list(tree) == want_paths, tree
             for rel in want_paths:
                 with open(os.path.join(work, root, *rel.split('/')), 'rb') as f:
-                    assert tree[rel] == hashlib.sha256(f.read()).hexdigest(), (root, rel)
+                    raw = f.read()
+                    assert tree[rel] == hashlib.sha256(raw if b'\0' in raw else raw.replace(b'\r\n', b'\n')).hexdigest(), (root, rel)
+        # The CRLF file hashes as its LF copy would.
+        assert trees[0]['hooks/register.tsx'] == hashlib.sha256(mod_files['hooks/register.tsx'].replace('\r\n', '\n').encode('utf-8')).hexdigest()
         assert [rel for rel in want_paths if trees[0][rel] != trees[1][rel]] == ['hooks/core.ts']
         assert hashlib.sha256(b'outside').hexdigest() not in json.dumps(answer) and work not in json.dumps(answer), answer
         assert helper('hashTree', {'root': w('no such mod'), **spec})[0] == {'ok': False, 'code': 'NOT_FOUND'}

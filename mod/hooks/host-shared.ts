@@ -210,37 +210,101 @@ export function cyrb53(text: string): string {
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, '0')
 }
 
+/** cyrb53 over bytes, each byte one unit: the native digest of a file read as bytes. */
+export function cyrb53Bytes(bytes: Uint8Array): string {
+  let text = ''
+  for (let at = 0; at < bytes.length; at += 8192) text += String.fromCharCode(...bytes.subarray(at, at + 8192))
+  return cyrb53(text)
+}
+
+const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+/** Standard padded base64 to bytes, in plain TypeScript (the plugin's runtime may lack Uint8Array.fromBase64). */
+export function base64Bytes(base64: string): Uint8Array {
+  const clean = base64.replace(/[^A-Za-z0-9+/]/g, '')
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4))
+  let size = 0
+  for (let at = 0; at + 1 < clean.length; at += 4) {
+    const n = [0, 1, 2, 3].map(i => BASE64.indexOf(clean[at + i] ?? 'A'))
+    const word = ((n[0] ?? 0) << 18) | ((n[1] ?? 0) << 12) | ((n[2] ?? 0) << 6) | (n[3] ?? 0)
+    out[size++] = (word >> 16) & 255
+    if (at + 2 < clean.length) out[size++] = (word >> 8) & 255
+    if (at + 3 < clean.length) out[size++] = word & 255
+  }
+  return out.subarray(0, size)
+}
+
+/** The bytes a drift digest is taken over: each CRLF folded to LF; a file that holds a NUL byte (binary-looking) as it is. */
+export function driftBytes(bytes: Uint8Array): Uint8Array {
+  if (bytes.includes(0)) return bytes
+  const out = new Uint8Array(bytes.length)
+  let size = 0
+  for (let at = 0; at < bytes.length; at++) {
+    if (bytes[at] === 0x0d && bytes[at + 1] === 0x0a) continue
+    out[size++] = bytes[at] ?? 0
+  }
+  return out.subarray(0, size)
+}
+
+/** The text a drift digest is taken over when only the text can be read: each CRLF folded to LF; a text with a NUL as it is. */
+export const driftText = (text: string): string => (text.includes('\0') ? text : text.replace(/\r\n/g, '\n'))
+
+/**
+ * The native digest of one file: cyrb53 over its bytes (driftBytes) when the port reads bytes, so two files that differ
+ * in bytes that do not decode as UTF-8 (0xff and 0xfe both read as U+FFFD) still differ; cyrb53 over its text
+ * (driftText) when the port answers text. Undefined when the file cannot be read.
+ */
+async function nativeDigest(port: HostPort, path: string): Promise<string | undefined> {
+  const raw = port.readBytes === undefined ? undefined : await port.readBytes(path).catch(() => undefined)
+  if (raw !== undefined && typeof raw === 'object' && typeof raw.base64 === 'string') return cyrb53Bytes(driftBytes(base64Bytes(raw.base64)))
+  const text = typeof raw === 'string' ? raw : await port.read(path).catch(() => undefined)
+  return text === undefined ? undefined : cyrb53(driftText(text))
+}
+
 const joinRel = (root: string, rel: string) => `${root.replace(/[\\/]+$/, '')}/${rel}`
 
-/** One root, natively: undefined when it is no directory, holds too many files or a file cannot be read. */
+/** Whether a folder on the way from `root` to `rel` (not `rel` itself) is a link, or cannot be looked at. */
+async function isLinkOnTheWay(port: HostPort, root: string, rel: string): Promise<boolean> {
+  const parts = rel.split('/')
+  for (let at = 1; at < parts.length; at++) {
+    const own = await port.stat(joinRel(root, parts.slice(0, at).join('/'))).catch(() => undefined)
+    if (own === undefined || own.isLink) return true
+  }
+  return false
+}
+
+/**
+ * One root, natively: undefined when it is no directory, holds too many files or a file cannot be read. No link is
+ * followed inside the root: an entry that is a link, or has one among the folders on its way, is passed over.
+ */
 async function nativeTree(port: HostPort, root: string, spec: TreeSpec): Promise<Record<string, string> | undefined> {
   const top = await port.stat(root).catch(() => undefined)
   if (top?.kind !== 'dir') return undefined
   const found: string[] = []
   for (const dir of spec.dirs) {
-    // The folder itself is looked at without following a link: a linked folder is passed over.
-    const own = await port.stat(joinRel(root, dir)).catch(() => undefined)
+    // The folder itself is looked at without following a link: a linked folder is passed over, and so is one below a link.
+    const own = (await isLinkOnTheWay(port, root, dir)) ? undefined : await port.stat(joinRel(root, dir)).catch(() => undefined)
     if (own === undefined || own.isLink || own.kind !== 'dir') continue
     const entries = await port.list(joinRel(root, dir)).catch(() => undefined)
     if (entries === undefined) return undefined
     for (const entry of entries) if (entry.kind === 'file' && !entry.isLink) found.push(`${dir}/${entry.name}`)
   }
   for (const file of spec.files) {
-    const own = await port.stat(joinRel(root, file)).catch(() => undefined)
+    const own = (await isLinkOnTheWay(port, root, file)) ? undefined : await port.stat(joinRel(root, file)).catch(() => undefined)
     if (own !== undefined && !own.isLink && own.kind === 'file') found.push(file)
   }
   const unique = [...new Set(found)].sort()
   if (unique.length > TREE_MAX_FILES) return undefined
   const files: Record<string, string> = {}
   for (const rel of unique) {
-    const text = await port.read(joinRel(root, rel)).catch(() => undefined)
-    if (text === undefined) return undefined
-    files[rel] = cyrb53(text)
+    const digest = await nativeDigest(port, joinRel(root, rel))
+    if (digest === undefined) return undefined
+    files[rel] = digest
   }
   return files
 }
 
-/** hashTrees through `$.fs` alone (list, stat, read), on both systems: cyrb53 over each file's text. */
+/** hashTrees through `$.fs` alone (list, stat, read), on both systems: cyrb53 over each file's bytes, line ends folded (nativeDigest). */
 export async function nativeHashTrees(port: HostPort, roots: readonly string[], spec: TreeSpec): Promise<TreeHashes[] | undefined> {
   const trees: TreeHashes[] = []
   for (const root of roots) {

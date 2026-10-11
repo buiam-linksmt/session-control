@@ -71,7 +71,7 @@ function probeLines(world: World, args: readonly string[]): string {
       } catch {
         file = {}
       }
-      lines.push(['A', pid, proc.comm, proc.start, String(file.procStart ?? ''), String(file.sessionId ?? '')].join('\t'))
+      lines.push(['A', pid, proc.comm, proc.start, String(file.procStart ?? ''), String(file.sessionId ?? ''), proc.state].join('\t'))
     } else if (arg.startsWith('t:')) {
       const [sid = '', cfg = ''] = arg.slice(2).split('|')
       const found = [...world.files.keys()].some(key => key.startsWith(`${cfg}/projects/`) && key.endsWith(`/${sid}.jsonl`))

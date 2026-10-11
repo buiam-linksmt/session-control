@@ -10,7 +10,7 @@ import type { On } from 'claude-code'
 
 import { TOAST_TITLES } from '../hooks/core'
 import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from '../hooks/drift'
-import { cyrb53, nativeHashTrees } from '../hooks/host-shared'
+import { base64Bytes, cyrb53, driftBytes, driftText, nativeHashTrees } from '../hooks/host-shared'
 import { driftStep, freshNoticeState, noticeStoreKey, parseNoticeState } from '../hooks/notices'
 import { listInMap } from './fake-helper'
 import { NOW_MS } from './fixtures'
@@ -56,10 +56,16 @@ function engineBand(on: On): void {
 
 const BAND_PROPS = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 9 } }
 
-/** The band's text as the terminal draws it. */
+/** The band's first line as the terminal draws it: its first Text (the drift line drawn above the band beneath it). */
 async function bandOf($: { ui: { mount: (target: never) => Promise<{ findAll: (q: object) => Promise<unknown[]> }> } }, props: Record<string, unknown> = BAND_PROPS): Promise<string> {
   const ui = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'AbovePrompt', props } as never)
-  return String(((await ui.findAll({}))[0] as { text?: string } | undefined)?.text ?? '')
+  return String(((await ui.findAll({ type: 'Text' }))[0] as { text?: string } | undefined)?.text ?? '')
+}
+
+/** Every Text of the band, in order. */
+async function bandLines($: { ui: { mount: (target: never) => Promise<{ findAll: (q: object) => Promise<unknown[]> }> } }): Promise<string[]> {
+  const ui = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS } as never)
+  return (await ui.findAll({ type: 'Text' })).map(one => String((one as { text?: string }).text ?? ''))
 }
 
 /** The loaded plugin's folder as the first check asked for it: the first $.fs.stat with resolve outside the mock world's /w. */
@@ -290,6 +296,15 @@ describe('the drift band on the mock world', () => {
     expect(store.size).toBe(0)
   })
 
+  test('the drift line goes above the band beneath it, which stays drawn (another plugin\'s band, or the engine\'s own)', { options: SOURCE_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: FAST })
+    storeOf(on)
+    engineBand(on)
+    await started($, world, changedOne)
+    await poll(world, EVERY)
+    expect(await bandLines($)).toEqual([BAND_ONE, 'engine band'])
+  })
+
   test('a survey holds the band: the engine draws', { options: SOURCE_OPTIONS }, async ($, on) => {
     const world = mockWorld(on, { env: FAST })
     storeOf(on)
@@ -447,6 +462,57 @@ describe('drift.ts', () => {
     expect(cyrb53('export const core = 1\n')).toBe(cyrb53('export const core = 1\n'))
     expect(cyrb53('export const core = 1\n')).not.toBe(cyrb53('export const core = 2\n'))
     expect(cyrb53('abc')).toBe('11f9f91ac18c8d')
+  })
+
+  test('nativeHashTrees by bytes: CRLF and LF alike, one changed byte counts, 0xff against 0xfe counts (they decode alike), a file with a NUL byte as it is; a port that answers text: line ends folded', async () => {
+    const raw = new Map<string, number[]>([
+      ['/r/a/hooks/x.ts', [...'a\nb\n'].map(one => one.charCodeAt(0))],
+      ['/r/b/hooks/x.ts', [...'a\r\nb\r\n'].map(one => one.charCodeAt(0))],
+      ['/r/a/hooks/y.ts', [0x61, 0xff, 0x0a]],
+      ['/r/b/hooks/y.ts', [0x61, 0xfe, 0x0a]],
+      ['/r/a/hooks/z.bin', [0x00, 0x0d, 0x0a]],
+      ['/r/b/hooks/z.bin', [0x00, 0x0a]],
+      ['/r/a/hooks/w.ts', [...'one\r\n'].map(one => one.charCodeAt(0))],
+      ['/r/b/hooks/w.ts', [...'onE\n'].map(one => one.charCodeAt(0))],
+    ])
+    const toBase64 = (bytes: readonly number[]) => btoa(String.fromCharCode(...bytes))
+    const port = {
+      stat: async (path: string) => {
+        if (raw.has(path)) return { kind: 'file', size: 1, mtimeMs: 0, isLink: false }
+        if ([...raw.keys()].some(one => one.startsWith(`${path}/`))) return { kind: 'dir', size: 0, mtimeMs: 0, isLink: false }
+        throw new Error('ENOENT')
+      },
+      list: async (path: string) => listInMap(new Map([...raw.keys()].map(key => [key, 'x'])), new Map(), path),
+      // The text as the engine decodes it: a byte that is no UTF-8 becomes U+FFFD, so y.ts reads alike in both.
+      read: async (path: string) => String.fromCharCode(...(raw.get(path) ?? []).map(one => (one > 0x7f ? 0xfffd : one))),
+      readBytes: async (path: string) => ({ base64: toBase64(raw.get(path) ?? []) }),
+    }
+    const trees = await nativeHashTrees(port as never, ['/r/a', '/r/b'], DRIFT_SPEC)
+    expect(changedFiles(trees?.[0] as never, trees?.[1] as never)).toEqual(['hooks/w.ts', 'hooks/y.ts', 'hooks/z.bin'])
+    // Read as text only (an engine without bytes): 0xff and 0xfe are lost to the decoding, the line ends still fold.
+    const textOnly = { ...port, readBytes: async (path: string) => port.read(path) }
+    const asText = await nativeHashTrees(textOnly as never, ['/r/a', '/r/b'], DRIFT_SPEC)
+    expect(changedFiles(asText?.[0] as never, asText?.[1] as never)).toEqual(['hooks/w.ts', 'hooks/z.bin'])
+    expect(driftText('a\r\nb')).toBe('a\nb')
+    expect(driftText('a\0\r\n')).toBe('a\0\r\n')
+    expect([...driftBytes(new Uint8Array([0x61, 0x0d, 0x0a, 0x0d]))]).toEqual([0x61, 0x0a, 0x0d])
+    for (const bytes of [[], [0x66], [0x66, 0x6f], [0x66, 0x6f, 0x6f], [0, 255, 254, 13, 10, 128]]) expect([...base64Bytes(toBase64(bytes))]).toEqual(bytes)
+  })
+
+  test('nativeHashTrees: a link among the folders on the way is not followed: plugin.json under a linked .claude-plugin is passed over', async () => {
+    const files = new Map(Object.entries({ '/r/a/hooks/x.ts': 'x', '/r/a/.claude-plugin/plugin.json': '{}' }))
+    const port = {
+      stat: async (path: string) => {
+        if (path === '/r/a/.claude-plugin') return { kind: 'dir', size: 0, mtimeMs: 0, isLink: true }
+        if (files.has(path)) return { kind: 'file', size: 1, mtimeMs: 0, isLink: false }
+        if ([...files.keys()].some(one => one.startsWith(`${path}/`))) return { kind: 'dir', size: 0, mtimeMs: 0, isLink: false }
+        throw new Error('ENOENT')
+      },
+      list: async (path: string) => listInMap(files, new Map(), path),
+      read: async (path: string) => files.get(path) ?? '',
+    }
+    const trees = await nativeHashTrees(port as never, ['/r/a'], DRIFT_SPEC)
+    expect(Object.keys(trees?.[0]?.files ?? {})).toEqual(['hooks/x.ts'])
   })
 
   test('nativeHashTrees: a root that is no folder answers nothing; a file over the read cap answers nothing', async () => {

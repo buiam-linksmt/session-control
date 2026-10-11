@@ -933,7 +933,9 @@ describe('Windows probe', () => {
   const byPid = (pid: number) => REGISTRY.find(e => e.pid === pid)!
 
   test('the Linux probe text is the one it always was', () => {
-    expect(fingerprint(PROBE_SCRIPT)).toBe('1260:2204f4bb')
+    // Moved on purpose (T3b, the lock-holder follow-up): each A line now ends with the process state letter of
+    // /proc/<pid>/stat, so a zombie lock holder is told as dead; it was '1260:2204f4bb'.
+    expect(fingerprint(PROBE_SCRIPT)).toBe('1336:8aef2985')
   })
 
   test('the Windows probe text is pinned: a change to it is a change of this test too', () => {
