@@ -8,7 +8,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On, ProcessRunResult } from 'claude-code'
 
 import { parseProcFacts } from '../hooks/core'
-import type { Host, HostPort, RotatePlan } from '../hooks/host'
+import type { HostPort, RotatePlan } from '../hooks/host'
 import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, NODE_REFUSAL, NODE_WARNING, appendText, newerAnswer, nodeMajor, readAnswer, rejectionCode, treeAnswer, withHelper } from '../hooks/host-helper'
 import { TAIL_SHAPED_MAX_BYTES } from '../hooks/host-shared'
 import type { HelperNote } from '../hooks/host-helper'

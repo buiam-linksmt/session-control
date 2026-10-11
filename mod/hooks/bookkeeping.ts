@@ -29,7 +29,7 @@ export const QUEUE_SCHEMA = {
     action: { type: 'string', enum: ['add', 'update', 'remove'], description: 'add a task, update fields of one, or remove it.' },
     id: { type: 'string', minLength: 1 },
     title: { type: 'string' },
-    status: { type: 'string', description: 'Exactly queued, running or done (the panel shows only queued and running); waiting detail goes in fields.note.' },
+    status: { type: 'string', description: 'Exactly queued, running or done (the panel shows queued tasks only; running work is a session); waiting detail goes in fields.note.' },
     fields: { type: 'object', description: 'Any other fields (model, effort, dir, prompt_file, session_id, config_dir, waits_for, note).' },
   },
 } as const

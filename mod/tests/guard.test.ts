@@ -40,7 +40,7 @@ const answerOf = (answer: unknown) => {
   return { text: String(one.deny ?? one.result ?? one.text ?? ''), isRefused: one.deny !== undefined || one.isError === true }
 }
 
-describe('heredocs, quoted arguments and substitutions (decision mod-20: a prompt-file heredoc that only names a helper file runs)', () => {
+describe('heredocs, quoted arguments and substitutions, as the sign-off guard reads a command', () => {
   test('cutHeredocs and substitutionsOf: bodies as Bash reads them, a mark each; substitutions outside single quotes', () => {
     const cut = cutHeredocs("cat > a <<'X'; cat > b <<Y\none\nX\ntwo $(date)\nY\necho after")
     expect(cut.heredocs.map(one => [one.body, one.isQuoted])).toEqual([['one', true], ['two $(date)', false]])

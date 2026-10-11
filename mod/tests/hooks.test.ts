@@ -85,14 +85,6 @@ const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 
 // The orchestrator's agreed-decisions.md, when a test serves one (undefined: the file is missing).
 const DECISIONS: { text: string | undefined } = { text: undefined }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
-/** The rows of the transcript tail the fixture serves. */
-const TAIL = [
-  { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the suite files.' }, { type: 'tool_use', name: 'Bash', input: { command: 'git status -sb' } }] } },
-  { type: 'user', message: { content: [{ type: 'tool_result', content: '## develop...origin/develop' }] } },
-]
-  .map(row => JSON.stringify(row))
-  .join('\n')
-
 /** Windows PowerShell as the mod runs it when SystemRoot is unset. */
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 /** The fixture on Windows: C:/fixture/... and C:/work/... are the fixture's /fixture/... and /work/... */
@@ -390,7 +382,9 @@ describe('tool surface', () => {
     // registered after list_licences; every tool before it keeps its own pin (the next test).
     // Changed on purpose again by feature/licence-tools (16687:1371ae1b before): launch_worker's schema gains config_dir
     // and its description a sentence (2916:5bd96840 to 3506:a5214540); every other tool keeps its own pin.
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('17277:e069d42b')
+    // Changed on purpose again by feature/node-only (17277:e069d42b before): the status description of queue_task says
+    // the panel shows queued tasks only (702:d743828c to 723:d470f87e); every other tool keeps its own pin.
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('17298:d6106e35')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -426,13 +420,16 @@ describe('tool surface', () => {
     // purpose (its new parameters) and added the two write-side tools.
     // feature/licence-tools moved launch_worker's on purpose (config_dir; 2916:5bd96840 before) and added the two
     // licence tools.
+    // feature/node-only moved queue_task's on purpose (its status description), and with it the group pin of the five.
     const pins = Object.fromEntries(w.tools.map(tool => [tool.name, fingerprint(JSON.stringify(tool))]))
     expect(pins).toEqual({
       launch_worker: '3506:a5214540',
       acknowledge_workers: '875:8ed174c7',
       retire_workers: '1530:18bbed4e',
       open_point: '932:ad93390e',
-      queue_task: '702:d743828c',
+      // Moved on purpose by feature/node-only (702:d743828c before): its status description says the panel shows
+      // queued tasks only, running work being a session.
+      queue_task: '723:d470f87e',
       record_decision: '644:568b5ef',
       list_sessions: '564:8e142ecb',
       read_result: '803:cd9e805f',
@@ -449,7 +446,9 @@ describe('tool surface', () => {
       list_licences: '604:8cb60265',
       probe_licence_usage: '872:606c21ff',
     })
-    expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4689:d2b85bc0')
+    // The five after launch_worker hold queue_task, so feature/node-only moved this one with it (4689:d2b85bc0 before);
+    // the other four keep their own pins above.
+    expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4710:7d7306c')
     expect(fingerprint(JSON.stringify(w.tools.slice(6, 12)))).toBe('3428:1484e7b6')
   })
 })
