@@ -2011,13 +2011,14 @@ async function scanLicences($: EngineInterface): Promise<{ scan: LicenceScan; is
   return { scan, isCached: false }
 }
 
-/** list_licences: the scan, and the registry's sessions per licence from a fresh probe. */
+/** list_licences: the scan, and the registry's sessions per licence from a fresh probe (paths normalised, links not resolved). */
 async function listLicences($: EngineInterface) {
   const { scan, isCached } = await scanLicences($)
   const parsed = parseRegistry(await readRegistryText($))
   const registry = parsed.ok ? { entries: parsed.entries, facts: await probe($, parsed.entries) } : undefined
+  const isWindows = (await hostOf($)).platform === 'windows'
   return {
-    result: listLicencesText({ scan, nowMs: await $.clock.now(), isCached, ...(registry === undefined ? {} : { registry }), ...(parsed.ok ? {} : { registryError: parsed.error }), isSame: await sameDirOf($) }),
+    result: listLicencesText({ scan, nowMs: await $.clock.now(), isCached, ...(registry === undefined ? {} : { registry }), ...(parsed.ok ? {} : { registryError: parsed.error }), isSame: await sameDirOf($), isWindows }),
   }
 }
 

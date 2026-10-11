@@ -18,12 +18,14 @@ import {
   USAGE_PROBE_WORST_MS,
   findLicence,
   hasProbeRoom,
+  isUnderLicence,
   isUsageFresh,
   licenceCandidates,
   licenceDirsOf,
   licenceName,
   licenceOf,
   listLicencesText,
+  normalConfigDir,
   probeUsageText,
 } from '../hooks/licences'
 import type { Licence } from '../hooks/licences'
@@ -205,6 +207,32 @@ describe('list_licences', () => {
     // Asked by stat (kind), never by exists alone and never read.
     for (const name of ['dirs', 'mixed', 'linkdir', 'linkfile']) expect(world.statted).toContain(`${CLAUDE}/${name}/.credentials.json`)
     expect(world.statted).toContain(`${HOME}/.claude-broken/.credentials.json`)
+  })
+
+  test('registry config_dir paths are matched normalised (// and /./ collapsed, a trailing / stripped), never through a symbolic link', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seed(world)
+    licence(world, CLAUDE)
+    licence(world, `${CLAUDE}/second`)
+    world.links.set('/w/alias-second', `${CLAUDE}/second`)
+    const entry = (n: number, configDir: string) => ({ title: `e${n}`, session_id: `5000000${n}-aaaa-4bbb-8ccc-00000000000${n}`, config_dir: configDir, cwd: '/w/work', model: 'haiku', effort: 'low', reported: true })
+    const entries = [
+      entry(1, `${HOME}//.claude//second/`),
+      entry(2, `${CLAUDE}/./second`),
+      entry(3, `${CLAUDE}/second/.`),
+      entry(4, `${CLAUDE}/second///`),
+      entry(5, '/w/alias-second'),
+      entry(6, `${CLAUDE}/x/../second`),
+      entry(7, `${HOME}/./.claude/`),
+    ]
+    world.files.set(REGISTRY, `${JSON.stringify(entries, null, 2)}\n`)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    expect((await answerOf($, 'list_licences')).split('\n')).toEqual([
+      '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
+      `- default | config_dir ${CLAUDE} | source default | logged_in yes | sessions 0 live, 1 in all`,
+      `- second | config_dir ${CLAUDE}/second | source child | logged_in yes | sessions 0 live, 4 in all`,
+      '2 registry entries are under no discovered licence.',
+    ])
   })
 
   test('the registry unreadable: the licences with ? counts and the reason', { options: OPTIONS }, async ($, on) => {
@@ -681,6 +709,24 @@ describe('list_licences on Windows', () => {
     expectNoIdentity(text)
   })
 
+  test('registry config_dir paths are matched normalised in both separators and without case; a trailing separator and .\\ dropped', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {
+    const w = winWorld(on)
+    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
+    const entries = ['c:\\w\\home\\.claude\\.\\second\\\\', 'C:/w/home/.claude//Second/./', 'C:\\w\\home\\.claude\\other'].map((configDir, n) => ({ title: `w${n}`, session_id: `6000000${n}-aaaa-4bbb-8ccc-00000000000${n}`, config_dir: configDir, cwd: 'C:/w/work', reported: true }))
+    w.files.set(WIN_REGISTRY, `${JSON.stringify(entries)}\n`)
+    for (const dir of ['C:/w/home/.claude', 'C:/w/home/.claude/Second']) {
+      w.files.set(`${dir}/.credentials.json`, credentialsText())
+      w.files.set(`${dir}/.claude.json`, configText())
+    }
+    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    expect((await answerOf($, 'list_licences')).split('\n')).toEqual([
+      '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
+      '- default | config_dir C:/w/home/.claude | source default | logged_in yes | sessions 0 live, 0 in all',
+      '- Second | config_dir C:/w/home/.claude/Second | source child | logged_in yes | sessions 0 live, 2 in all',
+      '1 registry entry is under no discovered licence.',
+    ])
+  })
+
   test('probe_licence_usage: claude.exe with the three arguments, in the drive root, CLAUDE_CONFIG_DIR in the native form (none for the inherited default)', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {
     const w = winWorld(on)
     w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
@@ -756,6 +802,22 @@ describe('licences.ts', () => {
     expect(findLicence(licences, 'default', isSameWinPath)?.configDir).toBe('C:/Users/u/.claude')
     expect(findLicence(licences, 'C:/Users/u/.claude/other', isSameWinPath)).toBeUndefined()
     expect(findLicence(licences, '  ', isSameWinPath)).toBeUndefined()
+  })
+
+  test('normalConfigDir and isUnderLicence: spelling only (separators, . components, a trailing separator), .. kept, no link resolved', () => {
+    expect(normalConfigDir('/h//.claude/./a/')).toBe('/h/.claude/a')
+    expect(normalConfigDir('//h/.claude/a/.')).toBe('/h/.claude/a')
+    expect(normalConfigDir('/h/.claude/x/../a')).toBe('/h/.claude/x/../a')
+    expect(normalConfigDir('/')).toBe('/')
+    expect(normalConfigDir('///')).toBe('/')
+    expect(normalConfigDir('/h/a\\b')).toBe('/h/a\\b')
+    expect(normalConfigDir('C:\\Users\\u\\.claude\\.\\Work\\\\', true)).toBe('C:/Users/u/.claude/Work')
+    expect(normalConfigDir('\\\\srv\\share\\.claude\\', true)).toBe('//srv/share/.claude')
+    expect(normalConfigDir('C:\\', true)).toBe('C:')
+    expect(isUnderLicence('/h/.claude//a/', '/h/.claude/a', same)).toBe(true)
+    expect(isUnderLicence('/h/link-to-a', '/h/.claude/a', same)).toBe(false)
+    expect(isUnderLicence('', '/h/.claude/a', same)).toBe(false)
+    expect(isUnderLicence('c:\\users\\U\\.claude\\.\\work\\', 'C:/Users/u/.claude/Work', isSameWinPath, true)).toBe(true)
   })
 
   test('listLicencesText: bounded to MAX_LICENCES lines, the rest counted; names and paths cleaned', () => {

@@ -139,9 +139,27 @@ export function findLicence(licences: readonly Licence[], asked: string, isSame:
 
 // ---------------------------------------------------------------- list_licences
 
-/** Registry sessions per licence: live (the Abort check passes) and in all. */
-export function sessionCounts(licence: Licence, entries: readonly SessionEntry[], facts: ProcFacts, isSame: (a: string, b: string) => boolean): { live: number; all: number } {
-  const under = entries.filter(entry => typeof entry.config_dir === 'string' && entry.config_dir !== '' && isSame(entry.config_dir, licence.configDir))
+/**
+ * A config directory as the registry match compares it: repeated separators collapsed, `.` components dropped and a
+ * trailing separator stripped (on Windows `\\` is a separator too, and a leading `//` of a UNC path is kept). Spelling
+ * only: `..` is kept and no symbolic link is resolved (the mod never resolves one), so a registry path through a link
+ * and the licence's own path count as two directories.
+ */
+export function normalConfigDir(path: string, isWindows = false): string {
+  const slashed = isWindows ? path.replace(/\\/g, '/') : path
+  const lead = isWindows && /^\/\/[^/]/.test(slashed) ? '//' : slashed.startsWith('/') ? '/' : ''
+  const parts = slashed.split('/').filter(part => part !== '' && part !== '.')
+  return lead + parts.join('/') || lead || '.'
+}
+
+/** Whether a registry entry's config_dir is a licence's directory: both normalised (normalConfigDir), then compared as the platform does. */
+export function isUnderLicence(entryDir: string, licenceDir: string, isSame: (a: string, b: string) => boolean, isWindows = false): boolean {
+  return entryDir !== '' && isSame(normalConfigDir(entryDir, isWindows), normalConfigDir(licenceDir, isWindows))
+}
+
+/** Registry sessions per licence: live (the Abort check passes) and in all; the paths matched by isUnderLicence. */
+export function sessionCounts(licence: Licence, entries: readonly SessionEntry[], facts: ProcFacts, isSame: (a: string, b: string) => boolean, isWindows = false): { live: number; all: number } {
+  const under = entries.filter(entry => typeof entry.config_dir === 'string' && isUnderLicence(entry.config_dir, licence.configDir, isSame, isWindows))
   return { live: under.filter(entry => rowStatus(entry, facts) === 'alive').length, all: under.length }
 }
 
@@ -159,6 +177,7 @@ export function listLicencesText(input: {
   registry?: { entries: readonly SessionEntry[]; facts: ProcFacts }
   registryError?: string
   isSame: (a: string, b: string) => boolean
+  isWindows?: boolean
 }): string {
   const { scan } = input
   const age = ageOf(scan, input.nowMs)
@@ -167,7 +186,7 @@ export function listLicencesText(input: {
     `${count} licence${count === 1 ? '' : 's'} (directory scan ${input.isCached ? `cached, ${age} s old` : 'fresh'}; logged_in says only that .credentials.json and .claude.json are there: neither is opened).`,
   ]
   for (const licence of scan.licences.slice(0, MAX_LICENCES)) {
-    const counts = input.registry === undefined ? undefined : sessionCounts(licence, input.registry.entries, input.registry.facts, input.isSame)
+    const counts = input.registry === undefined ? undefined : sessionCounts(licence, input.registry.entries, input.registry.facts, input.isSame, input.isWindows)
     lines.push(
       [
         `- ${clean(licence.name)}`,
@@ -180,7 +199,7 @@ export function listLicencesText(input: {
   }
   if (count > MAX_LICENCES) lines.push(`(${count - MAX_LICENCES} more licences not shown)`)
   if (input.registry !== undefined) {
-    const known = input.registry.entries.filter(entry => typeof entry.config_dir === 'string' && scan.licences.some(one => input.isSame(one.configDir, entry.config_dir as string))).length
+    const known = input.registry.entries.filter(entry => typeof entry.config_dir === 'string' && scan.licences.some(one => isUnderLicence(entry.config_dir as string, one.configDir, input.isSame, input.isWindows))).length
     const other = input.registry.entries.length - known
     if (other > 0) lines.push(`${other} registry entr${other === 1 ? 'y is' : 'ies are'} under no discovered licence.`)
   } else lines.push(`The registry cannot be read (${clean(input.registryError ?? 'unknown')}): no session counts.`)
