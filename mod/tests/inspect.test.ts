@@ -361,6 +361,14 @@ describe('list_sessions', () => {
     expect(shownName(`${ofLength(63)}-2`)).toContain(REDACTED)
   })
 
+  test('a worker report keeps the git ids of its git lines, and the redaction count leaves them out; a hex string elsewhere is redacted and counted', () => {
+    const tip = '7ebdad1d0e3a5e562fe4070f84c13ef087fd005c'
+    const report = ['git ls-remote origin refs/heads/main', `${tip}\trefs/heads/main`, `origin ${tip} refs/heads/feature/write-tools`, `${tip} fix(mod): x`, 'build id 3f2a9c1b7d4e8a6f0b5c2d9e1a7f4b3c8d6e0a2f'].join('\n')
+    const got = redactCounted(report)
+    expect(got.text).toBe(report.replace('3f2a9c1b7d4e8a6f0b5c2d9e1a7f4b3c8d6e0a2f', REDACTED))
+    expect(got.count).toBe(1)
+  })
+
   test('a registry that does not parse is a refusal, nothing written', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     w.files.set(REG, '[{"title": ')

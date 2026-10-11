@@ -104,19 +104,64 @@ const isPlainPath = (path: string) =>
     .flatMap(segment => segment.split(/[-_.+=~]/))
     .every(word => word.length < 16 || /^[A-Za-z]+$/.test(word) || /^[0-9]+$/.test(word))
 
-/** A string with everything that looks like a credential replaced by [redacted]; UUIDs and plain absolute paths stay. */
+/** A git object id as git prints it: 40 hex digits (SHA-1) or 64 (SHA-256), lower case, not part of a longer run of letters or digits. */
+const GIT_SHA = /(?<![0-9A-Za-z])(?:[0-9a-f]{40}|[0-9a-f]{64})(?![0-9A-Za-z])/g
+
+/**
+ * What makes a line a git line: a ref (`refs/`), `commit `, `HEAD`, a range of two hex ids (`a..b`, `a...b`), the
+ * commands `git ls-remote`, `git log` and `git rev-parse`, or `sha` as a word (`sha`, `sha1`, `sha256`, `shas`).
+ */
+const GIT_LINE = /refs\/|\b[Cc]ommit\s|\bHEAD\b|[0-9a-f]{7,64}\.\.\.?[0-9a-f]{7,64}|\bgit\s+(?:ls-remote|log|rev-parse)\b|\b[Ss][Hh][Aa][Ss]?\d*\b/
+/** The first thing of a `git log --oneline` row: an id, a blank, the subject. */
+const LOG_ROW = /^\s*([0-9a-f]{40}|[0-9a-f]{64})(?=\s+\S)/
+/** What stands before an id that is no git id: a word that says secret, or an assignment (`=` or `:`), blanks and a quote between. */
+const BEFORE_SECRET = new RegExp(`(?:${SECRET_WORD}${NAME_CHAR}*["']?\\s*[=:]?|[=:])\\s*["']?$`, 'i')
+/** Stands in for a git id while the other patterns run: private-use characters around its number. */
+const SHIELD = /\uE000(\d+)\uE001/g
+
+/**
+ * The text with each git id in an evident git context held back from the redaction (a placeholder each, kept in
+ * `kept`): 40 or 64 lower-case hex digits on a git line (GIT_LINE) or at the start of a `git log --oneline` row, and
+ * not after a word that says secret or an `=` or `:` (those stay redacted, as long hex strings do everywhere else).
+ * A text with the placeholder's own characters is left whole.
+ */
+function shieldShas(text: string, kept: string[]): string {
+  if (/[\uE000\uE001]/.test(text)) return text
+  return text
+    .split('\n')
+    .map(line => {
+      const isGit = GIT_LINE.test(line)
+      const row = LOG_ROW.exec(line)
+      if (!isGit && row === null) return line
+      const rowAt = row === null ? -1 : line.indexOf(row[1] as string)
+      return line.replace(GIT_SHA, (sha, at: number) => {
+        if (!isGit && at !== rowAt) return sha
+        if (BEFORE_SECRET.test(line.slice(Math.max(0, at - 40), at))) return sha
+        kept.push(sha)
+        return `\uE000${kept.length - 1}\uE001`
+      })
+    })
+    .join('\n')
+}
+
+/**
+ * A string with everything that looks like a credential replaced by [redacted]; UUIDs and plain absolute paths stay,
+ * and so does a 40 or 64-digit git id in an evident git context (shieldShas); long hex strings anywhere else go.
+ */
 export function redact(text: string): string {
-  let out = text
+  const kept: string[] = []
+  let out = shieldShas(text, kept)
     .replace(AUTHORIZATION, (_, name: string) => `${name}${REDACTED}`)
     .replace(URL_USERINFO, (_, scheme: string) => `${scheme}${REDACTED}@`)
     .replace(USER_FLAG, (_, flag: string, quote: string) => `${flag}${quote}${REDACTED}${quote}`)
     .replace(SECRET_ASSIGNMENT, (_, name: string) => `${name}${REDACTED}`)
     .replace(SECRET_FLAG, (_, flag: string) => `${flag}${REDACTED}`)
   for (const pattern of TOKEN_PATTERNS) out = out.replace(pattern, REDACTED)
-  return out.replace(PATH_OR_RUN, found => {
+  out = out.replace(PATH_OR_RUN, found => {
     if (!/^(?:[A-Za-z]:[\\/]|~\/|\/)/.test(found)) return isTokenRun(found) ? REDACTED : found
     return isPlainPath(found) ? found : found.replace(RUN, run => (isTokenRun(run) ? REDACTED : run))
   })
+  return kept.length === 0 ? out : out.replace(SHIELD, (whole, at: string) => kept[Number(at)] ?? whole)
 }
 
 /** A value with every string in it redacted and cut to TRACE_MAX_STRING characters; keys stay. */

@@ -40,6 +40,91 @@ describe('redaction', () => {
     expect(redact('API_KEY: abc123')).toBe(`API_KEY: ${REDACTED}`)
   })
 
+  describe('git ids', () => {
+    const TIP = '7ebdad1d0e3a5e562fe4070f84c13ef087fd005c'
+    const BASE = '75bce63b2d3a4ab1c5e7f0b1d9c8a6e4f2b0d3c1'
+    const SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+    const CANARY = '3f2a9c1b7d4e8a6f0b5c2d9e1a7f4b3c8d6e0a2f'
+
+    test('a 40 or 64 digit id in an evident git context stays: a ref, commit, HEAD, a range, git ls-remote, git log, git rev-parse, sha, the start of a log row', () => {
+      for (const line of [
+        `origin ${TIP} refs/heads/main`,
+        `${TIP}\trefs/heads/feature/write-tools`,
+        `refs/heads/main is at ${TIP}`,
+        `commit ${TIP}`,
+        `the commit ${TIP} was pushed`,
+        `HEAD is now ${TIP}`,
+        `${BASE}..${TIP}`,
+        `${BASE}...${TIP}`,
+        `range ${BASE}..${TIP} of the branch`,
+        `$ git ls-remote origin ${TIP}`,
+        `git log -1 ${TIP}`,
+        `git rev-parse ${TIP}`,
+        `the sha of the tip is ${TIP}`,
+        `SHA ${TIP}`,
+        `shas ${TIP} ${BASE}`,
+        `sha256 ${SHA256}`,
+        `object (sha1 ${TIP}) in the pack`,
+        `${TIP} fix(mod): show a session name`,
+        `  ${TIP} feat(mod): close_worker`,
+        `${SHA256} a 64 digit log row`,
+      ]) {
+        expect(redact(line)).toBe(line)
+      }
+      // Each line of a text decides for itself; the id of a log row only, not the id further on.
+      const report = `git ls-remote origin\n${TIP}\trefs/heads/main\n${BASE} docs(readme): x\n${CANARY}\nok`
+      expect(redact(report)).toBe(report.replace(CANARY, REDACTED))
+      expect(redact(`${TIP} fix: see also ${CANARY}`)).toBe(`${TIP} fix: see also ${REDACTED}`)
+      // Another secret on the line goes, the id stays.
+      expect(redact(`git ls-remote https://user:pa55@example.com/org/repo.git ${TIP} refs/heads/x`)).toBe(`git ls-remote https://${REDACTED}@example.com/org/repo.git ${TIP} refs/heads/x`)
+      expect(redact(`commit ${TIP} and commit ${BASE}`)).toBe(`commit ${TIP} and commit ${BASE}`)
+    })
+
+    test('a long hex string with no git context, one next to a secret word or an = or : assignment, and one that is no 40 or 64 digit id stay redacted', () => {
+      for (const [line, want] of [
+        [CANARY, REDACTED],
+        [`the value is ${CANARY} here`, `the value is ${REDACTED} here`],
+        [`${CANARY}\n${CANARY}`, `${REDACTED}\n${REDACTED}`],
+        [`${SHA256}`, REDACTED],
+        // The id is the first word of a line that is no log row (nothing after it).
+        [`${TIP} `, `${REDACTED} `],
+        // A git line, but the id sits after a secret word or an assignment.
+        [`refs/heads/main token ${CANARY}`, `refs/heads/main token ${REDACTED}`],
+        [`HEAD secret ${CANARY}`, `HEAD secret ${REDACTED}`],
+        [`commit key=${CANARY}`, `commit key=${REDACTED}`],
+        [`git log password: ${CANARY}`, `git log password: ${REDACTED}`],
+        [`sha=${CANARY}`, `sha=${REDACTED}`],
+        [`sha: ${CANARY}`, `sha: ${REDACTED}`],
+        [`refs/heads/main x=${CANARY}`, `refs/heads/main x=${REDACTED}`],
+        [`refs/heads/main "id": "${CANARY}"`, `refs/heads/main "id": "${REDACTED}"`],
+        [`API_KEY=${CANARY} refs/heads/main`, `API_KEY=${REDACTED} refs/heads/main`],
+        [`Authorization: Bearer ${CANARY} refs/heads/main`, `Authorization: ${REDACTED} refs/heads/main`],
+        // Not a 40 or 64 digit id: 32 to 39, 41 to 63, 65 and more, upper case, longer runs of letters and digits.
+        [`refs/heads/main ${CANARY.slice(0, 32)}`, `refs/heads/main ${REDACTED}`],
+        [`refs/heads/main ${CANARY.slice(0, 39)}`, `refs/heads/main ${REDACTED}`],
+        [`refs/heads/main ${CANARY}a`, `refs/heads/main ${REDACTED}`],
+        [`refs/heads/main ${SHA256}0`, `refs/heads/main ${REDACTED}`],
+        [`refs/heads/main ${SHA256}${SHA256}`, `refs/heads/main ${REDACTED}`],
+        [`commit ${CANARY.toUpperCase()}`, `commit ${REDACTED}`],
+        [`commit ghp${CANARY}`, `commit ${REDACTED}`],
+        [`commit ${CANARY}xyz`, `commit ${REDACTED}`],
+        [`commit ${'a1b2c3d4e5f60718'.repeat(2)}ZZ${CANARY.slice(0, 8)}`, `commit ${REDACTED}`],
+      ] as const) {
+        expect(redact(line)).toBe(want)
+      }
+    })
+
+    test('the placeholder characters in a text switch the shielding off for it: every long hex string goes', () => {
+      expect(redact(`refs/heads/main ${CANARY} \uE0000\uE001`)).toBe(`refs/heads/main ${REDACTED} \uE0000\uE001`)
+    })
+
+    test('the trace uses the same function: an id on a git line (an argument with its ref too) stays, an id alone or beside a secret word goes, each string of a value on its own', () => {
+      expect(traceLine(1, NOW_MS, 'x', { out: `origin ${TIP} refs/heads/main`, bare: TIP, secret: `token ${CANARY}`, argv: ['git', 'push', 'origin', `${TIP}:refs/heads/x`] })).toBe(
+        JSON.stringify({ ts: localIso(NOW_MS), seq: 1, event: 'x', out: `origin ${TIP} refs/heads/main`, bare: REDACTED, secret: `token ${REDACTED}`, argv: ['git', 'push', 'origin', `${TIP}:refs/heads/x`] }),
+      )
+    })
+  })
+
   test('NAME=value and NAME: value whose name says secret, in any case, underscores and hyphens separating words', () => {
     expect(redact('ANTHROPIC_API_KEY=abc')).toBe(`ANTHROPIC_API_KEY=${REDACTED}`)
     expect(redact('env GITHUB_TOKEN=x1 MY_SECRET_VALUE=y db_password=z PASSWD=w')).toBe(
