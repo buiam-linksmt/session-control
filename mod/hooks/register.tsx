@@ -65,6 +65,7 @@ import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
 import { findSecrets, secretScanLine, tallyFromAnswer, tallyOf } from './secrets'
+import { promptLint } from './lint'
 import type { SecretTally } from './secrets'
 import type { ProtectedFile } from './guard'
 import type { StopReport } from './host'
@@ -1438,6 +1439,13 @@ async function launch($: EngineInterface, given: LaunchInput) {
     trace($, 'guard', { tool: 'launch_worker', isOk: false, ...messageFields(reason, 'reason') })
     return { deny: `${PLUGIN}: ${reason}` }
   }
+  // The prompt lint (lint.ts): a likely secret or a prompt over the size cap is refused before anything runs, the
+  // licence picker included; a missing branch or decision section is a warning in the answer.
+  const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text)
+  if (lint.refusal !== undefined) {
+    trace($, 'guard', { tool: 'launch_worker', isOk: false, check: 'prompt-lint', ...messageFields(lint.refusal, 'reason') })
+    return { deny: `${PLUGIN}: ${lint.refusal}; nothing was launched` }
+  }
   const runsDir = await runsPath($)
   const nowMs = await $.clock.now()
   const base = `${runsDir}/${new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(0, 14)}-${slugify(filled.title ?? '')}`
@@ -1495,7 +1503,7 @@ async function launch($: EngineInterface, given: LaunchInput) {
   }
   // No CLAUDE_CONFIG_DIR on the line: a fresh launch without a picker, or a resume under the default directory.
   const isConfigInherited = picker === '' && (verdict.resumeSid === undefined || machine.isDefaultConfigDir(verdict.configDir, defaultDir))
-  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, name, own, fromEntry })
+  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, name, own, fromEntry, warnings: lint.warnings })
 }
 
 /** Start the worker as a background task of the host's launch tool, find its real pid and session, register it. */
@@ -1506,10 +1514,12 @@ async function spawnWorker(
   entries: readonly SessionEntry[],
   before: ProcFacts,
   own: string | undefined,
-  launchRun: { base: string; name: string; own?: OwnPrompt; fromEntry: readonly string[] },
+  launchRun: { base: string; name: string; own?: OwnPrompt; fromEntry: readonly string[]; warnings?: readonly string[] },
 ) {
   const machine = await hostOf($)
   const port = portOf($)
+  // The prompt lint's warnings, one line each after the answer; a launch with none answers as before.
+  const warningLines = (launchRun.warnings ?? []).map(one => `\nWARNING: ${one}`).join('')
   // The launch's redirections need the runs directory.
   await machine.prepareRunsDir(port, await runsPath($))
   const files = { result: `${launchRun.base}.json`, err: `${launchRun.base}.err` }
@@ -1543,7 +1553,7 @@ async function spawnWorker(
   }
   if (worker === undefined) {
     trace($, 'worker.missing', { seconds: 30 })
-    return { result: `Started in the background but no claude process appeared within 30 s; check ${files.err}. Not registered.` }
+    return { result: `Started in the background but no claude process appeared within 30 s; check ${files.err}. Not registered.${warningLines}` }
   }
   // The engine writes the session file shortly after the process starts: read it again until it is there. Its name
   // and messaging socket are taken from the same file; an older claude writes no socket, and the entry then has none.
@@ -1570,7 +1580,7 @@ async function spawnWorker(
   const filePid = pidFile === undefined ? undefined : pidFromFile(await $.fs.read(pidFile).catch(() => ''))
   const pidFileFact = pidFile === undefined ? {} : { pidFile: filePid === undefined ? 'unread' : filePid === worker.pid ? 'same' : 'differs' }
   trace($, 'worker.found', { pid: worker.pid, sessionId, isNamed: fromFile.name !== undefined, isSocketSeen: fromFile.socketPath !== undefined, ...pidFileFact })
-  if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.` }
+  if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.${warningLines}` }
   const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
   const prompt = launchRun.own === undefined ? {} : { promptFile: launchRun.own.path, ...(launchRun.own.section === undefined ? {} : { section: launchRun.own.section }) }
   const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox, Math.floor(launchedAt / 1000), prompt)
@@ -1586,7 +1596,7 @@ async function spawnWorker(
   const promptNote = ownPrompt === undefined ? '' : ` Prompt: ${ownPrompt.path} (written by the mod${added.length === 0 ? '' : `; ${added.join('; ')}`}).`
   const entryNote = fromEntry.length === 0 ? '' : ` From the entry: ${fromEntry.join(', ')}.`
   return {
-    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}${promptNote}${entryNote}`,
+    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}${promptNote}${entryNote}${warningLines}`,
   }
 }
 
