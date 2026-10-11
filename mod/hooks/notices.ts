@@ -65,7 +65,10 @@ export const ORPHANS_SHOWN = 5
 /** How many pids the grouped orphan notice lists. */
 export const ORPHAN_PIDS_LISTED = 10
 
-/** The finding kinds of audit_state the retire-due notice counts, by its three groups. */
+/**
+ * The finding kinds of audit_state the retire-due notice counts, by its three groups. A queued-free-wait finding is
+ * counted once per task and wait text (retireStep, NoticeState.freeWaits).
+ */
 const RETIRE_GROUPS: readonly { kinds: readonly string[]; label: (n: number) => string }[] = [
   { kinds: ['retirable'], label: n => `${n} finished ${n === 1 ? 'session' : 'sessions'} can be retired` },
   { kinds: ['kept-old'], label: n => `${n} kept ${n === 1 ? 'session' : 'sessions'} idle over 6 hours` },
@@ -106,6 +109,11 @@ export type NoticeState = {
   drift?: string
   /** The session ids whose secret-in-result notice was told; absent until one is, so the stored state is as before. */
   secrets?: string[]
+  /**
+   * The queued tasks whose queued-free-wait finding retire-due told, as `<task id> <hash of the trimmed waits_for>`
+   * (waitKey); a changed wait text is a new key. Absent until one is told, so the stored state is as before.
+   */
+  freeWaits?: string[]
 }
 
 export function freshNoticeState(): NoticeState {
@@ -159,6 +167,8 @@ export function parseNoticeState(value: unknown): NoticeState {
   if (typeof value.drift === 'string' && value.drift !== '') state.drift = value.drift
   const secrets = strings(value.secrets)
   if (secrets.length > 0) state.secrets = secrets
+  const freeWaits = strings(value.freeWaits)
+  if (freeWaits.length > 0) state.freeWaits = freeWaits
   return state
 }
 
@@ -480,16 +490,51 @@ export function isRetireDue(state: NoticeState, nowMs: number): boolean {
   return (state.retireAt === undefined || nowMs - state.retireAt >= RETIRE_EVERY_SEC * 1000) && (state.retireCheckAt === undefined || nowMs - state.retireCheckAt >= RETIRE_CHECK_SEC * 1000)
 }
 
+/** A queued task's key in NoticeState.freeWaits: its id and a short hash (FNV-1a) of its trimmed waits_for, never the text. */
+export function waitKey(id: string, waitsFor: string): string {
+  const text = waitsFor.trim()
+  let hash = 2166136261
+  for (let at = 0; at < text.length; at++) hash = Math.imul(hash ^ text.charCodeAt(at), 16777619) >>> 0
+  return `${id} ${hash.toString(16).padStart(8, '0')}`
+}
+
+/** The freeWaits keys of the queued tasks with a waits_for that is not blank; undefined when the queue cannot be read. */
+function queuedWaitKeys(queueText: string | undefined): Map<string, string[]> | undefined {
+  const tasks = queueTasks(queueText)
+  if (tasks === undefined) return undefined
+  const keys = new Map<string, string[]>()
+  for (const task of tasks) {
+    if (task.status !== 'queued' || task.waitsFor.trim() === '') continue
+    keys.set(task.id, [...(keys.get(task.id) ?? []), waitKey(task.id, task.waitsFor)])
+  }
+  return keys
+}
+
+/**
+ * Forgets the told free-text waits the queue no longer holds: a task removed, no longer queued or whose waits_for
+ * changed. A queue that cannot be read forgets nothing.
+ */
+export function pruneFreeWaits(state: NoticeState, queueText: string | undefined): void {
+  if (state.freeWaits === undefined) return
+  const keys = queuedWaitKeys(queueText)
+  if (keys === undefined) return
+  const held = new Set([...keys.values()].flat())
+  state.freeWaits = state.freeWaits.filter(key => held.has(key))
+  if (state.freeWaits.length === 0) delete state.freeWaits
+}
+
 /**
  * retire-due (decision win-36): audit_state's own findings (auditFindings) over the registry, the probe, the queue and
  * the cleared log, counted in three groups (sessions to retire, kept sessions idle over 6 hours, stale queue tasks)
- * with the first few ids; one notice pointing at audit_state, at most once per RETIRE_EVERY_SEC.
+ * with the first few ids; one notice pointing at audit_state, at most once per RETIRE_EVERY_SEC. A queued task with a
+ * queued-free-wait finding is counted once per waits_for text (freeWaits): a task that waits long does not nag.
  */
 export function retireStep(
   state: NoticeState,
   input: { entries: readonly SessionEntry[]; facts: ProcFacts; nowMs: number; queueText?: string; retired?: ReadonlySet<string> },
 ): Notice[] {
   state.retireCheckAt = input.nowMs
+  pruneFreeWaits(state, input.queueText)
   const findings: Finding[] = auditFindings({
     entries: input.entries,
     facts: input.facts,
@@ -497,15 +542,21 @@ export function retireStep(
     ...(input.queueText === undefined ? {} : { queueText: input.queueText }),
     ...(input.retired === undefined ? {} : { retired: input.retired }),
   })
+  const told = new Set(state.freeWaits ?? [])
+  const waitKeys = queuedWaitKeys(input.queueText) ?? new Map<string, string[]>()
+  const freshKeys = (one: Finding) => (waitKeys.get(one.ref ?? '') ?? []).filter(key => !told.has(key))
+  const counted = findings.filter(one => one.kind !== 'queued-free-wait' || freshKeys(one).length > 0)
   const parts: string[] = []
   const fields: Record<string, number> = {}
   for (const [at, group] of RETIRE_GROUPS.entries()) {
-    const ids = [...new Set(findings.filter(one => group.kinds.includes(one.kind)).map(one => one.ref ?? '?'))]
+    const ids = [...new Set(counted.filter(one => group.kinds.includes(one.kind)).map(one => one.ref ?? '?'))]
     fields[['retirable', 'keptOld', 'staleTasks'][at] as string] = ids.length
     if (ids.length > 0) parts.push(`${group.label(ids.length)} (${idList(ids)})`)
   }
   if (parts.length === 0) return []
   state.retireAt = input.nowMs
+  const fresh = [...new Set(counted.filter(one => one.kind === 'queued-free-wait').flatMap(freshKeys))]
+  if (fresh.length > 0) state.freeWaits = [...told, ...fresh]
   return [{ kind: 'retire-due', message: `${parts.join('; ')}: run audit_state`, fields }]
 }
 

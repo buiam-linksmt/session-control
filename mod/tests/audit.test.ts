@@ -275,6 +275,15 @@ describe('queued tasks whose wait the audit cannot check', () => {
     expect(freeOf([{ id: 'q', title: 'x', status: 'queued', waits_for: 'mod step 2' }], { entries: [] }).map(one => one.ref)).toEqual(['q'])
   })
 
+  test('a waits_for of whitespace only (spaces, a tab, a newline, a no-break space) is no wait: no finding; a wait with text around blanks still is one', () => {
+    const blanks = { spaces: '   ', tab: '\t', newline: '\n', nbsp: '\u00A0', mixed: ' \t\r\n\u00A0 ' }
+    const tasks = Object.entries(blanks).map(([id, waits]) => ({ id, title: 'x', status: 'queued', waits_for: waits }))
+    expect(freeOf(tasks)).toEqual([])
+    expect(auditFindings({ entries: ENTRIES, facts: FACTS, nowMs: NOW, queueText: queueOf(tasks) }).filter(one => one.ref !== undefined && Object.keys(blanks).includes(one.ref))).toEqual([])
+    expect(freeOf([{ id: 'padded', title: 'x', status: 'queued', waits_for: '\u00A0 mod step 2\t\n' }]).map(one => [one.ref, one.evidence])).toEqual([['padded', `waits_for "mod step 2": ${FREE}`]])
+    expect(freeOf([{ id: 'plain', title: 'x', status: 'queued', waits_for: 'mod step 2' }]).map(one => one.ref)).toEqual(['plain'])
+  })
+
   test('a licence headroom wait (a percentage or the word headroom) is never one while it has no reset time or its reset time is ahead; one whose reset time has passed is', () => {
     const ahead = new Date(NOW + 3 * 3600_000).toISOString()
     const behind = new Date(NOW - 600_000).toISOString()

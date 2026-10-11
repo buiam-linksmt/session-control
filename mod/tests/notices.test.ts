@@ -32,11 +32,14 @@ import {
   parseNoticeState,
   pendingWith,
   pointStep,
+  RETIRE_EVERY_SEC,
+  pruneFreeWaits,
   pruneHarvested,
   repoStep,
   retireStep,
   stallStep,
   unitStep,
+  waitKey,
 } from '../hooks/notices'
 import type { Notice, NoticeKind } from '../hooks/notices'
 import { localDate } from '../hooks/store'
@@ -397,8 +400,9 @@ describe('retire-due: queued tasks whose wait audit_state cannot check', () => {
     leftByFirstLoad = store.get(KEY)
     await poll(world, 3540, 60)
     expect(noticeToasts(world).length).toBe(1)
+    // The same waits an hour on are not told again (retire-due: each free-text wait told once).
     await poll(world, 60, 60)
-    expect(noticeToasts(world)).toEqual([`Housekeeping due \u00B7 ${text}`, `Housekeeping due \u00B7 ${text}`])
+    expect(noticeToasts(world)).toEqual([`Housekeeping due \u00B7 ${text}`])
   })
 
   test('a fresh load with the store the first one left, two minutes later: nothing is told again', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
@@ -412,6 +416,168 @@ describe('retire-due: queued tasks whose wait audit_state cannot check', () => {
     await poll(world, 600, 60)
     expect(noticeToasts(world)).toEqual([])
     expect(noticeLines(await userPrompt($))).toEqual([])
+  })
+})
+
+describe('retire-due: each free-text wait told once', () => {
+  const HOUR_MS = RETIRE_EVERY_SEC * 1000
+  const QUEUE_FILE = `${ORCH}/task-queue.json`
+  // A finished session no finding names however long the clock runs, so only the queue is told.
+  const kept = { title: 'limited', session_id: SID_FREE, config_dir: `${HOME}/.claude`, reported: true, outcome: { kind: 'limit' } }
+  const groups = { id: 'q-groups', status: 'queued', title: 'After the groups', waits_for: 'mod step 3 groups T2a to T3b and the licence tools' }
+  const steps = { id: 'q-steps', status: 'queued', title: 'After the steps', waits_for: 'mod steps 1 to 4 complete' }
+  const queueOf = (tasks: Record<string, unknown>[]) => JSON.stringify({ tasks })
+  const stepAt = (state: ReturnType<typeof freshNoticeState>, tasks: Record<string, unknown>[], nowMs: number) => retireStep(state, { entries: [kept], facts: facts([]), nowMs, queueText: queueOf(tasks) })
+  const stale = (ids: string[]) => `${ids.length} queue ${ids.length === 1 ? 'task looks' : 'tasks look'} stale (${ids.join(', ')}): run audit_state`
+  const toast = (ids: string[]) => `Housekeeping due · ${stale(ids)}`
+  const setQueue = (world: World, tasks: Record<string, unknown>[]) => world.files.set(QUEUE_FILE, queueOf(tasks))
+
+  test('retireStep: told once for an unchanged wait, again for a changed text, a task added later alone, a removed and re-added task again', () => {
+    const state = freshNoticeState()
+    expect(stepAt(state, [groups, steps], NOW_MS).map(one => one.message)).toEqual([stale(['q-groups', 'q-steps'])])
+    expect(state.freeWaits).toEqual([waitKey('q-groups', groups.waits_for), waitKey('q-steps', steps.waits_for)])
+    for (let hour = 1; hour <= 6; hour++) expect(stepAt(state, [groups, steps], NOW_MS + hour * HOUR_MS)).toEqual([])
+    // Blanks around the same text are the same wait.
+    expect(stepAt(state, [{ ...groups, waits_for: ` ${groups.waits_for}\n` }, steps], NOW_MS + 7 * HOUR_MS)).toEqual([])
+    const changed = { ...steps, waits_for: 'mod steps 1 to 5 complete' }
+    expect(stepAt(state, [groups, changed], NOW_MS + 8 * HOUR_MS).map(one => one.message)).toEqual([stale(['q-steps'])])
+    const later = { id: 'q-later', status: 'queued', title: 'Added later', waits_for: 'the customer answer' }
+    expect(stepAt(state, [groups, changed, later], NOW_MS + 9 * HOUR_MS).map(one => one.message)).toEqual([stale(['q-later'])])
+    expect(stepAt(state, [changed, later], NOW_MS + 10 * HOUR_MS)).toEqual([])
+    expect(state.freeWaits).toEqual([waitKey('q-steps', changed.waits_for), waitKey('q-later', later.waits_for)])
+    expect(stepAt(state, [changed, later, groups], NOW_MS + 11 * HOUR_MS).map(one => one.message)).toEqual([stale(['q-groups'])])
+    expect(stepAt(state, [], NOW_MS + 12 * HOUR_MS)).toEqual([])
+    expect(state.freeWaits).toBeUndefined()
+  })
+
+  test('pruneFreeWaits forgets a task no longer queued with that wait, keeps them all when the queue cannot be read', () => {
+    const state = freshNoticeState()
+    state.freeWaits = [waitKey('q-groups', groups.waits_for), waitKey('q-steps', steps.waits_for)]
+    pruneFreeWaits(state, undefined)
+    pruneFreeWaits(state, '{not json')
+    expect(state.freeWaits).toEqual([waitKey('q-groups', groups.waits_for), waitKey('q-steps', steps.waits_for)])
+    pruneFreeWaits(state, queueOf([groups, { ...steps, status: 'done' }]))
+    expect(state.freeWaits).toEqual([waitKey('q-groups', groups.waits_for)])
+    pruneFreeWaits(state, queueOf([{ ...groups, waits_for: 'another wait' }]))
+    expect(state.freeWaits).toBeUndefined()
+    expect(parseNoticeState({ freeWaits: [waitKey('q-a', 'x'), 3] }).freeWaits).toEqual([waitKey('q-a', 'x')])
+    expect('freeWaits' in parseNoticeState({ freeWaits: [] })).toBe(false)
+    expect(waitKey('q-a', '  x\t')).toBe(waitKey('q-a', 'x'))
+    expect(waitKey('q-a', 'x')).toMatch(/^q-a [0-9a-f]{8}$/)
+  })
+
+  test('the stored state holds the task ids and hashes only, never the wait text', () => {
+    const canary = ['wait', Date.now().toString(36), 'marker'].join('-')
+    const state = freshNoticeState()
+    expect(stepAt(state, [{ ...groups, waits_for: `the ${canary} release` }], NOW_MS)).toHaveLength(1)
+    const stored = JSON.stringify(state)
+    expect(stored).not.toContain(canary)
+    expect(stored).not.toContain('release')
+    expect(state.freeWaits?.every(key => /^q-groups [0-9a-f]{8}$/.test(key))).toBe(true)
+  })
+
+  let leftByLoad: unknown
+
+  test('through the poll: told once over 6 hours, again after its text changes, a task added later alone, a removed and re-added task again; no free text in the store', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    const canary = ['wait', Date.now().toString(36), 'marker'].join('-')
+    const own = { ...steps, waits_for: `the ${canary} release` }
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries: [kept], queue: [groups, own] })
+    await start($)
+    await poll(world, 60, 60)
+    expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps'])])
+    expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: retire-due: ${stale(['q-groups', 'q-steps'])}`])
+    await poll(world, 6 * 3600, 60)
+    expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps'])])
+    expect(noticeLines(await userPrompt($))).toEqual([])
+    expect(JSON.stringify(store.get(KEY))).not.toContain(canary)
+    setQueue(world, [groups, { ...own, waits_for: `the ${canary} release, then the merge` }])
+    await poll(world, 120, 60)
+    expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps']), toast(['q-steps'])])
+    const later = { id: 'q-later', status: 'queued', title: 'Added later', waits_for: 'the customer answer' }
+    setQueue(world, [groups, { ...own, waits_for: `the ${canary} release, then the merge` }, later])
+    await poll(world, 3600, 60)
+    expect(noticeToasts(world).slice(2)).toEqual([toast(['q-later'])])
+    setQueue(world, [{ ...own, waits_for: `the ${canary} release, then the merge` }, later])
+    await poll(world, 120, 60)
+    setQueue(world, [{ ...own, waits_for: `the ${canary} release, then the merge` }, later, groups])
+    await poll(world, 3600, 60)
+    expect(noticeToasts(world).slice(3)).toEqual([toast(['q-groups'])])
+    await poll(world, 3 * 3600, 60)
+    expect(noticeToasts(world).length).toBe(4)
+    const left = store.get(KEY) as { freeWaits?: string[] }
+    expect(JSON.stringify(left)).not.toContain(canary)
+    expect(JSON.stringify(left)).not.toContain('customer')
+    expect(left.freeWaits?.length).toBe(3)
+    leftByLoad = left
+  })
+
+  test('a fresh load with the store the last one left, two hours later: nothing is told again', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    expect(leftByLoad).toBeDefined()
+    const world = mockWorld(on)
+    storeOf(on, { [KEY]: leftByLoad })
+    echoPrompt(on)
+    // The first load told these three; the queue keeps two of them as they were.
+    expect((leftByLoad as { freeWaits: string[] }).freeWaits.map(key => key.split(' ')[0])).toEqual(['q-steps', 'q-later', 'q-groups'])
+    seed(world, { entries: [kept], queue: [groups, { id: 'q-later', status: 'queued', title: 'Added later', waits_for: 'the customer answer' }] })
+    await world.clock.advance(2 * HOUR_MS)
+    await start($)
+    await poll(world, 2 * 3600, 60)
+    expect(noticeToasts(world)).toEqual([])
+    expect(noticeLines(await userPrompt($))).toEqual([])
+  })
+
+  test('the notices option off: never told, nothing stored', { options: { ...OPTIONS, pollSeconds: 60, notices: 'off' } }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries: [kept], queue: [groups, steps] })
+    await start($)
+    await poll(world, 2 * 3600, 60)
+    expect(noticeToasts(world)).toEqual([])
+    expect(noticeLines(await userPrompt($))).toEqual([])
+    expect(store.has(KEY)).toBe(false)
+  })
+
+  test('the other stale kinds keep their hourly notice, wording and ids beside a told free-text wait', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    const entries = [
+      { title: 'free', session_id: SID_FREE, config_dir: `${HOME}/.claude`, reported: true, outcome: { kind: 'clean' } },
+      { title: 'kept', session_id: SID_KEPT, config_dir: `${HOME}/.claude`, reported: true, keep: true, outcome: { kind: 'clean' }, ended_at: NOW_SEC - 7 * 3600 },
+    ]
+    const queue = [
+      { id: 'q-done', status: 'done', title: 'Done' },
+      { id: 'q-blocked', status: 'blocked', title: 'Odd status' },
+      { id: 'q-run', status: 'running', title: 'Running, no session' },
+    ]
+    const head = `1 finished session can be retired (${SID_FREE.slice(0, 8)}); 1 kept session idle over 6 hours (${SID_KEPT.slice(0, 8)})`
+    const text = `${head}; 3 queue tasks look stale (q-blocked, q-run, q-done): run audit_state`
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries, queue: [...queue, groups] })
+    await start($)
+    expect(noticeToasts(world)).toEqual([])
+    await poll(world, 60, 60)
+    expect(noticeToasts(world)).toEqual([`Housekeeping due · ${head}; 4 queue tasks look stale (q-blocked, q-run, q-done and 1 more): run audit_state`])
+    await poll(world, 3540, 60)
+    expect(noticeToasts(world).length).toBe(1)
+    await poll(world, 60, 60)
+    expect(noticeToasts(world).length).toBe(2)
+    expect(noticeToasts(world)[1]).toBe(`Housekeeping due · ${text}`)
+    expect(noticeLines(await userPrompt($))).toEqual([
+      `session-control notice: retire-due: ${head}; 4 queue tasks look stale (q-blocked, q-run, q-done and 1 more): run audit_state`,
+      `session-control notice: retire-due: ${text}`,
+    ])
+    await poll(world, 3540, 60)
+    expect(noticeToasts(world).length).toBe(2)
+    await poll(world, 60, 60)
+    expect(noticeToasts(world)).toEqual([
+      `Housekeeping due · ${head}; 4 queue tasks look stale (q-blocked, q-run, q-done and 1 more): run audit_state`,
+      `Housekeeping due · ${text}`,
+      `Housekeeping due · ${text}`,
+    ])
   })
 })
 

@@ -48,6 +48,7 @@ import {
   parseNoticeState,
   pendingWith,
   pointStep,
+  pruneFreeWaits,
   pruneHarvested,
   queueTasks,
   registryStep,
@@ -855,6 +856,7 @@ async function pollNotices(
     if (grouped.length > 0) notices.push(orphanGroupNotice(grouped))
     notices.push(...stallStep(state, entries, facts, nowMs))
     pruneHarvested(state, entries, files.queueText)
+    pruneFreeWaits(state, files.queueText)
     notices.push(...unitStep(state, files.queueText, false))
     notices.push(...pointStep(state, files.pointsText, nowMs))
     if (isTick && isRetireDue(state, nowMs)) {

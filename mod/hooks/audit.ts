@@ -292,7 +292,8 @@ export function auditFindings(input: AuditInput): Finding[] {
         action: 'when its work finished or died, set it done (or queued for a relaunch) with queue_task; when a live session does it, name that session in its note',
       })
     }
-    if (task.status === 'queued' && task.waitsFor !== '') {
+    // A waits_for of whitespace only is no wait.
+    if (task.status === 'queued' && task.waitsFor.trim() !== '') {
       const ids = [...task.waitsFor.matchAll(UUID)].map(found => found[0].toLowerCase())
       const blockers: string[] = []
       for (const entry of entries) {
