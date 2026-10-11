@@ -151,7 +151,7 @@ The tools already redact (see the inspection tools above); the secret scan (deci
 
 | Kind | What |
 | --- | --- |
-| `private-key` | a `-----BEGIN ... PRIVATE KEY-----` block (RSA, EC, OpenSSH, PGP, encrypted), to its END line or the end of the text |
+| `private-key` | a `-----BEGIN ... PRIVATE KEY-----` block (RSA, EC, OpenSSH, PGP, encrypted), masked from its header to its END line; with no END line before the next BEGIN header (a key cut off in a report), to the first blank line after at least one body line (armor header lines such as `Version:`, `Proc-Type:` or `DEK-Info:` are no body lines), never past the next BEGIN header and never more than 4,000 characters after the header (`PRIVATE_KEY_MAX_BODY`), so a header without its END line cannot hide the rest of a report |
 | `github-token` | `ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` with 20 or more letters and digits, `github_pat_` |
 | `sk-key` | `sk-` (also `sk-ant-`, `sk-proj-`, `sk-live-`, `sk-test-`) with 16 or more characters, a letter and a digit among them |
 | `slack-token` | `xoxb-`, `xoxa-`, `xoxp-` (and `xoxe-`, `xoxr-`, `xoxs-`) with 10 or more characters |

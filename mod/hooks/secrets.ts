@@ -41,7 +41,46 @@ const isPlainPath = (text: string) =>
 /** A value that is no secret by its shape: a UUID, a generated session name, a plain path. */
 const isExempt = (value: string) => UUID.test(value) || GENERATED_NAME.test(value) || (/[\\/]/.test(value) && isPlainPath(value))
 
-type Rule = { kind: SecretKind; pattern: RegExp; group?: number; accept?: (value: string, match: RegExpExecArray) => boolean }
+/** A rule: what it finds, the value it masks (the whole match, or a group), a check on the value, and for a private key where its mask ends (from the end of the match). */
+type Rule = { kind: SecretKind; pattern: RegExp; group?: number; accept?: (value: string, match: RegExpExecArray) => boolean; endOf?: (text: string, from: number) => number }
+
+/** The longest a private key is masked after its header when its END line is missing, in characters. */
+export const PRIVATE_KEY_MAX_BODY = 4000
+
+const PRIVATE_KEY_HEAD = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g
+const PRIVATE_KEY_FOOT = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g
+
+/** An armor header line inside a key block (`Version: ...`, `Proc-Type: ...`, `DEK-Info: ...`): no body line. */
+const ARMOR_HEADER = /^[A-Za-z][A-Za-z-]*:\s/
+
+/**
+ * Where the mask of a private key whose header ends at `from` ends: at its END line when one comes before the next
+ * BEGIN header; with none, at the first blank line after at least one body line (armor header lines are no body
+ * lines), never past the next BEGIN header and never more than PRIVATE_KEY_MAX_BODY characters after the header, so a
+ * header without its END line cannot hide the rest of a report.
+ */
+function privateKeyEnd(text: string, from: number): number {
+  const foot = new RegExp(PRIVATE_KEY_FOOT.source, 'g')
+  const head = new RegExp(PRIVATE_KEY_HEAD.source, 'g')
+  foot.lastIndex = from
+  head.lastIndex = from
+  const end = foot.exec(text)
+  const next = head.exec(text)
+  if (end !== null && (next === null || end.index < next.index)) return end.index + end[0].length
+  let nextAt = next?.index ?? text.length
+  while (nextAt > from && /\s/.test(text[nextAt - 1] ?? '')) nextAt--
+  const limit = Math.min(text.length, from + PRIVATE_KEY_MAX_BODY, nextAt)
+  let bodyLines = 0
+  for (let at = text.indexOf('\n', from); at >= 0 && at < limit; ) {
+    const lineEnd = text.indexOf('\n', at + 1)
+    const line = text.slice(at + 1, lineEnd < 0 ? text.length : lineEnd)
+    if (line.trim() === '') {
+      if (bodyLines > 0) return at
+    } else if (!ARMOR_HEADER.test(line)) bodyLines++
+    at = lineEnd
+  }
+  return limit
+}
 
 /**
  * A name that says it holds a secret: its last part (split at `_`, `-`, `.` and a lower-to-upper case change) is
@@ -71,7 +110,7 @@ const isBlob = (value: string) => !isExempt(value) && (/^[0-9a-fA-F]{32,}$/.test
  * (`password=`), a scheme (`https://`) or the word Bearer stays readable.
  */
 const RULES: readonly Rule[] = [
-  { kind: 'private-key', pattern: /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----|$(?![\s\S]))/g },
+  { kind: 'private-key', pattern: PRIVATE_KEY_HEAD, endOf: privateKeyEnd },
   { kind: 'github-token', pattern: /(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g },
   { kind: 'sk-key', pattern: /(?<![A-Za-z0-9_-])sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{16,}/g, accept: value => /\d/.test(value) && /[A-Za-z]/.test(value.slice(3)) },
   { kind: 'slack-token', pattern: /(?<![A-Za-z0-9_])xox[abeprs]-[A-Za-z0-9-]{10,}/g },
@@ -124,7 +163,8 @@ export function findSecrets(text: string): SecretFind[] {
         continue
       }
       const start = rule.group === undefined ? match.index : match.index + match[0].lastIndexOf(value)
-      const end = start + value.length
+      const end = rule.endOf === undefined ? start + value.length : rule.endOf(text, match.index + match[0].length)
+      if (rule.endOf !== undefined) rule.pattern.lastIndex = end
       if (found.some(one => start < one.end && end > one.start)) continue
       found.push({ kind: rule.kind, start, end, line: 0 })
     }

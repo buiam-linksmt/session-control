@@ -10,7 +10,7 @@ import { TOAST_TITLES } from '../hooks/core'
 import { digestText } from '../hooks/digest'
 import { clean, readResultText, workerTailText } from '../hooks/inspect'
 import { freshNoticeState, parseNoticeState, pruneHarvested, secretNotice } from '../hooks/notices'
-import { addTallies, findSecrets, maskSecrets, secretScanLine, tallyFromAnswer, tallyOf } from '../hooks/secrets'
+import { PRIVATE_KEY_MAX_BODY, addTallies, findSecrets, maskSecrets, secretScanLine, tallyFromAnswer, tallyOf } from '../hooks/secrets'
 import type { SecretKind } from '../hooks/secrets'
 import { parseProcFacts } from '../hooks/core'
 import { NOW_MS } from './fixtures'
@@ -94,6 +94,41 @@ describe('secrets.ts: the detector', () => {
     expect(tallyFromAnswer(`x\n${secretScanLine(tally)}`)).toEqual(tally)
     expect(tallyFromAnswer('x\nno scan')).toBeUndefined()
     expect(addTallies({ count: 1, kinds: ['keyed-blob'] }, { count: 2, kinds: ['aws-key', 'keyed-blob'] })).toEqual({ count: 3, kinds: ['aws-key', 'keyed-blob'] })
+  })
+
+  test('a private key without its END line: masked to the first blank line after a body line, or at most 4000 characters after the header; with END, to the END line', () => {
+    const BODY = 'b3BlbnNzaC1rZXktdjEAAAAACANARYcanary00000000'
+    const PGP_HEAD = ['-----BEGIN', 'PGP', 'PRIVATE', 'KEY', 'BLOCK-----'].join(' ')
+    const RSA_HEAD = ['-----BEGIN', 'RSA', 'PRIVATE', 'KEY-----'].join(' ')
+    const RSA_FOOT = ['-----END', 'RSA', 'PRIVATE', 'KEY-----'].join(' ')
+    expect(PRIVATE_KEY_MAX_BODY).toBe(4000)
+    // The real loss: a header and a body line, then the rest of the report (4985 characters) stays readable.
+    const report = `## Rest of the report\n${'The suite passes and the branch is pushed. '.repeat(116)}`.slice(0, 4985)
+    const lost = maskSecrets(`Found in the old fixture:\n${PRIVATE_KEY_HEAD}\n${BODY}\n\n${report}`)
+    expect(lost.text).toBe(`Found in the old fixture:\n[redacted]\n\n${report}`)
+    expect(lost.finds.map(one => one.kind)).toEqual(['private-key'])
+    // No blank line: at most 4000 characters after the header go; the rest stays.
+    const long = `${PRIVATE_KEY_HEAD}${'A'.repeat(4000)}TAIL-KEPT and more text`
+    expect(maskSecrets(long).text).toBe('[redacted]TAIL-KEPT and more text')
+    const lines = `${PRIVATE_KEY_HEAD}\n${`${'Q'.repeat(63)}\n`.repeat(80)}`
+    const capped = maskSecrets(lines).text
+    expect(capped.startsWith('[redacted]')).toBe(true)
+    expect(capped.length).toBe('[redacted]'.length + lines.length - PRIVATE_KEY_HEAD.length - PRIVATE_KEY_MAX_BODY)
+    // Armor header lines are no body lines: the blank line after them does not end the mask, the one after the body does.
+    const pgp = maskSecrets(`${PGP_HEAD}\nVersion: GnuPG v2\nComment: x\n\n${BODY}\n${BODY}\n\nafter the key`)
+    expect(pgp.text).toBe('[redacted]\n\nafter the key')
+    // A header with no body line before a blank line: the mask runs on to the next blank line after a body line.
+    expect(maskSecrets(`${PRIVATE_KEY_HEAD}\n\n${BODY}\n\nkept`).text).toBe('[redacted]\n\nkept')
+    // A second header ends the first one's mask; each is a find.
+    const two = maskSecrets(`${PRIVATE_KEY_HEAD}\n${BODY}\n${RSA_HEAD}\n${BODY}\n${RSA_FOOT}\nkept`)
+    expect(two.text).toBe('[redacted]\n[redacted]\nkept')
+    expect(two.finds.map(one => one.kind)).toEqual(['private-key', 'private-key'])
+    // With its END line, a key is masked to the END line, a blank line inside it (an encrypted PEM's headers) or not.
+    const pem = `${RSA_HEAD}\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\n${BODY}\n${BODY}\n${RSA_FOOT}\nafter`
+    expect(maskSecrets(pem).text).toBe('[redacted]\nafter')
+    expect(maskSecrets(`x ${PRIVATE_KEY_HEAD}\n${BODY}\n${PRIVATE_KEY_FOOT} y`).text).toBe('x [redacted] y')
+    // A header at the very end of a text masks only itself.
+    expect(maskSecrets(`tail ${PRIVATE_KEY_HEAD}`).text).toBe('tail [redacted]')
   })
 
   test('known false positive (accepted, documented): a base64 value after a key word in a quoted example is counted', () => {
