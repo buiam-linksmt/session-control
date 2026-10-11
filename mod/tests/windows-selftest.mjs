@@ -798,5 +798,14 @@ try {
     }
   }
 } finally {
-  fs.rmSync(work, { recursive: true, force: true })
+  // A process of the test (a node.exe just stopped, a PowerShell) can still hold the folder for a moment on Windows
+  // (EBUSY): the removal is tried again for up to about 4 seconds (8 tries, each waiting 100 ms longer). A folder that
+  // still cannot go is said and fails the run, never in place of an error the run already threw, which goes on to be
+  // reported as it was.
+  try {
+    fs.rmSync(work, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 })
+  } catch (err) {
+    console.error(`windows-selftest: cleanup: ${work} could not be removed (${err?.code ?? err}); remove it by hand`)
+    process.exitCode = 1
+  }
 }

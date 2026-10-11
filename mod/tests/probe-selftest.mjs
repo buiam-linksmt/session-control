@@ -7,8 +7,8 @@
 // REGISTER_SCRIPT, CLEAR_SCRIPT and ACK_SCRIPT of hooks/core.ts (the jq reference of the registry edits) on scratch
 // registries and against the differential cases of REGISTRY_GOLDEN in tests/fixtures.ts, the <Button> shape of
 // hooks/register.tsx, and the helper's append and rotate of a log. The registry scripts are sh scripts that call jq,
-// and the probe reads /proc: this runs on Linux and WSL. It removes every scratch directory it made. Only the Node
-// standard library is used.
+// and the probe reads /proc: this runs on Linux and WSL, and on native Windows prints one `skipped` line with the reason
+// and exits 0. It removes every scratch directory it made. Only the Node standard library is used.
 
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -17,6 +17,11 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { after, before, pyEqual, pyJson, pyTruthy } from './lib/selftest.mjs'
+
+if (process.platform === 'win32') {
+  console.log("probe-selftest: skipped (native Windows: the helper's probe reads /proc, and the registry scripts need sh and jq; Windows has neither, and its probe, PROBE_PS1, is checked by windows-selftest.mjs)")
+  process.exit(0)
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const made = []

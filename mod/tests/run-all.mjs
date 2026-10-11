@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Runs the Node self-tests one after the other and prints a summary: `node mod/tests/run-all.mjs` (Node 22 or newer).
-// They are helper.test.mjs (under node --test), probe-selftest.mjs and windows-selftest.mjs (which prints `skipped`
-// without powershell.exe). The end-to-end scripts (e2e-*.mjs) are left out: each starts real claude sessions and spends
+// They are helper.test.mjs (under node --test), probe-selftest.mjs (which prints `skipped` on native Windows) and
+// windows-selftest.mjs (which prints `skipped` without powershell.exe). The end-to-end scripts (e2e-*.mjs) are left out: each starts real claude sessions and spends
 // quota. Exit 1 when any of them fails.
 
 import { spawnSync } from 'node:child_process'
