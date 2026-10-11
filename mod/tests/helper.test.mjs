@@ -15,6 +15,8 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const HOST = join(HERE, '..', 'helper', 'host.mjs')
 const IS_LINUX = process.platform === 'linux'
 const has = cmd => spawnSync('sh', ['-c', `command -v ${cmd}`]).status === 0
+/** Node strips the types of a .ts file by itself (Node 23.6 or newer, or 22 with the flag): the fixtures and core.ts load as they are. */
+const HAS_TS = Boolean(process.features?.typescript)
 
 /** One helper run: the answer parsed, the exit code and the raw stdout. */
 function helper(op, request, env = {}) {
@@ -585,6 +587,36 @@ test('probe: SC_HELPER_PROC_ROOT alone, or with SC_HELPER_TEST other than 1, is 
   }
 })
 
+test('probe: a pid whose sessions file records another procStart than its stat field 22 (a reused pid) is reported with both starts and reads as dead, never alive', { skip: !IS_LINUX || !HAS_TS }, async () => {
+  const { parseProcFacts, isPidAlive, rowStatus } = await import('../hooks/core.ts')
+  const tree = fakeTree()
+  try {
+    // pid 3000: a claude started at tick 9600000; its sessions file was written by an earlier process of that pid.
+    const dir = join(tree.proc, '3000')
+    fs.mkdirSync(dir)
+    fs.writeFileSync(join(dir, 'comm'), 'claude\n')
+    fs.writeFileSync(join(dir, 'stat'), `3000 (claude) ${Array.from({ length: 50 }, (_, at) => (at === 0 ? 'S' : at === 19 ? '9600000' : String(at))).join(' ')}\n`)
+    const file = join(tree.cfg, 'sessions', '3000.json')
+    const probe = () => helper('probe', { args: [`pid:3000|${tree.cfg}`] }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: tree.proc })
+    const entry = { pid: 3000, session_id: 'sid-r', config_dir: tree.cfg }
+    const proofLines = out => out.split('\n').filter(line => line.startsWith('A\t'))
+    fs.writeFileSync(file, JSON.stringify({ pid: 3000, sessionId: 'sid-r', procStart: '1234567' }))
+    const reused = probe()
+    assert.equal(reused.code, 0)
+    assert.deepEqual(proofLines(reused.answer.out), ['A\t3000\tclaude\t9600000\t1234567\tsid-r\tS'])
+    const facts = parseProcFacts(reused.answer.out)
+    assert.equal(isPidAlive(entry, facts), false)
+    assert.equal(rowStatus(entry, facts), 'dead')
+    // The same pid with its own start in the file is alive: the start is what tells them apart.
+    fs.writeFileSync(file, JSON.stringify({ pid: 3000, sessionId: 'sid-r', procStart: '9600000' }))
+    const own = probe()
+    assert.deepEqual(proofLines(own.answer.out), ['A\t3000\tclaude\t9600000\t9600000\tsid-r\tS'])
+    assert.equal(rowStatus(entry, parseProcFacts(own.answer.out)), 'alive')
+  } finally {
+    fs.rmSync(tree.root, { recursive: true, force: true })
+  }
+})
+
 // ---------------------------------------------------------------- the stop of stop_worker, on real processes
 
 /** Field 22 of /proc/<pid>/stat, or '' when the pid is gone. */
@@ -864,9 +896,6 @@ test('hashTree: a root that is not there or is a file, a bad request, over 500 f
 })
 
 // ---------------------------------------------------------------- probeUsage (usage.mjs)
-
-/** Node strips the types of a .ts file by itself (Node 23.6 or newer, or 22 with the flag): the fixtures load as they are. */
-const HAS_TS = Boolean(process.features?.typescript)
 
 test('probeUsage parser: the helper gives each recorded and written case its answer', { skip: !HAS_TS }, async () => {
   const { parseUsage } = await import('../helper/usage.mjs')
