@@ -339,7 +339,7 @@ if (process.env.KEEP_OUT) {
   ])
   info(`outputs copied to ${keep}`)
 }
-const LEFT = processesNaming(S, 'e2e-write-tools')
+const LEFT = processesNaming(S)
 if (!LEFT) pass('no process names the scratch directory')
 else fail(`no process names the scratch directory: ${LEFT}`)
 finish(S)

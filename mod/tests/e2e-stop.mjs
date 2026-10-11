@@ -16,10 +16,10 @@
 // fails at once. One line per check; exit 1 on a failure. Only this run's own processes are ever signalled: the
 // worker's tree as recorded, each only while it still has its recorded start, and the bystander likewise.
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, HAS_PROC, LIB_URL, MOD, awaitOrchestrator, byteSize, callCounts, entriesOf, finish, globIn, grepF, isErrorFalse, join, jqPick, keepOut, kit,
+  CFG_DEFAULT, HAS_PROC, LIB_URL, MOD, awaitOrchestrator, byteSize, callCounts, entriesOf, finish, firstMatch, globIn, grepF, isErrorFalse, join, jqPick, keepOut, kit,
   linesOf, nodeCommand, ours, procPids, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings,
   signal, startClaude, startOf, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -107,10 +107,12 @@ fs.writeFileSync(join(S, 'instruction.txt'),
 
 // The worker's descendants seen from outside after the tree was recorded, until the orchestrator has ended: about three
 // times a second /proc is read, and a process whose parent is a member is a member (the members to start from: every
-// recorded or already seen pid that still has its start). The new members go to treeSeen (pid to start). A signal of
-// the proof to a pid outside the recorded tree is excused only when this watch saw that pid in the tree: a child the
-// worker spawned after the recording.
+// recorded or already seen pid that still has its start). The new members go to treeSeen (pid to start). A recorded or
+// seen pid found with another start (another process now has the pid) goes to treeReused ("pid start"). A signal of the
+// proof to a pid outside the recorded tree is excused only when this watch saw that pid in the tree, a child the worker
+// spawned after the recording, and the signalled process had the start the watch saw (see lateOk).
 const treeSeen = new Map()
+const treeReused = new Set()
 const watchTree = () => {
   const recorded = new Map(linesOf(readOr(join(S, 'tree-before.txt'))).map(l => l.split(' ')).filter(([p, st]) => p && st).map(([p, st]) => [p, st]))
   if (recorded.size === 0) return
@@ -127,6 +129,7 @@ const watchTree = () => {
     for (const [p, { ppid }] of stat) if (!members.has(p) && members.has(ppid)) members.add(p), (grown = true)
   }
   for (const p of members) if (!recorded.has(p) && !treeSeen.has(p)) treeSeen.set(p, stat.get(p).start)
+  for (const [p, st] of [...recorded, ...treeSeen]) if (stat.has(p) && stat.get(p).start !== st) treeReused.add(`${p} ${stat.get(p).start}`)
 }
 const watcher = setInterval(watchTree, 300)
 orch = startClaude({
@@ -141,6 +144,7 @@ orch = startClaude({
 await awaitOrchestrator(orch, { limit: 540, dir: S, isOk: () => isErrorFalse(join(S, 'orchestrator.json')) })
 clearInterval(watcher)
 fs.writeFileSync(join(S, 'tree-seen.txt'), [...treeSeen].map(([p, st]) => `${p} ${st}\n`).join(''))
+fs.writeFileSync(join(S, 'tree-reused.txt'), [...treeReused].map(line => `${line}\n`).join(''))
 const OPID_DONE = String(orch.pid)
 const ojson = readJson(join(S, 'orchestrator.json'))
 const OSID = typeof ojson?.session_id === 'string' ? ojson.session_id : ''
@@ -192,12 +196,33 @@ check('stop', 'Surviving descendants: none.', 'no survivor')
 check('stop', 'The registry is unchanged', 'no registry field written')
 // Every signal went to a pid of the tree recorded before the stop, or to a child the worker spawned after the recording
 // that the outside watch saw in its tree (such a pid is not required dead either); any other pid is a stray signal.
+// A late pid counts by its start, not its number alone (lateOk): the watch saw it with a start and never saw that pid
+// with another, the signal was not sent before that start (the start's wall time from btime and the clock ticks, 2 s
+// allowed for btime's whole seconds), and the pid is gone now or still has that start.
 const stopLines = linesOf(readOr(outPath('stop')))
 const treePids = new Set(treeBefore.map(l => l.split(' ')[0]))
-const signalled = stopLines.filter(l => /^- [0-9TZ:.-]+ (SIGTERM|SIGKILL) to [0-9]+/.test(l)).map(l => /^.* to ([0-9]+).*$/.exec(l)[1])
-const LATE = [...new Set(signalled.filter(p => !treePids.has(p) && treeSeen.has(p)))]
-const STRAY = signalled.filter(p => !treePids.has(p) && !treeSeen.has(p))
-info(`signalled pids outside the recorded tree that the outside watch saw in the worker's tree after the recording (not required dead, not stray): ${LATE.length ? LATE.join(' ') : 'none'}`)
+const BT = firstMatch(readOr('/proc/stat'), /^btime (.*)$/m)
+const TCK = (spawnSync('getconf', ['CLK_TCK'], { encoding: 'utf8' }).stdout ?? '').replace(/\n+$/, '')
+const lateOk = (p, at) => {
+  const seen = treeSeen.get(p)
+  if (seen === undefined) return false
+  if ([...treeReused].some(line => line.startsWith(`${p} `))) return false
+  const now = startOf(p)
+  if (now !== '' && now !== seen) return false
+  const atMs = Date.parse(at)
+  if (Number.isNaN(atMs) || !/^[0-9]+$/.test(BT) || !/^[0-9]+$/.test(TCK)) return false
+  return atMs + 2000 >= Number(BT) * 1000 + Math.floor((Number(seen) * 1000) / Number(TCK))
+}
+const signals = stopLines.filter(l => /^- [0-9TZ:.-]+ (SIGTERM|SIGKILL) to [0-9]+/.test(l)).map(l => /^- ([0-9TZ:.-]+) .* to ([0-9]+).*$/.exec(l)).map(m => [m[1], m[2]])
+const LATE = []
+const STRAY = []
+for (const [at, p] of signals) {
+  if (treePids.has(p)) continue
+  if (lateOk(p, at)) {
+    if (!LATE.includes(p)) LATE.push(p)
+  } else STRAY.push(p)
+}
+info(`signalled pids outside the recorded tree that the outside watch saw in the worker's tree after the recording, with the start it saw (not required dead, not stray): ${LATE.length ? LATE.join(' ') : 'none'}`)
 if (STRAY.length === 0) pass(`every signal of the proof went to a process of the worker's tree (${stopLines.filter(l => /SIG(TERM|KILL) to/.test(l)).length} signals)`)
 else fail(`a signal went outside the recorded tree: ${STRAY.join(' ')}`)
 
@@ -236,10 +261,10 @@ check('finished', 'nothing was signalled', 'and nothing is signalled')
 
 if (process.env.KEEP_OUT) {
   const keep = process.env.KEEP_OUT
-  keepOut(keep, [{ files: [...globIn(S, /^out-.*\.txt$/, 'out-*.txt'), join(S, 'tree-before.txt'), join(S, 'tree-dropped.txt'), join(S, 'tree-seen.txt'), join(S, 'claude-before.txt'), join(S, 'orchestrator.json'), TRACE] }])
+  keepOut(keep, [{ files: [...globIn(S, /^out-.*\.txt$/, 'out-*.txt'), join(S, 'tree-before.txt'), join(S, 'tree-dropped.txt'), join(S, 'tree-seen.txt'), join(S, 'tree-reused.txt'), join(S, 'claude-before.txt'), join(S, 'orchestrator.json'), TRACE] }])
   info(`outputs copied to ${keep}`)
 }
-const STILL = processesNaming(S, 'e2e-stop')
+const STILL = processesNaming(S)
 if (!STILL) pass('no process names the scratch directory')
 else fail(`no process names the scratch directory: ${STILL}`)
 finish(S)

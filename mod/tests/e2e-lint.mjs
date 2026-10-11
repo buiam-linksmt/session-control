@@ -181,7 +181,7 @@ if (process.env.KEEP_OUT) {
 }
 // The worker must be gone before the scratch directory goes: wait a little for it, then the cleanup stops what is left.
 if (HAS_PROC) for (let n = 0; n < 30 && workers().length > 0; n++) await sleep(1000)
-const STILL = processesNaming(S, 'e2e-lint')
+const STILL = processesNaming(S)
 if (!STILL) pass('no process names the scratch directory')
 else fail(`no process names the scratch directory: ${STILL}`)
 finish(S)

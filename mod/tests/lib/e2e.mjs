@@ -267,26 +267,30 @@ export function signal(pid, sig = 'SIGTERM') {
 }
 
 /**
- * `ps -eo pid,args | grep -F <dir> | grep -v -e grep -e <script>`: the first three processes whose command line names
- * the directory, this process left out. /proc on Linux, ps elsewhere on POSIX, Win32_Process through PowerShell on
- * Windows.
+ * The shell scripts' others_naming: the first three processes other than this one and its parent whose command line
+ * or working directory names the directory, as `<pid> <command line>`, with ` (cwd <dir>)` after it when the working
+ * directory names it. Only those two pids are left out, never a process by its name: every other process of this run
+ * that is still there is reported. /proc on Linux (command line and working directory); elsewhere the command lines
+ * only, through ps on POSIX and Win32_Process through PowerShell on Windows.
  */
-export function processesNaming(dir, scriptName) {
+export function processesNaming(dir) {
   let rows = []
   if (HAS_PROC) {
-    rows = procPids().map(pid => [pid, cmdline(pid) ?? ''])
+    rows = procPids().map(pid => [pid, cmdline(pid) ?? '', procCwd(pid)])
   } else if (IS_WINDOWS) {
     const ran = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1}' -f $_.ProcessId, $_.CommandLine }"], { encoding: 'utf8', timeout: 60_000, windowsHide: true })
-    rows = linesOf(ran.stdout ?? '').map(line => [before(line, ' '), line.slice(line.indexOf(' ') + 1)])
+    rows = linesOf(ran.stdout ?? '').map(line => [before(line, ' '), line.slice(line.indexOf(' ') + 1), ''])
   } else {
-    const ran = spawnSync('ps', ['-eo', 'pid,args'], { encoding: 'utf8', timeout: 60_000 })
-    rows = linesOf(ran.stdout ?? '').slice(1).map(line => [before(line.trim(), ' '), line.trim().slice(line.trim().indexOf(' ') + 1)])
+    const ran = spawnSync('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 60_000 })
+    rows = linesOf(ran.stdout ?? '').map(line => [before(line.trim(), ' '), line.trim().slice(line.trim().indexOf(' ') + 1), ''])
   }
+  const own = new Set([String(process.pid), String(process.ppid)])
   const wanted = [dir, native(dir), dir.replaceAll('/', '\\')]
+  const names = text => wanted.some(one => text.includes(one))
   return rows
-    .filter(([pid, args]) => pid !== String(process.pid) && wanted.some(one => args.includes(one)) && !args.includes('grep') && !args.includes(scriptName))
+    .filter(([pid, args, cwd]) => !own.has(pid) && (names(args) || names(cwd)))
     .slice(0, 3)
-    .map(([pid, args]) => `${pid} ${args}`)
+    .map(([pid, args, cwd]) => `${pid} ${args}${names(cwd) ? ` (cwd ${cwd})` : ''}`)
     .join('\n')
 }
 

@@ -22,6 +22,42 @@ FAILED=0
 pass() { printf 'ok   %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; FAILED=1; }
 info() { printf 'info %s\n' "$1"; }
+# The first three processes other than this script ($$) and its parent ($PPID) whose command line or working
+# directory names a directory, one per line into OTHERS: "<pid> <command line>", then " (cwd <dir>)" when the working
+# directory names it. Only those two pids are left out, never a process by a name, so every other process of this run
+# still there is seen. It runs in this shell, with no pipeline and no grep that would name the directory itself. /proc
+# where it lists the processes; elsewhere the command lines from ps.
+others_naming() {
+  OTHERS=''
+  _on_n=0
+  if [ -d /proc/self ] && ! command -v cygpath >/dev/null 2>&1; then
+    for _on_d in /proc/[0-9]*; do
+      _on_p=${_on_d#/proc/}
+      if [ "$_on_p" = "$$" ] || [ "$_on_p" = "$PPID" ]; then continue; fi
+      _on_a=$({ tr '\0' ' ' < "$_on_d/cmdline"; } 2>/dev/null)
+      _on_c=$(readlink "$_on_d/cwd" 2>/dev/null)
+      _on_w=''
+      case "$_on_c" in *"$1"*) _on_w=" (cwd $_on_c)" ;; esac
+      case "$_on_a" in *"$1"*) ;; *) [ -n "$_on_w" ] || continue ;; esac
+      OTHERS="$OTHERS${OTHERS:+
+}$_on_p $_on_a$_on_w"
+      _on_n=$((_on_n + 1))
+      [ "$_on_n" -lt 3 ] || break
+    done
+  else
+    _on_ps=$(ps -eo pid=,args= 2>/dev/null)
+    while read -r _on_p _on_a; do
+      if [ -z "$_on_p" ] || [ "$_on_p" = "$$" ] || [ "$_on_p" = "$PPID" ]; then continue; fi
+      case "$_on_a" in *"$1"*) ;; *) continue ;; esac
+      OTHERS="$OTHERS${OTHERS:+
+}$_on_p $_on_a"
+      _on_n=$((_on_n + 1))
+      [ "$_on_n" -lt 3 ] || break
+    done <<PS_EOF
+$_on_ps
+PS_EOF
+  fi
+}
 
 command -v claude >/dev/null 2>&1 || { fail 'claude is on the PATH'; exit 1; }
 command -v jq >/dev/null 2>&1 || { fail 'jq is on the PATH'; exit 1; }
@@ -256,7 +292,8 @@ if [ -n "${KEEP_OUT:-}" ]; then
   cp "$ORCH/agreed-decisions-archive.md" "$KEEP_OUT"/ 2>/dev/null
   info "outputs copied to $KEEP_OUT"
 fi
-LEFT=$(ps -eo pid,args 2>/dev/null | grep -F "$S" | grep -v -e grep -e 'e2e-write-tools' | head -n 3)
+others_naming "$S"
+LEFT=$OTHERS
 [ -z "$LEFT" ] && pass 'no process names the scratch directory' || fail "no process names the scratch directory: $LEFT"
 trap - EXIT
 cleanup

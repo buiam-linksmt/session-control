@@ -434,7 +434,7 @@ else pass('trace: no line contains the prompt text')
 // A process ended by the tmux server's exit may take a moment to go.
 let LEFT = ''
 for (let l = 0; ; l++) {
-  LEFT = processesNaming(S, 'e2e-smoke')
+  LEFT = processesNaming(S)
   if (!LEFT || l >= 10) break
   await sleep(1000)
 }

@@ -233,7 +233,7 @@ if (process.env.KEEP_OUT && keepOut(process.env.KEEP_OUT, [{ files: [...globIn(S
   info(`outputs copied to ${process.env.KEEP_OUT}`)
 }
 
-const LEFT = processesNaming(S, 'e2e-tools')
+const LEFT = processesNaming(S)
 if (!LEFT) pass('no process names the scratch directory')
 else fail(`no process names the scratch directory: ${LEFT}`)
 finish(S)

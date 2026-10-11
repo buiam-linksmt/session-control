@@ -249,7 +249,7 @@ if (HAS_PROC) {
 } else {
   skip(`no ${PROBE_LINE} process remains (no /proc)`)
 }
-const STILL = processesNaming(S, 'e2e-licences')
+const STILL = processesNaming(S)
 if (!STILL) pass('no process names the scratch directory')
 else fail(`no process names the scratch directory: ${STILL}`)
 finish(S)

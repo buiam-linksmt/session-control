@@ -129,7 +129,7 @@ if (process.env.KEEP_OUT) {
   keepOut(keep, [{ files: [...globIn(S, /^res-.*\.txt$/, 'res-*.txt'), join(S, 'orchestrator.json')] }, { files: [join(ORCH, 'open-points.json'), join(ORCH, 'task-queue.json'), join(ORCH, 'CLAUDE.md')] }])
   info(`outputs copied to ${keep}`)
 }
-const STILL = processesNaming(S, 'e2e-guard')
+const STILL = processesNaming(S)
 if (!STILL) pass('no process names the scratch directory')
 else fail(`no process names the scratch directory: ${STILL}`)
 finish(S)

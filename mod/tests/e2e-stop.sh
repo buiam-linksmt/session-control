@@ -18,6 +18,42 @@ FAILED=0
 pass() { printf 'ok   %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; FAILED=1; }
 info() { printf 'info %s\n' "$1"; }
+# The first three processes other than this script ($$) and its parent ($PPID) whose command line or working
+# directory names a directory, one per line into OTHERS: "<pid> <command line>", then " (cwd <dir>)" when the working
+# directory names it. Only those two pids are left out, never a process by a name, so every other process of this run
+# still there is seen. It runs in this shell, with no pipeline and no grep that would name the directory itself. /proc
+# where it lists the processes; elsewhere the command lines from ps.
+others_naming() {
+  OTHERS=''
+  _on_n=0
+  if [ -d /proc/self ] && ! command -v cygpath >/dev/null 2>&1; then
+    for _on_d in /proc/[0-9]*; do
+      _on_p=${_on_d#/proc/}
+      if [ "$_on_p" = "$$" ] || [ "$_on_p" = "$PPID" ]; then continue; fi
+      _on_a=$({ tr '\0' ' ' < "$_on_d/cmdline"; } 2>/dev/null)
+      _on_c=$(readlink "$_on_d/cwd" 2>/dev/null)
+      _on_w=''
+      case "$_on_c" in *"$1"*) _on_w=" (cwd $_on_c)" ;; esac
+      case "$_on_a" in *"$1"*) ;; *) [ -n "$_on_w" ] || continue ;; esac
+      OTHERS="$OTHERS${OTHERS:+
+}$_on_p $_on_a$_on_w"
+      _on_n=$((_on_n + 1))
+      [ "$_on_n" -lt 3 ] || break
+    done
+  else
+    _on_ps=$(ps -eo pid=,args= 2>/dev/null)
+    while read -r _on_p _on_a; do
+      if [ -z "$_on_p" ] || [ "$_on_p" = "$$" ] || [ "$_on_p" = "$PPID" ]; then continue; fi
+      case "$_on_a" in *"$1"*) ;; *) continue ;; esac
+      OTHERS="$OTHERS${OTHERS:+
+}$_on_p $_on_a"
+      _on_n=$((_on_n + 1))
+      [ "$_on_n" -lt 3 ] || break
+    done <<PS_EOF
+$_on_ps
+PS_EOF
+  fi
+}
 
 command -v claude >/dev/null 2>&1 || { fail 'claude is on the PATH'; exit 1; }
 command -v jq >/dev/null 2>&1 || { fail 'jq is on the PATH'; exit 1; }
@@ -92,8 +128,10 @@ EOF
 # The worker's descendants seen from outside after the tree was recorded, until the orchestrator has ended: about three
 # times a second /proc is read, and a process whose parent is a member is a member (the members to start from: every
 # recorded or already seen pid that still has its start). The new members go to tree-seen.txt (pid, start per line).
-# A signal of the proof to a pid outside the recorded tree is excused only when this watch saw that pid in the tree: a
-# child the worker spawned after the recording. It runs in the scratch directory, so no command line names it.
+# A recorded or seen pid found with another start (another process now has the pid) goes to tree-reused.txt (pid, that
+# start). A signal of the proof to a pid outside the recorded tree is excused only when this watch saw that pid in the
+# tree, a child the worker spawned after the recording, and the signalled process had the start the watch saw (see
+# late_ok). It runs in the scratch directory, so no command line names it.
 watch_tree() {
   cd "$S" || return 0
   while [ -e watch.on ]; do
@@ -101,12 +139,14 @@ watch_tree() {
       BEGIN {
         while ((getline l < "tree-before.txt") > 0) { split(l, k, " "); want[k[1]] = k[2]; known[k[1]] = 1 }
         while ((getline l < "tree-seen.txt") > 0) { split(l, k, " "); want[k[1]] = k[2]; known[k[1]] = 1 }
+        while ((getline l < "tree-reused.txt") > 0) told[l] = 1
       }
       { r = $0; sub(/^.*\) /, "", r); split(r, f, " "); par[$1] = f[2]; st[$1] = f[20] }
       END {
         for (p in want) if ((p in st) && st[p] == want[p]) mem[p] = 1
         do { n = 0; for (p in par) if (!(p in mem) && ((par[p]) in mem)) { mem[p] = 1; n++ } } while (n > 0)
         for (p in mem) if (!(p in known)) print p, st[p]
+        for (p in want) if ((p in st) && st[p] != want[p] && !((p " " st[p]) in told)) print p, st[p] >> "tree-reused.txt"
       }' >> tree-seen.txt
     sleep 0.3 2>/dev/null || sleep 1
   done
@@ -124,6 +164,7 @@ Then answer with one line: done.
 EOF
 
 : > "$S/tree-seen.txt"
+: > "$S/tree-reused.txt"
 touch "$S/watch.on"
 watch_tree &
 WATCHER=$!
@@ -190,14 +231,33 @@ check stop 'Surviving descendants: none.' 'no survivor'
 check stop 'The registry is unchanged' 'no registry field written'
 # Every signal went to a pid of the tree recorded before the stop, or to a child the worker spawned after the recording
 # that the outside watch saw in its tree (such a pid is not required dead either); any other pid is a stray signal.
+# A late pid counts by its start, not its number alone (late_ok): the watch saw it with a start and never saw that pid
+# with another, the signal was not sent before that start (the start's wall time from btime and the clock ticks, 2 s
+# allowed for btime's whole seconds), and the pid is gone now or still has that start.
+BT=$(sed -n 's/^btime //p' /proc/stat)
+TCK=$(getconf CLK_TCK 2>/dev/null)
+late_ok() {
+  _ls=$(sed -n "s/^$1 \([0-9]*\)$/\1/p" "$S/tree-seen.txt" 2>/dev/null | head -n 1)
+  [ -n "$_ls" ] || return 1
+  grep -q "^$1 " "$S/tree-reused.txt" 2>/dev/null && return 1
+  _now=$(start_of "$1")
+  [ -z "$_now" ] || [ "$_now" = "$_ls" ] || return 1
+  _at=$(date -u -d "$2" +%s%3N 2>/dev/null)
+  case "$_at:$BT:$TCK" in *[!0-9:]* | :* | *::* | *:) return 1 ;; esac
+  [ $((_at + 2000)) -ge $((BT * 1000 + _ls * 1000 / TCK)) ]
+}
 STRAY=''
 LATE=''
-for p in $(grep -E '^- [0-9TZ:.-]+ (SIGTERM|SIGKILL) to [0-9]+' "$S/out-stop.txt" | sed -E 's/^.* to ([0-9]+).*$/\1/'); do
+SIGNALS=$(grep -E '^- [0-9TZ:.-]+ (SIGTERM|SIGKILL) to [0-9]+' "$S/out-stop.txt" | sed -E 's/^- ([0-9TZ:.-]+) .* to ([0-9]+).*$/\1 \2/')
+while read -r at p; do
+  [ -n "$p" ] || continue
   if grep -q "^$p " "$S/tree-before.txt"; then :
-  elif grep -q "^$p " "$S/tree-seen.txt" 2>/dev/null; then case " $LATE " in *" $p "*) ;; *) LATE="$LATE $p" ;; esac
+  elif late_ok "$p" "$at"; then case " $LATE " in *" $p "*) ;; *) LATE="$LATE $p" ;; esac
   else STRAY="$STRAY $p"; fi
-done
-info "signalled pids outside the recorded tree that the outside watch saw in the worker's tree after the recording (not required dead, not stray):${LATE:- none}"
+done <<SIGNALS_EOF
+$SIGNALS
+SIGNALS_EOF
+info "signalled pids outside the recorded tree that the outside watch saw in the worker's tree after the recording, with the start it saw (not required dead, not stray):${LATE:- none}"
 [ -z "$STRAY" ] && pass "every signal of the proof went to a process of the worker's tree ($(grep -c -E 'SIG(TERM|KILL) to' "$S/out-stop.txt") signals)" || fail "a signal went outside the recorded tree:$STRAY"
 
 # ---------------------------------------------------------------- /proc from outside
@@ -229,10 +289,11 @@ check finished "refused: session $FIN is not alive: its entry records no pid" 'a
 check finished 'nothing was signalled' 'and nothing is signalled'
 
 if [ -n "${KEEP_OUT:-}" ]; then
-  mkdir -p "$KEEP_OUT" && cp "$S"/out-*.txt "$S/tree-before.txt" "$S/tree-dropped.txt" "$S/tree-seen.txt" "$S/claude-before.txt" "$S/orchestrator.json" "$TRACE" "$KEEP_OUT"/ 2>/dev/null
+  mkdir -p "$KEEP_OUT" && cp "$S"/out-*.txt "$S/tree-before.txt" "$S/tree-dropped.txt" "$S/tree-seen.txt" "$S/tree-reused.txt" "$S/claude-before.txt" "$S/orchestrator.json" "$TRACE" "$KEEP_OUT"/ 2>/dev/null
   info "outputs copied to $KEEP_OUT"
 fi
-STILL=$(ps -eo pid,args 2>/dev/null | grep -F "$S" | grep -v -e grep -e 'e2e-stop' | head -n 3)
+others_naming "$S"
+STILL=$OTHERS
 [ -z "$STILL" ] && pass 'no process names the scratch directory' || fail "no process names the scratch directory: $STILL"
 trap - EXIT
 cleanup
