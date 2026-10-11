@@ -22,7 +22,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, grepF, isErrorFalse, join, jqPick, kit, linesOf,
+  CFG_DEFAULT, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, globIn, grepF, isErrorFalse, join, jqPick, jsonValues, keepOut, kit, linesOf,
   localDate, native, nodeCommand, ours, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch,
   scratchSettings, shortId, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -284,14 +284,11 @@ const isLink = path => {
 }
 if (isLink(join(RUNS, 'hostile-link.json')) && isLink(join(RUNS, 'hostile-dir'))) pass('the two symbolic links in the runs folder are still links')
 else fail('the two symbolic links in the runs folder are still links')
-const clearedAll = linesOf(readOr(join(RUNS, 'cleared.jsonl'))).flatMap(line => {
-  try {
-    return [JSON.parse(line)]
-  } catch {
-    return []
-  }
-})
-if (clearedAll.filter(e => typeof e?.title === 'string' && e.title.startsWith('hostile')).length === 3) pass('cleared.jsonl: the three hostile entries are logged')
+// jq -s 'map(select(.title | startswith("hostile"))) | length': the whole file is read, so a part that is no JSON fails
+// it, and so does an entry without a string title (startswith of anything else is jq's error).
+const clearedAll = fs.existsSync(join(RUNS, 'cleared.jsonl')) ? jsonValues(readOr(join(RUNS, 'cleared.jsonl'))) : undefined
+const titled = clearedAll?.every(e => e !== null && typeof e === 'object' && !Array.isArray(e) && typeof e.title === 'string') === true
+if (titled && clearedAll.filter(e => e.title.startsWith('hostile')).length === 3) pass('cleared.jsonl: the three hostile entries are logged')
 else fail('cleared.jsonl: the three hostile entries are logged')
 
 // ---------------------------------------------------------------- archive_decisions
@@ -335,16 +332,11 @@ else fail('the trace has the launch.prompt and retire.cleanup lines')
 
 if (process.env.KEEP_OUT) {
   const keep = process.env.KEEP_OUT
-  fs.mkdirSync(keep, { recursive: true })
-  const copy = (from, to = join(keep, basename(from))) => {
-    try {
-      fs.copyFileSync(from, to)
-    } catch {}
-  }
-  for (const name of fs.readdirSync(S).filter(name => /^out-.*\.txt$/.test(name))) copy(join(S, name))
-  for (const f of [join(S, 'prompt-copy.md'), join(S, 'registry-at-outcome.json'), join(S, 'runs-at-outcome.txt'), join(S, 'orchestrator.json'), join(RUNS, 'cleared.jsonl'), TRACE]) copy(f)
-  copy(join(ORCH, 'agreed-decisions.md'), join(keep, 'agreed-decisions.after.md'))
-  copy(join(ORCH, 'agreed-decisions-archive.md'))
+  keepOut(keep, [
+    { files: [...globIn(S, /^out-.*\.txt$/, 'out-*.txt'), join(S, 'prompt-copy.md'), join(S, 'registry-at-outcome.json'), join(S, 'runs-at-outcome.txt'), join(S, 'orchestrator.json'), join(RUNS, 'cleared.jsonl'), TRACE] },
+    { files: [join(ORCH, 'agreed-decisions.md')], name: 'agreed-decisions.after.md' },
+    { files: [join(ORCH, 'agreed-decisions-archive.md')] },
+  ])
   info(`outputs copied to ${keep}`)
 }
 const LEFT = processesNaming(S, 'e2e-write-tools')

@@ -17,7 +17,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, basename, entriesOf, finish, firstLine, grepF, isErrorFalse, join, kit, lastLine, lineCount, linesOf,
+  CFG_DEFAULT, MOD, awaitOrchestrator, basename, entriesOf, finish, firstLine, globIn, grepF, isErrorFalse, join, keepOut, kit, lastLine, lineCount, linesOf,
   localDate, native, ours, pidExists, processesNaming, readJson, readOr, regularFiles, removeTree, requireClaude, resultText, scratch,
   scratchSettings, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -106,8 +106,10 @@ const outs = { 1: first, 2: second }
 const check = (n, text, what) => (grepF(outs[n], text) ? pass(`call ${n}: ${what}`) : fail(`call ${n}: ${what} (missing: ${text})`))
 const lacks = (n, text, what) => (grepF(outs[n], text) ? fail(`call ${n}: ${what} (found: ${text})`) : pass(`call ${n}: ${what}`))
 
+// case "$x" in "<head>"*"<tail>"): the head, then anything, then the tail, the two not sharing a character.
+const globbed = (text, head, tail) => text.length >= head.length + tail.length && text.startsWith(head) && text.endsWith(tail)
 const FIRST_HEAD = firstLine(first)
-if (FIRST_HEAD.startsWith("turn_digest: since the mod's load at ") && FIRST_HEAD.endsWith('; first call)')) pass(`call 1: reports from the mod's load (${FIRST_HEAD})`)
+if (globbed(FIRST_HEAD, "turn_digest: since the mod's load at ", '; first call)')) pass(`call 1: reports from the mod's load (${FIRST_HEAD})`)
 else fail(`call 1: reports from the mod's load (got '${FIRST_HEAD}')`)
 check(1, 'worker completions harvested: 1', 'the harvested completion counted')
 check(1, '- e2e digest worker [redacted]: clean', "the completion's line, its title redacted")
@@ -124,7 +126,7 @@ if (lineCount(first) <= 40) pass(`call 1: at most 40 lines (${lineCount(first)})
 else fail('call 1: at most 40 lines')
 
 const SECOND_HEAD = firstLine(second)
-if (SECOND_HEAD.startsWith('turn_digest: since the last call at ') && SECOND_HEAD.endsWith(' ago)')) pass(`call 2: since the last call (${SECOND_HEAD})`)
+if (globbed(SECOND_HEAD, 'turn_digest: since the last call at ', ' ago)')) pass(`call 2: since the last call (${SECOND_HEAD})`)
 else fail(`call 2: since the last call (got '${SECOND_HEAD}')`)
 if ((linesOf(second)[1] ?? '') === 'nothing new') pass('call 2: nothing new')
 else fail(`call 2: nothing new (got '${linesOf(second)[1] ?? ''}')`)
@@ -167,9 +169,7 @@ else fail('the trace shows no write between a turn_digest call and its answer')
 const reg = readJson(REG)
 if (Array.isArray(reg) && reg.length === 1 && reg[0]?.outcome?.kind === 'clean') pass('the registry holds the harvested entry, outcome clean')
 else fail('the registry holds the harvested entry, outcome clean')
-if (process.env.KEEP_OUT) {
-  fs.mkdirSync(process.env.KEEP_OUT, { recursive: true })
-  for (const f of outFiles) fs.copyFileSync(f, join(process.env.KEEP_OUT, basename(f)))
+if (process.env.KEEP_OUT && keepOut(process.env.KEEP_OUT, [{ files: globIn(S, /^out-.*\.txt$/, 'out-*.txt') }], false)) {
   info(`outputs copied to ${process.env.KEEP_OUT}`)
 }
 

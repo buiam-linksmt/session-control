@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import { delimiter } from 'node:path'
 import {
-  CFG_DEFAULT, HAS_PROC, IS_WINDOWS, MOD, awaitOrchestrator, basename, cmdline, comm, finish, firstMatch, grepF, isExecutable, join, kit,
+  CFG_DEFAULT, HAS_PROC, IS_WINDOWS, MOD, awaitOrchestrator, basename, cmdline, comm, finish, firstMatch, grepF, isExecutable, join, jsonValues, kit,
   linesOf, msys, native, nodeCommand, ours, pidExists, ppid, procCwd, procPids, processesNaming, readOr, removeTree, requireClaude,
   sanitized, scratch, signal, sleep, startClaude, which, writeLines,
 } from './lib/e2e.mjs'
@@ -321,19 +321,10 @@ else fail(`trace: every file write is inside the scratch directory (outside: ${O
 if (has('work-[redacted]') && !has(CANARY)) pass('trace: the key-like canary in the worker directory is [redacted]')
 else fail('trace: the key-like canary in the worker directory is [redacted]')
 {
-  // jq -e . over the trace: every line one JSON value, the last neither null nor false.
-  let parsed
-  let isJson = traceLines().length > 0
-  for (const line of traceLines()) {
-    if (line.trim() === '') continue
-    try {
-      parsed = JSON.parse(line)
-    } catch {
-      isJson = false
-      break
-    }
-  }
-  if (isJson && parsed !== null && parsed !== false) pass(`trace: all ${traceText().split('\n').length - 1} lines are JSON`)
+  // jq -e . over the trace: the whole file JSON values, at least one (a trace that is empty or blank gives jq no value,
+  // exit 4), the last neither null nor false. A missing trace is jq's error.
+  const values = fs.existsSync(TRACE) ? jsonValues(traceText()) : undefined
+  if (values !== undefined && values.length > 0 && values.at(-1) !== null && values.at(-1) !== false) pass(`trace: all ${traceText().split('\n').length - 1} lines are JSON`)
   else fail('trace: all lines are JSON')
 }
 

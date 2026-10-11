@@ -20,7 +20,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, grepF, iso, isErrorFalse, join, kit,
+  CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, globIn, grepF, iso, isErrorFalse, join, keepOut, kit,
   localDate, native, nodeMajor, ours, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, sanitized, scratch,
   scratchSettings, shortId, startClaude, toolUses, touchAgo, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -229,9 +229,7 @@ else info(`the answer gives ${N} of the six outputs with their first line verbat
 // Nothing changed by the tools: the seeded helper files are as written (the mod creates none: all are there).
 if (readJson(join(ORCH, 'task-queue.json'))?.tasks?.length === 2 && readJson(REG)?.length === 3 && fs.readdirSync(join(ORCH, 'backups')).length === 2) pass('the queue, the registry and backups/ are as seeded')
 else fail('the queue, the registry and backups/ are as seeded')
-if (process.env.KEEP_OUT) {
-  fs.mkdirSync(process.env.KEEP_OUT, { recursive: true })
-  for (const f of [...outFiles(), join(S, 'answer.txt')]) fs.copyFileSync(f, join(process.env.KEEP_OUT, basename(f)))
+if (process.env.KEEP_OUT && keepOut(process.env.KEEP_OUT, [{ files: [...globIn(S, /^out-.*\.txt$/, 'out-*.txt'), join(S, 'answer.txt')] }], false)) {
   info(`outputs copied to ${process.env.KEEP_OUT}`)
 }
 

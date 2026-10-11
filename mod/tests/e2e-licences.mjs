@@ -20,8 +20,8 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, HAS_PROC, HOME, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, cmdline, entriesOf, finish, grepF, isErrorFalse, join,
-  jqPick, kit, linesOf, native, nodeCommand, nodeMajor, ours, procCwd, procPids, processesNaming, readJson, readOr, removeTree, requireClaude,
+  CFG_DEFAULT, HAS_PROC, HOME, LIB_URL, MOD, awaitOrchestrator, byteSize, callCounts, cmdline, entriesOf, finish, globIn, grepF, isErrorFalse, join,
+  jqPick, keepOut, kit, linesOf, native, nodeCommand, nodeMajor, ours, procCwd, procPids, processesNaming, readJson, readOr, removeTree, requireClaude,
   resultText, scratch, scratchSettings, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
 
@@ -237,13 +237,7 @@ if (major !== undefined && major >= 22) {
 
 if (process.env.KEEP_OUT) {
   const keep = process.env.KEEP_OUT
-  fs.mkdirSync(keep, { recursive: true })
-  const names = fs.readdirSync(S).filter(name => /^res-.*\.txt$/.test(name)).map(name => join(S, name))
-  for (const f of [...names, join(S, 'answer.txt'), REG, TRACE]) {
-    try {
-      fs.copyFileSync(f, join(keep, basename(f)))
-    } catch {}
-  }
+  keepOut(keep, [{ files: [...globIn(S, /^res-.*\.txt$/, 'res-*.txt'), join(S, 'answer.txt'), REG, TRACE] }])
   info(`outputs copied to ${keep}`)
 }
 // The worker must be gone before the scratch directory goes: wait a little for it, then the cleanup stops what is left.

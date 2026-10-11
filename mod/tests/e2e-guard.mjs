@@ -16,7 +16,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, grepF, isErrorFalse, join, kit, native, ours,
+  CFG_DEFAULT, MOD, awaitOrchestrator, byteSize, callCounts, entriesOf, finish, globIn, grepF, isErrorFalse, join, keepOut, kit, native, ours,
   processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings, startClaude, toolUses,
   transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -126,13 +126,7 @@ else fail('disk: CLAUDE.md holds the edit')
 
 if (process.env.KEEP_OUT) {
   const keep = process.env.KEEP_OUT
-  fs.mkdirSync(keep, { recursive: true })
-  const names = fs.readdirSync(S).filter(name => /^res-.*\.txt$/.test(name)).map(name => join(S, name))
-  for (const f of [...names, join(S, 'orchestrator.json'), join(ORCH, 'open-points.json'), join(ORCH, 'task-queue.json'), join(ORCH, 'CLAUDE.md')]) {
-    try {
-      fs.copyFileSync(f, join(keep, basename(f)))
-    } catch {}
-  }
+  keepOut(keep, [{ files: [...globIn(S, /^res-.*\.txt$/, 'res-*.txt'), join(S, 'orchestrator.json')] }, { files: [join(ORCH, 'open-points.json'), join(ORCH, 'task-queue.json'), join(ORCH, 'CLAUDE.md')] }])
   info(`outputs copied to ${keep}`)
 }
 const STILL = processesNaming(S, 'e2e-guard')

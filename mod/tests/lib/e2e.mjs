@@ -289,6 +289,46 @@ export function processesNaming(dir, scriptName) {
     .map(([pid, args]) => `${pid} ${args}`)
     .join('\n')
 }
+
+/**
+ * A script's KEEP_OUT copies as its shell twin makes them: `mkdir -p <keep> && cp <files> <keep>/`, then each further
+ * cp. `steps` are cp calls: `{ files }` into the folder, `{ files: [file], name }` to a name of its own there. A cp
+ * copies what it can and goes on; a failure (the folder not made, a file missing or unreadable) never ends the run.
+ * With `quiet` false each failure is said on stderr, as by cp without 2>/dev/null. Answers whether every step copied
+ * everything (the shell's `&&` after the cp).
+ */
+export function keepOut(keep, steps, quiet = true) {
+  const say = text => quiet || fs.writeSync(2, text + '\n')
+  let made = true
+  try {
+    fs.mkdirSync(keep, { recursive: true })
+  } catch (error) {
+    // mkdir's message is never hidden in the shell scripts.
+    fs.writeSync(2, `mkdir: cannot create directory '${keep}': ${error.code ?? error.message}\n`)
+    made = false
+  }
+  let ok = made
+  steps.forEach((step, n) => {
+    if (n === 0 && !made) return
+    for (const file of step.files) {
+      try {
+        fs.copyFileSync(file, join(keep, step.name ?? basename(file)))
+      } catch (error) {
+        say(`cp: cannot copy '${file}': ${error.code ?? error.message}`)
+        ok = false
+      }
+    }
+  })
+  return ok
+}
+/** A shell glob `<dir>/<pattern>` of file names matching `regex`, sorted; with no match the pattern itself, as sh leaves it. */
+export function globIn(dir, regex, pattern) {
+  let names = []
+  try {
+    names = fs.readdirSync(dir).filter(name => regex.test(name)).sort()
+  } catch {}
+  return names.length > 0 ? names.map(name => join(dir, name)) : [join(dir, pattern)]
+}
 const before = (text, sep) => (text.includes(sep) ? text.slice(0, text.indexOf(sep)) : text)
 
 /**
@@ -509,6 +549,53 @@ export function grepF(text, pattern) {
 }
 /** This file as a URL: the scripts a test writes for the orchestrator's Bash tool import it from there. */
 export const LIB_URL = import.meta.url
+/**
+ * The JSON values of a text one after the other, as jq reads a file: whitespace (line ends too) between them, so a
+ * value may span lines and a line may hold two; undefined when any part is no JSON (jq stops there with an error).
+ */
+export function jsonValues(text) {
+  const values = []
+  const blank = c => c === ' ' || c === '\t' || c === '\n' || c === '\r'
+  // The index after the string that starts at i, or -1 when it does not end.
+  const stringEnd = i => {
+    for (let j = i + 1; j < text.length; j++) {
+      if (text[j] === '\\') j++
+      else if (text[j] === '"') return j + 1
+    }
+    return -1
+  }
+  let i = 0
+  for (;;) {
+    while (i < text.length && blank(text[i])) i++
+    if (i >= text.length) return values
+    const from = i
+    if (text[i] === '{' || text[i] === '[') {
+      let depth = 0
+      while (i < text.length) {
+        const c = text[i]
+        if (c === '"') {
+          i = stringEnd(i)
+          if (i < 0) return undefined
+          continue
+        }
+        i++
+        if (c === '{' || c === '[') depth++
+        else if ((c === '}' || c === ']') && --depth === 0) break
+      }
+      if (depth !== 0) return undefined
+    } else if (text[i] === '"') {
+      i = stringEnd(i)
+      if (i < 0) return undefined
+    } else {
+      while (i < text.length && !blank(text[i]) && !'{["'.includes(text[i])) i++
+    }
+    try {
+      values.push(JSON.parse(text.slice(from, i)))
+    } catch {
+      return undefined
+    }
+  }
+}
 /** The tool names the orchestrator called, as the info line lists them. */
 export const callCounts = entries => countedList(toolUses(entries).map(c => c.name))
 

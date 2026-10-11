@@ -19,7 +19,7 @@
 import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, HAS_PROC, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, grepF, isErrorFalse, join, jqPick, kit,
+  CFG_DEFAULT, HAS_PROC, LIB_URL, MOD, awaitOrchestrator, byteSize, callCounts, entriesOf, finish, globIn, grepF, isErrorFalse, join, jqPick, keepOut, kit,
   linesOf, nodeCommand, ours, procPids, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings,
   signal, startClaude, startOf, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -236,13 +236,7 @@ check('finished', 'nothing was signalled', 'and nothing is signalled')
 
 if (process.env.KEEP_OUT) {
   const keep = process.env.KEEP_OUT
-  fs.mkdirSync(keep, { recursive: true })
-  const names = fs.readdirSync(S).filter(name => /^out-.*\.txt$/.test(name)).map(name => join(S, name))
-  for (const f of [...names, join(S, 'tree-before.txt'), join(S, 'tree-dropped.txt'), join(S, 'tree-seen.txt'), join(S, 'claude-before.txt'), join(S, 'orchestrator.json'), TRACE]) {
-    try {
-      fs.copyFileSync(f, join(keep, basename(f)))
-    } catch {}
-  }
+  keepOut(keep, [{ files: [...globIn(S, /^out-.*\.txt$/, 'out-*.txt'), join(S, 'tree-before.txt'), join(S, 'tree-dropped.txt'), join(S, 'tree-seen.txt'), join(S, 'claude-before.txt'), join(S, 'orchestrator.json'), TRACE] }])
   info(`outputs copied to ${keep}`)
 }
 const STILL = processesNaming(S, 'e2e-stop')
