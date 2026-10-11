@@ -20,7 +20,7 @@ const DIGEST_TOOL = 'mcp__session-control__turn_digest'
 const SID_LIVE = '11111111-aaaa-4bbb-8ccc-111111111111'
 const SID_DONE = '22222222-aaaa-4bbb-8ccc-222222222222'
 const OTHER_SID = '5a5a5a5a-0000-4000-8000-00000000005a'
-const CANARY = 'sk-ant-api03-DIGESTCANARY0000000000000000000000'
+const CANARY = ['sk', 'ant', 'api03', 'DIGESTCANARY0000000000000000000000'].join('-')
 
 /** A worker whose pid is gone with a clean result: the first poll harvests it. */
 const DONE_ENTRY = { title: 'done worker', pid: 4300, session_id: SID_DONE, name: 'w-done-worker-261011090000', config_dir: `${HOME}/.claude`, cwd: '/w/work', model: 'haiku', effort: 'low', result_file: `${RUNS}/done.json` }

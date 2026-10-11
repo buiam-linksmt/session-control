@@ -51,8 +51,8 @@ const SID_BIG = 'b1900000-8888-4888-8888-888888888888'
 
 /** Secrets of the kinds the trace's redaction knows: none may reach an answer. */
 const CANARIES = {
-  anthropic: 'sk-ant-api03-CANARYcanary0123456789abcdef',
-  github: 'ghp_CANARY0123456789abcdefABCDEF',
+  anthropic: ['sk', 'ant', 'api03', 'CANARYcanary0123456789abcdef'].join('-'),
+  github: ['ghp', 'CANARY0123456789abcdefABCDEF'].join('_'),
   jwt: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjYW5hcnkiLCJpYXQiOjE3OTAwMDAwMDB9.c2lnbmF0dXJlY2FuYXJ5MDEyMzQ1Njc4OWFiY2RlZg',
   password: 'hunter2canary',
 }

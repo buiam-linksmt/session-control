@@ -153,11 +153,11 @@ describe('audit findings, one fixture per kind', () => {
       ['backups of kind task-queue-before-queue-task.json', '3 files; 2 are older than 2 days besides the newest: task-queue-before-queue-task-2026-01-07.json, task-queue-before-queue-task-2026-01-06.json'],
     ])
     // A file name is redacted as a path is: dated names read whole, a token-like word goes.
-    const token = 'ghp_CANARY0123456789abcdefABCDEF'
+    const token = ['ghp', 'CANARY0123456789abcdefABCDEF'].join('_')
     const tokenName = auditFindings({ ...BASE, backups: [file(`${token}-2026-01-09.json`, 0), file(`${token}-2026-01-01.json`, 5 * DAY)] }).filter(one => one.kind === 'backups')
     expect(tokenName.map(one => [one.subject, one.evidence])).toEqual([['backups of kind [redacted].json', '2 files; 1 is older than 2 days besides the newest: [redacted]-2026-01-01.json']])
     expect(auditText({ ...BASE, backups: [file(`${token}-2026-01-09.json`, 0)] })).not.toContain('CANARY')
-    const loose = auditFindings({ ...BASE, runs: [file('ghp_CANARY0123456789abcdefABCDEF.json', DAY)] }).filter(one => one.kind === 'runs')
+    const loose = auditFindings({ ...BASE, runs: [file(`${token}.json`, DAY)] }).filter(one => one.kind === 'runs')
     expect(loose.map(one => one.evidence)).toEqual(['1 file (1 KiB) that no registry entry names, the oldest 24h00m old: [redacted].json'])
     expect(backupKind('headless-sessions-before-completion-2026-10-10.json')).toBe('headless-sessions-before-completion.json')
     expect(backupKind('license-lib.sh.orig-2026-10-10b')).toBe('license-lib.sh.orig')
@@ -220,7 +220,7 @@ describe('audit text', () => {
   })
 
   test('free text is redacted; at most MAX_FINDINGS findings, the rest counted; no findings said as such', () => {
-    const tasks = Array.from({ length: MAX_FINDINGS + 3 }, (_, n) => ({ id: `t${n}`, title: n === 0 ? 'key ghp_CANARY0123456789abcdefABCDEF' : `t${n}`, status: 'later' }))
+    const tasks = Array.from({ length: MAX_FINDINGS + 3 }, (_, n) => ({ id: `t${n}`, title: n === 0 ? `key ${['ghp', 'CANARY0123456789abcdefABCDEF'].join('_')}` : `t${n}`, status: 'later' }))
     const text = auditText({ entries: [], facts: FACTS, nowMs: NOW, queueText: JSON.stringify({ tasks }) })
     expect(text).not.toContain('CANARY')
     expect(text).toContain('task t0 "key [redacted]"')

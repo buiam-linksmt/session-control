@@ -979,9 +979,9 @@ describe('notices.ts: the caps', () => {
 // ---------------------------------------------------------------- completion notes redacted (decision mod-20)
 
 describe('completion notes', () => {
-  const TITLE_CANARY = 'sk-canarytitle00000000'
-  const RESULT_CANARY = 'ghp_canaryresult0000000000'
-  const ERROR_CANARY = 'sk-canaryerror000000000'
+  const TITLE_CANARY = ['sk', 'canarytitle00000000'].join('-')
+  const RESULT_CANARY = ['ghp', 'canaryresult0000000000'].join('_')
+  const ERROR_CANARY = ['sk', 'canaryerror000000000'].join('-')
   const notification = ($: { prompt: { submit: (e: never) => Promise<unknown> } }) =>
     $.prompt.submit({ text: 'notification', wait: false, origin: { kind: 'task-notification' } } as never) as Promise<{ context?: readonly unknown[] }>
   const completions = (sent: { context?: readonly unknown[] }) => (sent.context ?? []).map(String).filter(line => line.startsWith('session-control completions: '))

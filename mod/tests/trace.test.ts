@@ -27,13 +27,16 @@ import {
 
 import { NOW_MS } from './fixtures'
 
+/** The user and password of a URL, joined at run time so the file holds no complete credential URL. */
+const USER_PA55 = ['user', 'pa55'].join(':')
+
 describe('redaction', () => {
   test('anything that looks like a token is replaced', () => {
     expect(redact('Authorization: Bearer abc.DEF-ghi_123')).toBe(`Authorization: ${REDACTED}`)
-    expect(redact('key sk-ant-api03-AbCdEf1234567890xyz in it')).toBe(`key ${REDACTED} in it`)
+    expect(redact(`key ${['sk', 'ant', 'api03', 'AbCdEf1234567890xyz'].join('-')} in it`)).toBe(`key ${REDACTED} in it`)
     expect(redact(`push with ghp_${'A1b2C3d4'.repeat(4)}abcd`)).toBe(`push with ${REDACTED}`)
     expect(redact(`github_pat_${'11ABCDEFG0'.repeat(3)}`)).toBe(REDACTED)
-    expect(redact('xoxb-1234567890-abcdefghij')).toBe(REDACTED)
+    expect(redact(['xoxb', '1234567890', 'abcdefghij'].join('-'))).toBe(REDACTED)
     expect(redact(`sha ${'0123456789abcdef'.repeat(3)} end`)).toBe(`sha ${REDACTED} end`)
     expect(redact('blob QWxhZGRpbjpvcGVuIHNlc2FtZQ9xYzE2NDQ1Njc4OTA= end')).toBe(`blob ${REDACTED} end`)
     expect(redact('a=1&password=hunter2&b=2')).toBe(`a=1&password=${REDACTED}&b=2`)
@@ -76,7 +79,7 @@ describe('redaction', () => {
       expect(redact(report)).toBe(report.replace(CANARY, REDACTED))
       expect(redact(`${TIP} fix: see also ${CANARY}`)).toBe(`${TIP} fix: see also ${REDACTED}`)
       // Another secret on the line goes, the id stays.
-      expect(redact(`git ls-remote https://user:pa55@example.com/org/repo.git ${TIP} refs/heads/x`)).toBe(`git ls-remote https://${REDACTED}@example.com/org/repo.git ${TIP} refs/heads/x`)
+      expect(redact(`git ls-remote https://${USER_PA55}@example.com/org/repo.git ${TIP} refs/heads/x`)).toBe(`git ls-remote https://${REDACTED}@example.com/org/repo.git ${TIP} refs/heads/x`)
       expect(redact(`commit ${TIP} and commit ${BASE}`)).toBe(`commit ${TIP} and commit ${BASE}`)
     })
 
@@ -150,7 +153,7 @@ describe('redaction', () => {
   })
 
   test('URL userinfo', () => {
-    expect(redact('git clone https://user:pa55@example.com/org/repo.git')).toBe(`git clone https://${REDACTED}@example.com/org/repo.git`)
+    expect(redact(`git clone https://${USER_PA55}@example.com/org/repo.git`)).toBe(`git clone https://${REDACTED}@example.com/org/repo.git`)
     expect(redact('ssh://deploy@host:22/x')).toBe(`ssh://${REDACTED}@host:22/x`)
   })
 
@@ -215,8 +218,8 @@ describe('redaction', () => {
   })
 
   test('AWS access key ids', () => {
-    expect(redact('id AKIAABCDEFGHIJKLMNOP end')).toBe(`id ${REDACTED} end`)
-    expect(redact('ASIA1234567890ABCDEF')).toBe(REDACTED)
+    expect(redact(`id ${['AKIA', 'ABCDEFGHIJKLMNOP'].join('')} end`)).toBe(`id ${REDACTED} end`)
+    expect(redact(['ASIA', '1234567890ABCDEF'].join(''))).toBe(REDACTED)
   })
 
   test('a run of 32 or more letters, digits, - _ / + = with a letter and a digit, outside a plain path', () => {

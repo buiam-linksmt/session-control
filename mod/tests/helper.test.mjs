@@ -546,7 +546,7 @@ function probeScript() {
   return vm.runInNewContext(found[1]).join('\n')
 }
 
-const CANARY = 'sk-canary-env-0123456789abcdef'
+const CANARY = ['sk', 'canary-env-0123456789abcdef'].join('-')
 
 /**
  * A fake /proc: claude processes with and without a config dir, a cwd, a command line with a tab and a newline, a

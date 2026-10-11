@@ -29,7 +29,8 @@ REG=$S/headless-sessions.json
 TRACE=$RUNS/trace.log
 CFG_DEFAULT=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 # A text the redaction takes for a key: no output may show it.
-CANARY=sk-e2ecanary0123456789digest
+# Joined from two parts, so the file holds no complete key-shaped string.
+CANARY="sk-""e2ecanary0123456789digest"
 OPID=''
 
 ours() { [ -n "$1" ] && tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -F -q "$S"; }

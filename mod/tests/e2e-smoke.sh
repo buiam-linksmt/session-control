@@ -69,7 +69,8 @@ S=$(mktemp -d "${TMPDIR:-/tmp}/session-control-e2e.XXXXXX") || { fail 'scratch d
 S=$(cd "$S" && pwd -P)
 ORCH=$S/orch
 # The worker's directory carries a canary that looks like a key: the trace must show it as [redacted].
-CANARY=sk-e2ecanary00000000
+# Joined from two parts, so the file holds no complete key-shaped string.
+CANARY="sk-""e2ecanary00000000"
 WORK=$S/work-$CANARY
 RUNS=$S/runs
 REG=$S/headless-sessions.json

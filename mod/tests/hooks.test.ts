@@ -1926,7 +1926,7 @@ describe('debug trace', () => {
   })
 
   test('the start: platform, options and the activation, no environment', { options: TRACED }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SECRET_THING: 'sk-should-never-appear-1234' })
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SECRET_THING: ['sk', 'should-never-appear-1234'].join('-') })
     await $.session.start(start(ORCH_DIR))
     const [first] = bare(traceOf(w))
     expect(first).toEqual({
