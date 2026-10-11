@@ -244,6 +244,24 @@ export function startOf(pid) {
   }
 }
 export const comm = pid => readOr(`/proc/${pid}/comm`).replace(/\n$/, '')
+/**
+ * Every process of the machine from Win32_Process, in one Windows PowerShell call: pid (a string) to its parent's pid,
+ * name, creation time in epoch milliseconds (the arithmetic of the mod's PROBE_PS1 and TREE_PS1, so a start compares
+ * with the starts stop_worker reports) and command line. Windows only; an empty map when the call fails.
+ */
+export function winProcs() {
+  const script =
+    '$e = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc); ' +
+    "Get-CimInstance Win32_Process | ForEach-Object { $c = ''; if ($_.CreationDate) { $c = [long][Math]::Floor(($_.CreationDate.ToUniversalTime() - $e).TotalMilliseconds) }; " +
+    "@($_.ProcessId, $_.ParentProcessId, $_.Name, $c, ([string]$_.CommandLine -replace '[\\t\\r\\n]', ' ')) -join [char]9 }"
+  const ran = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { encoding: 'utf8', timeout: 60_000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 })
+  const all = new Map()
+  for (const line of linesOf(ran.stdout ?? '')) {
+    const [pid, ppid, name, start, ...cmd] = line.split('\t')
+    if (/^[0-9]+$/.test(pid ?? '')) all.set(pid, { ppid: ppid ?? '', name: name ?? '', start: start ?? '', cmd: cmd.join(' ') })
+  }
+  return all
+}
 export const procCwd = pid => {
   try {
     return fs.readlinkSync(`/proc/${pid}/cwd`)
