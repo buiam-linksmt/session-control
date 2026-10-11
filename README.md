@@ -324,6 +324,7 @@ sh mod/tests/e2e-licences.sh
 The same tests in Node, the runtime the mod uses outside the engine (see Node ports of the tests below):
 
 ```sh
+node mod/tests/run-all.mjs
 node mod/tests/probe-selftest.mjs
 node mod/tests/windows-selftest.mjs
 node mod/tests/e2e-smoke.mjs
@@ -364,8 +365,9 @@ Node.js is the mod's single runtime outside the engine, also for the self-tests 
 
 - `probe-selftest.mjs`, the port of `probe-selftest.py`; `windows-selftest.mjs`, the port of `windows-selftest.py`. What they share (Python's string literals, `json.dumps`, `splitlines`, equality and the like, written out) is in `lib/selftest.mjs`.
 - `e2e-smoke.mjs`, `e2e-tools.mjs`, `e2e-write-tools.mjs`, `e2e-stop.mjs`, `e2e-guard.mjs`, `e2e-digest.mjs`, `e2e-lint.mjs` and `e2e-licences.mjs`, the ports of the eight `e2e-*.sh` scripts. What they share (the check lines, the scratch directory and its cleanup, the orchestrator's start and wait, the transcript reading, the process checks) is in `lib/e2e.mjs`.
+- `run-all.mjs` runs `helper.test.mjs` (under `node --test`), `probe-selftest.mjs` and `windows-selftest.mjs` one after the other and prints a summary; it runs no end-to-end script, since each of those starts real `claude` sessions and spends quota.
 
-The Python and shell versions stay beside the ports; whether to remove them is still open. Neither side is authoritative: a port checks what its twin checks, with the same fixtures, the same options and variables (`KEEP_TRACE`, `KEEP_OUT`, `HIDE_NODE`, `E2E_MAIN_DIR`, `E2E_IDENTITY`, `SC_WIN_SCRATCH`, `SC_WIN_NODE`), the same cost caps and time limits, the same scratch directories and cleanup, and the same `ok`, `FAIL`, `skip` and `info` lines, so the two must agree, and a difference between them is a bug in one of them. On this WSL host each pair printed the same set of `ok` lines, and scratch mutations of the mod that made a twin fail made its port fail on the same checks.
+The Python and shell versions stay beside the ports; whether to remove them is still open. Neither side is authoritative: a port checks what its twin checks, with the same fixtures, the same options and variables (`KEEP_TRACE`, `KEEP_OUT`, `HIDE_NODE`, `E2E_MAIN_DIR`, `E2E_IDENTITY`, `SC_WIN_SCRATCH`, `SC_WIN_NODE`), the same cost caps and time limits, the same scratch directories and cleanup, and the same `ok`, `FAIL`, `skip` and `info` lines, so the two must agree, and a difference between them is a bug in one of them. On this WSL host each pair printed the same set of `ok` lines (a line that depends on the model or on the machine's other processes, such as `no other tool was called` in the digest test, compared in runs where both went the same way), and scratch mutations of the mod that made a twin fail made its port fail on the same checks.
 
 The end-to-end ports need no `sh`, `grep`, `tr`, `sed`, `jq` or `cygpath`. The orchestrator's foreground waits run small node scripts of the test, by the absolute path of the node that runs the test, so `HIDE_NODE=1` still hides Node from the mod. The smoke test's interactive part runs where `tmux` exists (the pane runs a node script, no shell) and prints `skip` elsewhere. The `/proc` checks run on Linux only and print `skip` elsewhere; `e2e-stop.mjs` needs `/proc` throughout and fails at once without it, as `e2e-stop.sh` does. Only a run's own processes are ever signalled. The guard and lint tests still tell the orchestrator to run `sed -i`, `cat`, `jq`, a heredoc, a redirection and `git push --force` through its Bash tool, because those commands are what the guards are tested on (on Windows the `jq` step needs `jq` on Git Bash's PATH). `e2e-write-tools.mjs` makes symbolic links, as its twin does.
 
@@ -522,6 +524,6 @@ mod/
                                 e2e-lint.sh, e2e-licences.sh; their Node ports probe-selftest.mjs,
                                 windows-selftest.mjs, e2e-smoke.mjs, e2e-tools.mjs, e2e-digest.mjs,
                                 e2e-write-tools.mjs, e2e-stop.mjs, e2e-guard.mjs, e2e-lint.mjs, e2e-licences.mjs,
-                                lib/selftest.mjs, lib/e2e.mjs
+                                lib/selftest.mjs, lib/e2e.mjs; run-all.mjs
   types/index.d.ts              state contract of the panel
 ```
