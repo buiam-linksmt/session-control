@@ -5,8 +5,7 @@
 // Where it runs: from WSL, where Windows PowerShell is reachable through interop (paths converted with wslpath, the
 // Windows programs started from Linux); and natively on Windows (process.platform win32),
 // where it starts powershell.exe, cmd.exe, Git Bash's bash.exe and node.exe directly and uses Windows paths as they
-// are. THE NATIVE WINDOWS BRANCH IS UNVERIFIED: it has not been run on a Windows host; only the WSL branch has.
-// Without powershell.exe it prints `skipped`.
+// are. Without powershell.exe it prints `skipped`.
 //
 // Extracts the Windows PowerShell scripts the mod runs (PROBE_PS1 and TREE_PS1 of hooks/host-windows.ts), writes them
 // to a scratch directory on the Windows side and runs them through powershell.exe, the way the mod runs them on native
@@ -162,6 +161,18 @@ function get(name) {
   return fs.existsSync(path) ? utf8.decode(fs.readFileSync(path)) : null
 }
 const exists = path => fs.existsSync(path)
+/**
+ * A file a PowerShell of the test writes with Set-Content, read while the test waits for it: its text, or '' while it
+ * is not there or still being written (on native Windows a read then fails with EBUSY: Set-Content shares no read).
+ */
+function written(path) {
+  try {
+    return exists(path) ? readFile(path) : ''
+  } catch (err) {
+    if (err?.code === 'EBUSY') return ''
+    throw err
+  }
+}
 /** os.makedirs(path): the parents made too; a path that is already there is an error. */
 function makedirs(path) {
   if (fs.existsSync(path)) throw new Error(`already there: ${path}`)
@@ -217,7 +228,8 @@ try {
     const marker = join(work, `pid-${seconds}.txt`)
     const proc = startProc([PS, '-NoProfile', '-NonInteractive', '-Command', `$PID | Set-Content -Encoding ascii '${toWin(marker)}'; Start-Sleep ${seconds}`], work)
     for (let i = 0; i < 300; i++) {
-      if (exists(marker) && readFile(marker).trim()) return [proc, pyInt(readFile(marker).trim())]
+      const text = written(marker).trim()
+      if (text) return [proc, pyInt(text)]
       sleepMs(100)
     }
     throw new Error('the sleeper did not start')
@@ -524,7 +536,7 @@ try {
       `$f = [System.IO.File]::Open('${toWin(join(work, 'held.json'), '\\')}', 'Open', 'Read', 'Read'); ` +
       `'held' | Set-Content -Encoding ascii '${toWin(join(work, 'held.flag'), '\\')}'; Start-Sleep -Milliseconds 600; $f.Close()`], work)
     for (let i = 0; i < 300; i++) {
-      if (get('held.flag')) break
+      if (written(join(work, 'held.flag'))) break
       sleepMs(50)
     }
     check(get('held.flag'), 'the holder did not open the file')
