@@ -422,6 +422,30 @@ describe('heredocs, quoted arguments and substitutions (decision mod-20: a promp
   })
 })
 
+describe('the documented limits of the command check (README, Helper-file guard: a slip guard, not a boundary)', () => {
+  const files = protectedFiles(PLACES)
+  const verdict = (command: string) => commandVerdict(command, files, 'bash')
+
+  test('the forms the README lists as not caught run, the documented false positive is refused, and the backup the README suggests runs', () => {
+    for (const command of [
+      "sed -i 's/a/b/' task-qu''eue.json",
+      'sed -i s/a/b/ task-"queue".json',
+      'sed -i s/a/b/ task\\-queue.json',
+      'rm task-{queue,x}.json',
+      "rm $'task-queue\\x2ejson'",
+      'rm task-*.json',
+      'ls | grep queue | xargs rm',
+      'f=task; sed -i x "$f-queue.json"',
+      'sed -i x q',
+      'python3 fix.py',
+    ]) {
+      expect({ command, hit: verdict(command) }).toEqual({ command, hit: undefined })
+    }
+    expect(verdict('cp task-queue.json backups/task-queue-copy.json')?.file.name).toBe('task-queue.json')
+    expect(verdict('cat task-queue.json > backups/task-queue-copy.json')).toBeUndefined()
+  })
+})
+
 describe('record_decision and the decisions archive', () => {
   test('an id an archived section holds is refused with the reason; a new id is recorded; an unreadable archive refuses; no archive, no check', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)

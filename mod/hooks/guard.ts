@@ -8,7 +8,9 @@
 // refusing. It reads the command text that runs: a protected file named (by its base name, or a path ending in it)
 // together with a construct that writes it is refused; reading commands pass. A heredoc body that only data sinks read
 // and a quoted plain argument are text, not commands (decision mod-20); substitutions and a heredoc or here-string a
-// shell or an interpreter reads are checked as the code they are. It cannot see what the text does not say: a glob (`task-*.json`, `*.md`), a name built at run time
+// shell or an interpreter reads are checked as the code they are. It cannot see what the text does not say: a name spelled
+// another way (a quote or an escape inside it, `task-qu''eue.json`, `task\-queue.json`, brace expansion, `$'...\x2e...'`),
+// a glob (`task-*.json`, `*.md`), a name built at run time
 // (`f=task; sed -i x "$f-queue.json"` in one segment), a name read from a file or another command's output (`ls |
 // xargs rm`), a script file it runs (`python3 fix.py`, `sh edit.sh`), an encoded PowerShell command (-EncodedCommand),
 // a link or alias to a helper file that already exists (making one by `ln` is refused, but a later `sed -i q` names
