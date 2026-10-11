@@ -120,8 +120,8 @@ EOF
 OPID=$!
 SEEN_PID=''
 # The worker's launch line, read off the command line of the shell that runs it, where /proc shows the worker (not
-# in Git Bash, whose /proc does not list a native claude.exe). A haiku worker lives a few seconds: looked for 4 times
-# a second.
+# in Git Bash, whose /proc does not list a native claude.exe). A haiku worker lives a few seconds, sometimes about one:
+# the registry, the worker and its socket are looked for every 0.2 s while the orchestrator runs.
 WLINE=''
 # The worker's own argv (NULs as blanks) and pid, from the same /proc entry.
 WCMD=''
@@ -147,14 +147,14 @@ catch_socket() {
 }
 elapsed=0
 while kill -0 "$OPID" 2>/dev/null && [ "$elapsed" -lt 480 ]; do
-  if [ -z "$SEEN_PID" ] && [ -f "$REG" ]; then
-    SEEN_PID=$(grep -o '"pid": *[0-9]*' "$REG" | head -n 1 | grep -o '[0-9]*$')
-    [ -n "$SEEN_PID" ] && WPID=$SEEN_PID
-  fi
-  for _q in 1 2 3 4; do
+  for _q in 1 2 3 4 5; do
+    if [ -z "$SEEN_PID" ] && [ -f "$REG" ]; then
+      SEEN_PID=$(grep -o '"pid": *[0-9]*' "$REG" | head -n 1 | grep -o '[0-9]*$')
+      [ -n "$SEEN_PID" ] && WPID=$SEEN_PID
+    fi
     [ -z "$WLINE" ] && [ -d /proc/self ] && ! command -v cygpath >/dev/null 2>&1 && catch_worker
     [ -z "$SOCK_LIVE" ] && catch_socket
-    sleep 0.25
+    sleep 0.2
   done
   elapsed=$((elapsed + 1))
 done
@@ -172,8 +172,20 @@ info "orchestrator cost USD $(grep -o '"total_cost_usd": *[0-9.e-]*' "$S/orchest
 info "orchestrator session $(grep -o '"session_id": *"[^"]*"' "$S/orchestrator.json" | head -n 1 | sed 's/.*: *"//; s/"$//') (config dir ${CLAUDE_CONFIG_DIR:-$HOME/.claude}, cwd $ORCH)"
 
 field() { grep -o "\"$1\": *\"[^\"]*\"" "$REG" 2>/dev/null | head -n 1 | sed 's/.*: *"//; s/"$//'; }
-if [ -n "$SEEN_PID" ]; then pass "registry entry had a pid while the worker ran ($SEEN_PID)"; else fail 'registry entry had a pid while the worker ran'; fi
 SID=$(field session_id)
+# Whether the registry entry had the worker's pid while it ran. A haiku worker can live about a second, and the
+# completion drops the pid from the entry, so the registry sampled every 0.2 s above can still miss it: the trace
+# proves the same thing on its own. Its worker.found line records the pid the probe found for the new worker, and its
+# worker.registered line the pid of the entry just written, with isRegistered true and the entry's session id; the two
+# pids equal and that session id the registry's own mean the entry held that live pid. At least one of the two proofs
+# is required; neither found fails the check.
+TRACE_FOUND=$(grep -o '"event":"worker.found","pid":[0-9]*' "$TRACE" 2>/dev/null | head -n 1 | grep -o '[0-9]*$')
+TRACE_REG=$(grep -F '"event":"worker.registered"' "$TRACE" 2>/dev/null | grep -F '"isRegistered":true' | grep -F "\"sessionId\":\"$SID\"" | grep -o '"pid":[0-9]*' | head -n 1 | grep -o '[0-9]*$')
+if [ -n "$SEEN_PID" ] || { [ -n "$SID" ] && [ -n "$TRACE_FOUND" ] && [ "$TRACE_FOUND" = "$TRACE_REG" ]; }; then
+  pass "registry entry had a pid while the worker ran (registry sampled: ${SEEN_PID:-missed}; trace: worker.found pid ${TRACE_FOUND:-none}, registered pid ${TRACE_REG:-none})"
+else
+  fail "registry entry had a pid while the worker ran (registry sampled: missed; trace: worker.found pid ${TRACE_FOUND:-none}, registered pid ${TRACE_REG:-none})"
+fi
 if printf '%s' "$SID" | grep -Eq '^[0-9a-f-]{36}$'; then pass "registry entry has a session_id ($SID)"; else fail "registry entry has a session_id (got '$SID')"; fi
 KIND=$(grep -o '"kind": *"[a-z]*"' "$REG" 2>/dev/null | head -n 1 | sed 's/.*: *"//; s/"$//')
 if [ "$KIND" = clean ]; then pass 'registry entry has the outcome clean'; else fail "registry entry has the outcome clean (got '$KIND')"; fi
