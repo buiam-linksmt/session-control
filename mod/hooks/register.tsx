@@ -28,6 +28,8 @@ import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
 import { AUDIT_SCHEMA, auditText } from './audit'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
+import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
+import type { ProtectedFile } from './guard'
 import type { StopReport } from './host'
 import type { GitState, ListedFile } from './audit'
 import {
@@ -130,6 +132,8 @@ const AUDIT_TOOL = 'mcp__session-control__audit_state'
 const CLOSE_TOOL = 'mcp__session-control__close_worker'
 const ARCHIVE_TOOL = 'mcp__session-control__archive_decisions'
 const STOP_TOOL = 'mcp__session-control__stop_worker'
+/** The engine tools the helper-file guard looks at (guard.ts): the file tools by their path, Bash and PowerShell by their command. */
+const GUARDED_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell)$/
 
 /** How much of a transcript read_result reads when the whole is over the read cap: a final report can be one long row. */
 const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
@@ -198,6 +202,12 @@ let host: Promise<Host> | undefined
 const harvested = new Set<string>()
 /** Session names this session gave to launches: two launches in the same second still get different names. */
 const issuedNames = new Set<string>()
+/**
+ * The helper-file guard of this load: set only when the session runs in the orchestrator directory and the board is on
+ * there (startSession), with the session's directory, the platform and the protected files (guard.ts); else undefined
+ * and the guard passes every call.
+ */
+let guard: { cwd: string; isWindows: boolean; files: ProtectedFile[] } | undefined
 
 // The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
 // wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
@@ -1287,6 +1297,48 @@ async function panelSnapshot($: EngineInterface) {
   return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, log, expanded: log === null ? exp : null, nowMs: await $.clock.now() }) }
 }
 
+/**
+ * Where a path lands through its symbolic links ($.fs.stat with resolve): the file's own real path, or, for a file not
+ * there yet, its folder's real path and its name; undefined when neither resolves. A relative path is taken from the
+ * session's directory first.
+ */
+async function landing($: EngineInterface, path: string, cwd: string, isWindows: boolean): Promise<string | undefined> {
+  const isAbsolute = isWindows ? /^([A-Za-z]:[\\/]|[\\/]{2}|\/[A-Za-z]\/)/.test(path) : path.startsWith('/')
+  const whole = isAbsolute ? path : `${cwd.replace(/[\\/]+$/, '')}/${path}`
+  const own = await $.fs.stat(whole, { resolve: true }).catch(() => undefined)
+  if (own?.realPath !== undefined) return own.realPath
+  const cut = Math.max(whole.lastIndexOf('/'), whole.lastIndexOf('\\'))
+  const name = whole.slice(cut + 1)
+  if (cut < 0 || name === '' || name === '.' || name === '..') return undefined
+  const folder = await $.fs.stat(whole.slice(0, cut + 1), { resolve: true }).catch(() => undefined)
+  return folder?.realPath === undefined ? undefined : `${folder.realPath.replace(/[\\/]+$/, '')}/${name}`
+}
+
+/**
+ * The helper-file guard's verdict on one tool call of this session (guard.ts): Bash and PowerShell by their command's
+ * text, the file tools by the path they write, compared as given (made absolute, `..` folded) and where it lands
+ * through its links, against each protected file the same two ways; the refusal text, or undefined to let it run.
+ */
+async function guardRefusal($: EngineInterface, input: Record<string, unknown>): Promise<string | undefined> {
+  const active = guard
+  if (active === undefined) return undefined
+  const tool = String(input.tool ?? '')
+  if (tool === 'Bash' || tool === 'PowerShell') {
+    const hit = commandVerdict(typeof input.command === 'string' ? input.command : '', active.files, tool === 'PowerShell' ? 'powershell' : 'bash')
+    if (hit === undefined) return undefined
+    trace($, 'guard', { check: 'helper-file', tool, file: hit.file.name, isOk: false })
+    return denyText(tool, hit.file, hit.how)
+  }
+  const target = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : ''
+  if (target === '') return undefined
+  const landed = await landing($, target, active.cwd, active.isWindows)
+  const files = await Promise.all(active.files.map(async file => ({ ...file, spellings: [await landing($, file.path, active.cwd, active.isWindows)].filter((one): one is string => one !== undefined) })))
+  const hit = pathVerdict(landed === undefined ? [target] : [target, landed], files, active.cwd, active.isWindows)
+  if (hit === undefined) return undefined
+  trace($, 'guard', { check: 'helper-file', tool, file: hit.name, isOk: false })
+  return denyText(tool, hit, `a write of ${normalPath(target, active.cwd, active.isWindows)}`)
+}
+
 /** A directory's entries ($.fs.list), a folder's mtime from $.fs.stat; undefined when it is not there. */
 async function listed($: EngineInterface, dir: string): Promise<ListedFile[] | undefined> {
   const entries = await $.fs.list(dir).catch(() => undefined)
@@ -1492,7 +1544,10 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
     const options = { ...rest, registryPath: registrySetting, pollSeconds: pollMs / 1000, licencePickCommand: licencePickCommand.trim() === '' ? 'empty' : 'set' }
     traceStart = { cwd, platform: machine.platform, isOrchestratorDir: config.orchestratorDir !== '' && isHere, options }
   }
-  if (config.orchestratorDir !== '' && isHere) await activate($)
+  if (config.orchestratorDir !== '' && isHere) {
+    await activate($)
+    guard = { cwd, isWindows: machine.platform === 'windows', files: protectedFiles({ orchestratorDir: config.orchestratorDir, registryPath: await registryPath($), runsDir: await runsPath($) }) }
+  }
 }
 
 /** /session-control: refused outside an orchestrator directory; else the board on and the panel shown or hidden. */
@@ -1571,6 +1626,7 @@ export const register: Register = (on, options) => {
   isHelperFallbackNoted = false
   quietFallbacksTraced.clear()
   host = undefined
+  guard = undefined
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
@@ -1725,6 +1781,29 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: STOP_TOOL }, ($, e) => tracedTool($, 'stop_worker', e, ['session_id'], () => stopWorker($, plain(e).session_id, plain(e).reason), true)).catch(($, e, next) => {
     traceError($, 'stop_worker', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: stop_worker failed` }
+  })
+
+  // The helper-file guard (decision mod-2, guard.ts): in the orchestrator directory's own session only, a hand edit of a
+  // file the mod's tools write is refused, with the tool to use instead. The mod's own calls (the launch's Bash) pass
+  // untouched: the tools write through $.fs and the helper, never through a tool call. When the guard cannot run (a
+  // re-entry, or its own reads failed) the handler decides on the call's text alone, without the links resolved.
+  on('tool.call', { tool: GUARDED_TOOLS }, async ($, e, next) => {
+    if (guard === undefined || next.origin.plugin === PLUGIN) return next(e)
+    const refusal = await guardRefusal($, plain(e))
+    return refusal === undefined ? next(e) : { deny: refusal }
+  }).catch(($, e, next) => {
+    if (next.called) return next(e)
+    const active = guard
+    if (active === undefined) return next(e)
+    const input = plain(e)
+    const tool = String(input.tool ?? '')
+    if (tool === 'Bash' || tool === 'PowerShell') {
+      const hit = commandVerdict(typeof input.command === 'string' ? input.command : '', active.files, tool === 'PowerShell' ? 'powershell' : 'bash')
+      return hit === undefined ? next(e) : { deny: denyText(tool, hit.file, hit.how) }
+    }
+    const target = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : ''
+    const hit = target === '' ? undefined : pathVerdict([target], active.files.map(file => ({ ...file, spellings: [] })), active.cwd, active.isWindows)
+    return hit === undefined ? next(e) : { deny: denyText(tool, hit, `a write of ${normalPath(target, active.cwd, active.isWindows)}`) }
   })
 
   // The inspection tools: read-only; their answers reach the trace as a length only.
