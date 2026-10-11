@@ -560,16 +560,16 @@ the compaction digest show the titles of open, not-held points; read `open-point
 
 Every helper-file change goes through the session-control tools: `open_point`, `queue_task`,
 `record_decision` and `archive_decisions` for points, queue and decisions; `launch_worker`,
-`acknowledge_workers`, `retire_workers` and `close_worker` for the registry. In this session the mod
-refuses a hand edit of a helper file, through an edit tool or a Bash or PowerShell command. The mod creates a missing helper file and the tools write a daily backup into `backups/`; the mod merges worker
-completions into the registry itself. A helper file that exists and
-does not parse is a blocker raised as an open point. A tool that refuses a legitimate change is fixed in
-the mod. When a tool is unavailable, raise an open point.
+`acknowledge_workers`, `retire_workers` and `close_worker` for the registry; never edit a helper file by
+hand, with an edit tool or a Bash or PowerShell command. The mod creates a missing helper file and the tools write a daily backup into `backups/`; the mod merges worker
+completions into the registry itself. A helper file that exists and does not parse is a blocker raised as an open point.
+A tool that refuses a legitimate change is fixed in the mod. When a tool is unavailable, raise an open point; when the tools
+answer that session-control needs Node.js, every tool but `panel_snapshot` is down: tell the user in the reply.
 
 The helper files, `backups/` and the saved worker reports belong to this session alone; the user sees only
 the side panel, so whatever the panel hides is mine to keep correct. At the end of every unit run
-`audit_state` and act on its findings before reporting: queue tasks carry exactly `queued`, `running` or `done` with the detail in `note`, and
-none stays for finished or dead work; no settled or stale open point stays open; decisions, registry
+`audit_state` and act on its findings before reporting: the queue holds only work waiting to start: a task is `queued`, with its wait in `waits_for` and the detail in
+`note`; running work is a session and gets no task, and no task stays for finished or dead work; no settled or stale open point stays open; decisions, registry
 entries, `backups/` and `reports/` hold nothing spent. Keep them lean: one line per fact, no duplicated state; remove a closed unit's queue entries
 with `queue_task` `remove`, move its decision section with `archive_decisions` and delete its spent reports. Say what was decided or found in plain words,
 with no decision numbers, entry ids or file names unless asked. A deliverable the user sends or owns
