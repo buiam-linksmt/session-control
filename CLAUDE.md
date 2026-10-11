@@ -53,8 +53,8 @@ commits at the end, no cadence changes to make a run cheaper or safer, no reorde
 - A stop condition must name observable drift, never the absence of a convention. Verify a convention
   actually holds before treating its absence as a blocker.
 - Never tell a skill run to change its own steps, cadence or checkpoints.
-- A skill-test prompt names itself "skill test" (the only phrase that exempts a prompt from `launch_worker`'s
-  item, size and branch checks; its secret and sign-off refusals still apply) and carries only the goal, the premises and the report format (Worker prompt, items 1, 2 and 11).
+- A skill-test prompt says "skill test" (exempt from `launch_worker`'s item, size and branch checks, never its
+  secret and sign-off refusals) and carries only the goal, premises and report format (Worker prompt items 1, 2, 11).
 - If the skill's procedure looks like it will cause a problem, let it happen and record it as a
   rework item.
 
@@ -217,11 +217,12 @@ consequential claim needs.
 
 ### 2. Launch
 
-**At every launch, read model and effort from `<control>/model-complexity-matrix.md`: the model row
-from the task's scope, the effort column from how much deliberation this task needs, chosen
-independently. Set effort only through the `effort` parameter of `launch_worker` (`low`/`medium`/`high`/`xhigh`/`max`).
-Launch Anthropic models only; a missing matrix file is a question to the user.** A diagnosis is `opus` at
-`xhigh` or `max`; a conclusion that decides what happens next is a consequential claim (see Scope).
+**At every fresh launch, read model and effort from `<control>/model-complexity-matrix.md`: the model row from the
+task's scope, the effort column from how much deliberation this task needs, chosen independently; a resume keeps the
+entry's model and licence and takes no fresh pick. Set effort only through the `effort` parameter of `launch_worker`
+(`low`/`medium`/`high`/`xhigh`/`max`). Launch Anthropic models only; a missing matrix file is a question to the
+user.** A diagnosis is `opus` at `xhigh` or `max`; a conclusion that decides what happens next is a consequential
+claim (see Scope).
 
 Pass the prompt inline as `prompt`, or as `prompt_file`: a file in the scratchpad, outside the target
 repo's tree, written with a quoted heredoc (`<<'PROMPT_EOF'`) and checked non-empty (`test -s`).
@@ -233,16 +234,15 @@ headroom the run requires, default 40), `timeout_minutes` (default 180, range 5 
 rules block when the prompt lacks a checked item; default on with `prompt` or `section`), `config_dir`
 (Licences) and `resume_sid`. The tool picks the licence for a fresh launch (the default config directory
 when no picker is configured), starts the worker in the background, finds its pid and registers the entry.
-A resume passes `resume_sid`: the tool reuses the entry's `config_dir`, takes `dir`, `model`, `effort` and
-`title` from the entry unless given, refuses a live session and takes no fresh pick.
+A resume passes `resume_sid` and the entry's own `cwd` as `dir` and the same `model` (left out, they are filled from
+the entry, as are `effort` and `title`; give them only to repeat the entry's values); a live session is refused.
 
-`launch_worker` refuses a prompt that lacks a foreground wait, the `git status -sb` report line or the
-no-attribution instruction (pass `rules`), holds a likely secret (name where the worker finds it, never the
-value), exceeds 60000 characters (reference long documents by path) or instructs a sign-off step (a force,
-delete, mirror or pruning push, `reset --hard`, a forced `clean`, `branch -D`: raise it as an open point and
-launch without it); rewrite the prompt and launch again. A warning in its answer (a push to `main` or
-`develop`; a commit or push with no branch and no decision section) is checked against the push policy and
-Worker prompt item 1 at once; a run whose prompt breaks them is stopped with `stop_worker` and relaunched.
+`launch_worker` refuses a prompt that lacks a foreground wait, the `git status -sb` report line or the no-attribution
+instruction (pass `rules`), holds a likely secret (name where the worker finds it, never the value), exceeds 60000
+characters (reference long documents by path) or instructs a step the mod refuses (Sign-off list: raise it as an open
+point and launch without it); rewrite the prompt and launch again. A warning in its answer (a push to `main` or
+`develop`; a commit or push with no branch and no decision section) is checked against the push policy and Worker
+prompt item 1 at once; a run whose prompt breaks them is stopped with `stop_worker` and relaunched.
 
 A task with no natural project directory gets `dir` set to `<workspaces>`; `launch_worker` refuses
 `<control>` and `$HOME`. Every worker starts through `launch_worker`; no worker is started with a
@@ -263,8 +263,8 @@ and raise an open point naming the session.
 the Abort check, take the outcome label (`clean`, `limit`, `login`, `killed`, `error`, `chatter`) from the
 `session-control completions: <title>: <summary>` line of the next prompt, or from the entry's `outcome`;
 classify an entry without a label from the err file and `read_result` (`killed` also covers a missing or
-truncated result file: the err file tells a time limit from memory). A `<title>: report check: ...` item is a
-note and never changes the outcome: the work counts as not pushed until a resume supplies what it names. Act:
+truncated result file: the err file tells a time limit from memory). A `<title>: report check: ...` item never
+changes the outcome; a resume supplies what it names. Act:
 - Exit 0 with a report against the prompt's acceptance criteria and no question for the user: retire
   (step 7); with one: Follow up (step 5).
 - Exit 0 ending on a deferral (a background wait, a scheduled wakeup, a promise to report later), with
@@ -359,13 +359,12 @@ point naming where, never the value; removal and rotation wait for the user.
 - `list_sessions` lists every registry row as the panel shows it and each live headless `claude -p` no
   entry claims (an orphan) with its pid, cwd and config dir.
 - Poll on demand or when the user asks — do not busy-loop.
-- At the start of every turn, and first after a compaction or a restart: take the registry rows from
-  `list_sessions` and the compaction digest and read `task-queue.json` and `open-points.json` for the ids and
-  the launch fields (`dir`, `model`, `effort`, `prompt_file`) the panel omits; run the Abort check on every registry
-  pid without a classified outcome and classify each dead one by the exit list (Launch), from its
-  transcript when scratchpad files are gone; raise an open point for each orphan (step 3); launch every
-  `queued` task whose blocker has cleared, and start the reset `sleep` for one still waiting with none
-  running. Report only what this check changed.
+- At the start of every turn, and first after a compaction or a restart: take the registry rows from `list_sessions`
+  and the compaction digest and read `task-queue.json` and `open-points.json` for the ids and task `fields`, which
+  the panel never shows; run the Abort check on every registry pid without a classified outcome and classify each
+  dead one by the exit list (Launch), from its transcript when scratchpad files are gone; raise an open point for
+  each orphan (step 3); launch every `queued` task whose blocker has cleared, and start the reset `sleep` for one
+  still waiting with none running. Report only what this check changed.
 
 ### 5. Follow up
 
@@ -402,6 +401,7 @@ does both for a registered worker: Abort check, descendants listed, worker and s
 stopped (a forced kill after the grace period), Abort check again, the proof as its answer. Report it
 stopped only on a `dead` result; check an `exited` zombie again shortly; `STILL ALIVE` is a live worker,
 reported as running. `TaskStop` kills the shell wrapper only and proves nothing. Release a lock it held.
+A live process `stop_worker` refuses is raised as an open point naming its pid and session id; kill nothing by hand.
 
 **The Abort check**, used wherever a pid must be proved alive or dead: alive = the pid's
 `<config_dir>/sessions/<pid>.json` names the entry's session_id and its start is the process's own; anything
@@ -423,7 +423,7 @@ Once death is confirmed, and whenever a worker finishes or dies, call `session_w
 the outcome; report each write it flags under `<control>` or to the registry, and undo it only after the
 user has seen it.
 
-The mod drops `pid` itself once the Abort check fails and the entry has a `result_file`, as every
+With `completionWrites` on, the mod drops `pid` once the Abort check fails and the entry has a `result_file`, as every
 `launch_worker` entry does; an entry without one is raised as an open point. Keep the entry (step 3).
 
 ### 7. Retire
