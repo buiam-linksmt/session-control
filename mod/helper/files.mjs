@@ -180,7 +180,10 @@ export function tail(request) {
   const budget = request.maxBytes === undefined ? TAIL_MAX_BYTES : count(request, 'maxBytes', 1)
   const fd = fs.openSync(file, 'r')
   try {
-    const size = fs.fstatSync(fd).size
+    const info = fs.fstatSync(fd)
+    // A directory: on Linux its read fails (EISDIR), on Windows it opens and reads as empty; IS_DIR on both.
+    if (info.isDirectory()) throw new HelperError('IS_DIR')
+    const size = info.size
     // The lines as byte ranges, newest first. A last \n closes the last line and opens none (as tailLines drops the
     // empty piece after it); an empty file has no line.
     const ranges = []
