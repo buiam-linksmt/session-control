@@ -91,8 +91,8 @@ declare module 'claude-code' {
       boxBack: number
       /** Id of the open point whose description is open in the panel; null when none. */
       selectedPoint: string | null
-      /** Queued tasks of the task queue file; null when unreadable. */
-      queued: { title: string; running?: true }[] | null
+      /** The tasks of the task queue file whose status is `queued`; null when unreadable. */
+      queued: { title: string }[] | null
       /** Session id whose output box is open in the panel; null when none. */
       selected: string | null
       /** Section a header icon expanded to the whole docked panel; null shows the three boxes. */

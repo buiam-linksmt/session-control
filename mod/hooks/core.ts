@@ -1789,9 +1789,9 @@ export function summarizeTranscript(tail: string, maxLines: number): string[] {
 
 // --- queued work ------------------------------------------------------------
 
-export type QueuedTask = { title: string; running?: true }
+export type QueuedTask = { title: string }
 
-/** Tasks of task-queue.json whose status is exactly queued or running, in file order; a running one is marked. */
+/** Tasks of task-queue.json whose status is exactly queued, in file order: running work is a session, not queued work. */
 export function parseQueuedWork(text: string): QueuedTask[] | null {
   let doc: unknown
   try {
@@ -1802,8 +1802,8 @@ export function parseQueuedWork(text: string): QueuedTask[] | null {
   const list = (doc as { tasks?: unknown } | null)?.tasks
   if (!Array.isArray(list)) return null
   return list
-    .filter((one): one is Record<string, unknown> => typeof one === 'object' && one !== null && ['queued', 'running'].includes(String((one as { status?: unknown }).status)))
-    .map(one => ({ title: typeof one.title === 'string' ? one.title : '(untitled)', ...(one.status === 'running' ? { running: true as const } : {}) }))
+    .filter((one): one is Record<string, unknown> => typeof one === 'object' && one !== null && (one as { status?: unknown }).status === 'queued')
+    .map(one => ({ title: typeof one.title === 'string' ? one.title : '(untitled)' }))
 }
 
 /** Lines hidden below the window after a wheel move, kept inside the history. */

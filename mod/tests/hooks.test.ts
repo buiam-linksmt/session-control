@@ -32,6 +32,8 @@ const PICKER = '/fixture/bin/pick --need {need}'
 const OPTIONS = { orchestratorDir: ORCH_DIR, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, licencePickCommand: PICKER }
 const TOOL = 'mcp__session-control__launch_worker'
 const QUEUE_TEXT = JSON.stringify({ tasks: [{ id: 'q1', status: 'queued', title: 'Queued one' }, { id: 'q2', status: 'done', title: 'Finished' }] })
+// The task queue the fixture serves; a test that serves another puts QUEUE_TEXT back.
+const QUEUE = { text: QUEUE_TEXT }
 const OPEN_POINTS_TEXT = JSON.stringify({
   points: [
     { id: 'a', status: 'open', title: 'First question', detail: 'Detail one', recommendation: 'Do A' },
@@ -134,7 +136,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     }
     if (path === '/work/orch/CLAUDE.md') return { value: '# Role: Session Orchestrator\n' }
     if (path === '/work/new/thin.md') return { value: 'Just do the work.' }
-    if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE_TEXT }
+    if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE.text }
     if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
     if (path === `${ORCH_DIR}/agreed-decisions.md` && DECISIONS.text !== undefined) return { value: DECISIONS.text }
     const result = /^\/fixture\/results\/(\w+)\.json$/.exec(path)?.[1]
@@ -1096,6 +1098,49 @@ describe('launch_worker', () => {
     await ui.press({ key: 'tab:sessions' })
     expect(await all()).not.toContain('Reading the suite files')
     expect(await all()).toContain('alive worker')
+  })
+})
+
+describe('the queued work section', () => {
+  test('lists and counts only the tasks with status queued: a running task is shown nowhere, inline or docked', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = JSON.stringify({
+      tasks: [
+        { id: 'q1', status: 'queued', title: 'Queued one' },
+        { id: 'q2', status: 'running', title: 'Running one' },
+        { id: 'q3', status: 'done', title: 'Finished' },
+        { id: 'q4', status: 'queued', title: 'Queued two' },
+      ],
+    })
+    try {
+      world(on)
+      stubPanel(on)
+      await $.session.start(start(ORCH_DIR))
+      await $.command.run({ command: 'session-control', args: 'side' } as never)
+      const textOf = async (ui: Awaited<ReturnType<typeof mountPane>>) => String(((await ui.findAll({}))[0] as { text?: string }).text)
+      const inline = await $.ui.mount({
+        plugin: 'session-control',
+        surface: 'terminal',
+        component: 'Pane',
+        requestId: 'session-control',
+        props: { ...PANE_PROPS, placement: 'inline', scroll: { offset: 0, bodyRows: 40 } } as never,
+      })
+      expect(await textOf(inline)).toContain('Queued 2')
+      await inline.press({ key: 'tab:queue' })
+      const listed = await textOf(inline)
+      expect(listed).toContain('Queued one')
+      expect(listed).toContain('Queued two')
+      expect(listed).not.toContain('Running one')
+      expect(listed).not.toContain('Finished')
+      await inline.unmount()
+      const docked = await textOf(await mountPane($))
+      expect(docked).toContain('QUEUED WORK')
+      expect(docked).toContain('Queued one')
+      expect(docked).toContain('Queued two')
+      expect(docked).not.toContain('Running one')
+      expect(docked).not.toContain('(running)')
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
   })
 })
 

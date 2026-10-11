@@ -2745,7 +2745,7 @@ export const register: Register = (on, options) => {
         : queue.length === 0
           ? [{ text: 'none', dim: true }]
           : queue.flatMap(task =>
-              wrapText(task.running === true ? `${task.title} (running)` : task.title, width - 2).map((text, i) => ({ text: (i === 0 ? '\u2022 ' : '  ') + text })),
+              wrapText(task.title, width - 2).map((text, i) => ({ text: (i === 0 ? '\u2022 ' : '  ') + text })),
             )
     const pointRows: PRow[] =
       list === null

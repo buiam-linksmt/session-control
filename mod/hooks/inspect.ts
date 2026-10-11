@@ -574,7 +574,7 @@ export function panelSnapshotText(input: {
   out.push('', 'QUEUED WORK')
   if (input.queue === null) out.push('task queue unreadable.')
   else if (input.queue.length === 0) out.push('none')
-  else for (const task of input.queue.slice(0, MAX_ROWS)) wrapText(clean(task.running === true ? `${task.title} (running)` : task.title), width - 2).forEach((text, i) => out.push((i === 0 ? '• ' : '  ') + text))
+  else for (const task of input.queue.slice(0, MAX_ROWS)) wrapText(clean(task.title), width - 2).forEach((text, i) => out.push((i === 0 ? '• ' : '  ') + text))
   out.push('', 'OPEN POINTS')
   if (input.points === null) out.push('open points unreadable.')
   else if (input.points.length === 0) out.push('none')

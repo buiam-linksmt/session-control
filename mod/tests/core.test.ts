@@ -600,9 +600,13 @@ describe('panel helpers', () => {
   test('queued work keeps queued tasks in file order', () => {
     const text = JSON.stringify({ tasks: [{ status: 'queued', title: 'A' }, { status: 'done', title: 'B' }, { status: 'queued', title: 'C' }] })
     expect(parseQueuedWork(text)).toEqual([{ title: 'A' }, { title: 'C' }])
-    const running = JSON.stringify({ tasks: [{ status: 'running', title: 'R' }, { status: 'running (worker x)', title: 'S' }, { status: 'queued', title: 'Q' }] })
-    expect(parseQueuedWork(running)).toEqual([{ title: 'R', running: true }, { title: 'Q' }])
     expect(parseQueuedWork('{')).toBeNull()
+  })
+
+  test('queued work leaves out a running task: running work is a session, only status queued is listed', () => {
+    const running = JSON.stringify({ tasks: [{ status: 'running', title: 'R' }, { status: 'running (worker x)', title: 'S' }, { status: 'queued', title: 'Q' }, { status: 'Queued', title: 'T' }, { status: 'done', title: 'D' }] })
+    expect(parseQueuedWork(running)).toEqual([{ title: 'Q' }])
+    expect(parseQueuedWork(JSON.stringify({ tasks: [{ status: 'running', title: 'R' }] }))).toEqual([])
   })
 })
 

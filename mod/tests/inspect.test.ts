@@ -585,7 +585,9 @@ describe('panel_snapshot', () => {
     expect(text).toMatch(/\nSESSIONS\n {2}title +sid +status +model +effort +elapsed\n/)
     expect(text).toMatch(/\n {2}alive worker +a11e000c +running +opus +high +2m05s\n/)
     expect(text).toMatch(/\n {2}\(no entry\) \/m\/elsewhere +- +orphan +\? +\? +40m00s\n/)
-    expect(text).toContain('\nQUEUED WORK\n\u2022 Queued task\n\u2022 Running task (running)\n')
+    // Only the queued task: a running task is a session, and a done one is gone from the queue.
+    expect(text).toContain('\nQUEUED WORK\n\u2022 Queued task\n\nOPEN POINTS\n')
+    expect(text).not.toContain('Running task')
     expect(text).toContain('\nOPEN POINTS\n  1. Rotate the key [redacted]\n  2. Second point')
     expect(text).not.toContain('Done task')
     expect(text).not.toContain('LOG ')
