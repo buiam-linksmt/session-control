@@ -5,7 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { MAX_FINDINGS, auditFindings, auditText, backupKind, decisionSections } from '../hooks/audit'
+import { MAX_FINDINGS, auditFindings, auditText, backupKind, decisionSections, licenceWait } from '../hooks/audit'
 import type { AuditInput, Finding } from '../hooks/audit'
 import { parseProcFacts } from '../hooks/core'
 import { PROBE_SCRIPT } from '../hooks/host-posix'
@@ -211,12 +211,12 @@ describe('audit text', () => {
   test('the count, the facts, then the numbered findings; nothing changed', () => {
     const text = auditText(BASE)
     const lines = text.split('\n')
-    expect(lines[0]).toBe('audit_state: 15 findings (4 high, 6 medium, 5 low); nothing was changed.')
+    expect(lines[0]).toBe('audit_state: 16 findings (4 high, 7 medium, 5 low); nothing was changed.')
     expect(lines[1]).toBe(
       'facts: registry 5 entries, 1 alive; queue 7 tasks; open points 3 open (1 held); backups/ 5 files in 3 kinds (task-queue-before-queue-task.json 3, open-points-before-open-point.json 1, dev-mod-before-sync 1); runs 10 files; reports/ 2 files; agreed-decisions.md 11 lines, 4 sections; git branch feature/x (default main), 1 tracked file changed.',
     )
     expect(lines[2]).toBe('1. [high] queue-status | task q-blocked "Blocked task" | status "blocked" is not exactly queued, running or done | action: queue_task update with status queued, running or done, the detail in note')
-    expect(lines.length).toBe(17)
+    expect(lines.length).toBe(18)
   })
 
   test('free text is redacted; at most MAX_FINDINGS findings, the rest counted; no findings said as such', () => {
@@ -226,6 +226,97 @@ describe('audit text', () => {
     expect(text).toContain('task t0 "key [redacted]"')
     expect(text.split('\n').at(-1)).toBe('(3 more findings not shown)')
     expect(auditText({ entries: [], facts: FACTS, nowMs: NOW }).split('\n')[0]).toBe('audit_state: no findings; nothing was changed.')
+  })
+})
+
+describe('queued tasks whose wait the audit cannot check', () => {
+  const FREE = 'names no registry session (by session id, its first 8 characters or its name)'
+  const ACTION = 'confirm the wait still holds: when the work it waits for is finished or abandoned, set the task done or remove it with queue_task'
+  const queueOf = (tasks: Record<string, unknown>[]) => JSON.stringify({ tasks })
+  const freeOf = (tasks: Record<string, unknown>[], extra: Partial<AuditInput> = {}) =>
+    auditFindings({ entries: ENTRIES, facts: FACTS, nowMs: NOW, queueText: queueOf(tasks), ...extra }).filter(one => one.kind === 'queued-free-wait')
+
+  test('a queued task whose waits_for is free text naming no registry session is a medium queued-free-wait finding', () => {
+    const found = auditFindings(BASE).filter(one => one.kind === 'queued-free-wait')
+    expect(found).toEqual([{ severity: 'medium', kind: 'queued-free-wait', ref: 'q-wait-text', subject: 'task q-wait-text "Waits on a step"', evidence: `waits_for "mod step 2": ${FREE}`, action: ACTION }])
+    const seen = freeOf([
+      { id: 'q-groups', title: 'After the groups', status: 'queued', waits_for: 'mod step 3 groups T2a to T3b and the licence tools' },
+      { id: 'q-steps', title: 'After the steps', status: 'queued', waits_for: 'mod steps 1 to 4 complete' },
+    ])
+    expect(seen.map(one => [one.ref, one.subject, one.evidence])).toEqual([
+      ['q-groups', 'task q-groups "After the groups"', `waits_for "mod step 3 groups T2a to T3b and the licence tools": ${FREE}`],
+      ['q-steps', 'task q-steps "After the steps"', `waits_for "mod steps 1 to 4 complete": ${FREE}`],
+    ])
+    expect(auditText(BASE)).toContain(`[medium] queued-free-wait | task q-wait-text "Waits on a step" | waits_for "mod step 2": ${FREE} | action: ${ACTION}`)
+  })
+
+  test('a wait that resolves to a registry session, by full id, first 8 characters or name, alive or not, is not one; nor a full session id no entry has', () => {
+    const tasks = [
+      { id: 'by-id', title: 'x', status: 'queued', waits_for: `the run ${SID_LIVE}` },
+      { id: 'by-id8', title: 'x', status: 'queued', waits_for: `session ${SID_DONE.slice(0, 8)} to finish` },
+      { id: 'by-name', title: 'x', status: 'queued', waits_for: 'after w-live-1 commits' },
+      { id: 'by-dead', title: 'x', status: 'queued', waits_for: `${SID_DEAD.slice(0, 8)} harvested` },
+      { id: 'unknown-id', title: 'x', status: 'queued', waits_for: SID_RETIRED },
+    ]
+    expect(freeOf(tasks)).toEqual([])
+    // The full id no entry has stays the high waits-for-finished finding.
+    const all = auditFindings({ entries: ENTRIES, facts: FACTS, nowMs: NOW, queueText: queueOf(tasks), retired: new Set([SID_RETIRED]) })
+    expect(all.filter(one => one.kind === 'waits-for-finished').map(one => one.ref)).toEqual(['by-id8', 'by-dead', 'unknown-id'])
+  })
+
+  test('only a queued task with a waits_for that is not blank: running, done, an empty or missing waits_for are not one; an unreadable registry leaves the check out', () => {
+    expect(freeOf([
+      { id: 'run', title: 'x', status: 'running', waits_for: 'mod step 2', note: SID_LIVE },
+      { id: 'done', title: 'x', status: 'done', waits_for: 'mod step 2' },
+      { id: 'empty', title: 'x', status: 'queued', waits_for: '' },
+      { id: 'none', title: 'x', status: 'queued' },
+    ])).toEqual([])
+    expect(freeOf([{ id: 'q', title: 'x', status: 'queued', waits_for: 'mod step 2' }], { entries: [], registryError: 'registry is not JSON: x' })).toEqual([])
+    expect(freeOf([{ id: 'q', title: 'x', status: 'queued', waits_for: 'mod step 2' }], { entries: [] }).map(one => one.ref)).toEqual(['q'])
+  })
+
+  test('a licence headroom wait (a percentage or the word headroom) is never one while it has no reset time or its reset time is ahead; one whose reset time has passed is', () => {
+    const ahead = new Date(NOW + 3 * 3600_000).toISOString()
+    const behind = new Date(NOW - 600_000).toISOString()
+    expect(freeOf([
+      { id: 'pct', title: 'x', status: 'queued', waits_for: 'licence headroom 40%' },
+      { id: 'pct-only', title: 'x', status: 'queued', waits_for: 'a licence with 40 % room' },
+      { id: 'word', title: 'x', status: 'queued', waits_for: 'Headroom on any licence' },
+      { id: 'ahead', title: 'x', status: 'queued', waits_for: `headroom 40%, reset ${ahead}` },
+      { id: 'ahead-offset', title: 'x', status: 'queued', waits_for: 'headroom 40% at 2026-01-10 14:30+0100' },
+      { id: 'one-ahead', title: 'x', status: 'queued', waits_for: `40% on main (reset ${behind}) or tae (reset ${ahead})` },
+    ])).toEqual([])
+    const passed = freeOf([{ id: 'behind', title: 'Relaunch', status: 'queued', waits_for: `licence headroom 40%, reset ${behind}` }])
+    expect(passed.map(one => [one.severity, one.ref, one.evidence, one.action])).toEqual([['medium', 'behind', `waits_for "licence headroom 40%, reset ${behind}": a licence headroom wait whose reset time ${behind} has passed`, ACTION]])
+    expect(licenceWait('mod step 2', NOW)).toEqual({ state: 'none' })
+    expect(licenceWait('headroom 40%', NOW)).toEqual({ state: 'open' })
+    expect(licenceWait('headroom 40% until 2026-01-10T11:00Z', NOW)).toEqual({ state: 'passed', reset: '2026-01-10T11:00Z' })
+    expect(licenceWait('headroom 40% until 2026-01-10T13:00+01:00', NOW)).toEqual({ state: 'passed', reset: '2026-01-10T13:00+01:00' })
+    expect(licenceWait('headroom 40% until 2026-01-10T13:00-01:00', NOW)).toEqual({ state: 'open' })
+  })
+
+  test('the evidence is redacted and cut to 120 characters; the finding comes after done-in-queue among the medium ones', () => {
+    const canary = ['ghp', `CANARY${Date.now().toString(36)}0123456789abcdefABCDEF`].join('_')
+    const found = freeOf([{ id: 'q-secret', title: 'x', status: 'queued', waits_for: `the push with ${canary} done` }])
+    expect(found.map(one => one.evidence)).toEqual([`waits_for "the push with [redacted] done": ${FREE}`])
+    const text = auditText({ entries: ENTRIES, facts: FACTS, nowMs: NOW, queueText: queueOf([{ id: 'q-secret', title: 'x', status: 'queued', waits_for: `the push with ${canary} done` }]) })
+    expect(text).not.toContain('CANARY')
+    expect(text).not.toContain(canary.slice(4))
+    const long = freeOf([{ id: 'q-long', title: 'x', status: 'queued', waits_for: `${'word '.repeat(60)}end` }])[0]?.evidence ?? ''
+    const quoted = long.slice('waits_for "'.length, long.indexOf('": '))
+    expect(quoted.length).toBe(120)
+    expect(quoted.endsWith('\u2026')).toBe(true)
+    const kinds = auditFindings(BASE).map(one => one.kind)
+    expect(kinds.indexOf('queued-free-wait')).toBe(kinds.indexOf('done-in-queue') + 1)
+    expect(kinds.slice(0, kinds.indexOf('queued-free-wait')).filter(kind => kind === 'waits-for-finished').length).toBe(2)
+  })
+
+  test('at most MAX_FINDINGS of them are shown, the rest counted', () => {
+    const tasks = Array.from({ length: MAX_FINDINGS + 5 }, (_, n) => ({ id: `f${n}`, title: `free ${n}`, status: 'queued', waits_for: `step ${n} of the plan` }))
+    const lines = auditText({ entries: [], facts: FACTS, nowMs: NOW, queueText: queueOf(tasks) }).split('\n')
+    expect(lines[0]).toBe(`audit_state: ${MAX_FINDINGS + 5} findings (0 high, ${MAX_FINDINGS + 5} medium, 0 low); nothing was changed.`)
+    expect(lines.filter(line => line.includes('] queued-free-wait | ')).length).toBe(MAX_FINDINGS)
+    expect(lines.at(-1)).toBe('(5 more findings not shown)')
   })
 })
 

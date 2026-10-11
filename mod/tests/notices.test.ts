@@ -361,6 +361,60 @@ describe('retire-due', () => {
   })
 })
 
+describe('retire-due: queued tasks whose wait audit_state cannot check', () => {
+  const queue = [
+    { id: 'q-groups', status: 'queued', title: 'After the groups', waits_for: 'mod step 3 groups T2a to T3b and the licence tools' },
+    { id: 'q-steps', status: 'queued', title: 'After the steps', waits_for: 'mod steps 1 to 4 complete' },
+    { id: 'q-licence', status: 'queued', title: 'Waits on licence', waits_for: 'licence headroom 40%' },
+    { id: 'q-plain', status: 'queued', title: 'Ready' },
+  ]
+  const entries = [{ title: 'kept', session_id: SID_KEPT, config_dir: `${HOME}/.claude`, reported: true, keep: true, outcome: { kind: 'clean' }, ended_at: NOW_SEC - 600 }]
+  const text = '2 queue tasks look stale (q-groups, q-steps): run audit_state'
+
+  test('retireStep counts the free-text waits as stale queue tasks and names their ids; a licence wait and no wait are not counted', () => {
+    const state = freshNoticeState()
+    const told = retireStep(state, { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: queue }) })
+    expect(told).toEqual([{ kind: 'retire-due', message: text, fields: { retirable: 0, keptOld: 0, staleTasks: 2 } }])
+    expect(state.retireAt).toBe(NOW_MS)
+    expect(retireStep(freshNoticeState(), { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: queue.slice(2) }) })).toEqual([])
+    // With a done task as well: one group, the ids in audit_state's order.
+    const mixed = retireStep(freshNoticeState(), { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: [...queue, { id: 'q-done', status: 'done', title: 'Done' }] }) })
+    expect(mixed[0]?.message).toBe('3 queue tasks look stale (q-done, q-groups, q-steps): run audit_state')
+  })
+
+  let leftByFirstLoad: unknown
+
+  test('from the poll, at most once per hour, naming the task ids', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries, queue })
+    await start($)
+    expect(noticeToasts(world)).toEqual([])
+    await poll(world, 60, 60)
+    expect(noticeToasts(world)).toEqual([`Housekeeping due \u00B7 ${text}`])
+    expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: retire-due: ${text}`])
+    leftByFirstLoad = store.get(KEY)
+    await poll(world, 3540, 60)
+    expect(noticeToasts(world).length).toBe(1)
+    await poll(world, 60, 60)
+    expect(noticeToasts(world)).toEqual([`Housekeeping due \u00B7 ${text}`, `Housekeeping due \u00B7 ${text}`])
+  })
+
+  test('a fresh load with the store the first one left, two minutes later: nothing is told again', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    expect(leftByFirstLoad).toBeDefined()
+    const world = mockWorld(on)
+    storeOf(on, { [KEY]: leftByFirstLoad })
+    echoPrompt(on)
+    seed(world, { entries, queue })
+    await world.clock.advance(120_000)
+    await start($)
+    await poll(world, 600, 60)
+    expect(noticeToasts(world)).toEqual([])
+    expect(noticeLines(await userPrompt($))).toEqual([])
+  })
+})
+
 describe('repo-state', () => {
   /** git in the orchestrator directory: on `branch` (default main), CLAUDE.md changed when `isChanged`. */
   const gitOf = (world: World, branch: string, isChanged: boolean) => (args: readonly string[]) => {

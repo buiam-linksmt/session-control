@@ -55,6 +55,7 @@ const KIND_ORDER = [
   'waits-for-finished',
   'unacknowledged',
   'done-in-queue',
+  'queued-free-wait',
   'retirable',
   'kept-old',
   'open-point-old',
@@ -81,6 +82,10 @@ export const BACKUP_MAX_SEC = 2 * 86400
 const OWN_RUN_FILE = /^(trace\.log(\.\d+)?|cleared\.jsonl|[a-z]+\.ps1)$/
 
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
+/** A licence headroom wait, as the orchestrator records a launch refused for licence room: a percentage or the word headroom. */
+const LICENCE_WAIT = /\bheadroom\b|\d+(?:\.\d+)?\s*%/i
+/** A reset time in a licence wait: an ISO date and time (a blank for the T, seconds and a zone optional; no zone is local time). */
+const RESET_TIME = /\b(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)(Z|[+-]\d{2}:?\d{2})?\b/gi
 
 type Task = { id: string; title: string; status: string; waitsFor: string; text: string }
 type Point = { id: string; title: string; status: string; hold: boolean; raised?: string }
@@ -149,6 +154,20 @@ function daysBetween(from: string, to: string): number | undefined {
 /** A backup's kind: its name without the date (and what follows the date up to the extension). */
 export function backupKind(name: string): string {
   return name.replace(/[-_.]?\d{4}-\d{2}-\d{2}[A-Za-z0-9]*/, '')
+}
+
+/**
+ * A licence headroom wait's state: `none` when the text is no licence wait; `open` when it has no reset time or its
+ * latest reset time is still ahead; `passed` with that time when every reset time it names is behind `nowMs`.
+ */
+export function licenceWait(text: string, nowMs: number): { state: 'none' | 'open' } | { state: 'passed'; reset: string } {
+  if (!LICENCE_WAIT.test(text)) return { state: 'none' }
+  const times = [...text.matchAll(RESET_TIME)]
+    .map(found => ({ shown: found[0], ms: Date.parse(`${found[1]}T${found[2]}${(found[3] ?? '').replace(/^([+-]\d{2})(\d{2})$/, '$1:$2')}`) }))
+    .filter(one => Number.isFinite(one.ms))
+  if (times.length === 0) return { state: 'open' }
+  const latest = times.reduce((a, b) => (b.ms > a.ms ? b : a))
+  return latest.ms > nowMs ? { state: 'open' } : { state: 'passed', reset: latest.shown }
 }
 
 /** Whether a text names a session: its full id, its first 8 characters or its session name (the queue checks, the queue-ready notice). */
@@ -283,6 +302,14 @@ export function auditFindings(input: AuditInput): Finding[] {
         if (!entries.some(entry => str(entry.session_id).toLowerCase() === id)) blockers.push(`session ${id.slice(0, 8)} ${input.retired?.has(id) === true ? 'was retired' : 'is in no registry entry'}`)
       }
       if (blockers.length > 0) add({ severity: 'high', kind: 'waits-for-finished', ref: task.id, subject: taskName(task), evidence: `waits_for "${short(task.waitsFor, 100)}": ${names(blockers, 3)}`, action: 'its blocker has cleared: launch it, or correct waits_for with queue_task' })
+      // A wait the audit cannot check: it names no registry session and holds no full session id (an unreadable
+      // registry leaves it out: no wait could be resolved), and it is no licence headroom wait still open.
+      const licence = licenceWait(task.waitsFor, input.nowMs)
+      const isSessionWait = ids.length > 0 || entries.some(entry => isNamedBy(task.waitsFor, entry))
+      if (input.registryError === undefined && !isSessionWait && licence.state !== 'open') {
+        const why = licence.state === 'passed' ? `a licence headroom wait whose reset time ${short(licence.reset, 40)} has passed` : 'names no registry session (by session id, its first 8 characters or its name)'
+        add({ severity: 'medium', kind: 'queued-free-wait', ref: task.id, subject: taskName(task), evidence: `waits_for "${short(task.waitsFor, 120)}": ${why}`, action: 'confirm the wait still holds: when the work it waits for is finished or abandoned, set the task done or remove it with queue_task' })
+      }
     }
     if (task.status === 'done') add({ severity: 'medium', kind: 'done-in-queue', ref: task.id, subject: taskName(task), evidence: 'status done, still in the queue', action: 'queue_task remove once its unit is closed and reported' })
   }

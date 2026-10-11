@@ -69,7 +69,7 @@ export const ORPHAN_PIDS_LISTED = 10
 const RETIRE_GROUPS: readonly { kinds: readonly string[]; label: (n: number) => string }[] = [
   { kinds: ['retirable'], label: n => `${n} finished ${n === 1 ? 'session' : 'sessions'} can be retired` },
   { kinds: ['kept-old'], label: n => `${n} kept ${n === 1 ? 'session' : 'sessions'} idle over 6 hours` },
-  { kinds: ['queue-status', 'running-task-no-session', 'waits-for-finished', 'done-in-queue'], label: n => `${n} queue ${n === 1 ? 'task looks' : 'tasks look'} stale` },
+  { kinds: ['queue-status', 'running-task-no-session', 'waits-for-finished', 'done-in-queue', 'queued-free-wait'], label: n => `${n} queue ${n === 1 ? 'task looks' : 'tasks look'} stale` },
 ]
 
 // ---------------------------------------------------------------- state

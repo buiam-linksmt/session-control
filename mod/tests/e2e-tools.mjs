@@ -6,12 +6,12 @@
 // scratch directory it makes and removes. It seeds a scratch registry with three finished sessions (a clean one with
 // its result file; a chatter one whose result file says "Done." and whose transcript holds the real report; one whose
 // cwd is the scratch root, which holds the orchestrator directory and the registry), their transcripts under a scratch
-// config directory, run files, a queue with one stale and one fine task, an open point raised ten days ago, a
-// decisions section and two backups of one kind. A headless haiku orchestrator (capped at --max-budget-usd 0.25) is
-// asked to call each tool once and to answer with their outputs verbatim; each output is then read from the
-// orchestrator's own transcript and checked against the seeded data, and no output, no answer and no trace line may
-// hold the canary secret. The orphan row is the orchestrator itself, a live claude -p no registry entry claims; the
-// other live claude processes of the machine show as they are and are never touched.
+// config directory, run files, a queue with one stale task, one fine task and one task waiting on free text, an open
+// point raised ten days ago, a decisions section and two backups of one kind. A headless haiku orchestrator (capped
+// at --max-budget-usd 0.25) is asked to call each tool once and to answer with their outputs verbatim; each output is
+// then read from the orchestrator's own transcript and checked against the seeded data, and no output, no answer and no
+// trace line may hold the canary secret. The orphan row is the orchestrator itself, a live claude -p no registry entry
+// claims; the other live claude processes of the machine show as they are and are never touched.
 // Everything the mod reads or writes is in the scratch directory (registry, helper files, runs directory, trace); the
 // real registry, helper files and runs directory are never touched, and the licence picker option is empty. The
 // orchestrator runs under the default configuration (this process's CLAUDE_CONFIG_DIR, else ~/.claude): its
@@ -49,7 +49,7 @@ for (const d of [join(ORCH, 'backups'), CFG, RUNS, join(S, 'work-clean'), join(S
 
 // ---------------------------------------------------------------- the seeded files
 writeLines(join(ORCH, 'CLAUDE.md'), '# Role: Session Orchestrator', '', 'Scratch orchestrator of the session-control tools test: do exactly what the prompt says.')
-writeJson(join(ORCH, 'task-queue.json'), { tasks: [{ id: 'e2e-stale', title: 'E2E stale task', status: 'blocked' }, { id: 'e2e-fine', title: 'E2E fine task', status: 'queued' }] })
+writeJson(join(ORCH, 'task-queue.json'), { tasks: [{ id: 'e2e-stale', title: 'E2E stale task', status: 'blocked' }, { id: 'e2e-fine', title: 'E2E fine task', status: 'queued' }, { id: 'e2e-free-wait', title: 'E2E free wait task', status: 'queued', waits_for: 'mod steps 1 to 4 complete' }] })
 const RAISED = localDate(10)
 writeJson(join(ORCH, 'open-points.json'), { points: [{ id: 'e2e-point', status: 'open', raised: RAISED, title: 'E2E open point about the parser', detail: 'Seeded by the test.', recommendation: 'Close it.' }] })
 writeLines(join(ORCH, 'agreed-decisions.md'), '# Agreed decisions', '', '## E2E unit - branch feature/e2e-gone', '1. a decision of a closed unit')
@@ -194,6 +194,7 @@ check('panel_snapshot', '1. E2E open point about the parser', 'the open point')
 check('audit_state', 'nothing was changed.', 'the count line')
 check('audit_state', '[high] queue-status | task e2e-stale "E2E stale task" | status "blocked" is not exactly queued, running or done', 'the stale queue entry')
 lacks('audit_state', 'task e2e-fine', 'the fine queue entry is no finding')
+check('audit_state', '[medium] queued-free-wait | task e2e-free-wait "E2E free wait task" | waits_for "mod steps 1 to 4 complete": names no registry session (by session id, its first 8 characters or its name)', 'the queued task waiting on free text')
 check('audit_state', `[medium] unacknowledged | session ${shortId(SID_CHATTER)} "e2e chatter worker"`, 'the unacknowledged chatter session')
 check('audit_state', `[medium] retirable | session ${shortId(SID_CLEAN)} "e2e clean worker"`, 'the retirable clean session')
 check('audit_state', '[medium] open-point-old | open point e2e-point', 'the open point raised ten days ago')
@@ -227,7 +228,7 @@ for (const t of TOOLS) {
 if (N === 6) pass('the answer gives the six outputs, each after its line')
 else info(`the answer gives ${N} of the six outputs with their first line verbatim (the model's copy, not the tools')`)
 // Nothing changed by the tools: the seeded helper files are as written (the mod creates none: all are there).
-if (readJson(join(ORCH, 'task-queue.json'))?.tasks?.length === 2 && readJson(REG)?.length === 3 && fs.readdirSync(join(ORCH, 'backups')).length === 2) pass('the queue, the registry and backups/ are as seeded')
+if (readJson(join(ORCH, 'task-queue.json'))?.tasks?.length === 3 && readJson(REG)?.length === 3 && fs.readdirSync(join(ORCH, 'backups')).length === 2) pass('the queue, the registry and backups/ are as seeded')
 else fail('the queue, the registry and backups/ are as seeded')
 if (process.env.KEEP_OUT && keepOut(process.env.KEEP_OUT, [{ files: [...globIn(S, /^out-.*\.txt$/, 'out-*.txt'), join(S, 'answer.txt')] }], false)) {
   info(`outputs copied to ${process.env.KEEP_OUT}`)
