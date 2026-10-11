@@ -11,6 +11,8 @@ import { classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, isG
 import type { PresentedPoint, ProcFacts, QueuedTask } from './core'
 import type { NewerFiles } from './host'
 import { REDACTED, redact } from './trace'
+import { maskSecrets, secretScanLine, tallyOf } from './secrets'
+import type { SecretFind } from './secrets'
 
 // ---------------------------------------------------------------- schemas
 
@@ -93,9 +95,9 @@ function occurrences(text: string, part: string): number {
   return count
 }
 
-/** Free text from a file as an answer shows it: no terminal control, redacted. */
+/** Free text from a file as an answer shows it: no terminal control, each likely secret masked (secrets.ts), redacted. */
 export function clean(text: string): string {
-  return redact(plainText(text))
+  return redact(maskSecrets(plainText(text)).text)
 }
 
 /** A free text on one line, cut to `max` characters. */
@@ -371,11 +373,16 @@ export function readResultText(input: ResultFacts): string {
     lines.push(`run: ${run.join(', ')}`)
   }
   if (report === undefined) return bounded(lines.join('\n'))
-  const redacted = redactCounted(plainText(report))
+  // The secret scan masks each likely secret first (counted with the redaction's replacements) and says what it found
+  // in the answer's last line, kinds only.
+  const masked = maskSecrets(plainText(report))
+  const redacted = redactCounted(masked.text)
+  const count = redacted.count + masked.finds.length
   const head = headOf(redacted.text, input.maxChars)
-  lines.push(`redaction: ${redacted.count} replacement${redacted.count === 1 ? '' : 's'} (each shows as ${REDACTED})`)
+  lines.push(`redaction: ${count} replacement${count === 1 ? '' : 's'} (each shows as ${REDACTED})`)
   lines.push(head.cut === 0 ? `truncated: no (${redacted.text.length} characters)` : `truncated: yes, the first ${input.maxChars} of ${redacted.text.length} characters kept, ${head.cut} cut`)
   lines.push('--- report ---', head.text, '--- end of report ---')
+  if (masked.finds.length > 0) lines.push(secretScanLine(tallyOf(masked.finds)))
   return lines.join('\n')
 }
 
@@ -405,14 +412,18 @@ export function workerTailText(input: {
     return out.join('\n')
   }
   let count = 0
+  const finds: SecretFind[] = []
   const shown = input.lines.map(line => {
-    const one = redactCounted(plainText(line))
-    count += one.count
+    const masked = maskSecrets(plainText(line))
+    finds.push(...masked.finds)
+    const one = redactCounted(masked.text)
+    count += one.count + masked.finds.length
     return one.text
   })
   out.push(`last ${shown.length} line${shown.length === 1 ? '' : 's'} (of ${input.wanted} asked), summarised as the panel's log shows them; redaction: ${count} replacement${count === 1 ? '' : 's'}:`)
   out.push(...(shown.length === 0 ? ['(no readable assistant text, tool call or tool result in the tail)'] : shown))
-  return bounded(out.join('\n'))
+  // The secret scan's line stays the last one, also when the answer is cut.
+  return finds.length === 0 ? bounded(out.join('\n')) : `${bounded(out.join('\n'))}\n${secretScanLine(tallyOf(finds))}`
 }
 
 // ---------------------------------------------------------------- session_writes

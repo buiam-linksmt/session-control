@@ -53,6 +53,7 @@ import {
   registryStep,
   repoStep,
   retireStep,
+  secretNotice,
   stallStep,
   unitStep,
 } from './notices'
@@ -63,6 +64,8 @@ import { DIGEST_SCHEMA, digestKeyDir, digestStoreKey, digestText, lastCallOf, wi
 import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
+import { findSecrets, secretScanLine, tallyFromAnswer, tallyOf } from './secrets'
+import type { SecretTally } from './secrets'
 import type { ProtectedFile } from './guard'
 import type { StopReport } from './host'
 import type { GitState, ListedFile } from './audit'
@@ -636,6 +639,8 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   const title: unknown = entry.title
   const who = title === undefined || title === null ? sid.slice(0, 8) : clean(String(title))
   const label = `${who}: ${clean(outcome.summary)}`
+  // The secret scan of the worker's report (secrets.ts): the notes' last line and one secret-in-result notice per entry.
+  const secrets = tallyOf(findSecrets(resultReport(resultText)))
   if (config.completionWrites) {
     // Read again right before writing, so the window against the licence
     // daemon's own writes is as short as this API allows (no lock, no rename).
@@ -649,12 +654,13 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
     }
   }
   $.ui.toast(toastText(TOAST_TITLES[outcome.kind], `${label}`), { timeoutMs: 8000 })
-  recordDigest({ at: await $.clock.now(), kind: 'completion', text: label })
-  const notes = reportNote === undefined ? [label] : [label, `${who}: report check: ${reportNote}`]
+  recordDigest({ at: await $.clock.now(), kind: 'completion', text: label, ...(secrets.count === 0 ? {} : { secrets }) })
+  const notes = [label, ...(reportNote === undefined ? [] : [`${who}: report check: ${reportNote}`]), ...(secrets.count === 0 ? [] : [`${who}: ${secretScanLine(secrets)}`])]
   await update($, pendingNotes, list => [...list, ...notes].slice(-20))
-  // The harvest's notices: queued tasks that waited for it, its compliance check, and the queue maybe left empty.
+  // The harvest's notices: queued tasks that waited for it, its compliance check, the queue maybe left empty, and the
+  // secrets its report holds.
   const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => undefined)
-  await withNotices($, state => [...harvestNotices(state, entry, outcome, queueText), ...unitStep(state, queueText, true)], toasts, 'harvest')
+  await withNotices($, state => [...harvestNotices(state, entry, outcome, queueText), ...unitStep(state, queueText, true), ...secretNotice(state, entry, secrets, 'result')], toasts, 'harvest')
 }
 
 // ---------------------------------------------------------------- the poll-based notices (notices.ts)
@@ -724,8 +730,8 @@ async function withNotices($: EngineInterface, work: (state: NoticeState) => Not
   await noticeChain
 }
 
-/** Where a notice pass comes from: the poll, the harvests of a refresh (all of them together), a queue change. */
-type ToastSource = 'poll' | 'harvest' | 'queue'
+/** Where a notice pass comes from: the poll, the harvests of a refresh (all of them together), a queue change, a tool's answer. */
+type ToastSource = 'poll' | 'harvest' | 'queue' | 'tool'
 
 /**
  * The notice toasts of one refresh (decision mod-20): how many each source may still show (TOASTS_PER_PASS each) and
@@ -733,7 +739,16 @@ type ToastSource = 'poll' | 'harvest' | 'queue'
  */
 type ToastBudget = { left: Record<ToastSource, number>; more: number }
 
-const toastBudget = (): ToastBudget => ({ left: { poll: TOASTS_PER_PASS, harvest: TOASTS_PER_PASS, queue: TOASTS_PER_PASS }, more: 0 })
+const toastBudget = (): ToastBudget => ({ left: { poll: TOASTS_PER_PASS, harvest: TOASTS_PER_PASS, queue: TOASTS_PER_PASS, tool: TOASTS_PER_PASS }, more: 0 })
+
+/** An inspection tool's answer that ends on the secret scan's line: one secret-in-result notice for its entry, once. */
+async function secretsAnswered($: EngineInterface, entry: SessionEntry, answer: string, where: 'result' | 'transcript tail'): Promise<void> {
+  const tally: SecretTally | undefined = tallyFromAnswer(answer)
+  if (tally === undefined) return
+  const toasts = toastBudget()
+  await withNotices($, state => secretNotice(state, entry, tally, where), toasts, 'tool')
+  toastMore($, toasts)
+}
 
 /** The one summary toast of the notices past their toast cap, when there were any. */
 function toastMore($: EngineInterface, toasts: ToastBudget): void {
@@ -1669,8 +1684,7 @@ async function readResult($: EngineInterface, id: unknown, maxChars: unknown) {
   const errText = typeof entry.err_file === 'string' && entry.err_file !== '' ? await $.fs.read(entry.err_file).catch(() => '') : ''
   const transcript = await transcriptText($, entry, REPORT_TAIL)
   const chars = typeof maxChars === 'number' && Number.isFinite(maxChars) ? Math.min(READ_RESULT_CHARS.max, Math.max(READ_RESULT_CHARS.min, Math.floor(maxChars))) : READ_RESULT_CHARS.default
-  return {
-    result: readResultText({
+  const text = readResultText({
       entry,
       facts,
       ...(resultText === undefined ? {} : { resultText }),
@@ -1678,8 +1692,9 @@ async function readResult($: EngineInterface, id: unknown, maxChars: unknown) {
       errText,
       ...('text' in transcript ? { transcript: { text: transcript.text, isWhole: transcript.isWhole } } : { transcriptMissing: transcript.missing }),
       maxChars: chars,
-    }),
-  }
+    })
+  await secretsAnswered($, entry, text, 'result')
+  return { result: text }
 }
 
 /** worker_tail: the log pane's tail of the transcript, its age and the process. */
@@ -1693,16 +1708,16 @@ async function workerTail($: EngineInterface, id: unknown, lines: unknown) {
   const nowSec = (await $.clock.now()) / 1000
   const statSec = path === undefined ? undefined : await $.fs.stat(path).then(one => one.mtimeMs / 1000, () => undefined)
   const mtime = facts.transcriptMtime.get(entry.session_id) ?? statSec
-  return {
-    result: workerTailText({
-      entry,
-      facts,
-      ...(path === undefined ? {} : { path }),
-      ...(mtime === undefined ? {} : { ageSec: Math.max(0, nowSec - mtime) }),
-      ...(tail === undefined ? {} : { lines: summarizeTranscript(tail, wanted) }),
-      wanted,
-    }),
-  }
+  const text = workerTailText({
+    entry,
+    facts,
+    ...(path === undefined ? {} : { path }),
+    ...(mtime === undefined ? {} : { ageSec: Math.max(0, nowSec - mtime) }),
+    ...(tail === undefined ? {} : { lines: summarizeTranscript(tail, wanted) }),
+    wanted,
+  })
+  await secretsAnswered($, entry, text, 'transcript tail')
+  return { result: text }
 }
 
 /** session_writes: the start from the transcript (or the entry), the listing under the cwd (host.filesNewerThan). */

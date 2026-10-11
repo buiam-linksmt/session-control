@@ -997,7 +997,8 @@ describe('completion notes', () => {
     const toast = world.toasts.find(text => text.startsWith('Session finished · '))
     expect(toast).toBe('Session finished · rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.')
     const notes = completions(await notification($))
-    expect(notes).toEqual([`session-control completions: rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.; rotate [redacted] worker: ${REPORT_CHECK}`])
+    // The secret scan (decision win-22) adds its line last: kinds only.
+    expect(notes).toEqual([`session-control completions: rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.; rotate [redacted] worker: ${REPORT_CHECK}; rotate [redacted] worker: secret scan: 1 likely secret redacted (kinds: github-token)`])
     const everything = JSON.stringify([world.toasts, notes])
     for (const canary of [TITLE_CANARY, RESULT_CANARY]) expect(everything).not.toContain(canary)
   })
@@ -1014,7 +1015,8 @@ describe('completion notes', () => {
     await start($)
     const notes = completions(await notification($))
     expect(notes).toEqual([
-      `session-control completions: ${SID_UNIT.slice(0, 8)}: error: push refused for [redacted]; ` +
+      // The secret scan (decision win-22) adds its line after the completion it found the canary in.
+      `session-control completions: ${SID_UNIT.slice(0, 8)}: error: push refused for [redacted]; ${SID_UNIT.slice(0, 8)}: secret scan: 1 likely secret redacted (kinds: sk-key); ` +
         `unit worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.; unit worker: ${REPORT_CHECK}`,
     ])
     expect(world.toasts).toContain(`Session failed · ${SID_UNIT.slice(0, 8)}: error: push refused for [redacted]`)

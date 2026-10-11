@@ -485,6 +485,8 @@ describe('worker_tail', () => {
       '> Bash git status -sb',
       '  < ## develop...origin/develop API_KEY=[redacted]',
       'Now red text and a key [redacted].',
+      // The secret scan (decision win-22): one last line, kinds only.
+      'secret scan: 2 likely secrets redacted (kinds: sk-key, secret-assignment)',
     ])
     expectNoCanary(got.text)
     expect(got.text).not.toContain('\u001b')
@@ -493,7 +495,7 @@ describe('worker_tail', () => {
   test('lines asks for fewer; a finished worker is not alive and its age comes from the file', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     const got = await call($, w, 'worker_tail', { session_id: SID_ALIVE, lines: 2 })
-    expect(got.text.split('\n').slice(3)).toEqual(["last 2 lines (of 2 asked), summarised as the panel's log shows them; redaction: 2 replacements:", '  < ## develop...origin/develop API_KEY=[redacted]', 'Now red text and a key [redacted].'])
+    expect(got.text.split('\n').slice(3)).toEqual(["last 2 lines (of 2 asked), summarised as the panel's log shows them; redaction: 2 replacements:", '  < ## develop...origin/develop API_KEY=[redacted]', 'Now red text and a key [redacted].', 'secret scan: 2 likely secrets redacted (kinds: sk-key, secret-assignment)'])
     const done = await $.tool.call({ tool: tool('worker_tail'), session_id: SID_CHATTER } as never)
     const lines = String((done as { result?: unknown }).result).split('\n')
     expect(lines[1]).toBe('process: not alive (no pid recorded: finished or never started)')

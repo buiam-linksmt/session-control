@@ -11,6 +11,7 @@ import { auditFindings, gitFindings, namesSession, oldestChangeMs } from './audi
 import type { Finding, GitState } from './audit'
 import { clean } from './inspect'
 import { localDate } from './store'
+import type { SecretTally } from './secrets'
 
 export type NoticeKind =
   | 'orphan'
@@ -24,6 +25,7 @@ export type NoticeKind =
   | 'lock-holder'
   | 'registry-unreadable'
   | 'mod-drift'
+  | 'secret-in-result'
 
 /** One notice: its kind, its message (one line) and the trace's fields (ids, counts and switches only, never free text). */
 export type Notice = { kind: NoticeKind; message: string; fields: Record<string, string | number | boolean> }
@@ -102,6 +104,8 @@ export type NoticeState = {
   locks?: Record<string, string>
   /** The changed files (one per line) the last mod-drift notice was told for; absent while the trees match. */
   drift?: string
+  /** The session ids whose secret-in-result notice was told; absent until one is, so the stored state is as before. */
+  secrets?: string[]
 }
 
 export function freshNoticeState(): NoticeState {
@@ -153,6 +157,8 @@ export function parseNoticeState(value: unknown): NoticeState {
     if (Object.keys(locks).length > 0) state.locks = locks
   }
   if (typeof value.drift === 'string' && value.drift !== '') state.drift = value.drift
+  const secrets = strings(value.secrets)
+  if (secrets.length > 0) state.secrets = secrets
   return state
 }
 
@@ -395,6 +401,30 @@ export function pruneHarvested(state: NoticeState, entries: readonly SessionEntr
   }
   const sids = new Set(entries.map(entry => str(entry.session_id)).filter(sid => sid !== ''))
   state.compliance = state.compliance.filter(sid => sids.has(sid))
+  if (state.secrets !== undefined) {
+    state.secrets = state.secrets.filter(sid => sids.has(sid))
+    if (state.secrets.length === 0) delete state.secrets
+  }
+}
+
+// ---------------------------------------------------------------- secret-in-result
+
+/**
+ * secret-in-result (decision win-22): the secret scan (secrets.ts) found likely secrets in a worker's result (at the
+ * harvest, or read by read_result) or in its transcript tail (worker_tail): one notice per registry entry, by its
+ * session id, kept until the entry leaves the registry. Kinds and the count only, never a value or a position.
+ */
+export function secretNotice(state: NoticeState, entry: SessionEntry, tally: SecretTally, where: 'result' | 'transcript tail'): Notice[] {
+  const sid = str(entry.session_id)
+  if (sid === '' || tally.count === 0 || (state.secrets ?? []).includes(sid)) return []
+  state.secrets = [...(state.secrets ?? []), sid]
+  return [
+    {
+      kind: 'secret-in-result',
+      message: `worker "${oneLine(str(entry.title) || '(untitled)')}" (session ${sessionLabel(entry)}): its ${where} holds ${tally.count} likely ${tally.count === 1 ? 'secret' : 'secrets'} (kinds: ${tally.kinds.join(', ')}), redacted in the tools' answers; raise an open point naming where, never the value`,
+      fields: { session_id: sid, count: tally.count },
+    },
+  ]
 }
 
 // ---------------------------------------------------------------- unit-complete

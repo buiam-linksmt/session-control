@@ -7,6 +7,8 @@ import { formatAge } from './core'
 import type { PeerNote } from './core'
 import { clean } from './inspect'
 import type { NoticeKind } from './notices'
+import { addTallies, secretScanLine } from './secrets'
+import type { SecretTally } from './secrets'
 
 /** turn_digest takes no input. */
 export const DIGEST_SCHEMA = { type: 'object', additionalProperties: false, properties: {} } as const
@@ -20,8 +22,11 @@ export const DIGEST_EVENTS_KEPT = 500
 /** The longest item line, before it is cut. */
 const ITEM_CHARS = 220
 
-/** One event of the ledger: a harvested completion or a delivered notice, with its time (epoch ms) and its one-line text. */
-export type DigestEvent = { at: number; kind: 'completion' | NoticeKind; text: string }
+/**
+ * One event of the ledger: a harvested completion or a delivered notice, with its time (epoch ms) and its one-line text;
+ * a completion whose report the secret scan found likely secrets in carries their tally.
+ */
+export type DigestEvent = { at: number; kind: 'completion' | NoticeKind; text: string; secrets?: SecretTally }
 
 /** The $.store key of an orchestrator directory's last turn_digest call. */
 export function digestStoreKey(orchestratorDir: string): string {
@@ -108,7 +113,10 @@ export function digestText(input: DigestInput): string {
   const isEmpty = sections.length === 0 && noticeLine.length === 0 && peerLine.length === 0
   const body = isEmpty ? ['nothing new'] : []
   // The section items share what is left of the line budget; the longest is cut first, and says how many it left out.
-  const room = DIGEST_MAX_LINES - 1 - fixed.length - body.length - noticeLine.length - peerLine.length - 1
+  // The secret scan of the completions reported here: one last line, kinds only, kept within the bound.
+  const secrets = input.events.reduce<SecretTally>((sum, one) => (one.secrets === undefined ? sum : addTallies(sum, one.secrets)), { count: 0, kinds: [] })
+  const scanLine = secrets.count === 0 ? [] : [secretScanLine(secrets)]
+  const room = DIGEST_MAX_LINES - 1 - fixed.length - body.length - noticeLine.length - peerLine.length - 1 - scanLine.length
   const shown = sections.map(one => one.items.length)
   const cost = () => sections.reduce((sum, one, at) => sum + 1 + (shown[at] ?? 0) + ((shown[at] ?? 0) < one.items.length ? 1 : 0), 0)
   while (cost() > room) {
@@ -124,5 +132,5 @@ export function digestText(input: DigestInput): string {
     if (keep < one.items.length) lines.push(`- ... ${one.items.length - keep} more`)
   }
   lines.push(...noticeLine, ...peerLine, state)
-  return lines.slice(0, DIGEST_MAX_LINES).join('\n')
+  return [...lines.slice(0, DIGEST_MAX_LINES - scanLine.length), ...scanLine].join('\n')
 }

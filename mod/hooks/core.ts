@@ -334,6 +334,7 @@ export const TOAST_TITLES = {
   'lock-holder': 'Dead lock holder',
   'registry-unreadable': 'Registry unreadable',
   'mod-drift': 'Mod out of date',
+  'secret-in-result': 'Secret in a result',
   // The one summary toast of the notices past the toast cap of a refresh.
   moreNotices: 'More notices',
 } as const satisfies Record<
@@ -353,6 +354,7 @@ export const TOAST_TITLES = {
   | 'lock-holder'
   | 'registry-unreadable'
   | 'mod-drift'
+  | 'secret-in-result'
   | 'moreNotices',
   string
 >
