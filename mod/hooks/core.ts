@@ -161,6 +161,15 @@ const STATUS_ORDER: Record<SessionRowStatus, number> = {
   done: 5,
 }
 
+/**
+ * The orphans: each live headless claude process no registry entry claims (by its recorded pid) that is not one of the
+ * licence daemon's own runs. The one predicate of the orphan rows, list_sessions and the orphan notice (notices.ts).
+ */
+export function orphanProcs(entries: readonly SessionEntry[], facts: ProcFacts): ProcFact[] {
+  const claimed = new Set(entries.map(entry => entry.pid).filter((pid): pid is number => typeof pid === 'number'))
+  return facts.claude.filter(proc => !claimed.has(proc.pid) && isHeadless(proc.cmdline) && !isLicenceRun(proc.cmdline))
+}
+
 /** One row per registry entry, plus one per live headless claude no entry claims that is not a licence run. */
 export function buildRows(
   entries: readonly SessionEntry[],
@@ -168,9 +177,7 @@ export function buildRows(
   nowSec: number,
 ): SessionRow[] {
   const rows: SessionRow[] = []
-  const claimed = new Set<number>()
   for (const entry of entries) {
-    if (typeof entry.pid === 'number') claimed.add(entry.pid)
     const sid = typeof entry.session_id === 'string' ? entry.session_id : ''
     const status = rowStatus(entry, facts)
     const proc = facts.claude.find(one => one.pid === entry.pid)
@@ -192,8 +199,7 @@ export function buildRows(
       costUsd: typeof outcome?.costUsd === 'number' ? outcome.costUsd : undefined,
     })
   }
-  for (const proc of facts.claude) {
-    if (claimed.has(proc.pid) || !isHeadless(proc.cmdline) || isLicenceRun(proc.cmdline)) continue
+  for (const proc of orphanProcs(entries, facts)) {
     rows.push({
       title: `(no entry) ${proc.cwd}`,
       sid8: '',

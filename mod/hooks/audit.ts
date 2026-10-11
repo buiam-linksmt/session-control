@@ -44,7 +44,8 @@ export type AuditInput = {
 }
 
 export type Severity = 'high' | 'medium' | 'low'
-export type Finding = { severity: Severity; kind: string; subject: string; evidence: string; action: string }
+/** One finding; `ref` is the id it is about (a task's id, or a session id's first 8 characters) where it has one: the retire-due notice lists them. */
+export type Finding = { severity: Severity; kind: string; subject: string; evidence: string; action: string; ref?: string }
 
 /** The kinds in the order they are told within a severity. */
 const KIND_ORDER = [
@@ -150,6 +151,50 @@ export function backupKind(name: string): string {
   return name.replace(/[-_.]?\d{4}-\d{2}-\d{2}[A-Za-z0-9]*/, '')
 }
 
+/** Whether a text names a session: its full id, its first 8 characters or its session name (the queue checks, the queue-ready notice). */
+export function namesSession(text: string, entry: SessionEntry): boolean {
+  const sid = str(entry.session_id)
+  const name = str(entry.name)
+  return (sid !== '' && (text.includes(sid) || text.includes(sid.slice(0, 8)))) || (name !== '' && text.includes(name))
+}
+
+/** The session ids of the retired sessions in cleared.jsonl, lower case; undefined when it cannot be read. */
+export function retiredIds(clearedText: string | undefined): Set<string> | undefined {
+  return clearedText === undefined ? undefined : new Set([...clearedText.matchAll(/"session_id":\s*"([0-9a-fA-F-]{36})"/g)].map(found => (found[1] ?? '').toLowerCase()))
+}
+
+/** The mtime of the oldest tracked change git reports (epoch ms); undefined when none has one. */
+export function oldestChangeMs(git: GitState): number | undefined {
+  const times = git.changed.map(one => one.mtimeMs).filter((ms): ms is number => ms !== undefined)
+  return times.length === 0 ? undefined : Math.min(...times)
+}
+
+/**
+ * The git findings of the orchestrator directory: a branch other than the default with no worker alive (or a detached
+ * HEAD), and tracked changes not committed with the age of the oldest. audit_state and the repo-state notice read the
+ * same findings.
+ */
+export function gitFindings(git: GitState, aliveCount: number, nowMs: number): Finding[] {
+  const out: Finding[] = []
+  const workers = `${plural(aliveCount, 'worker')} alive`
+  if (git.branch !== undefined && git.defaultBranch !== undefined && git.branch !== git.defaultBranch && aliveCount === 0) {
+    out.push({ severity: 'medium', kind: 'git-branch', subject: 'the orchestrator directory', evidence: `on branch ${short(git.branch, 80)}, not the default ${short(git.defaultBranch, 80)}; ${workers}`, action: 'check the branch out back to the default one once nothing needs it' })
+  }
+  if (git.branch === undefined) out.push({ severity: 'medium', kind: 'git-branch', subject: 'the orchestrator directory', evidence: `HEAD is detached; ${workers}`, action: 'check out the default branch once nothing needs the detached HEAD' })
+  if (git.changed.length > 0) {
+    const oldestMs = oldestChangeMs(git)
+    const oldest = oldestMs === undefined ? '' : `, the oldest change ${formatAge(Math.max(0, nowMs - oldestMs) / 1000)} old`
+    out.push({
+      severity: 'medium',
+      kind: 'git-uncommitted',
+      subject: 'the orchestrator directory',
+      evidence: `${plural(git.changed.length, 'tracked file')} with changes not committed (${fileNames(git.changed.map(one => one.path))})${oldest}; branch ${short(git.branch ?? 'detached HEAD', 80)}; ${workers}`,
+      action: 'commit what is settled through a worker, or say what keeps it uncommitted',
+    })
+  }
+  return out
+}
+
 /** The base name of a path, on either system. */
 const baseName = (path: string) => path.split(/[\\/]/).pop() ?? path
 
@@ -210,23 +255,19 @@ export function auditFindings(input: AuditInput): Finding[] {
   const pointList = typeof points === 'string' ? [] : points
   const status = (entry: SessionEntry) => rowStatus(entry, facts)
   const alive = entries.filter(entry => status(entry) === 'alive')
-  /** Whether a task's text names a session: its full id, its first 8 characters or its session name. */
-  const isNamedBy = (text: string, entry: SessionEntry) => {
-    const sid = str(entry.session_id)
-    const name = str(entry.name)
-    return (sid !== '' && (text.includes(sid) || text.includes(sid.slice(0, 8)))) || (name !== '' && text.includes(name))
-  }
+  const isNamedBy = namesSession
   const taskName = (task: Task) => `task ${short(task.id || '(no id)', 60)} "${short(task.title || '(untitled)', 80)}"`
 
   // ---- the queue
   for (const task of taskList) {
     if (!['queued', 'running', 'done'].includes(task.status)) {
-      add({ severity: 'high', kind: 'queue-status', subject: taskName(task), evidence: `status "${short(task.status, 60)}" is not exactly queued, running or done`, action: 'queue_task update with status queued, running or done, the detail in note' })
+      add({ severity: 'high', kind: 'queue-status', ref: task.id, subject: taskName(task), evidence: `status "${short(task.status, 60)}" is not exactly queued, running or done`, action: 'queue_task update with status queued, running or done, the detail in note' })
     }
     if (task.status === 'running' && !alive.some(entry => isNamedBy(task.text, entry))) {
       add({
         severity: 'high',
         kind: 'running-task-no-session',
+        ref: task.id,
         subject: taskName(task),
         evidence: `running, but it names no live session (by session id, its first 8 characters or its name); ${plural(alive.length, 'session')} alive`,
         action: 'when its work finished or died, set it done (or queued for a relaunch) with queue_task; when a live session does it, name that session in its note',
@@ -241,9 +282,9 @@ export function auditFindings(input: AuditInput): Finding[] {
       for (const id of ids) {
         if (!entries.some(entry => str(entry.session_id).toLowerCase() === id)) blockers.push(`session ${id.slice(0, 8)} ${input.retired?.has(id) === true ? 'was retired' : 'is in no registry entry'}`)
       }
-      if (blockers.length > 0) add({ severity: 'high', kind: 'waits-for-finished', subject: taskName(task), evidence: `waits_for "${short(task.waitsFor, 100)}": ${names(blockers, 3)}`, action: 'its blocker has cleared: launch it, or correct waits_for with queue_task' })
+      if (blockers.length > 0) add({ severity: 'high', kind: 'waits-for-finished', ref: task.id, subject: taskName(task), evidence: `waits_for "${short(task.waitsFor, 100)}": ${names(blockers, 3)}`, action: 'its blocker has cleared: launch it, or correct waits_for with queue_task' })
     }
-    if (task.status === 'done') add({ severity: 'medium', kind: 'done-in-queue', subject: taskName(task), evidence: 'status done, still in the queue', action: 'queue_task remove once its unit is closed and reported' })
+    if (task.status === 'done') add({ severity: 'medium', kind: 'done-in-queue', ref: task.id, subject: taskName(task), evidence: 'status done, still in the queue', action: 'queue_task remove once its unit is closed and reported' })
   }
 
   // ---- the registry
@@ -261,13 +302,13 @@ export function auditFindings(input: AuditInput): Finding[] {
     const sid = str(entry.session_id)
     const isNamedByTask = sid !== '' && (active.includes(sid) || active.includes(sid.slice(0, 8)))
     if (state === 'done' && entry.keep !== true && kind === 'clean' && !isNamedByTask) {
-      add({ severity: 'medium', kind: 'retirable', subject: sessionName(entry), evidence: `finished clean, acknowledged, not kept, no queued or running task names it${ended === undefined ? '' : `; ended ${formatAge(nowSec - ended)} ago`}`, action: 'retire_workers when its goal is met' })
+      add({ severity: 'medium', kind: 'retirable', ref: sid.slice(0, 8), subject: sessionName(entry), evidence: `finished clean, acknowledged, not kept, no queued or running task names it${ended === undefined ? '' : `; ended ${formatAge(nowSec - ended)} ago`}`, action: 'retire_workers when its goal is met' })
     }
     if (entry.keep === true && state !== 'alive') {
       const mtime = sid === '' ? undefined : facts.transcriptMtime.get(sid)
       const since = ended ?? mtime ?? (typeof entry.started_at === 'number' ? entry.started_at : undefined)
       if (since !== undefined && nowSec - since > KEPT_MAX_SEC) {
-        add({ severity: 'medium', kind: 'kept-old', subject: sessionName(entry), evidence: `marked keep, last active ${formatAge(nowSec - since)} ago (more than 6 hours)`, action: 'resume it if the follow-up is still due; else acknowledge_workers with keep false and retire it' })
+        add({ severity: 'medium', kind: 'kept-old', ref: sid.slice(0, 8), subject: sessionName(entry), evidence: `marked keep, last active ${formatAge(nowSec - since)} ago (more than 6 hours)`, action: 'resume it if the follow-up is still due; else acknowledge_workers with keep false and retire it' })
       }
     }
   }
@@ -283,25 +324,7 @@ export function auditFindings(input: AuditInput): Finding[] {
   }
 
   // ---- git
-  if (input.git !== undefined) {
-    const git = input.git
-    const workers = `${plural(alive.length, 'worker')} alive`
-    if (git.branch !== undefined && git.defaultBranch !== undefined && git.branch !== git.defaultBranch && alive.length === 0) {
-      add({ severity: 'medium', kind: 'git-branch', subject: 'the orchestrator directory', evidence: `on branch ${short(git.branch, 80)}, not the default ${short(git.defaultBranch, 80)}; ${workers}`, action: 'check the branch out back to the default one once nothing needs it' })
-    }
-    if (git.branch === undefined) add({ severity: 'medium', kind: 'git-branch', subject: 'the orchestrator directory', evidence: `HEAD is detached; ${workers}`, action: 'check out the default branch once nothing needs the detached HEAD' })
-    if (git.changed.length > 0) {
-      const times = git.changed.map(one => one.mtimeMs).filter((ms): ms is number => ms !== undefined)
-      const oldest = times.length === 0 ? '' : `, the oldest change ${formatAge(Math.max(0, input.nowMs - Math.min(...times)) / 1000)} old`
-      add({
-        severity: 'medium',
-        kind: 'git-uncommitted',
-        subject: 'the orchestrator directory',
-        evidence: `${plural(git.changed.length, 'tracked file')} with changes not committed (${fileNames(git.changed.map(one => one.path))})${oldest}; branch ${short(git.branch ?? 'detached HEAD', 80)}; ${workers}`,
-        action: 'commit what is settled through a worker, or say what keeps it uncommitted',
-      })
-    }
-  }
+  if (input.git !== undefined) for (const finding of gitFindings(input.git, alive.length, input.nowMs)) add(finding)
 
   // ---- backups/: per kind, the files older than 2 days beyond the newest of their kind
   const kinds = new Map<string, ListedFile[]>()

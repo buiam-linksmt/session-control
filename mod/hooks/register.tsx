@@ -26,7 +26,7 @@ import type { Host, HostEnvName, HostPort, RemoveOutcome, TailShape } from './ho
 import { HELPER_SCRIPT, fallbackFields, fallbackToast, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
-import { AUDIT_SCHEMA, auditText } from './audit'
+import { AUDIT_SCHEMA, auditText, retiredIds } from './audit'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
 import type { ProtectedFile } from './guard'
@@ -1413,7 +1413,7 @@ async function auditState($: EngineInterface) {
   const runs = await runsPath($)
   const text = (path: string) => $.fs.read(path).catch(() => undefined)
   const [queueText, pointsText, decisionsText, clearedText] = await Promise.all([text(orchPath('task-queue.json')), text(orchPath('open-points.json')), text(orchPath('agreed-decisions.md')), text(`${runs}/cleared.jsonl`)])
-  const retired = clearedText === undefined ? undefined : new Set([...clearedText.matchAll(/"session_id":\s*"([0-9a-fA-F-]{36})"/g)].map(found => (found[1] ?? '').toLowerCase()))
+  const retired = retiredIds(clearedText)
   const [backups, runFiles, reports] = await Promise.all([listed($, orchPath('backups')), listed($, runs), listed($, orchPath('reports'))])
   const git = await gitState($, config.orchestratorDir)
   return {
