@@ -774,6 +774,20 @@ async function editHelper(
   return { deny: `${PLUGIN}: ${file} changed while it was being edited; nothing written, try again` }
 }
 
+/**
+ * record_decision: one line appended to agreed-decisions.md, its id checked against the file and against the
+ * decisions archive (archive_decisions moved those sections there; their ids stay taken). An archive that is there but
+ * cannot be read refuses the write: the id cannot be checked.
+ */
+async function recordDecision($: EngineInterface, input: Record<string, unknown>): Promise<{ result: string } | { deny: string }> {
+  const archivePath = orchPath(DECISIONS_ARCHIVE)
+  const archive = await $.fs.read(archivePath).catch(() => undefined)
+  if (archive === undefined && (await $.fs.exists(archivePath).catch(() => true))) {
+    return { deny: `${PLUGIN}: ${DECISIONS_ARCHIVE} is there but cannot be read, so the id cannot be checked against the archived decisions; nothing written` }
+  }
+  return editHelper($, 'agreed-decisions.md', 'record-decision', text => appendDecision(text, input, archive))
+}
+
 /** The orchestrator has acknowledged finished workers' results: they show as finished; with keep they also stay for a resume. */
 async function acknowledge($: EngineInterface, ids: readonly string[], keep: boolean) {
   const reg = await registryAndFacts($)
@@ -1738,7 +1752,7 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: DECISION_TOOL }, ($, e) =>
-    tracedTool($, 'record_decision', e, ['section', 'id'], () => editHelper($, 'agreed-decisions.md', 'record-decision', text => appendDecision(text, plain(e)))),
+    tracedTool($, 'record_decision', e, ['section', 'id'], () => recordDecision($, plain(e))),
   ).catch(($, e, next) => {
     traceError($, 'record_decision', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: record_decision failed` }

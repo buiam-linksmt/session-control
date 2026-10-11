@@ -142,9 +142,17 @@ export function editQueue(text: string, input: Obj): Edit {
   return { ok: true, text: JSON.stringify(doc, null, 2) + '\n', note: `updated ${id}` }
 }
 
-export function appendDecision(text: string, input: Obj): Edit {
+/**
+ * Appends one decision line `<id>. <text>` to its section. An id that a line of the file already starts with is refused,
+ * and so is one a line of the archive starts with (`archiveText`, agreed-decisions-archive.md, when there is one): an
+ * archived section's ids stay taken.
+ */
+export function appendDecision(text: string, input: Obj, archiveText?: string): Edit {
   const line = `${str(input.id)}. ${str(input.text).replace(/\s*\n\s*/g, ' ').trim()}`
   if (text.split('\n').some(one => one.startsWith(`${str(input.id)}. `))) return { ok: false, error: `decision ${str(input.id)} already exists` }
+  if (archiveText?.split(/\r?\n/).some(one => one.startsWith(`${str(input.id)}. `)) === true) {
+    return { ok: false, error: `decision ${str(input.id)} already exists in agreed-decisions-archive.md (an archived section's ids stay taken); choose another id` }
+  }
   const section = str(input.section).trim()
   const lines = text.replace(/\n+$/, '').split('\n')
   if (section === '') return { ok: true, text: [...lines, line].join('\n') + '\n', note: `recorded ${str(input.id)} at the end` }

@@ -37,6 +37,8 @@ export type World = {
   launch: { cwd: string; sid: string }
   /** Operations made to fail: `tree` (the listing cannot run), `stop` (the stop script sends nothing and exits 1). */
   breaks: Set<'tree' | 'stop'>
+  /** Files that are there but cannot be read (over the read cap, say). */
+  unreadable: Set<string>
 }
 
 const ok = (stdout = '', exitCode = 0) => ({ exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
@@ -78,6 +80,7 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
     passed: [],
     launch: { cwd: '/w/work', sid: 'abcdabcd-0000-4000-8000-000000000001' },
     breaks: new Set(),
+    unreadable: new Set(),
   }
   const { files, links } = world
   const real = (path: string) => throughLinks(links, path.replace(/\/+$/, ''))
@@ -96,6 +99,7 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
     return { value: { tool: `mcp__session-control__${e.name}` } }
   })
   on('fs.read', ($, e) => {
+    if (world.unreadable.has(real(e.path))) throw new Error(`EFBIG ${e.path}`)
     const text = files.get(real(e.path))
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }

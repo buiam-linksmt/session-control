@@ -306,3 +306,26 @@ describe('guard.ts on Windows paths and PowerShell', () => {
     expect(denyText('PowerShell', raw[2] ?? raw[0]!, 'Set-Content')).toContain('session-control tool queue_task, never by hand (PowerShell: Set-Content)')
   })
 })
+
+describe('record_decision and the decisions archive', () => {
+  test('an id an archived section holds is refused with the reason; a new id is recorded; an unreadable archive refuses; no archive, no check', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seedOrchestrator(world)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const record = async (id: string) => answerOf(await $.tool.call({ tool: 'mcp__session-control__record_decision', section: 'Free unit', id, text: 'A line.' } as never))
+    // No archive yet: only the file's own ids count.
+    expect((await record('arch-1')).isRefused).toBe(false)
+    world.files.set(`${ORCH}/agreed-decisions-archive.md`, '# Agreed decisions archive\n# Archived 2026-09-20 from agreed-decisions.md\n## Gone unit\ngone-1. Archived.\n')
+    const refused = await record('gone-1')
+    expect(refused.isRefused).toBe(true)
+    expect(refused.text).toContain("decision gone-1 already exists in agreed-decisions-archive.md (an archived section's ids stay taken); choose another id")
+    expect(world.files.get(`${ORCH}/agreed-decisions.md`)).not.toContain('gone-1.')
+    expect((await record('free-9')).isRefused).toBe(false)
+    expect(world.files.get(`${ORCH}/agreed-decisions.md`)).toContain('free-9. A line.')
+    world.unreadable.add(`${ORCH}/agreed-decisions-archive.md`)
+    const unreadable = await record('free-10')
+    expect(unreadable.isRefused).toBe(true)
+    expect(unreadable.text).toContain('agreed-decisions-archive.md is there but cannot be read, so the id cannot be checked')
+    expect(world.files.get(`${ORCH}/agreed-decisions.md`)).not.toContain('free-10.')
+  })
+})

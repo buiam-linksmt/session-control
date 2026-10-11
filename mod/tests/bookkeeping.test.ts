@@ -65,6 +65,16 @@ describe('agreed decisions', () => {
     expect(last.ok && last.text).toBe('## One\nx-1. first\n\n## Two\ny-1. second\ny-2. tail\n')
   })
 
+  test('a decision id that a line of the archive starts with is refused, saying so; an id only mentioned there, or no archive, is not', () => {
+    const archive = '# Agreed decisions archive\n# Archived 2026-10-11 from agreed-decisions.md\n## Old unit\r\nold-1. Was decided.\r\nold-2. Also.\n'
+    const refused = appendDecision(TEXT, { section: 'One', id: 'old-2', text: 'again' }, archive)
+    expect(refused).toEqual({ ok: false, error: "decision old-2 already exists in agreed-decisions-archive.md (an archived section's ids stay taken); choose another id" })
+    expect(appendDecision(TEXT, { section: 'One', id: 'old', text: 'new' }, archive).ok).toBe(true)
+    expect(appendDecision(TEXT, { section: 'One', id: 'Was', text: 'new' }, archive).ok).toBe(true)
+    expect(appendDecision(TEXT, { section: 'One', id: 'old-2', text: 'new' }).ok).toBe(true)
+    expect(appendDecision(TEXT, { section: 'One', id: 'old-2', text: 'new' }, '').ok).toBe(true)
+  })
+
   test('a decision id that already exists in the file is refused', () => {
     expect(appendDecision(TEXT, { section: 'One', id: 'x-1', text: 'again' }).ok).toBe(false)
   })
