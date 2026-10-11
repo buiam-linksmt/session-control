@@ -4,9 +4,11 @@
 // file that is neither in this list nor in UNGUARDED_FILES (with its reason). Pure: no `$`, no I/O; register.tsx hooks
 // `tool.call` for Edit, Write, MultiEdit, NotebookEdit, Bash and PowerShell and asks pathVerdict or commandVerdict.
 //
-// The Bash and PowerShell check is a heuristic against slips, not a sandbox. It reads the command text: a protected
-// file named (by its base name, or a path ending in it) together with a construct that writes it is refused; reading
-// commands pass. It cannot see what the text does not say: a glob (`task-*.json`, `*.md`), a name built at run time
+// The Bash and PowerShell check is a heuristic against slips, not a sandbox or a security boundary; it errs on
+// refusing. It reads the command text that runs: a protected file named (by its base name, or a path ending in it)
+// together with a construct that writes it is refused; reading commands pass. A heredoc body that only data sinks read
+// and a quoted plain argument are text, not commands (decision mod-20); substitutions and a heredoc or here-string a
+// shell or an interpreter reads are checked as the code they are. It cannot see what the text does not say: a glob (`task-*.json`, `*.md`), a name built at run time
 // (`f=task; sed -i x "$f-queue.json"` in one segment), a name read from a file or another command's output (`ls |
 // xargs rm`), a script file it runs (`python3 fix.py`, `sh edit.sh`), an encoded PowerShell command (-EncodedCommand),
 // a link or alias to a helper file that already exists (making one by `ln` is refused, but a later `sed -i q` names
@@ -114,8 +116,12 @@ export function pathVerdict(targets: readonly string[], files: readonly (Protect
 
 // ---------------------------------------------------------------- commands (Bash, PowerShell)
 
-type Word = { text: string; isExpanded: boolean }
-type Segment = { words: Word[]; outputs: Word[] }
+type Word = { text: string; isExpanded: boolean; isQuoted: boolean }
+/**
+ * A segment's words and output redirections; `isPiped` when a single `|` ends it (its output feeds the next segment),
+ * `isSubstitution` when it sits inside a `$(...)`, `hereStrings` the words after a `<<<` (also among its words).
+ */
+type Segment = { words: Word[]; outputs: Word[]; isPiped: boolean; isSubstitution: boolean; hereStrings: string[] }
 
 /** Whether a word names a file: the word itself, or a path or an assignment (`of=`, `--file=`) ending in it; any case. */
 function namesFile(text: string, name: string): boolean {
@@ -127,34 +133,47 @@ function namesFile(text: string, name: string): boolean {
  * The words of a command line, split into segments at `;`, `&&`, `||`, `|`, `&`, line breaks and parentheses, with the
  * output redirections of each (`>`, `>>`, `>|`, `&>`, `<>`, a descriptor before them; a duplication such as `2>&1` is
  * none). Quotes go: single quotes keep everything, double quotes and a backslash escape (PowerShell: the backtick)
- * the next character. A word that holds `$` or a backtick substitution outside single quotes is marked expanded.
+ * the next character. A word that holds `$` or a backtick substitution outside single quotes is marked expanded, one
+ * that a quote contributed to is marked quoted.
  */
 function segmentsOf(command: string, isPowerShell: boolean): Segment[] {
   const segments: Segment[] = []
   let words: Word[] = []
   let outputs: Word[] = []
+  let hereStrings: string[] = []
   let word = ''
   let isWord = false
   let isExpanded = false
+  let isQuoted = false
   let pendingOutput = false
+  let pendingHere = false
+  // Per open parenthesis: whether it opened a `$(...)`.
+  const parens: boolean[] = []
   const escape = isPowerShell ? '`' : '\\'
   const flush = () => {
     if (!isWord) return
-    const one = { text: word, isExpanded }
+    const one = { text: word, isExpanded, isQuoted }
     if (pendingOutput) {
       outputs.push(one)
       pendingOutput = false
-    } else words.push(one)
+    } else {
+      words.push(one)
+      if (pendingHere) hereStrings.push(word)
+    }
+    pendingHere = false
     word = ''
     isWord = false
     isExpanded = false
+    isQuoted = false
   }
-  const endSegment = () => {
+  const endSegment = (isPiped = false) => {
     flush()
     pendingOutput = false
-    if (words.length > 0 || outputs.length > 0) segments.push({ words, outputs })
+    pendingHere = false
+    if (words.length > 0 || outputs.length > 0) segments.push({ words, outputs, isPiped, isSubstitution: parens.includes(true), hereStrings })
     words = []
     outputs = []
+    hereStrings = []
   }
   for (let at = 0; at < command.length; at++) {
     const char = command[at] ?? ''
@@ -164,6 +183,7 @@ function segmentsOf(command: string, isPowerShell: boolean): Segment[] {
       const stop = end < 0 ? command.length : end
       word += command.slice(at + 1, stop)
       isWord = true
+      isQuoted = true
       at = stop
       // PowerShell doubles a quote inside single quotes.
       if (isPowerShell && command[stop + 1] === "'") word += "'"
@@ -171,6 +191,7 @@ function segmentsOf(command: string, isPowerShell: boolean): Segment[] {
     }
     if (char === '"') {
       isWord = true
+      isQuoted = true
       for (at++; at < command.length && command[at] !== '"'; at++) {
         const inner = command[at] ?? ''
         if (inner === escape && at + 1 < command.length) {
@@ -193,13 +214,24 @@ function segmentsOf(command: string, isPowerShell: boolean): Segment[] {
       at = end < 0 ? command.length : end - 1
       continue
     }
+    if (!isPowerShell && char === '<' && next === '<' && command[at + 2] === '<') {
+      // A here-string: the next word is the command's standard input; it stays among the words, as before.
+      flush()
+      words.push({ text: '<<<', isExpanded: false, isQuoted: false })
+      pendingHere = true
+      at += 2
+      continue
+    }
     if (char === '\n' || char === ';' || char === '(' || char === ')' || char === '{' || char === '}' || char === '|' || (char === '&' && next !== '>')) {
       if (char === '&' && command[at - 1] === '>') {
         word += char
         isWord = true
         continue
       }
-      endSegment()
+      const isSubstitutionOpen = char === '(' && word.endsWith('$')
+      endSegment(char === '|' && next !== '|')
+      if (char === '(') parens.push(isSubstitutionOpen)
+      if (char === ')') parens.pop()
       if ((char === '|' || char === '&') && next === char) at++
       continue
     }
@@ -208,6 +240,8 @@ function segmentsOf(command: string, isPowerShell: boolean): Segment[] {
       if (isWord && !/^\d+$/.test(word)) flush()
       word = ''
       isWord = false
+      isExpanded = false
+      isQuoted = false
       let op = char
       while (/[>&|*<]/.test(command[at + 1] ?? '') && op.length < 3) op += command[++at] ?? ''
       // A duplication (>&1, >&-, 2>&1) writes no file.
@@ -230,6 +264,198 @@ function segmentsOf(command: string, isPowerShell: boolean): Segment[] {
   return segments
 }
 
+// ---------------------------------------------------------------- heredocs and substitutions (Bash)
+
+/**
+ * A heredoc cut out of a command: its body, whether its delimiter was quoted (`<<'X'`, `<<"X"`, `<<\X`: the body is
+ * literal text, nothing in it runs) and the mark its operator left in the command's text, a word of its own.
+ */
+type Heredoc = { body: string; isQuoted: boolean; mark: string }
+
+const heredocMark = (index: number) => `\u0002${index}\u0003`
+
+/**
+ * A Bash command with its heredoc bodies cut out: each `<<X`, `<<-X`, `<<'X'` or `<<"X"` outside quotes, a comment and
+ * an arithmetic `((...))` (where `<<` is a shift) becomes a mark word, and its body (the lines after the line that holds
+ * the operator, up to the line that is exactly the delimiter, after leading tabs with `<<-`; to the end when none is)
+ * is taken out, as Bash reads it. A `<<<` here-string stays. A command that holds the mark's own characters is left
+ * whole, its bodies read as command lines as before.
+ */
+export function cutHeredocs(command: string): { text: string; heredocs: Heredoc[] } {
+  if (/[\u0002\u0003]/.test(command)) return { text: command, heredocs: [] }
+  const heredocs: Heredoc[] = []
+  const pending: { delimiter: string; isQuoted: boolean; isTabbed: boolean; mark: string }[] = []
+  let out = ''
+  let quote = ''
+  let arithmetic = 0
+  let isWordStart = true
+  for (let at = 0; at < command.length; at++) {
+    const char = command[at] ?? ''
+    const next = command[at + 1] ?? ''
+    if (quote === "'") {
+      out += char
+      if (char === "'") quote = ''
+      continue
+    }
+    if (quote === '"') {
+      out += char
+      if (char === '\\' && next !== '') {
+        out += next
+        at++
+      } else if (char === '"') quote = ''
+      continue
+    }
+    if (char === '\\' && next !== '') {
+      out += char + next
+      at++
+      isWordStart = false
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quote = char
+      out += char
+      isWordStart = false
+      continue
+    }
+    if (char === '#' && isWordStart) {
+      const end = command.indexOf('\n', at)
+      const stop = end < 0 ? command.length : end
+      out += command.slice(at, stop)
+      at = stop - 1
+      continue
+    }
+    if (char === '(' && next === '(') {
+      arithmetic++
+      out += '(('
+      at++
+      isWordStart = true
+      continue
+    }
+    if (char === ')' && next === ')' && arithmetic > 0) {
+      arithmetic--
+      out += '))'
+      at++
+      isWordStart = false
+      continue
+    }
+    if (char === '<' && next === '<' && command[at + 2] === '<') {
+      out += '<<<'
+      at += 2
+      isWordStart = true
+      continue
+    }
+    if (char === '<' && next === '<' && arithmetic === 0) {
+      let end = at + 2
+      const isTabbed = command[end] === '-'
+      if (isTabbed) end++
+      while (command[end] === ' ' || command[end] === '\t') end++
+      let delimiter = ''
+      let isQuoted = false
+      while (end < command.length && !/[\s;&|<>()]/.test(command[end] ?? '')) {
+        const one = command[end] ?? ''
+        if (one === "'" || one === '"') {
+          isQuoted = true
+          const close = command.indexOf(one, end + 1)
+          const stop = close < 0 ? command.length : close
+          delimiter += command.slice(end + 1, stop)
+          end = stop + 1
+          continue
+        }
+        if (one === '\\') {
+          isQuoted = true
+          delimiter += command[end + 1] ?? ''
+          end += 2
+          continue
+        }
+        delimiter += one
+        end++
+      }
+      if (delimiter === '') {
+        out += '<<'
+        at++
+        continue
+      }
+      const mark = heredocMark(heredocs.length + pending.length)
+      pending.push({ delimiter, isQuoted, isTabbed, mark })
+      out += ` ${mark} `
+      at = end - 1
+      isWordStart = true
+      continue
+    }
+    if (char === '\n' && pending.length > 0) {
+      out += '\n'
+      let from = at + 1
+      for (const one of pending) {
+        const lines: string[] = []
+        while (from < command.length) {
+          const end = command.indexOf('\n', from)
+          const stop = end < 0 ? command.length : end
+          const line = command.slice(from, stop)
+          from = stop + 1
+          if ((one.isTabbed ? line.replace(/^\t+/, '') : line) === one.delimiter) break
+          lines.push(line)
+        }
+        heredocs.push({ body: lines.join('\n'), isQuoted: one.isQuoted, mark: one.mark })
+      }
+      pending.length = 0
+      at = from - 1
+      isWordStart = true
+      continue
+    }
+    out += char
+    isWordStart = /[\s;&|()<>]/.test(char)
+  }
+  // An operator on the last line has no body.
+  for (const one of pending) heredocs.push({ body: '', isQuoted: one.isQuoted, mark: one.mark })
+  return { text: out, heredocs }
+}
+
+/**
+ * The command texts that run inside a text: each `$(...)` (not an arithmetic `$((...))`) and each backtick pair outside
+ * single quotes, in double quotes too; with `isBody` (an unquoted heredoc's body) quotes are literal text, so every one
+ * counts. Nested ones are found when the inner text is checked in turn.
+ */
+export function substitutionsOf(text: string, isBody = false): string[] {
+  const found: string[] = []
+  let isDouble = false
+  for (let at = 0; at < text.length; at++) {
+    const char = text[at] ?? ''
+    if (char === '\\') {
+      at++
+      continue
+    }
+    if (!isBody && char === "'" && !isDouble) {
+      const end = text.indexOf("'", at + 1)
+      at = end < 0 ? text.length : end
+      continue
+    }
+    if (!isBody && char === '"') {
+      isDouble = !isDouble
+      continue
+    }
+    if (char === '$' && text[at + 1] === '(' && text[at + 2] !== '(') {
+      let depth = 0
+      let end = at + 1
+      for (; end < text.length; end++) {
+        const one = text[end]
+        if (one === '\\') end++
+        else if (one === '(') depth++
+        else if (one === ')' && --depth === 0) break
+      }
+      found.push(text.slice(at + 2, end))
+      at = end
+      continue
+    }
+    if (char === '`') {
+      let end = at + 1
+      while (end < text.length && text[end] !== '`') end += text[end] === '\\' ? 2 : 1
+      found.push(text.slice(at + 1, end))
+      at = end
+    }
+  }
+  return found
+}
+
 /** Commands that change the file they are given, whatever their options. */
 const WRITERS = new Set([
   'tee', 'mv', 'cp', 'rm', 'unlink', 'truncate', 'shred', 'install', 'ln', 'rsync', 'sponge', 'patch', 'touch',
@@ -241,8 +467,8 @@ const WRITERS = new Set([
   'rename-item', 'rni', 'new-item', 'ni', 'clear-content', 'clc', 'tee-object', 'set-item', 'si', 'export-csv', 'export-clixml',
 ])
 
-/** Words that run the command after them. */
-const PREFIXES = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nohup', 'nice', 'time', 'timeout', 'stdbuf', 'xargs', 'busybox', '&', '.'])
+/** Words that run the command after them; the shell's own keywords before a command (`do`, `then`, `if`, ...) too. */
+const PREFIXES = new Set(['sudo', 'doas', 'env', 'command', 'builtin', 'exec', 'nohup', 'nice', 'time', 'timeout', 'stdbuf', 'xargs', 'busybox', '&', '.', 'do', 'then', 'else', 'elif', 'if', 'while', 'until', '!'])
 
 /** Interpreters whose one-liners (-c, -e) can open a file for writing. */
 const INTERPRETERS = /^(python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|lua|awk|gawk|mawk|nawk)$/
@@ -250,6 +476,21 @@ const INTERPRETERS = /^(python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|lua|awk
 /** Shells whose -c (PowerShell -Command) text is a command line of its own. */
 const SHELLS = /^(bash|sh|dash|zsh|ksh|fish|cmd|cmd\.exe)$/
 const POWERSHELLS = /^(powershell|powershell\.exe|pwsh|pwsh\.exe)$/
+
+/**
+ * Commands that take a heredoc or a here-string as data: they print, count, filter or store it (tee writes it to the
+ * files it is given, which the check of its arguments sees), never run it. A heredoc whose whole pipeline is made of
+ * these is text; `git commit`, `git tag` and `git notes` take one as a message.
+ */
+const DATA_SINKS = new Set([
+  'cat', 'tee', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'sort', 'uniq', 'cut', 'tr', 'fold', 'fmt', 'nl', 'rev', 'column',
+  'base64', 'md5sum', 'sha1sum', 'sha256sum', 'sha512sum', 'cksum', 'od', 'xxd', 'hexdump', 'strings', 'less', 'more', 'jq', 'diff', 'cmp',
+  'echo', 'printf', 'true', ':', 'gh',
+])
+const GIT_MESSAGES = new Set(['commit', 'tag', 'notes'])
+
+/** Commands whose quoted arguments name what the shell keeps (assignments, word lists, code): such a name counts as said. */
+const KEEPS_QUOTES = new Set(['export', 'declare', 'local', 'readonly', 'typeset', 'alias', 'let', 'eval', 'read', 'readarray', 'mapfile', 'for', 'select', 'case', 'set', 'source', '.'])
 
 /** What a piece of code does that writes, removes or moves a file. */
 const WRITE_MARKERS =
@@ -265,31 +506,137 @@ function firstNamed(text: string, files: readonly ProtectedFile[]): ProtectedFil
   return files.find(file => namesFile(text, file.name))
 }
 
+/** A segment's command: the word after its assignments and prefixes (sudo, env, xargs, do, ...), its name as compared, its arguments, and whether xargs feeds it. */
+function commandOf(segment: Segment): { raw: string; name: string; args: string[]; isXargs: boolean } {
+  const words = segment.words.map(one => one.text)
+  let at = 0
+  while (at < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at] ?? '') || PREFIXES.has((words[at] ?? '').toLowerCase()) || (at > 0 && PREFIXES.has((words[at - 1] ?? '').toLowerCase()) && (words[at] ?? '').startsWith('-')))) at++
+  const raw = words[at] ?? ''
+  const name = raw.replace(/^.*[\\/]/, '').replace(/^microsoft\.powershell\.\w+\\/i, '').toLowerCase()
+  return { raw, name, args: words.slice(at + 1), isXargs: words.slice(0, at).some(one => one.toLowerCase() === 'xargs') }
+}
+
+/** An interpreter's or a shell's option that takes code in the next argument. */
+const CODE_FLAG = /^(-c|-e|-E|--eval|-p|--print|-r|\/c|\/k)$/i
+
+/** Whether a segment runs a script file: an interpreter or a shell given a file and no code, `source` or `.`, or a command by its path (`./fix.sh`). */
+function runsScript(segment: Segment): boolean {
+  const first = segment.words[0]?.text ?? ''
+  const { raw, name, args } = commandOf(segment)
+  const isGivenFile = args.some(arg => !arg.startsWith('-') && !arg.startsWith('\u0002')) && !args.some(arg => CODE_FLAG.test(arg))
+  return ((INTERPRETERS.test(name) || SHELLS.test(name)) && isGivenFile) || name === 'source' || first === '.' || /^\.{0,2}\//.test(raw)
+}
+
+/** Whether a word is an assignment (`NAME=...`, `NAME[i]=...`, `NAME+=...`): what is quoted in it is kept by the shell. */
+const isAssignment = (text: string) => /^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=/.test(text)
+
+/**
+ * The first protected file the command names outside its quoted plain arguments: an unquoted word, an output target, an
+ * assignment, a word of a substitution, a here-string, a quoted word that holds a `$(...)` or a backtick, and every word
+ * of a command that keeps its quoted words (KEEPS_QUOTES; printf with -v). A name only inside a quoted argument of any
+ * other command (`echo "... task-queue.json ..."`) is data.
+ */
+function namedOutsideData(segments: readonly Segment[], files: readonly ProtectedFile[]): ProtectedFile | undefined {
+  for (const segment of segments) {
+    const first = (segment.words[0]?.text ?? '').toLowerCase()
+    const isKept = segment.isSubstitution || KEEPS_QUOTES.has(first) || (first === 'printf' && segment.words.some(one => one.text === '-v'))
+    for (const word of [...segment.words, ...segment.outputs]) {
+      const counts = isKept || !word.isQuoted || segment.outputs.includes(word) || isAssignment(word.text) || /\$\(|`/.test(word.text) || segment.hereStrings.includes(word.text)
+      const hit = counts ? firstNamed(word.text, files) : undefined
+      if (hit !== undefined) return hit
+    }
+  }
+  return undefined
+}
+
+/** The code rule of an interpreter: code that names a protected file and does something that writes. */
+function codeHit(code: string, files: readonly ProtectedFile[]): ProtectedFile | undefined {
+  const hit = firstNamed(code, files)
+  return hit !== undefined && WRITE_MARKERS.test(code) ? hit : undefined
+}
+
+/**
+ * What a heredoc or here-string's text is to the pipeline that reads it, from the segment that holds it to the end of
+ * its pipeline: `code` when a shell reads it (checked as a command line), `script` when an interpreter does (its code
+ * rule), `data` when every command is a data sink (DATA_SINKS; git commit, tag, notes), `operands` when xargs turns it
+ * into arguments, else `lines`: read as command lines, as the guard did before it knew heredocs.
+ */
+function feedOf(segments: readonly Segment[], at: number): { kind: 'code' | 'script' | 'data' | 'operands' | 'lines'; name: string } {
+  const chain: Segment[] = []
+  for (let index = at; index < segments.length; index++) {
+    chain.push(segments[index] as Segment)
+    if (!(segments[index] as Segment).isPiped) break
+  }
+  const commands = chain.map(commandOf)
+  const shell = commands.find(one => SHELLS.test(one.name) || POWERSHELLS.test(one.name) || one.name === 'source' || one.name === 'eval')
+  if (shell !== undefined) return { kind: 'code', name: shell.raw }
+  const interpreter = commands.find(one => INTERPRETERS.test(one.name))
+  if (interpreter !== undefined) return { kind: 'script', name: interpreter.raw }
+  const xargs = commands.find(one => one.isXargs)
+  if (xargs !== undefined) return { kind: 'operands', name: `xargs ${xargs.raw}` }
+  const isData = commands.every(one => !one.isXargs && (DATA_SINKS.has(one.name) || (one.name === 'git' && one.args.some(arg => GIT_MESSAGES.has(arg)))))
+  return { kind: isData ? 'data' : 'lines', name: commands[0]?.raw ?? '' }
+}
+
 /**
  * Whether a Bash or PowerShell command writes a protected file, by its text: a redirection to it (or to a variable while
- * the command names it), a writing command or cmdlet given it (tee, mv, cp, rm, truncate, install, ln, editors,
- * Set-Content, Out-File, Add-Content, Remove-Item, Move-Item and the rest of WRITERS), `sed -i`, `perl -i`, `ruby -i`,
- * `awk -i inplace`, `yq -i`, `dd of=`, `git checkout|restore|rm|mv` of it, `find ... -delete|-exec`, an interpreter's
- * code that names it and writes, a .NET file call that names it; and the same inside `sh -c`, `bash -c`, `eval`,
- * `cmd /c` and `powershell -Command`. Undefined: the command reads it, or names no protected file.
+ * the command names it outside its quoted plain arguments), a writing command or cmdlet given it (tee, mv, cp, rm,
+ * truncate, install, ln, editors, Set-Content, Out-File, Add-Content, Remove-Item, Move-Item and the rest of WRITERS),
+ * `sed -i`, `perl -i`, `ruby -i`, `awk -i inplace`, `yq -i`, `dd of=`, `git checkout|restore|rm|mv` of it,
+ * `find ... -delete|-exec`, an interpreter's code that names it and writes, a .NET file call that names it; and the same
+ * inside `sh -c`, `bash -c`, `eval`, `cmd /c`, `powershell -Command`, a `$(...)` or backtick substitution (in double
+ * quotes and in an unquoted heredoc too), and a heredoc or here-string a shell or an interpreter reads. A heredoc's body
+ * that only data sinks read (`cat > prompt.md <<'EOF'`) is text and is not read for names. Undefined: the command reads
+ * it, or names no protected file.
  */
 export function commandVerdict(command: string, files: readonly ProtectedFile[], dialect: 'bash' | 'powershell', depth = 0): CommandHit | undefined {
-  const named = firstNamed(command, files)
-  if (named === undefined || depth > 3) return undefined
+  if (firstNamed(command, files) === undefined || depth > 3) return undefined
   const isPowerShell = dialect === 'powershell'
-  if (DOTNET_WRITE.test(command)) return { file: named, how: 'a .NET file call' }
-  for (const segment of segmentsOf(command, isPowerShell)) {
+  if (DOTNET_WRITE.test(command)) {
+    const named = firstNamed(command, files)
+    if (named !== undefined) return { file: named, how: 'a .NET file call' }
+  }
+  // A command that also runs a script (a file an interpreter or a shell runs, `source`, `./x`) may run what its heredoc
+  // wrote: its heredoc bodies are read as before, as command lines and as the interpreter's code.
+  const cut = isPowerShell ? { text: command, heredocs: [] } : cutHeredocs(command)
+  const isScriptRun = !isPowerShell && segmentsOf(cut.text, false).some(runsScript)
+  const { text, heredocs } = isScriptRun ? { text: command, heredocs: [] } : cut
+  const segments = segmentsOf(text, isPowerShell)
+  // What runs inside the text: substitutions, and each heredoc as its pipeline reads it.
+  if (!isPowerShell) {
+    for (const inner of substitutionsOf(text)) {
+      const hit = commandVerdict(inner, files, 'bash', depth + 1)
+      if (hit !== undefined) return hit
+    }
+    for (const heredoc of heredocs) {
+      if (firstNamed(heredoc.body, files) === undefined) continue
+      const at = segments.findIndex(segment => segment.words.some(one => one.text === heredoc.mark))
+      const feed = feedOf(segments, Math.max(0, at))
+      if (!heredoc.isQuoted) {
+        for (const inner of substitutionsOf(heredoc.body, true)) {
+          const hit = commandVerdict(inner, files, 'bash', depth + 1)
+          if (hit !== undefined) return hit
+        }
+      }
+      if (feed.kind === 'data') continue
+      if (feed.kind === 'script') {
+        const hit = codeHit(heredoc.body, files)
+        if (hit !== undefined) return { file: hit, how: `${feed.name} code that writes it (a heredoc)` }
+        continue
+      }
+      if (feed.kind === 'operands') return { file: firstNamed(heredoc.body, files) as ProtectedFile, how: `a heredoc fed to ${feed.name}` }
+      const hit = commandVerdict(heredoc.body, files, 'bash', depth + 1)
+      if (hit !== undefined) return hit
+    }
+  }
+  const named = isPowerShell ? firstNamed(command, files) : namedOutsideData(segments, files)
+  for (const [index, segment] of segments.entries()) {
     for (const target of segment.outputs) {
       const hit = firstNamed(target.text, files)
       if (hit !== undefined) return { file: hit, how: 'an output redirection (>)' }
-      if (target.isExpanded) return { file: named, how: 'an output redirection to a variable, in a command that names the file' }
+      if (target.isExpanded && named !== undefined) return { file: named, how: 'an output redirection to a variable, in a command that names the file' }
     }
-    const words = segment.words.map(one => one.text)
-    let at = 0
-    while (at < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[at] ?? '') || PREFIXES.has((words[at] ?? '').toLowerCase()) || (at > 0 && PREFIXES.has((words[at - 1] ?? '').toLowerCase()) && (words[at] ?? '').startsWith('-')))) at++
-    const rawCommand = words[at] ?? ''
-    const name = rawCommand.replace(/^.*[\\/]/, '').replace(/^microsoft\.powershell\.\w+\\/i, '').toLowerCase()
-    const args = words.slice(at + 1)
+    const { raw: rawCommand, name, args } = commandOf(segment)
     const argHit = args.map(arg => firstNamed(arg, files)).find(one => one !== undefined)
     if (WRITERS.has(name) && argHit !== undefined) return { file: argHit, how: rawCommand }
     if (name === 'sed' && args.some(arg => /^-[^-]*i|^--in-place/.test(arg)) && argHit !== undefined) return { file: argHit, how: 'sed -i' }
@@ -298,15 +645,29 @@ export function commandVerdict(command: string, files: readonly ProtectedFile[],
     if (/^g?awk$/.test(name) && args.some((arg, i) => arg === '--inplace' || (arg === '-i' && args[i + 1] === 'inplace')) && argHit !== undefined) return { file: argHit, how: 'awk -i inplace' }
     if (name === 'dd') {
       const out = args.find(arg => /^of=/i.test(arg) && firstNamed(arg, files) !== undefined)
-      if (out !== undefined) return { file: firstNamed(out, files) ?? named, how: 'dd of=' }
+      if (out !== undefined) return { file: firstNamed(out, files) ?? (argHit as ProtectedFile), how: 'dd of=' }
     }
     if (name === 'git' && args.some(arg => ['checkout', 'restore', 'rm', 'mv', 'apply'].includes(arg)) && argHit !== undefined) return { file: argHit, how: `git ${args.find(arg => ['checkout', 'restore', 'rm', 'mv', 'apply'].includes(arg))}` }
     if (name === 'find' && args.some(arg => /^-(delete|exec|execdir|ok|okdir|fprint|fprintf|fls)$/.test(arg)) && argHit !== undefined) return { file: argHit, how: 'find -delete or -exec' }
+    // A here-string a shell or an interpreter reads is code.
+    for (const fed of segment.hereStrings) {
+      if (firstNamed(fed, files) === undefined) continue
+      const feed = feedOf(segments, index)
+      if (feed.kind === 'code') {
+        const hit = commandVerdict(fed, files, 'bash', depth + 1)
+        if (hit !== undefined) return hit
+      }
+      if (feed.kind === 'script') {
+        const hit = codeHit(fed, files)
+        if (hit !== undefined) return { file: hit, how: `${feed.name} code that writes it (a here-string)` }
+      }
+    }
     if (INTERPRETERS.test(name)) {
       const codeAt = args.findIndex(arg => /^(-c|-e|-E|--eval|-p|--print|-r)$/.test(arg))
-      const code = codeAt >= 0 ? (args[codeAt + 1] ?? '') : /^g?awk$/.test(name) ? (args.find(arg => !arg.startsWith('-')) ?? '') : command
-      const codeHit = firstNamed(code, files)
-      if (codeHit !== undefined && WRITE_MARKERS.test(code)) return { file: codeHit, how: `${name} code that writes it` }
+      // Without a code argument the whole command line, heredoc bodies aside (a heredoc it reads was checked above).
+      const code = codeAt >= 0 ? (args[codeAt + 1] ?? '') : /^g?awk$/.test(name) ? (args.find(arg => !arg.startsWith('-')) ?? '') : text
+      const hit = codeHit(code, files)
+      if (hit !== undefined) return { file: hit, how: `${name} code that writes it` }
     }
     if (SHELLS.test(name) || name === 'eval') {
       const codeAt = args.findIndex(arg => /^(-c|\/c|\/k)$/i.test(arg))

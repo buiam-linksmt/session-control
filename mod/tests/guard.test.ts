@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { HELPER_FILES, UNGUARDED_FILES, commandVerdict, denyText, normalPath, pathVerdict, protectedFiles, writeKind } from '../hooks/guard'
+import { HELPER_FILES, UNGUARDED_FILES, commandVerdict, cutHeredocs, denyText, normalPath, pathVerdict, protectedFiles, substitutionsOf, writeKind } from '../hooks/guard'
 import { NOW_MS } from './fixtures'
 import { HOME, OPTIONS, ORCH, REGISTRY, RUNS, mockWorld, seedLiveWorker } from './mock-world'
 import type { World } from './mock-world'
@@ -306,6 +306,119 @@ describe('guard.ts on Windows paths and PowerShell', () => {
       expect({ command, hit: commandVerdict(command, raw, 'powershell') }).toEqual({ command, hit: undefined })
     }
     expect(denyText('PowerShell', raw[2] ?? raw[0]!, 'Set-Content')).toContain('session-control tool queue_task, never by hand (PowerShell: Set-Content)')
+  })
+})
+
+describe('heredocs, quoted arguments and substitutions (decision mod-20: a prompt-file heredoc that only names a helper file runs)', () => {
+  const files = protectedFiles(PLACES)
+  const verdict = (command: string) => commandVerdict(command, files, 'bash')
+  const PROMPT_BODY = [
+    'Update task-queue.json only through queue_task; never edit open-points.json by hand.',
+    'cp x task-queue.json',
+    '> open-points.json',
+    "node writes agreed-decisions.md, the worker's task-queue.json",
+    'sed -i s/a/b/ task-queue.json',
+  ].join('\n')
+
+  test('the reported case through the plugin: a prompt file written by a heredoc to a variable path runs; a redirect to a helper file in the same form is refused', { options: OPTIONS }, async ($, on) => {
+    const { call } = await started($, on)
+    const allowed = `SCRATCH=/tmp/scratch\ncat > "$SCRATCH/prompt.md" <<'PROMPT_EOF'\n${PROMPT_BODY}\nPROMPT_EOF\ntest -s "$SCRATCH/prompt.md"`
+    const answer = await call('Bash', { command: allowed })
+    expect({ isRefused: answer.isRefused, isPassed: answer.isPassed }).toEqual({ isRefused: false, isPassed: true })
+    const refused = await call('Bash', { command: `cat > task-queue.json <<'EOF'\n{}\nEOF` })
+    expect(refused.isRefused).toBe(true)
+    expect(refused.text).toContain('(Bash: an output redirection (>))')
+  })
+
+  test('allowed: a heredoc body (quoted or not, <<- too) that data sinks read only names a helper file, whatever its lines look like; a quoted plain argument names one beside a redirect to a variable', () => {
+    for (const command of [
+      `cat > /tmp/p.md <<'EOF'\n${PROMPT_BODY}\nEOF`,
+      `cat > /tmp/p.md <<"EOF"\n${PROMPT_BODY}\nEOF`,
+      `cat > /tmp/p.md <<\\EOF\n${PROMPT_BODY}\nEOF`,
+      `cat > /tmp/p.md <<EOF\nplain mention of task-queue.json and $HOME\nEOF`,
+      `cat <<-EOF > /tmp/p.md\n\trm task-queue.json\n\tEOF`,
+      `tee /tmp/p.md <<'EOF' >/dev/null\n${PROMPT_BODY}\nEOF`,
+      `cat <<'EOF' | grep task | wc -l\nrm task-queue.json\nEOF`,
+      `git commit -F - <<'EOF'\nfix: rm task-queue.json handling\nEOF`,
+      // A terminator line in quotes is no terminator: the rm line is still body.
+      `cat > /tmp/p <<'EOF'\nx\n'EOF'\nrm task-queue.json\nEOF`,
+      // Two heredocs on one line, each body to its own delimiter.
+      `cat > /tmp/p <<'A'; cat > /tmp/q <<'B'\nrm task-queue.json\nA\nrm open-points.json\nB`,
+      // An unquoted heredoc's substitution that only reads.
+      `cat > /tmp/p <<EOF\n$(cat task-queue.json)\nEOF`,
+      // A quoted heredoc's substitution is text.
+      `cat > /tmp/p <<'EOF'\n$(sed -i s/a/b/ task-queue.json)\n\`rm open-points.json\`\nEOF`,
+      // A quoted plain argument names it; the redirect goes to a variable.
+      'echo "Use queue_task, never task-queue.json by hand" > "$OUT"',
+      `printf '%s\\n' 'edit open-points.json only by open_point' >> "$P"`,
+      // Single quotes keep a substitution as text.
+      "echo '$(rm task-queue.json)'",
+      'grep queued <<< "$(cat task-queue.json)"',
+      // A here-string a reading command takes.
+      'cat <<< "see task-queue.json" > /tmp/x',
+      // A python heredoc that only reads.
+      `python3 - <<'EOF'\nprint(open('task-queue.json').read())\nEOF`,
+    ]) {
+      expect({ command, hit: verdict(command) }).toEqual({ command, hit: undefined })
+    }
+  })
+
+  test('still denied: a redirect, tee, sed -i, cp or mv onto a helper file, a python -c or node -e write, after or around a heredoc; a body a shell, an interpreter or xargs reads', () => {
+    const cases: readonly (readonly [string, string])[] = [
+      [`cat <<'EOF' > task-queue.json\n{}\nEOF`, 'an output redirection (>)'],
+      [`cat > /tmp/p <<'EOF'\nhello\nEOF\nsed -i s/a/b/ task-queue.json`, 'sed -i'],
+      [`cat > /tmp/p <<'EOF'\nhello\nEOF\ntee open-points.json < /tmp/p`, 'tee'],
+      [`cat > /tmp/p <<'EOF'\nhello\nEOF\ncp /tmp/p task-queue.json`, 'cp'],
+      [`cat > /tmp/p <<'EOF'\nhello\nEOF\nmv /tmp/p task-queue.json`, 'mv'],
+      [`cat > /tmp/p <<'EOF'\nx\nEOF\npython3 -c "open('task-queue.json','w').write('{}')"`, 'python3 code that writes it'],
+      [`cat > /tmp/p <<'EOF'\nx\nEOF\nnode -e "require('fs').writeFileSync('open-points.json','{}')"`, 'node code that writes it'],
+      // A terminator with a blank after it is no terminator; the real one ends the body, the rm after it runs.
+      [`cat > /tmp/p <<'EOF'\nEOF \nEOF\nrm task-queue.json`, 'rm'],
+      // `<<` inside a string is no heredoc: the next line is a command.
+      ['echo "a <<EOF b"\nrm task-queue.json\nEOF', 'rm'],
+      // An arithmetic shift is no heredoc either.
+      ['echo $((1<<2))\nrm task-queue.json', 'rm'],
+      // <<- strips the tabs of the terminator only; what follows it runs.
+      [`cat <<-EOF > /tmp/x\n\tmention task-queue.json\n\tEOF\nrm task-queue.json`, 'rm'],
+      // Substitutions run: in an unquoted heredoc, in double quotes, in backticks.
+      [`cat > /tmp/p <<EOF\n$(sed -i s/a/b/ task-queue.json)\nEOF`, 'sed -i'],
+      ['cat > /tmp/p <<EOF\n`rm task-queue.json`\nEOF', 'rm'],
+      ['echo "$(rm task-queue.json)"', 'rm'],
+      ['echo "`rm task-queue.json`"', 'rm'],
+      ['echo `rm task-queue.json`', 'rm'],
+      // A here-string or heredoc a shell or an interpreter reads is code.
+      ['bash <<< "sed -i s/a/b/ task-queue.json"', 'sed -i'],
+      [`python3 <<< "open('task-queue.json','w').write('x')"`, 'python3 code that writes it (a here-string)'],
+      [`bash <<'EOF'\nsed -i s/a/b/ task-queue.json\nEOF`, 'sed -i'],
+      [`cat <<'EOF' | sh\nrm open-points.json\nEOF`, 'rm'],
+      [`python3 - <<'EOF'\nimport json\njson.dump({}, open('task-queue.json', 'w'))\nEOF`, 'python3 code that writes it (a heredoc)'],
+      [`xargs rm <<'EOF'\ntask-queue.json\nEOF`, 'a heredoc fed to xargs rm'],
+      // A heredoc that writes a script the same command runs is read as before.
+      [`cat > /tmp/fix.py <<'EOF'\nimport json\njson.dump({}, open('open-points.json', 'w'))\nEOF\npython3 /tmp/fix.py`, 'python3 code that writes it'],
+      [`cat > /tmp/fix.sh <<'EOF'\nsed -i s/a/b/ task-queue.json\nEOF\nbash /tmp/fix.sh`, 'sed -i'],
+      // A consumer the guard does not know: the body is read as command lines, as before.
+      [`mycmd <<'EOF'\nsed -i s/a/b/ task-queue.json\nEOF`, 'sed -i'],
+      // The name kept by the shell: an assignment, a for list, a substitution's output.
+      ['f="task-queue.json"; echo x > "$f"', 'an output redirection to a variable, in a command that names the file'],
+      ['for f in "task-queue.json"; do echo x > "$f"; done', 'an output redirection to a variable, in a command that names the file'],
+      ['f=$(echo "task-queue.json"); echo x > "$f"', 'an output redirection to a variable, in a command that names the file'],
+      ['read f <<< "task-queue.json"; echo x > "$f"', 'an output redirection to a variable, in a command that names the file'],
+      // A shell keyword before the command.
+      ['for f in a; do sed -i s/a/b/ task-queue.json; done', 'sed -i'],
+      ['if true; then rm open-points.json; fi', 'rm'],
+    ]
+    for (const [command, how] of cases) expect({ command, how: verdict(command)?.how }).toEqual({ command, how })
+  })
+
+  test('cutHeredocs and substitutionsOf: bodies as Bash reads them, a mark each; substitutions outside single quotes', () => {
+    const cut = cutHeredocs("cat > a <<'X'; cat > b <<Y\none\nX\ntwo $(date)\nY\necho after")
+    expect(cut.heredocs.map(one => [one.body, one.isQuoted])).toEqual([['one', true], ['two $(date)', false]])
+    expect(cut.text).not.toContain('one')
+    expect(cut.text).toContain('echo after')
+    expect(cutHeredocs('echo "<<X"\nx\nX').heredocs).toEqual([])
+    expect(cutHeredocs('cat <<EOF\nno end').heredocs.map(one => one.body)).toEqual(['no end'])
+    expect(substitutionsOf('a $(b "c") `d` \'$(e)\' "$(f)" $((1+2))')).toEqual(['b "c"', 'd', 'f'])
+    expect(substitutionsOf("it's $(g)", true)).toEqual(['g'])
   })
 })
 
