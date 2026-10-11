@@ -19,7 +19,7 @@ import { PROBE_PS1, TREE_PS1, windowsHost } from '../hooks/host-windows'
 import { localDate } from '../hooks/store'
 import { checkInTable, helperAnswer, taskkillInTable, treeInTable } from './fake-helper'
 import type { ProcTable } from './fake-helper'
-import { NOW_MS } from './fixtures'
+import { NOW_MS, worldPath } from './fixtures'
 
 type Ran = { exitCode: number; stdout: string; stderr: string; isStdoutTruncated: boolean; isStderrTruncated: boolean }
 
@@ -115,17 +115,21 @@ function machine(env: Record<string, string>): Machine {
   return result
 }
 
-/** The machine beneath the plugins: the mock engine's fs, process, env and clock hooks answer from it. */
+/**
+ * The machine beneath the plugins: the mock engine's fs, process, env and clock hooks answer from it, each path in the
+ * form the machine keys it (worldPath: C:/... for a Windows machine, /... for a Linux one, on either host).
+ */
 function mount(on: On, m: Machine): void {
   mock.clock(on, { now: NOW_MS })
   mock.env(on, m.env)
-  on('fs.read', ($, e) => ({ value: m.read(e.path) }))
+  const at = (path: string) => worldPath(path, m.env.OS === 'Windows_NT')
+  on('fs.read', ($, e) => ({ value: m.read(at(e.path)) }))
   on('fs.write', ($, e) => {
-    m.files.set(keyOf(e.path), e.text)
+    m.files.set(keyOf(at(e.path)), e.text)
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: m.exists(e.path) }))
-  on('fs.stat', ($, e) => ({ value: m.stat(e.path) }))
+  on('fs.exists', ($, e) => ({ value: m.exists(at(e.path)) }))
+  on('fs.stat', ($, e) => ({ value: m.stat(at(e.path)) }))
   on('process.run', ($, e) => ({ value: m.run(e.argv, e.init?.stdin) }))
 }
 

@@ -355,7 +355,7 @@ function winWorld(on: On) {
   })
   on('fs.exists', ($, e) => ({ value: w.files.has(key(e.path)) || isDir(e.path) }))
   on('fs.stat', ($, e) => {
-    if ((e as { resolve?: boolean }).resolve === true && w.root === undefined && !given(e.path).startsWith('C:/')) w.root = given(e.path).replace(/\/+$/, '')
+    if ((e as { resolve?: boolean }).resolve === true && w.root === undefined && !given(e.path).startsWith('C:/w/')) w.root = given(e.path).replace(/\/+$/, '')
     const real = (e as { resolve?: boolean }).resolve === true ? { realPath: key(e.path) } : {}
     if (w.files.has(key(e.path))) return { value: { kind: 'file', size: 1, mtimeMs: NOW_MS, isLink: false, ...real } as never }
     if (isDir(e.path)) return { value: { kind: 'dir', size: 0, mtimeMs: NOW_MS, isLink: false, ...real } as never }

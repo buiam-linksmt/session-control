@@ -2,6 +2,17 @@
 // no real result file. Paths under /fixture/ exist nowhere; the integration
 // tests serve them through their own `fs.read` / `process.run` hooks.
 
+/**
+ * A path as a test's world keys its files, from the path the mock engine hands an fs hook. The engine makes a path
+ * absolute on the system the tests run on before the hook sees it: on Windows `/w/x` arrives as `C:\w\x` (the drive of
+ * the working directory, backslashes), on Linux `C:/w/x` arrives after the working directory (`<cwd>/C:/w/x`). A world
+ * of a Linux machine keys `/w/x` (a drive letter dropped); a world of a Windows machine (`isWindowsWorld`) keys `C:/w/x`.
+ */
+export function worldPath(path: string, isWindowsWorld = false): string {
+  const slashed = path.replace(/\\/g, '/')
+  return isWindowsWorld ? slashed.replace(/^.*?(?=[A-Za-z]:\/)/, '') : slashed.replace(/^[A-Za-z]:(?=\/)/, '')
+}
+
 export const NOW_SEC = 1_790_000_000
 export const NOW_MS = NOW_SEC * 1000
 

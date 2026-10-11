@@ -26,7 +26,7 @@ import {
 } from '../hooks/inspect'
 import { REDACTED, redact } from '../hooks/trace'
 import { helperAnswer } from './fake-helper'
-import { NOW_MS, NOW_SEC } from './fixtures'
+import { NOW_MS, NOW_SEC, worldPath } from './fixtures'
 import { OPTIONS as WORLD_OPTIONS, ORCH as WORLD_ORCH, REGISTRY as WORLD_REGISTRY, mockWorld } from './mock-world'
 
 const HOME = '/m/home'
@@ -175,21 +175,21 @@ function world(on: On, registry: object[] = REGISTRY): World {
   on('tool.register', ($, e) => ({ value: { tool: tool(e.name) } }))
   on('ui.toast', () => ({ value: undefined }))
   on('fs.read', ($, e) => {
-    const text = files.get(e.path)
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
-    if (w.unreadable.has(e.path)) throw new Error(`EFBIG ${e.path}`)
+    const text = files.get(worldPath(e.path))
+    if (text === undefined) throw new Error(`ENOENT ${worldPath(e.path)}`)
+    if (w.unreadable.has(worldPath(e.path))) throw new Error(`EFBIG ${worldPath(e.path)}`)
     return { value: text }
   })
   on('fs.write', ($, e) => {
-    w.writes.push(e.path)
-    files.set(e.path, e.text)
+    w.writes.push(worldPath(e.path))
+    files.set(worldPath(e.path), e.text)
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: files.has(e.path) }))
+  on('fs.exists', ($, e) => ({ value: files.has(worldPath(e.path)) }))
   on('fs.stat', ($, e) => {
-    const text = files.get(e.path)
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
-    return { value: { kind: 'file', size: text.length, mtimeMs: mtimes.get(e.path) ?? NOW_MS - 45_000, isLink: false } }
+    const text = files.get(worldPath(e.path))
+    if (text === undefined) throw new Error(`ENOENT ${worldPath(e.path)}`)
+    return { value: { kind: 'file', size: text.length, mtimeMs: mtimes.get(worldPath(e.path)) ?? NOW_MS - 45_000, isLink: false } }
   })
   on('process.run', ($, e) => {
     const argv = e.argv.map(String)
@@ -202,7 +202,7 @@ function world(on: On, registry: object[] = REGISTRY): World {
       const answer = helperAnswer(files, argv[2] ?? '', request, PROBE, path => path, mtimes)
       return ok(JSON.stringify(answer), answer.ok === true ? 0 : 1)
     }
-    if (cmd === 'mkdir' || cmd === 'test') return ok()
+    if (argv[0] === 'mkdir' || argv[0] === 'test') return ok()
     throw new Error(`unexpected command ${argv.join(' ')}`)
   })
   return w

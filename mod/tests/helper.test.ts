@@ -15,7 +15,7 @@ import type { HelperNote } from '../hooks/host-helper'
 import { posixHost } from '../hooks/host-posix'
 import { PROBE_PS1, windowsHost } from '../hooks/host-windows'
 import { helperAnswer as fakeHelper } from './fake-helper'
-import { NOW_MS } from './fixtures'
+import { NOW_MS, worldPath } from './fixtures'
 
 const ran = (stdout = '', exitCode = 0, stderr = '', isStdoutTruncated = false): ProcessRunResult => ({ exitCode, stdout, stderr, isStdoutTruncated, isStderrTruncated: false })
 
@@ -639,7 +639,8 @@ describe('withHelper on Windows', () => {
 const ORCH = '/m/orch'
 const PLUGIN_OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: true }
 
-type World = { sim: Sim; toasts: string[]; argv: string[][]; clock: ReturnType<typeof mock.clock> }
+/** `isWindowsHost`: the tests run on Windows, told by the engine's paths (a /m path reaches the fs hooks as C:\m). */
+type World = { sim: Sim; toasts: string[]; argv: string[][]; clock: ReturnType<typeof mock.clock>; isWindowsHost: boolean }
 
 /**
  * The machine beneath the plugin: fs over the map, process.run over the simulated commands with node wherever the
@@ -647,7 +648,11 @@ type World = { sim: Sim; toasts: string[]; argv: string[][]; clock: ReturnType<t
  */
 function world(on: On, node: string | undefined, answering: Answering = 'real', version: string | null = 'v24.14.0\n'): World {
   const sim = machine(answering, version)
-  const w: World = { sim, toasts: [], argv: [], clock: mock.clock(on, { now: NOW_MS }) }
+  const w: World = { sim, toasts: [], argv: [], clock: mock.clock(on, { now: NOW_MS }), isWindowsHost: false }
+  const seen = (path: string) => {
+    if (/^[A-Za-z]:\\/.test(path)) w.isWindowsHost = true
+    return worldPath(path)
+  }
   mock.env(on, { HOME: '/m/home' })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -657,18 +662,18 @@ function world(on: On, node: string | undefined, answering: Answering = 'real', 
     return { value: undefined }
   })
   on('fs.read', ($, e) => {
-    const text = sim.files.get(e.path)
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
+    const text = sim.files.get(seen(e.path))
+    if (text === undefined) throw new Error(`ENOENT ${seen(e.path)}`)
     return { value: text }
   })
   on('fs.write', ($, e) => {
-    sim.files.set(e.path, e.text)
+    sim.files.set(seen(e.path), e.text)
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: sim.files.has(e.path) }))
+  on('fs.exists', ($, e) => ({ value: sim.files.has(seen(e.path)) }))
   on('fs.stat', ($, e) => {
-    const text = sim.files.get(e.path)
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
+    const text = sim.files.get(seen(e.path))
+    if (text === undefined) throw new Error(`ENOENT ${seen(e.path)}`)
     return { value: { kind: 'file', size: text.length, mtimeMs: NOW_MS, isLink: false } as never }
   })
   on('fs.list', () => ({ value: [] as never }))
@@ -722,8 +727,9 @@ describe('helper options, through the plugin', () => {
     expect(nodeRuns(w)[0]).toEqual(['node', '--version'])
     const helper = nodeRuns(w).filter(argv => argv[1] !== '--version')
     expect(helper.length).toBeGreaterThan(0)
-    // The helper in the plugin's own folder ($.plugin.root), by absolute path.
-    expect(helper.every(argv => argv.length === 3 && /^\/.+\/helper\/host\.mjs$/.test(String(argv[1])) && !argv[1]?.includes('//'))).toBe(true)
+    // The helper in the plugin's own folder ($.plugin.root), by absolute path: /... on Linux, C:\... on Windows.
+    const absolute = w.isWindowsHost ? /^[A-Za-z]:\\[^/]+\/helper\/host\.mjs$/ : /^\/.+\/helper\/host\.mjs$/
+    expect(helper.every(argv => argv.length === 3 && absolute.test(String(argv[1])) && !argv[1]?.includes('//'))).toBe(true)
     expect(probes(w)).toEqual([['node', helper[0]?.[1] ?? '', 'probe']])
     expect(w.argv.filter(argv => argv[0] === 'sh')).toEqual([])
     expect(w.toasts).toEqual([])

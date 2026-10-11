@@ -9,7 +9,7 @@ import { MAX_FINDINGS, auditFindings, auditText, backupKind, decisionSections, l
 import type { AuditInput, Finding } from '../hooks/audit'
 import { parseProcFacts } from '../hooks/core'
 import { nodeAnswer } from './fake-helper'
-import { NOW_MS } from './fixtures'
+import { NOW_MS, worldPath } from './fixtures'
 
 const SID_LIVE = 'a1a1a1a1-1111-4111-8111-111111111111'
 const SID_DONE = 'd0d0d0d0-2222-4222-8222-222222222222'
@@ -363,23 +363,23 @@ function world(on: On, git: Git) {
   on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
   on('ui.toast', () => ({ value: undefined }))
   on('fs.read', ($, e) => {
-    const text = files.get(e.path)
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
+    const text = files.get(worldPath(e.path))
+    if (text === undefined) throw new Error(`ENOENT ${worldPath(e.path)}`)
     return { value: text }
   })
   on('fs.write', ($, e) => {
-    w.writes.push(e.path)
-    files.set(e.path, e.text)
+    w.writes.push(worldPath(e.path))
+    files.set(worldPath(e.path), e.text)
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: files.has(e.path) || e.path in dirs }))
+  on('fs.exists', ($, e) => ({ value: files.has(worldPath(e.path)) || worldPath(e.path) in dirs }))
   on('fs.stat', ($, e) => {
-    if (e.path === `${ORCH}/README.md`) return { value: { kind: 'file', size: 1, mtimeMs: NOW_MS - 2 * 3600_000, isLink: false } }
-    throw new Error(`ENOENT ${e.path}`)
+    if (worldPath(e.path) === `${ORCH}/README.md`) return { value: { kind: 'file', size: 1, mtimeMs: NOW_MS - 2 * 3600_000, isLink: false } }
+    throw new Error(`ENOENT ${worldPath(e.path)}`)
   })
   on('fs.list', ($, e) => {
-    const list = dirs[String(e.path)]
-    if (list === undefined) throw new Error(`ENOENT ${e.path}`)
+    const list = dirs[String(worldPath(e.path))]
+    if (list === undefined) throw new Error(`ENOENT ${worldPath(e.path)}`)
     return { value: list }
   })
   on('process.run', ($, e) => {

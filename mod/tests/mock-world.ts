@@ -11,7 +11,7 @@ import type { FsStat, On } from 'claude-code'
 
 import { helperAnswer, throughLinks, usageAnswerOf } from './fake-helper'
 import type { ProcTable } from './fake-helper'
-import { NOW_MS } from './fixtures'
+import { NOW_MS, worldPath } from './fixtures'
 
 /** The usage probe's arguments after the executable, as a probe process shows them in the table. */
 const USAGE_ARGS = ['-p', '/usage', '--no-session-persistence']
@@ -134,7 +134,7 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     commands: new Map(),
   }
   const { files, links } = world
-  const real = (path: string) => throughLinks(links, path.replace(/\/+$/, ''))
+  const real = (path: string) => throughLinks(links, worldPath(path).replace(/\/+$/, ''))
   const isDir = (path: string) => [...files.keys()].some(key => key.startsWith(`${real(path)}/`))
   const record = (path: string, via: string) => world.written.push({ path, via })
   const write = (path: string, text: string, via: string) => {
@@ -168,19 +168,19 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     return { value: { tool: `mcp__session-control__${e.name}` } }
   })
   on('fs.read', ($, e) => {
-    if (world.unreadable.has(real(e.path))) throw new Error(`EFBIG ${e.path}`)
-    const text = files.get(real(e.path))
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
+    if (world.unreadable.has(real(worldPath(e.path)))) throw new Error(`EFBIG ${worldPath(e.path)}`)
+    const text = files.get(real(worldPath(e.path)))
+    if (text === undefined) throw new Error(`ENOENT ${worldPath(e.path)}`)
     return { value: text }
   })
   on('fs.write', ($, e) => {
-    write(e.path, e.text, 'fs.write')
+    write(worldPath(e.path), e.text, 'fs.write')
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: files.has(real(e.path)) || isDir(e.path) }))
+  on('fs.exists', ($, e) => ({ value: files.has(real(worldPath(e.path))) || isDir(worldPath(e.path)) }))
   on('fs.stat', ($, e) => {
-    world.statted.push((e as { resolve?: boolean }).resolve === true ? `${e.path}+resolve` : e.path)
-    const path = e.path.replace(/\/+$/, '')
+    world.statted.push((e as { resolve?: boolean }).resolve === true ? `${worldPath(e.path)}+resolve` : worldPath(e.path))
+    const path = worldPath(e.path).replace(/\/+$/, '')
     const target = real(path)
     const base = { mtimeMs: NOW_MS, isLink: links.has(path) }
     const realPath = (e as { resolve?: boolean }).resolve === true ? { realPath: target } : {}
@@ -188,11 +188,11 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     if (isDir(path) || target === '/' || [HOME, ORCH, '/w', '/w/work'].includes(target)) return { value: { ...base, kind: 'dir', size: 0, ...realPath } as FsStat }
     // A link that leads nowhere is `other`, as the engine says it, with no realPath.
     if (links.has(path)) return { value: { ...base, kind: 'other', size: 0 } as FsStat }
-    throw new Error(`ENOENT ${e.path}`)
+    throw new Error(`ENOENT ${worldPath(e.path)}`)
   })
   on('fs.list', ($, e) => {
-    world.listed.push(e.path)
-    const dir = real(e.path)
+    world.listed.push(worldPath(e.path))
+    const dir = real(worldPath(e.path))
     const names = new Set([...files.keys()].filter(key => key.startsWith(`${dir}/`)).map(key => key.slice(dir.length + 1).split('/')[0] ?? ''))
     // A link (in links) is listed as one, as the engine lists it: `other`, isLink, not followed.
     for (const link of links.keys()) if (link.startsWith(`${dir}/`) && !link.slice(dir.length + 1).includes('/')) names.add(link.slice(dir.length + 1))
