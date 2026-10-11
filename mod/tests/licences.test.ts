@@ -609,11 +609,12 @@ const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z
 
 /**
  * A small Windows machine: files by their C:/ path (case kept as given), folders listed by what is under them, Node and
- * its helper (whose probeUsage answers the recorded text's answer, and records each request), an empty process probe.
+ * its helper (whose probeUsage answers the recorded text's answer, and records each request), a process probe that
+ * prints `probeOut` (empty unless a test sets it); `env` is added to the Windows environment.
  */
-function winWorld(on: On) {
-  const w = { files: new Map<string, string>(), links: new Map<string, string>(), runs: [] as string[][], usageRequests: [] as Record<string, unknown>[], clock: mock.clock(on, { now: NOW_MS }) }
-  mock.env(on, WIN_ENV)
+function winWorld(on: On, env: Record<string, string> = {}) {
+  const w = { files: new Map<string, string>(), links: new Map<string, string>(), runs: [] as string[][], usageRequests: [] as Record<string, unknown>[], clock: mock.clock(on, { now: NOW_MS }), probeOut: '' }
+  mock.env(on, { ...WIN_ENV, ...env })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
@@ -651,7 +652,8 @@ function winWorld(on: On) {
   on('process.run', ($, e) => {
     w.runs.push(e.argv.map(String))
     const ok = { exitCode: 0, stderr: '', stdout: '', isStdoutTruncated: false, isStderrTruncated: false }
-    if (e.argv[0] === POWERSHELL) return { value: ok }
+    // PROBE_PS1 prints what the test set (`probeOut`); TREE_PS1 nothing.
+    if (e.argv[0] === POWERSHELL) return { value: { ...ok, stdout: String(e.argv[6] ?? '').endsWith('/probe.ps1') ? w.probeOut : '' } }
     if (e.argv[0] === 'git') return { value: { ...ok, exitCode: 128 } }
     // The helper's usage probe: each licence answers what the recorded main text gives.
     if (e.argv[0] === 'node' && e.argv[2] === 'probeUsage') {
@@ -754,6 +756,58 @@ describe('list_licences on Windows', () => {
     expect(text.split('\n').slice(1, 3)).toEqual([`- default (config_dir C:/w/home/.claude) | ${MAIN_ROW} | age_seconds 0 | cached no`, `- Second (config_dir C:/w/home/.claude/Second) | ${MAIN_ROW} | age_seconds 0 | cached no`])
     expect(w.usageRequests).toEqual([{ configDir: 'C:/w/home/.claude', isInherited: true }, { configDir: 'C:/w/home/.claude/Second' }])
     expect(w.runs.some(argv => argv[0] === 'claude.exe')).toBe(false)
+  })
+})
+
+describe('the process probe on Windows', () => {
+  const seedLicences = (w: ReturnType<typeof winWorld>) => {
+    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
+    w.files.set(WIN_REGISTRY, '[]\n')
+    for (const dir of ['C:/w/home/.claude', 'C:/w/home/.claude/Second', 'C:/w/home/.claude-Work', 'D:/Lic/Extra']) {
+      w.files.set(`${dir}/.credentials.json`, credentialsText())
+      w.files.set(`${dir}/.claude.json`, configText())
+    }
+  }
+  const HEADLESS = '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model haiku'
+
+  test("it also looks for sessions files under the orchestrator's own config dir and each discovered licence, so an orphan under one of them shows its cwd and config dir", { options: WIN_OPTIONS }, async ($, on) => {
+    const w = winWorld(on, { CLAUDE_CONFIG_DIR: 'C:\\w\\own' })
+    seedLicences(w)
+    // What PROBE_PS1 prints for a headless claude whose sessions file it found under the licence Second.
+    w.probeOut = `P\t4242\tclaude\t9\tC:/w/work\tC:/w/home/.claude/Second\t${HEADLESS}\r\n`
+    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    const text = await answerOf($, 'list_sessions')
+    expect(text).toContain('- orphan (no registry entry) | pid 4242 | age 9s | cwd C:/w/work | config_dir C:/w/home/.claude/Second')
+    const probes = w.runs.filter(argv => argv[0] === POWERSHELL && String(argv[6] ?? '').endsWith('/probe.ps1'))
+    expect(probes.length).toBeGreaterThan(0)
+    for (const argv of probes) {
+      expect(argv.slice(7).filter(arg => arg.startsWith('c:'))).toEqual(['c:C:/w/own', 'c:C:/w/home/.claude', 'c:C:/w/home/.claude/Second', 'c:C:/w/home/.claude-Work', 'c:D:/Lic/Extra'])
+    }
+    // The licence tools' own scan keeps its age: the probe's folders are read apart from it.
+    expect((await answerOf($, 'list_licences')).split('\n')[0]).toContain('(directory scan fresh;')
+  })
+
+  test('a claude process whose command line cannot be read is no orphan row; the debug trace counts such processes each time the count changes', { options: { ...WIN_OPTIONS, debug: true } }, async ($, on) => {
+    const w = winWorld(on)
+    seedLicences(w)
+    const unreadable = 'P\t4343\tclaude\t9\t\t\t\r\n'
+    const headless = `P\t4242\tclaude\t9\tC:/w/work\t\t${HEADLESS}\r\n`
+    w.probeOut = unreadable + headless
+    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    const first = await answerOf($, 'list_sessions')
+    expect(first).toContain('| pid 4242 |')
+    expect(first).not.toContain('pid 4343')
+    await answerOf($, 'list_sessions')
+    w.probeOut = headless
+    await answerOf($, 'list_sessions')
+    const trace = w.files.get('C:/w/home/.claude/session-control/runs/trace.log') ?? ''
+    const counted = trace
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as Record<string, unknown>)
+      .filter(line => line.event === 'probe')
+      .map(line => line.unreadableCommandLines)
+    expect(counted).toEqual([1, 0])
   })
 })
 

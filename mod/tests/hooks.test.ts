@@ -1452,9 +1452,10 @@ describe('platform', () => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
     stubPanel(on)
     await $.session.start(start(`C:${ORCH_DIR}`))
-    // Node first (the probe runs only once it is found), then the probe.
+    // Node first (the probe runs only once it is found), then the probe, which also looks for sessions files under the
+    // discovered licences (here the default one alone).
     expect(w.runs[0]).toEqual(['node', '--version'])
-    expect(w.runs[1]).toEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT))])
+    expect(w.runs[1]).toEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT)), 'c:C:/fixture/home/.claude'])
     expect(w.writes.find(one => one.path.endsWith(`${WIN_RUNS}/probe.ps1`))?.text).toBe(PROBE_PS1)
     expect(w.runs.filter(argv => argv[0] === 'sh')).toEqual([])
     // The dead worker is harvested, the live one shows as running with its elapsed time.
@@ -1475,7 +1476,7 @@ describe('platform', () => {
       await w.clock.advance(5000)
       // The probe's stderr is output: the trace has its size, and the error that quotes it has … in its place.
       const message = 'the process probe failed (exit 1): \u2026'
-      const probe = [POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT))]
+      const probe = [POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT)), 'c:C:/fixture/home/.claude']
       expect(bare(traceOf(w, trace)).slice(before)).toEqual([
         { event: 'poll.tick' },
         { event: 'process.run', argv: probe, exitCode: 1, ms: 0, stderrBytes: 'Invalid class'.length },

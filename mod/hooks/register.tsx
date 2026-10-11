@@ -306,6 +306,10 @@ let digestDropped = 0
 let loadedAt = 0
 /** The licence tools' directory scan (licences.ts), kept SCAN_CACHE_MS in memory; `key` the home, default and option it was made for. */
 let licenceScan: { key: string; scan: LicenceScan } | undefined
+/** The folders the Windows probe also looks in for sessions files (probeConfigDirs), kept SCAN_CACHE_MS apart from licenceScan; `key` as its. */
+let probeDirs: { key: string; dirs: string[]; at: number } | undefined
+/** How many claude processes the last Windows probe read without a command line (noteUnreadable); a trace line when it changes. */
+let unreadableSeen = 0
 /** probe_licence_usage's answers per licence directory (licences.ts, isUsageFresh), in memory for the load. */
 const usageSeen = new Map<string, UsageSeen>()
 /**
@@ -623,12 +627,32 @@ async function ensureHelperFiles($: EngineInterface): Promise<void> {
   await (await hostOf($)).prepareHelperDirs(portOf($), orchPath('backups'))
 }
 
-/** The process facts (host.probe); `configDirs` are where the probe may look for sessions files too. */
+/**
+ * The process facts (host.probe); `configDirs` are where the probe may look for sessions files too. On Windows the probe
+ * finds a claude process's cwd and config dir only through its sessions file, so it also looks under the orchestrator's
+ * own config dir and the discovered licences (probeConfigDirs); on Linux it reads both from /proc for every process and
+ * takes no folders, so nothing is added there.
+ */
 async function probe($: EngineInterface, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
   const machine = await hostOf($)
-  const facts = await machine.probe(portOf($), entries, configDirs)
-  temp ??= tempPlaces($, machine.platform === 'windows')
+  const isWindows = machine.platform === 'windows'
+  const extra = isWindows ? (await probeConfigDirs($).catch(() => [])).filter(dir => !configDirs.some(one => machine.isDefaultConfigDir(one, dir))) : []
+  const facts = await machine.probe(portOf($), entries, [...configDirs, ...extra])
+  if (isWindows) noteUnreadable($, facts)
+  temp ??= tempPlaces($, isWindows)
   return { ...facts, temp: await temp }
+}
+
+/**
+ * A claude process whose command line the probe could not read (on Windows: an elevated one, or one of another logon
+ * session, seen by an orchestrator that is neither) never counts as a `-p` session, so it is no orphan row; the debug
+ * trace counts them in a `probe` line each time that count changes.
+ */
+function noteUnreadable($: EngineInterface, facts: ProcFacts): void {
+  const count = facts.claude.filter(one => one.cmdline === '').length
+  if (count === unreadableSeen) return
+  unreadableSeen = count
+  trace($, 'probe', { unreadableCommandLines: count })
 }
 
 /** The system temporary directory for the orphan rule's e2e exemption: on Linux `/tmp` and `$TMPDIR` when it is set. */
@@ -1957,19 +1981,20 @@ async function sameDirOf($: EngineInterface): Promise<(a: string, b: string) => 
   return (a, b) => machine.isDefaultConfigDir(a, b)
 }
 
-/**
- * The machine's licences (licences.ts): the default directory, <home>/.claude, <home>/.claude/<name>, <home>/.claude-<name>
- * and the licenceDirs option, by directory listings and the presence of the two files. Kept SCAN_CACHE_MS in memory;
- * a call after that, or with another home, default directory or option, scans again.
- */
-async function scanLicences($: EngineInterface): Promise<{ scan: LicenceScan; isCached: boolean }> {
+/** What a licence scan is made for: the home, the default directory a launch inherits, and its cache key (with the licenceDirs option). */
+async function licenceKey($: EngineInterface): Promise<{ home: string; defaultDir: string; key: string }> {
   const machine = await hostOf($)
   const home = await homeDir($)
   const defaultDir = machine.defaultConfigDir(home, await ownConfigDir($))
-  const nowMs = await $.clock.now()
-  const key = JSON.stringify([home, defaultDir, config.licenceDirs])
-  const kept = licenceScan
-  if (kept !== undefined && kept.key === key && nowMs >= kept.scan.scannedAt && nowMs - kept.scan.scannedAt < SCAN_CACHE_MS) return { scan: kept.scan, isCached: true }
+  return { home, defaultDir, key: JSON.stringify([home, defaultDir, config.licenceDirs]) }
+}
+
+/**
+ * The machine's licences (licences.ts) as they are now: the default directory, <home>/.claude, <home>/.claude/<name>,
+ * <home>/.claude-<name> and the licenceDirs option, by directory listings and the presence of the two files.
+ */
+async function discoverLicences($: EngineInterface, home: string, defaultDir: string, nowMs: number): Promise<LicenceScan> {
+  const machine = await hostOf($)
   const isSame = await sameDirOf($)
   const listed = async (dir: string) => (await $.fs.list(dir).catch(() => [])).map(one => ({ name: one.name, kind: one.kind }))
   // A regular file, or a link that leads to one ($.fs.stat follows a link): a directory, a broken link or anything else
@@ -1985,10 +2010,43 @@ async function scanLicences($: EngineInterface): Promise<{ scan: LicenceScan; is
     const one = licenceOf(candidate, { credentials, config: credentials && (await isThere(`${candidate.configDir}/.claude.json`)), homeConfig })
     if (one !== undefined) licences.push(one)
   }
-  const scan: LicenceScan = { licences, skipped: found.skipped, ignored: explicit.ignored, scannedAt: nowMs }
+  return { licences, skipped: found.skipped, ignored: explicit.ignored, scannedAt: nowMs }
+}
+
+/**
+ * The licence tools' scan (discoverLicences), kept SCAN_CACHE_MS in memory; a call after that, or with another home,
+ * default directory or option, scans again.
+ */
+async function scanLicences($: EngineInterface): Promise<{ scan: LicenceScan; isCached: boolean }> {
+  const { home, defaultDir, key } = await licenceKey($)
+  const nowMs = await $.clock.now()
+  const kept = licenceScan
+  if (kept !== undefined && kept.key === key && nowMs >= kept.scan.scannedAt && nowMs - kept.scan.scannedAt < SCAN_CACHE_MS) return { scan: kept.scan, isCached: true }
+  const scan = await discoverLicences($, home, defaultDir, nowMs)
   licenceScan = { key, scan }
-  trace($, 'licences.scan', { licences: licences.length, skipped: found.skipped, ignored: explicit.ignored })
+  trace($, 'licences.scan', { licences: scan.licences.length, skipped: scan.skipped, ignored: scan.ignored })
   return { scan, isCached: false }
+}
+
+/**
+ * Where the Windows probe also looks for sessions files: the orchestrator's own CLAUDE_CONFIG_DIR and the folder of
+ * each discovered licence (discoverLicences), each once. Kept SCAN_CACHE_MS in memory apart from the licence tools'
+ * scan, whose age list_licences reports.
+ */
+async function probeConfigDirs($: EngineInterface): Promise<string[]> {
+  const machine = await hostOf($)
+  const { home, defaultDir, key } = await licenceKey($)
+  const nowMs = await $.clock.now()
+  const kept = probeDirs
+  if (kept !== undefined && kept.key === key && nowMs >= kept.at && nowMs - kept.at < SCAN_CACHE_MS) return kept.dirs
+  const own = await ownConfigDir($)
+  const scan = await discoverLicences($, home, defaultDir, nowMs)
+  const dirs: string[] = []
+  for (const dir of [...(own === undefined ? [] : [machine.nativePath(own)]), ...scan.licences.map(one => one.configDir)]) {
+    if (!dirs.some(one => machine.isDefaultConfigDir(one, dir))) dirs.push(dir)
+  }
+  probeDirs = { key, dirs, at: nowMs }
+  return dirs
 }
 
 /** list_licences: the scan, and the registry's sessions per licence from a fresh probe (paths normalised, links not resolved). */
@@ -2343,6 +2401,8 @@ export const register: Register = (on, options) => {
   digestDropped = 0
   loadedAt = 0
   licenceScan = undefined
+  probeDirs = undefined
+  unreadableSeen = 0
   usageSeen.clear()
   isUsageProbing = false
   config = {
