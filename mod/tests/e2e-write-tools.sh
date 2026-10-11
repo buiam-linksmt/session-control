@@ -155,11 +155,12 @@ SID8=$(printf '%s' "$SID" | cut -c1-8)
 RESULT_FILE=$(jq -r '(.[] | select(.title == "e2e pong worker")).result_file // empty' "$S/registry-at-outcome.json" 2>/dev/null)
 ERR_FILE=$(jq -r '(.[] | select(.title == "e2e pong worker")).err_file // empty' "$S/registry-at-outcome.json" 2>/dev/null)
 PROMPT_FILE=$(jq -r '(.[] | select(.title == "e2e pong worker")).prompt_file // empty' "$S/registry-at-outcome.json" 2>/dev/null)
-BASE=${RESULT_FILE%.json}
+WORKER_NAME=$(jq -r '(.[] | select(.title == "e2e pong worker")).name // empty' "$S/registry-at-outcome.json" 2>/dev/null)
+OWN_PROMPT=$RUNS/$WORKER_NAME.prompt.md
 check launch "Launched pid " 'the worker was launched'
 check launch ", registered. Name: w-e2e-pong-worker-" 'registered under its session name'
-check launch "Prompt: $BASE.prompt.md (written by the mod; section \"$FREE\" appended; rules block appended)." 'the answer names the prompt file and what was appended'
-if [ "$PROMPT_FILE" = "$BASE.prompt.md" ] && [ "${PROMPT_FILE#"$RUNS"/}" != "$PROMPT_FILE" ]; then pass "registry: prompt_file is the mod's file in the runs directory ($PROMPT_FILE)"; else fail "registry: prompt_file is the mod's file in the runs directory (got '$PROMPT_FILE')"; fi
+check launch "Prompt: $OWN_PROMPT (written by the mod; section \"$FREE\" appended; rules block appended)." 'the answer names the prompt file and what was appended'
+if [ -n "$WORKER_NAME" ] && [ "$PROMPT_FILE" = "$OWN_PROMPT" ]; then pass "registry: prompt_file is the mod's file in the runs directory, named by the session name ($PROMPT_FILE)"; else fail "registry: prompt_file is the mod's file in the runs directory, named by the session name (got '$PROMPT_FILE', name '$WORKER_NAME')"; fi
 if jq -e --arg s "$FREE" '(.[] | select(.title == "e2e pong worker")) | .section == $s and .outcome.kind == "clean" and (has("pid") | not)' "$S/registry-at-outcome.json" >/dev/null 2>&1; then pass 'registry: section recorded, outcome clean, pid dropped at the harvest'; else fail "registry: section recorded, outcome clean, pid dropped at the harvest: $(head -c 400 "$S/registry-at-outcome.json" 2>/dev/null)"; fi
 P=$S/prompt-copy.md
 if [ -s "$P" ]; then

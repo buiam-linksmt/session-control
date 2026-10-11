@@ -971,8 +971,13 @@ async function launch($: EngineInterface, given: LaunchInput) {
   const runsDir = await runsPath($)
   const nowMs = await $.clock.now()
   const base = `${runsDir}/${new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(0, 14)}-${slugify(filled.title ?? '')}`
+  // The session name of this launch, reserved now: it is unique per launch, and the prompt file the mod writes is named by it
+  // (a title and a second are not unique). A resume keeps its entry's name, so its prompt file adds the launch time.
+  const name = launchName(filled.title ?? '', nowMs, reg.entries, filled.resume_sid, issuedNames)
+  issuedNames.add(name)
+  const promptStem = filled.resume_sid === undefined ? name : `${name}-${new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(2, 14)}`
   const own: OwnPrompt | undefined =
-    composed !== undefined && (filled.prompt !== undefined || composed.text !== sourceText) ? { path: `${base}.prompt.md`, composed, ...(section === undefined ? {} : { section: section.heading }) } : undefined
+    composed !== undefined && (filled.prompt !== undefined || composed.text !== sourceText) ? { path: `${runsDir}/${promptStem}.prompt.md`, composed, ...(section === undefined ? {} : { section: section.heading }) } : undefined
   const args = launchArgsOf(filled, own?.path ?? filled.prompt_file ?? '')
   const checks = await machine.launchChecks(portOf($), args)
   // The prompt file the mod writes is checked as text: it is written once the guards have passed.
@@ -1020,7 +1025,7 @@ async function launch($: EngineInterface, given: LaunchInput) {
   }
   // No CLAUDE_CONFIG_DIR on the line: a fresh launch without a picker, or a resume under the default directory.
   const isConfigInherited = picker === '' && (verdict.resumeSid === undefined || machine.isDefaultConfigDir(verdict.configDir, defaultDir))
-  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, own, fromEntry })
+  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, name, own, fromEntry })
 }
 
 /** Start the worker as a background task of the host's launch tool, find its real pid and session, register it. */
@@ -1031,16 +1036,14 @@ async function spawnWorker(
   entries: readonly SessionEntry[],
   before: ProcFacts,
   own: string | undefined,
-  launchRun: { base: string; own?: OwnPrompt; fromEntry: readonly string[] },
+  launchRun: { base: string; name: string; own?: OwnPrompt; fromEntry: readonly string[] },
 ) {
   const machine = await hostOf($)
   const port = portOf($)
   // The launch's redirections need the runs directory.
   await machine.prepareRunsDir(port, await runsPath($))
-  const nowMs = await $.clock.now()
   const files = { result: `${launchRun.base}.json`, err: `${launchRun.base}.err` }
-  const name = launchName(args.title, nowMs, entries, verdict.resumeSid, issuedNames)
-  issuedNames.add(name)
+  const { name } = launchRun
   const command = machine.launchCommand(args, { ...verdict, name }, files.result, files.err)
   const known = new Set(before.claude.map(one => one.pid))
   const launchedAt = await $.clock.now()

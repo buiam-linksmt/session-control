@@ -79,8 +79,15 @@ const USER_PASS = String.raw`(?!\d+:\d+(?![^\s'"]))[^\s:'"/\\]+:(?![/\\])[^\s'"]
 /** curl's credential flag, `-u user:pass`, `--user user:pass` or `--user=user:pass`, quoted or not: the value goes, the flag stays. */
 const USER_FLAG = new RegExp(String.raw`(?<![^\s"'=])(-u\s+|--user(?:\s+|=))(["']?)${USER_PASS}\2(?![^\s'"])`, 'g')
 
-/** The value of `-u` or `--user` as one argument of an argv. */
-const USER_PASS_ARG = new RegExp(`^${USER_PASS}$`)
+/**
+ * The same flag with a quoted value whose password may hold blanks (`-u 'alice:s3cret pw'`): the quote, a user, a colon,
+ * a password up to the closing quote of the same kind; the same exceptions as USER_PASS (numeric on both sides, a second
+ * part that starts with a slash or a backslash), and a password that does not start with a blank (a blank password is none).
+ */
+const USER_FLAG_QUOTED = new RegExp(String.raw`(?<![^\s"'=])(-u\s+|--user(?:\s+|=))(["'])(?!\d+:\d+\2)[^\s:'"/\\]+:(?![/\\\s])(?:(?!\2)[^\n])+\2`, 'g')
+
+/** The value of `-u` or `--user` as one argument of an argv (a password with blanks included: the argument is the whole value). */
+const USER_PASS_ARG = /^(?!\d+:\d+$)[^\s:'"/\\]+:(?![/\\]).+$/s
 const USER_FLAG_ARG = /^(?:-u|--user)$/
 
 /**
@@ -153,6 +160,7 @@ export function redact(text: string): string {
   let out = shieldShas(text, kept)
     .replace(AUTHORIZATION, (_, name: string) => `${name}${REDACTED}`)
     .replace(URL_USERINFO, (_, scheme: string) => `${scheme}${REDACTED}@`)
+    .replace(USER_FLAG_QUOTED, (_, flag: string, quote: string) => `${flag}${quote}${REDACTED}${quote}`)
     .replace(USER_FLAG, (_, flag: string, quote: string) => `${flag}${quote}${REDACTED}${quote}`)
     .replace(SECRET_ASSIGNMENT, (_, name: string) => `${name}${REDACTED}`)
     .replace(SECRET_FLAG, (_, flag: string) => `${flag}${REDACTED}`)

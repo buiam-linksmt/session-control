@@ -1591,7 +1591,7 @@ describe('platform', () => {
     await $.session.start(start(`C:${ORCH_DIR}`))
     const { prompt_file: _file, ...inline } = winArgs
     const out = await settled(w, $.tool.call({ tool: TOOL, ...inline, prompt: 'Reply PONG.' } as never))
-    const own = `${WIN_RUNS}/20260921141320-new.prompt.md`
+    const own = `${WIN_RUNS}/w-new-260921141320.prompt.md`
     expect(String(out.result)).toEndWith(`errors: ${WIN_RUNS}/20260921141320-new.err. Prompt: ${own} (written by the mod; rules block appended).`)
     expect(w.writes.filter(one => one.path === own).map(one => one.text)).toEqual([`Reply PONG.\n\n${RULES_BLOCK}\n`])
     expect(w.bash[0]?.command).toBe(
@@ -1615,7 +1615,7 @@ describe('platform', () => {
     await $.session.start(start(`C:${ORCH_DIR}`))
     const { prompt_file: _file, ...inline } = winArgs
     const out = await settled(w, $.tool.call({ tool: TOOL, ...inline, prompt: 'Goal: x. Wait in the foreground. Report git status -sb. No attribution.' } as never))
-    const own = `${WIN_RUNS}/20260921141320-new.prompt.md`
+    const own = `${WIN_RUNS}/w-new-260921141320.prompt.md`
     expect(String(out.result)).toContain(`Prompt: ${own} (written by the mod).`)
     expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`, 'C:/work/new', own))
   })
@@ -1987,7 +1987,7 @@ describe('debug trace', () => {
         { event: 'tool.call', tool: 'archive_decisions' },
         { event: 'tool.call', tool: 'close_worker', session_ids: ['dddddddd'], keep: true },
       ])
-      expect(lines).toContainEqual({ event: 'launch.prompt', promptFile: `${HOME}/.claude/session-control/runs/20260921141320-new.prompt.md`, chars: expect.any(Number), isInline: true, isSectionAdded: true, isRulesAdded: true } as never)
+      expect(lines).toContainEqual({ event: 'launch.prompt', promptFile: `${HOME}/.claude/session-control/runs/w-new-260921141320.prompt.md`, chars: expect.any(Number), isInline: true, isSectionAdded: true, isRulesAdded: true } as never)
       const text = w.writes.filter(one => one.path === TRACE).map(one => one.text).join('')
       expect(text).not.toContain('zebra-canary')
       expect(text).not.toContain('Secret unit heading')
@@ -2387,7 +2387,8 @@ describe('a log whose session leaves the registry', () => {
 describe('launch_worker: inline prompt, decisions section, rules block, resume fill', () => {
   const RUNS = `${HOME}/.claude/session-control/runs`
   const BASE = `${RUNS}/20260921141320-new`
-  const OWN = `${BASE}.prompt.md`
+  // The prompt file is named by the launch's unique session name (a resume adds its launch time), no longer by the title and the second.
+  const OWN = `${RUNS}/w-new-260921141320.prompt.md`
   const fresh = { dir: '/work/new', model: 'opus', effort: 'high', title: 'new' }
   /** A prompt that carries the three items the launch guard checks. */
   const FULL = 'Goal: tidy the parser. Wait in the foreground. Report git status -sb. No AI attribution in commits.'
@@ -2446,6 +2447,19 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
     expect('section' in (lastRegistry(w).at(-1) as object)).toBe(false)
     // The prompt is never traced nor written anywhere else.
     expect(w.writes.filter(one => one.text.includes('tidy the parser')).map(one => one.path)).toEqual([OWN])
+  })
+
+  test('two launches of the same title in the same second write prompt files of their own: the path is the session name, unique per launch; neither overwrites the other', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    const first = `${FULL} First.`
+    const second = `${FULL} Second.`
+    await $.tool.call({ tool: TOOL, ...fresh, prompt: first } as never)
+    await $.tool.call({ tool: TOOL, ...fresh, prompt: second } as never)
+    const written = w.writes.filter(one => one.path.endsWith('.prompt.md'))
+    expect(written.map(one => one.path)).toEqual([`${RUNS}/w-new-260921141320.prompt.md`, `${RUNS}/w-new-260921141320-2.prompt.md`])
+    expect(written.map(one => one.text)).toEqual([first, second])
+    expect(new Set(written.map(one => one.path)).size).toBe(2)
   })
 
   test('an inline prompt that lacks the items gets the rules block once, and then passes the guard', { options: OPTIONS }, async ($, on) => {
@@ -2560,7 +2574,7 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
         expect(String(out.result)).toEndWith('From the entry: dir, model, effort, title.')
         expect(String(w.bash[0]?.command)).toStartWith(`cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='medium' claude -p --model 'opus' --resume '${SID_UNREPORTED}' -n 'w-parser-work-260920100000'`)
         expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ title: 'parser work', cwd: '/work/new', model: 'opus', effort: 'medium', pid: 7001 })
-        expect(String(w.bash[0]?.command)).toContain(`"$(cat '${RUNS}/20260921141320-parser-work.prompt.md')"`)
+        expect(String(w.bash[0]?.command)).toContain(`"$(cat '${RUNS}/w-parser-work-260920100000-260921141320.prompt.md')"`)
         expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
       } finally {
         WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'

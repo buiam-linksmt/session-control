@@ -165,6 +165,32 @@ describe('redaction', () => {
     expect(redactValue(['curl', '-u', 'alice:pw', '--user', 'bob:x', 'https://x'])).toEqual(['curl', '-u', REDACTED, '--user', REDACTED, 'https://x'])
   })
 
+  test("curl's credential flag with a quoted password that holds blanks: -u 'alice:s3cret pw', in any quote, in one string or as an argument", () => {
+    expect(redact(`curl -u 'alice:s3cret pw' https://example.com/api`)).toBe(`curl -u '${REDACTED}' https://example.com/api`)
+    expect(redact('curl -u "alice:s3cret pw" x')).toBe(`curl -u "${REDACTED}" x`)
+    expect(redact(`curl --user 'alice:s3cret pw' -s x`)).toBe(`curl --user '${REDACTED}' -s x`)
+    expect(redact(`curl --user='alice:s3cret pw' x`)).toBe(`curl --user='${REDACTED}' x`)
+    expect(redact(`curl -u 'alice:a very secret pass phrase' -H 'Accept: json' x`)).toBe(`curl -u '${REDACTED}' -H 'Accept: json' x`)
+    expect(redact(`curl -u "alice:it's secret" x`)).toBe(`curl -u "${REDACTED}" x`)
+    expect(redact(`-u 'alice:s3cret pw'`)).toBe(`-u '${REDACTED}'`)
+    expect(redact(`curl -u 'alice:s3cret pw' -u 'bob:other pw' x`)).toBe(`curl -u '${REDACTED}' -u '${REDACTED}' x`)
+    expect(redactValue(['curl', '-u', 'alice:s3cret pw', 'https://x'])).toEqual(['curl', '-u', REDACTED, 'https://x'])
+    expect(redactValue(['curl', '--user', 'alice:a b c', '-s'])).toEqual(['curl', '--user', REDACTED, '-s'])
+    // The exceptions of the unquoted form hold for the quoted one: numeric on both sides, a path or a URL as the second part, no password.
+    for (const kept of [`docker run -u '1000:1000' image`, `diff -u 'C:/a b' x`, `ssh -u 'x http://host:8080/path' y`, `curl -u 'alice: ' x`, `sort -u 'a b' names.txt`]) {
+      expect(redact(kept)).toBe(kept)
+    }
+    expect(redactValue(['docker', 'run', '-u', '1000:1000', 'image'])).toEqual(['docker', 'run', '-u', '1000:1000', 'image'])
+  })
+
+  test('known over-redaction: a -u or --user value of the form name:name goes, whatever the command (www-data, sort, echo, docker, git push)', () => {
+    expect(redact('docker run --user www-data:www-data image')).toBe(`docker run --user ${REDACTED} image`)
+    expect(redact('sort -u a:b')).toBe(`sort -u ${REDACTED}`)
+    expect(redact('echo -u foo:bar')).toBe(`echo -u ${REDACTED}`)
+    expect(redact('docker run -u root:root image')).toBe(`docker run -u ${REDACTED} image`)
+    expect(redact('git push -u origin:main')).toBe(`git push -u ${REDACTED}`)
+  })
+
   test('ordinary command lines with -u or --user stay as they are', () => {
     const kept = [
       'git push -u origin feature/write-tools',
