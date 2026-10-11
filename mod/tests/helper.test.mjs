@@ -671,3 +671,129 @@ test('probe: the live /proc gives the shell probe\'s lines, elapsed seconds asid
   const common = nodeLines.filter(line => shellLines.has(line))
   assert.ok(common.length >= Math.min(shellLines.size, nodeLines.length) - 2, `${shell}\n---\n${node}`)
 })
+
+// ---------------------------------------------------------------- the stop of stop_worker, on real processes
+
+/** A `[...].join('\n')` script of hooks/host-posix.ts, as the mod runs it. */
+function posixScript(name) {
+  const src = fs.readFileSync(join(HERE, '..', 'hooks', 'host-posix.ts'), 'utf8')
+  const found = new RegExp(`export const ${name} = (\\[[\\s\\S]*?\\])\\.join\\('\\\\n'\\)`).exec(src)
+  assert.ok(found, `${name} not found in host-posix.ts`)
+  return vm.runInNewContext(found[1]).join('\n')
+}
+
+/** Field 22 of /proc/<pid>/stat, or '' when the pid is gone. */
+function startOf(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(') ') + 2).split(' ')[19] ?? ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * A throwaway tree of this test's own: a shell that starts a sleep and a second shell that ignores TERM and starts a
+ * sleep of its own (which inherits the ignored TERM). Answers the root's pid once its three descendants are there, and
+ * a bystander sleep outside the tree.
+ */
+async function throwawayTree() {
+  const root = spawn('sh', ['-c', 'sleep 300 & sh -c \'trap "" TERM; sleep 300\' & wait'], { stdio: 'ignore' })
+  const bystander = spawn('sleep', ['300'], { stdio: 'ignore' })
+  const children = () => spawnSync('sh', ['-c', `pgrep -P ${root.pid}; for c in $(pgrep -P ${root.pid}); do pgrep -P $c; done`], { encoding: 'utf8' }).stdout.split('\n').filter(Boolean)
+  for (let at = 0; at < 100 && children().length < 3; at++) await new Promise(done => setTimeout(done, 50))
+  assert.equal(children().length, 3, 'the throwaway tree did not start')
+  return { root, bystander, all: [root.pid, ...children().map(Number)] }
+}
+
+/** Kills what is left of a throwaway tree (only this test's own pids, by their start). */
+function cleanup(tree, starts) {
+  for (const pid of [...tree.all, tree.bystander.pid]) if (startOf(pid) !== '' && startOf(pid) === starts.get(pid)) process.kill(pid, 'SIGKILL')
+}
+
+const lines = out => out.replace(/\n$/, '').split('\n').map(line => line.split('\t'))
+
+for (const via of ['helper', 'sh']) {
+  test(`stop (${via}): the tree is listed first, the root and every descendant stopped (KILL where TERM is ignored), the bystander untouched`, { skip: !IS_LINUX || !has('pgrep') }, async () => {
+    const tree = await throwawayTree()
+    const starts = new Map([...tree.all, tree.bystander.pid].map(pid => [pid, startOf(pid)]))
+    try {
+      const rootStart = starts.get(tree.root.pid)
+      const listed =
+        via === 'helper'
+          ? helper('processTree', { pid: tree.root.pid, start: rootStart }).answer.out
+          : spawnSync('sh', ['-c', posixScript('TREE_SCRIPT'), 'session-tree', String(tree.root.pid), rootStart], { encoding: 'utf8' }).stdout
+      const got = lines(listed)
+      assert.deepEqual(got[0].slice(0, 4), ['R', String(tree.root.pid), String(process.pid), rootStart])
+      assert.equal(got[0][5].trim(), 'sh')
+      const descendants = got.filter(cols => cols[0] === 'D')
+      assert.deepEqual(descendants.map(cols => Number(cols[1])).sort(), tree.all.slice(1).sort())
+      assert.deepEqual(descendants.map(cols => cols[5].trim()).sort(), ['sh', 'sleep', 'sleep'])
+      // The listing process's own ancestors: this test runner and those above it.
+      const ancestors = got.filter(cols => cols[0] === 'G').map(cols => Number(cols[1]))
+      assert.ok(ancestors.includes(process.pid), listed)
+      const targets = [tree.root.pid, ...descendants.map(cols => Number(cols[1]))].map(pid => `${pid}:${starts.get(pid)}`)
+      const stopped =
+        via === 'helper'
+          ? helper('stopProcesses', { wait: 2, targets }).answer.out
+          : spawnSync('sh', ['-c', posixScript('STOP_SCRIPT'), 'session-stop', '2', ...targets], { encoding: 'utf8' }).stdout
+      const steps = lines(stopped)
+      const sent = steps.filter(cols => cols[0] === 'S')
+      assert.deepEqual(sent[0].slice(0, 3), ['S', String(tree.root.pid), 'TERM'])
+      assert.ok(sent.every(cols => cols[4] === '0' && Math.abs(Number(cols[3]) - Date.now()) < 60_000), stopped)
+      // The shell that ignores TERM needed KILL (its sleep and, where the runner starts children with TERM ignored, the
+      // other sleep too); every signal went to a pid of the tree, KILL only after that pid's TERM and its re-check.
+      const killed = sent.filter(cols => cols[2] === 'KILL').map(cols => Number(cols[1]))
+      assert.ok(killed.length >= 1 && killed.every(pid => tree.all.includes(pid) && pid !== tree.root.pid), stopped)
+      assert.ok(sent.every(cols => tree.all.includes(Number(cols[1]))), stopped)
+      for (const pid of killed) {
+        const at = steps.findIndex(cols => cols[0] === 'S' && cols[1] === String(pid) && cols[2] === 'KILL')
+        assert.ok(steps.slice(0, at).some(cols => cols[0] === 'C' && cols[1] === String(pid) && cols[3] === 'alive'), stopped)
+      }
+      // The root's parent is this runner, blocked in the call: a root that died stays a zombie until the runner reaps it
+      // (exited, state Z); a descendant is reaped by its own shell or by init.
+      const ends = steps.filter(cols => cols[0] === 'F')
+      assert.deepEqual(ends.map(cols => cols[1]), targets.map(one => one.split(':')[0]))
+      assert.ok(ends.every(cols => cols[2] === 'gone' || (cols[2] === 'exited' && cols[3] === 'Z' && cols[1] === String(tree.root.pid))), stopped)
+      assert.ok(!steps.some(cols => cols[0] === 'S' && cols[2] === 'KILL' && ends.some(end => end[1] === cols[1] && end[2] === 'exited') && steps.indexOf(cols) > steps.findIndex(c => c[0] === 'C' && c[1] === cols[1] && c[3] === 'exited')), 'a zombie was signalled')
+      await new Promise(done => setTimeout(done, 300))
+      for (const pid of tree.all) assert.equal(startOf(pid) === starts.get(pid), false, `${pid} is still there`)
+      assert.equal(startOf(tree.bystander.pid), starts.get(tree.bystander.pid))
+    } finally {
+      cleanup(tree, starts)
+    }
+  })
+
+  test(`stop (${via}): a pid with another start is never signalled; this runner (an ancestor of the stop) is never signalled`, { skip: !IS_LINUX }, async () => {
+    const sleeper = spawn('sleep', ['300'], { stdio: 'ignore' })
+    await new Promise(done => setTimeout(done, 100))
+    const start = startOf(sleeper.pid)
+    try {
+      const wrong = `${sleeper.pid}:${Number(start) + 1}`
+      const own = `${process.pid}:${startOf(process.pid)}`
+      const run = targets =>
+        via === 'helper' ? helper('stopProcesses', { wait: 1, targets }).answer.out : spawnSync('sh', ['-c', posixScript('STOP_SCRIPT'), 'session-stop', '1', ...targets], { encoding: 'utf8' }).stdout
+      assert.deepEqual(lines(run([wrong])), [['X', String(sleeper.pid), 'gone'], ['F', String(sleeper.pid), 'gone', '']])
+      assert.deepEqual(lines(run([own])).map(cols => cols.slice(0, 3)), [['X', String(process.pid), 'own'], ['F', String(process.pid), 'alive']])
+      assert.equal(startOf(sleeper.pid), start)
+      const listed = via === 'helper' ? helper('processTree', { pid: sleeper.pid, start: String(Number(start) + 1) }).answer.out : spawnSync('sh', ['-c', posixScript('TREE_SCRIPT'), 'session-tree', String(sleeper.pid), String(Number(start) + 1)], { encoding: 'utf8' }).stdout
+      assert.deepEqual(lines(listed)[0], ['N', String(sleeper.pid), start])
+      assert.equal(lines(listed).filter(cols => cols[0] === 'D').length, 0)
+    } finally {
+      sleeper.kill('SIGKILL')
+    }
+  })
+}
+
+test('stop: a bad request is a fixed code, and a target list is never read from a fake /proc tree', { skip: !IS_LINUX }, () => {
+  assertFailure(helper('processTree', { pid: 0, start: '1' }), 'BAD_REQUEST')
+  assertFailure(helper('processTree', { pid: 1, start: 'x' }), 'BAD_REQUEST')
+  assertFailure(helper('stopProcesses', { wait: 1, targets: [] }), 'BAD_REQUEST')
+  assertFailure(helper('stopProcesses', { wait: 1, targets: ['self:1'] }), 'BAD_REQUEST')
+  assertFailure(helper('stopProcesses', { wait: 61, targets: ['5:1'] }), 'BAD_REQUEST')
+  assertFailure(helper('stopProcesses', { wait: 1, targets: ['0:1'] }), 'BAD_REQUEST')
+  assertFailure(helper('batch', { ops: [{ op: 'stopProcesses', wait: 1, targets: ['5:1'] }] }), 'BAD_OP')
+  // The probe's fake tree variable changes nothing here: the live /proc is read (pid 1 has the start it has there).
+  const live = helper('processTree', { pid: 1, start: startOf(1) }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: '/nonexistent' })
+  assert.equal(lines(live.answer.out)[0][0], 'R')
+})

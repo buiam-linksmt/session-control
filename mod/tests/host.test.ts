@@ -11,14 +11,15 @@ import type { FsStat, On } from 'claude-code'
 
 import { tailLines } from '../hooks/core'
 import { HOST_MEMBERS, selectHost } from '../hooks/host'
-import type { Host, HostPort } from '../hooks/host'
+import type { Host, HostPort, StopReport } from '../hooks/host'
 import { withHelper } from '../hooks/host-helper'
 import { withPowerShellLaunch } from '../hooks/host-powershell'
 import { NEWER_MAX } from '../hooks/host-shared'
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, TAIL_SHAPED_SCRIPT, posixHost } from '../hooks/host-posix'
-import { FILES_PS1, NEWER_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
+import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, STOP_SCRIPT, TAIL_SHAPED_SCRIPT, TREE_SCRIPT, posixHost } from '../hooks/host-posix'
+import { FILES_PS1, NEWER_PS1, PROBE_PS1, TREE_PS1, windowsHost } from '../hooks/host-windows'
 import { localDate } from '../hooks/store'
-import { helperAnswer, newerInMap, removeRegularInMap, throughLinks } from './fake-helper'
+import { checkInTable, helperAnswer, newerInMap, removeRegularInMap, stopInTable, taskkillInTable, throughLinks, treeInTable } from './fake-helper'
+import type { ProcTable } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
 type Ran = { exitCode: number; stdout: string; stderr: string; isStdoutTruncated: boolean; isStderrTruncated: boolean }
@@ -46,6 +47,10 @@ type Machine = {
   runs: string[][]
   /** Milliseconds waited on the engine's clock. */
   sleeps: number[]
+  /** The processes the stop of stop_worker sees, and every signal sent to one. */
+  table: ProcTable
+  /** A helper call that fails this way (stopProcesses only): the stop's fallback. */
+  helperStopFails?: string
   read(path: string): string
   exists(path: string): boolean
   stat(path: string): FsStat
@@ -59,6 +64,7 @@ function machine(env: Record<string, string>): Machine {
   const links = new Map<string, string>()
   const removals: string[] = []
   const runs: string[][] = []
+  const table: ProcTable = { procs: new Map(), own: [900, 1], signals: [], nowMs: NOW_MS }
   const isDir = (path: string) => [...files.keys()].some(file => file.startsWith(`${keyOf(path).replace(/\/+$/, '')}/`))
   const move = (from: string, to: string) => {
     const text = files.get(keyOf(from))
@@ -90,7 +96,11 @@ function machine(env: Record<string, string>): Machine {
       const out = isWin ? '' : probeOutput('/m/work', '/m/cfg', 'claude -p --model opus --output-format json -- Goal: x')
       const request = JSON.parse(stdin ?? '') as Record<string, unknown>
       if (argv[2] === 'removeFile') removals.push(keyOf(String(request.path)))
-      const answer = helperAnswer(files, String(argv[2]), request, out, keyOf, mtimes, links)
+      if (argv[2] === 'stopProcesses' && result.helperStopFails !== undefined) {
+        if (result.helperStopFails === 'TIMEOUT') throw new Error('the process timed out')
+        return ran(JSON.stringify({ ok: false, code: result.helperStopFails }), 1)
+      }
+      const answer = helperAnswer(files, String(argv[2]), request, out, keyOf, mtimes, links, isWin ? undefined : table)
       return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
     }
     // rm -f follows a link met on the way to the file, as the system's does: a path through a linked directory reaches the target.
@@ -122,6 +132,15 @@ function machine(env: Record<string, string>): Machine {
       const found = newerInMap(files, mtimes, keyOf(argv[4] ?? ''), Number(argv[5]))
       if (found === undefined) return ran('', 3)
       return ran(`${found.slice(0, Number(argv[6])).map(one => `${(one.mtimeMs / 1000).toFixed(10)}\t${one.path}\n`).join('')}N\t${found.length}\n`)
+    }
+    if (cmd === 'sh' && script === TREE_SCRIPT) return ran(treeInTable(table, Number(argv[4]), argv[5] ?? ''))
+    if (cmd === 'sh' && script === STOP_SCRIPT) return ran(stopInTable(table, Number(argv[4]), argv.slice(5)))
+    if (cmd?.endsWith('\\taskkill.exe')) return ran('', taskkillInTable(table, Number(argv[2]), argv.includes('/F')))
+    if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/tree.ps1')) {
+      expect(files.get(keyOf(argv[6]))).toBe(TREE_PS1)
+      const [op, a = '', b = ''] = argv.slice(7)
+      const out = op === 'list' ? treeInTable(table, Number(a), b) : checkInTable(table, argv.slice(9))
+      return ran(out.replace(/\n/g, '\r\n'))
     }
     if (cmd === 'sh' && script === PROBE_SCRIPT) return ran(probeOutput('/m/work', '/m/cfg', 'claude -p --model opus --output-format json -- Goal: x'))
     if (cmd === 'sh' && script?.startsWith('tail -n 600 ')) {
@@ -176,7 +195,8 @@ function machine(env: Record<string, string>): Machine {
     }
     throw new Error(`unexpected command ${argv.join(' ')}`)
   }
-  return { env, files, mtimes, links, removals, runs, sleeps: [], read, exists: path => files.has(keyOf(path)) || isDir(path), stat, run }
+  const result: Machine = { env, files, mtimes, links, removals, runs, sleeps: [], table, read, exists: path => files.has(keyOf(path)) || isDir(path), stat, run }
+  return result
 }
 
 /** The machine beneath the plugins: the mock engine's fs, process, env and clock hooks answer from it. */
@@ -474,6 +494,59 @@ describe('host contract', () => {
       expect(listed?.files.at(-1)?.path).toBe(`${root}/work/f25.txt`)
     })
 
+    /** A worker's tree: root 5000 with a child 5001 and a grandchild 5002 that ignores TERM; 6000 is outside it. */
+    const seedTree = (m: Machine) => {
+      m.table.procs.set(5000, { ppid: 1, start: '100', state: 'S', comm: 'claude' })
+      m.table.procs.set(5001, { ppid: 5000, start: '101', state: 'S', comm: 'bash' })
+      m.table.procs.set(5002, { ppid: 5001, start: '102', state: 'S', comm: 'sleep', isStubborn: true })
+      m.table.procs.set(6000, { ppid: 1, start: '50', state: 'S', comm: 'claude' })
+    }
+    const signalsOf = (steps: StopReport['steps']) => steps.flatMap(step => (step.kind === 'signal' ? [`${step.pid} ${step.signal}`] : []))
+
+    test(`${one.name}: stopProcessTree lists the tree before the first signal, stops the root, then the descendant still there; nothing outside the tree is signalled`, async () => {
+      const m = machine(one.env)
+      seedTree(m)
+      const notes: string[] = []
+      const report = await host.stopProcessTree(portOf(m, runs, notes), { pid: 5000, start: '100' })
+      expect(report.tree.root).toMatchObject({ pid: 5000, ppid: 1, start: '100', comm: 'claude' })
+      expect(report.tree.descendants.map(proc => [proc.pid, proc.ppid, proc.start, proc.comm])).toEqual([
+        [5001, 5000, '101', 'bash'],
+        [5002, 5001, '102', 'sleep'],
+      ])
+      expect(report.tree.ancestors).toEqual([900, 1])
+      // The listing ran before any signal: the first signal is recorded after it.
+      const listedAt = m.runs.findIndex(argv => argv.includes(TREE_SCRIPT) || argv.some(arg => arg.endsWith('/tree.ps1')) || argv.includes('processTree'))
+      const firstSignal = m.runs.findIndex(argv => argv.includes(STOP_SCRIPT) || argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))
+      expect(listedAt).toBeGreaterThanOrEqual(0)
+      expect(firstSignal).toBeGreaterThan(listedAt)
+      expect(signalsOf(report.steps)).toEqual(one.platform === 'linux' ? ['5000 TERM', '5001 TERM', '5002 TERM', '5002 KILL'] : ['5000 taskkill /T', '5002 taskkill /T', '5002 taskkill /T /F'])
+      expect(report.steps.filter(step => step.kind === 'check' && step.status === 'gone').map(step => step.pid).sort()).toEqual(one.platform === 'linux' ? [5000, 5001, 5002] : [5000, 5002])
+      expect(report.final).toEqual([5000, 5001, 5002].map(pid => ({ pid, status: 'gone', state: '' })))
+      expect([...m.table.procs.keys()]).toEqual([6000])
+      expect(m.table.signals.some(sent => sent.pid === 6000)).toBe(false)
+      expect(notes).toEqual([])
+      expect(report.notes).toEqual([])
+    })
+
+    test(`${one.name}: stopProcessTree signals nothing when the pid has another start (a reused pid) or is this session's own process or an ancestor of it`, async () => {
+      const m = machine(one.env)
+      seedTree(m)
+      const port = portOf(m, runs)
+      const reused = await host.stopProcessTree(port, { pid: 5000, start: '99' })
+      expect(reused.tree.root).toBeUndefined()
+      expect(reused.tree.rootStartNow).toBe('100')
+      expect(reused.steps).toEqual([{ kind: 'skip', pid: 5000, reason: 'gone' }])
+      const gone = await host.stopProcessTree(port, { pid: 7777, start: '1' })
+      expect(gone.tree.rootStartNow).toBe('')
+      expect(gone.steps).toEqual([{ kind: 'skip', pid: 7777, reason: 'gone' }])
+      m.table.own = [5000, 900, 1]
+      const own = await host.stopProcessTree(port, { pid: 5000, start: '100' })
+      expect(own.steps).toEqual([{ kind: 'skip', pid: 5000, reason: 'own' }])
+      expect(m.table.signals).toEqual([])
+      expect(m.table.procs.size).toBe(4)
+      expect(m.runs.some(argv => argv.includes(STOP_SCRIPT) || argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))).toBe(false)
+    })
+
     test(`${one.name}: no operation falls back (the helper, where there is one, answers every call)`, async () => {
       const m = machine(one.env)
       const notes: string[] = []
@@ -484,9 +557,32 @@ describe('host contract', () => {
       await host.writeAtomic(port, `${root}/orch/reg.json`, '[1]\n', '[]\n')
       await host.append(port, `${runs}/log`, ['x'], false, () => undefined)
       await host.tail(port, `${root}/t.jsonl`)
+      seedTree(m)
+      await host.stopProcessTree(port, { pid: 5000, start: '100' })
       expect(notes).toEqual([])
       const isHelped = one.name.endsWith('with the helper')
       expect(m.runs.some(argv => argv[0] === NODE && argv[1] === HELPER)).toBe(isHelped)
+    })
+  }
+})
+
+describe('the stop through the helper falls back over the same listing', () => {
+  for (const code of ['TIMEOUT', 'IO']) {
+    test(`linux with the helper: a stop the helper fails (${code}) is made by STOP_SCRIPT over the listing the helper made, and the report says so`, async () => {
+      const m = machine(LINUX_ENV)
+      m.isStdinPassed = true
+      m.table.procs.set(5000, { ppid: 1, start: '100', state: 'S', comm: 'claude' })
+      m.table.procs.set(5001, { ppid: 5000, start: '101', state: 'S', comm: 'sleep' })
+      m.helperStopFails = code
+      const notes: string[] = []
+      const report = await withHelper(posixHost, { node: NODE, script: HELPER }).stopProcessTree(portOf(m, '/m/runs', notes), { pid: 5000, start: '100' })
+      expect(notes).toEqual([`helper fallback: stopProcesses ${code}`])
+      expect(m.runs.some(argv => argv[1] === HELPER && argv[2] === 'processTree')).toBe(true)
+      expect(m.runs.some(argv => argv.includes(TREE_SCRIPT))).toBe(false)
+      expect(m.runs.filter(argv => argv.includes(STOP_SCRIPT)).map(argv => argv.slice(4))).toEqual([['10', '5000:100', '5001:101']])
+      expect(report.final.every(one => one.status === 'gone')).toBe(true)
+      expect(report.notes[0]).toContain(`the helper's stop failed (${code})`)
+      expect(report.notes[0]?.includes('signals it sent before that are not in this record')).toBe(code === 'TIMEOUT')
     })
   }
 })

@@ -18,8 +18,24 @@ import {
   winPath,
 } from './core'
 import type { LaunchInput, ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RemoveOutcome, RotatePlan, TailShape, WorkerWant } from './host'
-import { NEWER_MAX, PANE_TAIL, bashLaunchCommand, clockPause, parseNewerListing, readTail, removeOutcomeOfExit, rotateAndAppendWith, statLaunchChecks, writeAtomicWith, writeIfAbsent } from './host-shared'
+import type { Host, HostPort, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopStep, StopTarget, TailShape, WorkerWant } from './host'
+import {
+  NEWER_MAX,
+  PANE_TAIL,
+  STOP_WAIT_SECONDS,
+  bashLaunchCommand,
+  clockPause,
+  parseNewerListing,
+  parseStopOutput,
+  readTail,
+  removeOutcomeOfExit,
+  rotateAndAppendWith,
+  statLaunchChecks,
+  treeOf,
+  unstoppable,
+  writeAtomicWith,
+  writeIfAbsent,
+} from './host-shared'
 
 /**
  * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
@@ -242,6 +258,158 @@ export const PROBE_PS1 = [
   'exit 0',
 ].join('\r\n')
 
+/**
+ * The process tree of a stop and its re-checks, for Windows PowerShell 5.1, run as a file like FILES_PS1; it reads
+ * Win32_Process (ProcessId, ParentProcessId, CreationDate, Name) as PROBE_PS1 does and signals nothing: the signals are
+ * taskkill.exe, run by the adapter itself. A start is the creation time in epoch milliseconds (PROBE_PS1's arithmetic).
+ *   list <pid> <start>             R or N for the root, G for each ancestor of this script, D for each descendant
+ *   check <seconds> <pid:start>... after a sleep of the seconds given, an F line per target (gone: no process with
+ *                                  that pid and that start); the first target binds to $B, the rest come in $args
+ * A parent is taken as one only when it was created before its child: Windows keeps a dead parent's pid in
+ * ParentProcessId, and that pid may since name another process.
+ */
+export const TREE_PS1 = [
+  '# session-control: the process tree of a stop and its re-checks, for Windows PowerShell 5.1 (stop_worker)',
+  'param([string]$Op, [string]$A, [string]$B)',
+  '$env:PSModulePath = "$PSHOME\\Modules"',
+  "$ErrorActionPreference = 'Stop'",
+  '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
+  '$epoch = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)',
+  'function Ms([DateTime]$at) { return [long][Math]::Floor(($at.ToUniversalTime() - $epoch).TotalMilliseconds) }',
+  'function Flat($text) { if ($null -eq $text) { return \'\' } return ([string]$text -replace "[`t`r`n]", \' \') }',
+  'try {',
+  "  if ($Op -eq 'check' -and [int]$A -gt 0) { Start-Sleep -Seconds ([int]$A) }",
+  '  $procs = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate, Name)',
+  '  $byPid = @{}',
+  '  foreach ($proc in $procs) { $byPid[[long]$proc.ProcessId] = $proc }',
+  '  function StartOf([long]$id) { $proc = $byPid[$id]; if ($null -eq $proc -or $null -eq $proc.CreationDate) { return \'\' }; return "$(Ms $proc.CreationDate)" }',
+  '  function IsChild($child, [long]$parent) {',
+  '    $up = $byPid[$parent]',
+  '    return ($null -ne $up -and $null -ne $up.CreationDate -and $null -ne $child.CreationDate -and $up.CreationDate -le $child.CreationDate)',
+  '  }',
+  '  $out = New-Object System.Text.StringBuilder',
+  "  if ($Op -eq 'list') {",
+  '    $root = [long]$A',
+  '    $start = StartOf $root',
+  '    $isRoot = ($start -ne \'\' -and $start -eq $B)',
+  '    if ($isRoot) { [void]$out.Append("R`t$root`t$([long]$byPid[$root].ParentProcessId)`t$start`t`t$(Flat $byPid[$root].Name)`n") }',
+  '    else { [void]$out.Append("N`t$root`t$start`n") }',
+  '    $at = [long]$PID',
+  '    for ($hop = 0; $hop -lt 64; $hop++) {',
+  '      $me = $byPid[$at]',
+  '      if ($null -eq $me) { break }',
+  '      $up = [long]$me.ParentProcessId',
+  '      if ($up -le 0 -or -not (IsChild $me $up)) { break }',
+  '      [void]$out.Append("G`t$up`n")',
+  '      $at = $up',
+  '    }',
+  '    if ($isRoot) {',
+  '      $todo = New-Object System.Collections.Generic.Queue[long]',
+  '      $seen = @{}',
+  '      $todo.Enqueue($root); $seen[$root] = $true',
+  '      while ($todo.Count -gt 0) {',
+  '        $here = $todo.Dequeue()',
+  '        foreach ($proc in $procs) {',
+  '          $id = [long]$proc.ProcessId',
+  '          if ([long]$proc.ParentProcessId -ne $here -or $seen.ContainsKey($id) -or -not (IsChild $proc $here)) { continue }',
+  '          $seen[$id] = $true; $todo.Enqueue($id)',
+  '          [void]$out.Append("D`t$id`t$here`t$(StartOf $id)`t`t$(Flat $proc.Name)`n")',
+  '        }',
+  '      }',
+  '    }',
+  "  } elseif ($Op -eq 'check') {",
+  '    foreach ($one in (@($B) + @($args))) {',
+  '      $cut = ([string]$one).IndexOf(\':\')',
+  '      if ($cut -lt 1) { continue }',
+  '      $id = [long]([string]$one).Substring(0, $cut)',
+  '      $want = ([string]$one).Substring($cut + 1)',
+  '      $now = StartOf $id',
+  '      if ($now -ne \'\' -and $now -eq $want) { [void]$out.Append("F`t$id`talive`t`n") } else { [void]$out.Append("F`t$id`tgone`t`n") }',
+  '    }',
+  '  } else { throw "unknown operation: $Op" }',
+  '  [Console]::Out.Write($out.ToString())',
+  '} catch {',
+  '  [Console]::Error.WriteLine($_.Exception.Message)',
+  '  exit 1',
+  '}',
+  'exit 0',
+].join('\r\n')
+
+/** taskkill.exe by absolute path, as Windows ships it. */
+async function taskkill(port: HostPort): Promise<string> {
+  const root = (await port.env('SystemRoot')) ?? 'C:\\Windows'
+  return `${root.replace(/[\\/]+$/, '')}\\System32\\taskkill.exe`
+}
+
+/** Which of the targets (`<pid>:<start>`) are still alive, after a sleep of `sleepSec` inside TREE_PS1's check. */
+async function stillAlive(port: HostPort, targets: readonly string[], sleepSec: number): Promise<Set<number>> {
+  const ran = await runScript(port, 'tree.ps1', TREE_PS1, ['check', String(sleepSec), ...targets], 20_000 + sleepSec * 1000)
+  if (ran.exitCode !== 0) throw new Error(`the process check failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 160)}`)
+  return new Set(parseStopOutput(ran.stdout).final.filter(one => one.status === 'alive').map(one => one.pid))
+}
+
+/**
+ * The stop on Windows, in short steps (each one process, so no wait falls on the engine's clock): the tree by
+ * TREE_PS1's list unless given; then for the root, and after it for every descendant still alive: `taskkill /PID <pid>
+ * /T` (a console process without a window refuses that and needs /F; the exit code is recorded), a re-check every
+ * second for up to STOP_WAIT_SECONDS, `taskkill /PID <pid> /T /F` to one still there, re-checks for up to 3 seconds;
+ * then the end state of each.
+ */
+async function stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport> {
+  const listing = tree ?? treeOf((await runScript(port, 'tree.ps1', TREE_PS1, ['list', String(target.pid), target.start], 30_000)).stdout)
+  const early = unstoppable(listing, target)
+  if (early !== undefined) return early
+  const exe = await taskkill(port)
+  const steps: StopStep[] = []
+  const own = new Set(listing.ancestors)
+  const key = (one: { pid: number; start: string }) => `${one.pid}:${one.start}`
+  const group = async (members: readonly { pid: number; start: string }[]) => {
+    const live: { pid: number; start: string }[] = []
+    const alive = await stillAlive(port, members.map(key), 0)
+    for (const one of members) {
+      if (own.has(one.pid)) steps.push({ kind: 'skip', pid: one.pid, reason: 'own' })
+      else if (!alive.has(one.pid)) steps.push({ kind: 'skip', pid: one.pid, reason: 'gone' })
+      else {
+        const atMs = await port.now()
+        const ran = await port.run([exe, '/PID', String(one.pid), '/T'], { timeoutMs: 15_000 })
+        steps.push({ kind: 'signal', pid: one.pid, signal: 'taskkill /T', atMs, exitCode: ran.exitCode })
+        live.push(one)
+      }
+    }
+    if (live.length === 0) return
+    let waited = 0
+    let left = await stillAlive(port, live.map(key), 0)
+    while (waited < STOP_WAIT_SECONDS && left.size > 0) {
+      left = await stillAlive(port, live.map(key), 1)
+      waited++
+    }
+    const checkedAt = await port.now()
+    for (const one of live) steps.push({ kind: 'check', pid: one.pid, atMs: checkedAt, status: left.has(one.pid) ? 'alive' : 'gone', waitedSec: waited })
+    const rest = live.filter(one => left.has(one.pid))
+    if (rest.length === 0) return
+    for (const one of rest) {
+      const atMs = await port.now()
+      const ran = await port.run([exe, '/PID', String(one.pid), '/T', '/F'], { timeoutMs: 15_000 })
+      steps.push({ kind: 'signal', pid: one.pid, signal: 'taskkill /T /F', atMs, exitCode: ran.exitCode })
+    }
+    let after = 0
+    left = await stillAlive(port, rest.map(key), 0)
+    while (after < 3 && left.size > 0) {
+      left = await stillAlive(port, rest.map(key), 1)
+      after++
+    }
+    const doneAt = await port.now()
+    for (const one of rest) steps.push({ kind: 'check', pid: one.pid, atMs: doneAt, status: left.has(one.pid) ? 'alive' : 'gone', waitedSec: after })
+  }
+  const root = listing.root ?? target
+  await group([root])
+  const others = await stillAlive(port, listing.descendants.map(key), 0)
+  await group(listing.descendants.filter(one => others.has(one.pid)))
+  const all = [root, ...listing.descendants]
+  const end = await stillAlive(port, all.map(key), 0)
+  return { tree: listing, steps, final: all.map(one => ({ pid: one.pid, status: end.has(one.pid) ? 'alive' : 'gone', state: '' })), notes: [] }
+}
+
 /** Windows PowerShell 5.1 by absolute path: on Windows `bash` is the WSL launcher, and sh, mv and pwsh are not on the PATH a command gets. */
 async function powershell(port: HostPort): Promise<string> {
   const root = (await port.env('SystemRoot')) ?? 'C:\\Windows'
@@ -400,6 +568,7 @@ export const windowsHost: Host = {
     })
     return ran?.exitCode === 0 && !ran.isStdoutTruncated ? parseNewerListing(ran.stdout, winPath) : undefined
   },
+  stopProcessTree,
   /** Each rename of the plan by the file script, where a file another session moved meanwhile is no failure. */
   async rotate(port: HostPort, plan: RotatePlan): Promise<void> {
     for (const [from, to] of plan.moves) {

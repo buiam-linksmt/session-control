@@ -6,8 +6,22 @@
 import type { SessionEntry } from '../types'
 import { findNewWorker, isDefaultConfigDir, defaultConfigDir, parseProcFacts, probeArgs, transcriptPath } from './core'
 import type { LaunchArgs, LaunchInput, ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RemoveOutcome, RotatePlan, TailShape, WorkerWant } from './host'
-import { NEWER_MAX, TAIL_SHAPED_MAX_BYTES, bashLaunchCommand, parseNewerListing, removeOutcomeOfExit, rotateAndAppendWith, writeAtomicWith } from './host-shared'
+import type { Host, HostPort, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopTarget, TailShape, WorkerWant } from './host'
+import {
+  NEWER_MAX,
+  STOP_TIMEOUT_MS,
+  STOP_WAIT_SECONDS,
+  TAIL_SHAPED_MAX_BYTES,
+  bashLaunchCommand,
+  parseNewerListing,
+  parseStopOutput,
+  removeOutcomeOfExit,
+  rotateAndAppendWith,
+  stopTargets,
+  treeOf,
+  unstoppable,
+  writeAtomicWith,
+} from './host-shared'
 import { dirOf } from './store'
 
 /**
@@ -94,6 +108,98 @@ export const REMOVE_REGULAR_SCRIPT = String.raw`p=$1
 [ -e "$p" ] || exit 3
 [ -f "$p" ] || exit 5
 rm -f -- "$p"`
+
+/**
+ * The process tree of a stop, read-only: args are the root's pid and the start the Abort check proved. Every
+ * /proc/<pid>/stat is read in one `cat`; sed keeps the pid and the fields after the name's last ") " (a name may hold
+ * blanks and parentheses), so awk's $2 is the state, $3 the parent pid and $21 the start (stat field 22). It prints the
+ * lines parseStopOutput reads: R (the root, when its start is the one asked) or N (not: the start it has now, empty when
+ * gone), G for each ancestor of this shell (the session's own process and those above it, up to but not counting
+ * pid 1), and D for each descendant, breadth first; a name comes from /proc/<pid>/comm.
+ */
+export const TREE_SCRIPT = [
+  'p=$1; want=$2; self=$$',
+  'tab=$(printf "\\t")',
+  "cat /proc/[0-9]*/stat 2>/dev/null | sed -n 's/^\\([0-9][0-9]*\\) (.*) \\(.*\\)$/\\1 \\2/p' |",
+  '  awk -v root="$p" -v want="$want" -v self="$self" \'',
+  '    { par[$1] = $3; st[$1] = $21; sta[$1] = $2; n++; ord[n] = $1 }',
+  '    END {',
+  '      isRoot = (want != "" && (root in st) && st[root] == want)',
+  '      if (isRoot) print "R\\t" root "\\t" par[root] "\\t" st[root] "\\t" sta[root]',
+  '      else print "N\\t" root "\\t" ((root in st) ? st[root] : "")',
+  '      for (a = self; (a in par) && par[a] > 1; a = par[a]) print "G\\t" par[a]',
+  '      if (!isRoot) exit',
+  '      qn = 1; q[1] = root; seen[root] = 1',
+  '      for (qi = 1; qi <= qn; qi++) for (k = 1; k <= n; k++) {',
+  '        c = ord[k]',
+  '        if (par[c] == q[qi] && !(c in seen)) { seen[c] = 1; q[++qn] = c; print "D\\t" c "\\t" par[c] "\\t" st[c] "\\t" sta[c] }',
+  '      }',
+  "    }' |",
+  '  while IFS="$tab" read -r tag a b c d; do',
+  '    case $tag in',
+  '      R|D) cm=$(tr "\\t\\n" "  " < "/proc/$a/comm" 2>/dev/null); printf "%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n" "$tag" "$a" "$b" "$c" "$d" "$cm";;',
+  '      *) printf "%s\\t%s\\t%s\\n" "$tag" "$a" "$b";;',
+  '    esac',
+  '  done',
+].join('\n')
+
+/**
+ * The stop itself: args are the seconds to wait after TERM, then the targets as `<pid>:<start>`, the root first and its
+ * descendants after it (TREE_SCRIPT's listing). A target is signalled only while /proc/<pid>/stat field 22 is still its
+ * start (the Abort check's own comparison: the root's start is the one its sessions file proved) and it is no zombie
+ * (state Z: it has ended; its entry stays until its parent reaps it, and it is reported as `exited`), never when it is
+ * this shell or one of its ancestors (X own). The root: TERM, a re-check every second for up to the wait, KILL to one still
+ * there, re-checks for up to 3 seconds (a killed process is gone once its parent reaps it); then every descendant still
+ * alive the same way, together. It prints S, C, X and F lines (parseStopOutput); times are epoch milliseconds
+ * (`date +%s%3N`). The waits are `sleep 1` in this shell, so the engine's hook budget never pays for them.
+ */
+export const STOP_SCRIPT = [
+  'w=$1; shift',
+  'now() { date +%s%3N; }',
+  "start() { sed -n 's/^.*) //p' \"/proc/$1/stat\" 2>/dev/null | cut -d' ' -f20; }",
+  "state() { sed -n 's/^.*) //p' \"/proc/$1/stat\" 2>/dev/null | cut -d' ' -f1; }",
+  'same() { [ -n "$2" ] && [ "$(start "$1")" = "$2" ] && [ "$(state "$1")" != Z ]; }',
+  'where() { if same "$1" "$2"; then echo alive; elif [ -n "$2" ] && [ "$(start "$1")" = "$2" ]; then echo exited; else echo gone; fi; }',
+  'own=" $$ "; a=$PPID',
+  'while [ -n "$a" ] && [ "$a" -gt 1 ] 2>/dev/null; do own="$own$a "; a=$(sed -n "s/^PPid:[[:space:]]*//p" "/proc/$a/status" 2>/dev/null); done',
+  'mine() { case $own in *" $1 "*) return 0;; esac; return 1; }',
+  'left() { n=0; for t in "$@"; do same "${t%%:*}" "${t#*:}" && n=$((n + 1)); done; echo "$n"; }',
+  'checks() { for t in $2; do printf "C\\t%s\\t%s\\t%s\\t%s\\n" "${t%%:*}" "$(now)" "$(where "${t%%:*}" "${t#*:}")" "$1"; done; }',
+  'group() {',
+  '  live=""',
+  '  for t in "$@"; do',
+  '    p=${t%%:*}',
+  '    if mine "$p"; then printf "X\\t%s\\town\\n" "$p"',
+  '    elif same "$p" "${t#*:}"; then kill -TERM "$p" 2>/dev/null; r=$?; printf "S\\t%s\\tTERM\\t%s\\t%s\\n" "$p" "$(now)" "$r"; live="$live $t"',
+  '    else printf "X\\t%s\\tgone\\n" "$p"; fi',
+  '  done',
+  '  [ -n "$live" ] || return 0',
+  '  i=0; while [ "$i" -lt "$w" ] && [ "$(left $live)" -gt 0 ]; do sleep 1; i=$((i + 1)); done',
+  '  checks "$i" "$live"',
+  '  rest=""; for t in $live; do same "${t%%:*}" "${t#*:}" && rest="$rest $t"; done',
+  '  [ -n "$rest" ] || return 0',
+  '  for t in $rest; do p=${t%%:*}; if same "$p" "${t#*:}"; then kill -KILL "$p" 2>/dev/null; r=$?; printf "S\\t%s\\tKILL\\t%s\\t%s\\n" "$p" "$(now)" "$r"; fi; done',
+  '  j=0; while [ "$j" -lt 3 ] && [ "$(left $rest)" -gt 0 ]; do sleep 1; j=$((j + 1)); done',
+  '  checks "$j" "$rest"',
+  '}',
+  'root=$1; shift',
+  'group "$root"',
+  'surv=""; for t in "$@"; do same "${t%%:*}" "${t#*:}" && surv="$surv $t"; done',
+  '[ -z "$surv" ] || group $surv',
+  'for t in "$root" "$@"; do p=${t%%:*}; g=$(where "$p" "${t#*:}"); if [ "$g" = gone ]; then printf "F\\t%s\\tgone\\t\\n" "$p"; else printf "F\\t%s\\t%s\\t%s\\n" "$p" "$g" "$(state "$p")"; fi; done',
+  'exit 0',
+].join('\n')
+
+/** The tree of a stop by TREE_SCRIPT, then the stop by STOP_SCRIPT over that listing (or over `tree` when given). */
+async function stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport> {
+  const listing = tree ?? treeOf((await port.run(['sh', '-c', TREE_SCRIPT, 'session-tree', String(target.pid), target.start], { timeoutMs: 15_000 })).stdout)
+  const early = unstoppable(listing, target)
+  if (early !== undefined) return early
+  const ran = await port.run(['sh', '-c', STOP_SCRIPT, 'session-stop', String(STOP_WAIT_SECONDS), ...stopTargets(listing)], { timeoutMs: STOP_TIMEOUT_MS })
+  const report = parseStopOutput(ran.stdout, { tree: listing })
+  const { isListed, ...done } = report
+  return ran.exitCode === 0 ? done : { ...done, notes: [`the stop script exited ${ran.exitCode}`] }
+}
 
 /** Removes a regular file with REMOVE_REGULAR_SCRIPT. */
 async function removeRegularFile(port: HostPort, path: string): Promise<RemoveOutcome> {
@@ -201,6 +307,7 @@ export const posixHost: Host = {
     const ran = await port.run(['sh', '-c', NEWER_SCRIPT, 'session-newer', dir, String(Math.floor(epochSeconds)), String(NEWER_MAX)], { timeoutMs: 30_000 })
     return ran.exitCode === 0 && !ran.isStdoutTruncated ? parseNewerListing(ran.stdout) : undefined
   },
+  stopProcessTree,
   /** ROTATE_SCRIPT, which checks the size again itself; untraced (the trace is what it rotates). */
   async rotate(port: HostPort, plan: RotatePlan): Promise<void> {
     const argv = ['sh', '-c', ROTATE_SCRIPT, 'session-trace', plan.path, String(plan.keep - 1), String(plan.maxBytes), String(plan.adding)]

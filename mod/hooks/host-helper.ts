@@ -12,8 +12,8 @@ import type { ProcessRunResult } from 'claude-code'
 import type { SessionEntry } from '../types'
 import { parseProcFacts, probeArgs } from './core'
 import type { ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, RemoveOutcome, RotatePlan, TailShape } from './host'
-import { NEWER_MAX, PANE_TAIL, TAIL_SHAPED_MAX_BYTES, readTail } from './host-shared'
+import type { Host, HostPort, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopTarget, TailShape } from './host'
+import { NEWER_MAX, PANE_TAIL, STOP_TIMEOUT_MS, STOP_WAIT_SECONDS, TAIL_SHAPED_MAX_BYTES, parseStopOutput, readTail, stopTargets, unstoppable } from './host-shared'
 
 /** The helper's entry point under the plugin's directory. */
 export const HELPER_SCRIPT = 'helper/host.mjs'
@@ -28,10 +28,10 @@ export const HELPER_REDETECT_MS = 10 * 60_000
 export type HelperSetup = { node: string; script: string }
 
 /** The helper's operations as its protocol names them. */
-export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'batch'
+export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'processTree' | 'stopProcesses' | 'batch'
 
 /** One step of a batch: a file operation and its request. */
-export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'batch'> } & Record<string, unknown>
+export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'processTree' | 'stopProcesses' | 'batch'> } & Record<string, unknown>
 
 /** What a helper call came to: its answer's fields, or the fixed code it failed with. */
 export type HelperAnswer = { ok: true; fields: Record<string, unknown> } | { ok: false; code: string; at?: number }
@@ -120,9 +120,10 @@ export function newerAnswer(fields: Record<string, unknown>): NewerFiles | undef
 const rotateRequest = (plan: RotatePlan) => ({ path: plan.path, adding: plan.adding, maxBytes: plan.maxBytes, moves: plan.moves.map(([from, to]) => [from, to]) })
 
 /**
- * The adapter with its listed operations run by the helper: probe (Linux only: on Windows the process rows stay on
- * PROBE_PS1), writeAtomic, renameOver, removeFile, removeRegularFile (the same helper operation with `regularOnly`), append,
- * tail, rotate, filesNewerThan and rotateAndAppend (one batch). Every other member is the adapter's own.
+ * The adapter with its listed operations run by the helper: probe and stopProcessTree (Linux only: on Windows the
+ * process rows stay on PROBE_PS1, and the stop on TREE_PS1 and taskkill), writeAtomic, renameOver, removeFile,
+ * removeRegularFile (the same helper operation with `regularOnly`), append, tail, rotate, filesNewerThan and
+ * rotateAndAppend (one batch). Every other member is the adapter's own.
  */
 export function withHelper(base: Host, setup: HelperSetup): Host {
   let ready: Promise<boolean> | undefined
@@ -338,6 +339,40 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         undefined,
         LISTING_TIMEOUT_MS,
       ).then(done => done.found)
+    },
+
+    /**
+     * Linux: the tree by the helper's processTree, then the stop by its stopProcesses over that listing. A listing that
+     * fails leaves the whole stop to the adapter (it lists itself). A stop that fails (Node cannot start, times out, its
+     * answer is cut or not one) falls back to the adapter's stop over the same listing, which signals only a process that
+     * still has its listed start; a timed-out helper may have sent signals before it was cut, which this record cannot
+     * show, and the note says so. The caller's Abort check afterwards says what is true.
+     */
+    async stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport> {
+      if (!isProbed || !(await isReady(port))) return base.stopProcessTree(port, target, tree)
+      let listing = tree
+      if (listing === undefined) {
+        const answer = await call(port, 'processTree', { pid: target.pid, start: target.start }, false, { pid: target.pid }, CALL_TIMEOUT_MS)
+        const parsed = answer.ok && typeof answer.fields.out === 'string' ? parseStopOutput(answer.fields.out) : undefined
+        if (parsed === undefined || !parsed.isListed) {
+          port.noteHelper({ kind: 'fallback', op: 'processTree', code: answer.ok ? 'BAD_ANSWER' : answer.code, isQuiet: false })
+          return base.stopProcessTree(port, target)
+        }
+        listing = parsed.tree
+      }
+      const early = unstoppable(listing, target)
+      if (early !== undefined) return early
+      const targets = stopTargets(listing)
+      const answer = await call(port, 'stopProcesses', { wait: STOP_WAIT_SECONDS, targets }, false, { pid: target.pid, targets: targets.length }, STOP_TIMEOUT_MS)
+      if (answer.ok && typeof answer.fields.out === 'string') {
+        const { isListed, ...done } = parseStopOutput(answer.fields.out, { tree: listing })
+        return done
+      }
+      const code = answer.ok ? 'BAD_ANSWER' : answer.code
+      port.noteHelper({ kind: 'fallback', op: 'stopProcesses', code, isQuiet: false })
+      const done = await base.stopProcessTree(port, target, listing)
+      const cut = code === 'TIMEOUT' ? '; it was cut off after it started, so signals it sent before that are not in this record' : ''
+      return { ...done, notes: [`the helper's stop failed (${code})${cut}; the native stop ran over the same listing and signalled only processes that still had their listed start`, ...done.notes] }
     },
 
     async rotate(port: HostPort, plan: RotatePlan): Promise<void> {

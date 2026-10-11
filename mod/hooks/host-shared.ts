@@ -5,7 +5,7 @@ import type { FsStat } from 'claude-code'
 
 import type { LaunchArgs } from './core'
 import { buildLaunchArgv, tailLines } from './core'
-import type { Host, HostPort, LaunchTarget, NewerFiles, RemoveOutcome, RotatePlan, TailShape } from './host'
+import type { Host, HostPort, LaunchTarget, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopStatus, StopStep, StopTarget, TailShape, TreeProc } from './host'
 import { tmpPath } from './store'
 
 /**
@@ -98,4 +98,91 @@ export function parseNewerListing(stdout: string, toPath: (path: string) => stri
     else if (/^\d+(\.\d+)?$/.test(head) && rest !== '') files.push({ path: toPath(rest), mtimeMs: secondsToMs(head) })
   }
   return total === undefined ? undefined : { files, total: Math.max(total, files.length) }
+}
+
+/** How long a stop waits after the first signal, in one-second re-checks, before the second (KILL, taskkill /F). */
+export const STOP_WAIT_SECONDS = 10
+
+/** How long a stop may run in one process: the root's wait and the descendants' wait, each with the re-checks after KILL. */
+export const STOP_TIMEOUT_MS = 45_000
+
+/**
+ * What the tree listing and the stop print (TREE_SCRIPT and STOP_SCRIPT on Linux, the helper's processTree and
+ * stopProcesses, TREE_PS1 on Windows), one tab-separated line each:
+ *   R <pid> <ppid> <start> <state> <name>   the root, still the process asked for
+ *   N <pid> <start now>                     the root is not (gone: no start; or another start: a reused pid)
+ *   D <pid> <ppid> <start> <state> <name>   a descendant
+ *   G <pid>                                 an ancestor of the listing process (this session's own chain)
+ *   S <pid> <signal> <epoch ms> <exit code> a signal sent
+ *   C <pid> <epoch ms> <gone|exited|alive> <seconds waited>   a check after it (exited: a zombie, Linux)
+ *   X <pid> <gone|own>                      not signalled
+ *   F <pid> <gone|exited|alive> <state>     the end state
+ * Into `report` when given (its tree kept unless the text lists one); `isListed` says whether an R or N line came.
+ */
+export function parseStopOutput(stdout: string, report?: Pick<StopReport, 'tree'>): StopReport & { isListed: boolean } {
+  const tree: ProcTree = report?.tree ?? { rootStartNow: '', descendants: [], ancestors: [] }
+  const out: StopReport & { isListed: boolean } = { tree, steps: [], final: [], notes: [], isListed: false }
+  const proc = (cols: string[]): TreeProc | undefined => {
+    const pid = Number(cols[1])
+    const ppid = Number(cols[2])
+    return Number.isSafeInteger(pid) && pid > 0 && Number.isSafeInteger(ppid) && /^\d+$/.test(cols[3] ?? '') ? { pid, ppid, start: cols[3] ?? '', state: (cols[4] ?? '').trim(), comm: cols.slice(5).join(' ').trim() } : undefined
+  }
+  const statusOf = (text: string | undefined): StopStatus => (text === 'alive' ? 'alive' : text === 'exited' ? 'exited' : 'gone')
+  const pidOf = (text: string | undefined) => {
+    const pid = Number(text)
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined
+  }
+  for (const line of stdout.replace(/\r/g, '').split('\n')) {
+    const cols = line.split('\t')
+    const tag = cols[0]
+    const pid = pidOf(cols[1])
+    if (pid === undefined) continue
+    if (tag === 'R') {
+      const root = proc(cols)
+      if (root !== undefined) {
+        out.tree = { ...out.tree, root, rootStartNow: root.start, descendants: [], ancestors: [] }
+        out.isListed = true
+      }
+    } else if (tag === 'N') {
+      out.tree = { rootStartNow: /^\d+$/.test(cols[2] ?? '') ? (cols[2] ?? '') : '', descendants: [], ancestors: [] }
+      out.isListed = true
+    } else if (tag === 'D') {
+      const one = proc(cols)
+      if (one !== undefined) out.tree.descendants.push(one)
+    } else if (tag === 'G') out.tree.ancestors.push(pid)
+    else if (tag === 'S') {
+      const atMs = Number(cols[3])
+      const exitCode = Number(cols[4])
+      out.steps.push({ kind: 'signal', pid, signal: cols[2] ?? '', atMs: Number.isFinite(atMs) ? atMs : 0, exitCode: Number.isInteger(exitCode) ? exitCode : -1 })
+    } else if (tag === 'C') {
+      const atMs = Number(cols[2])
+      const waited = Number(cols[4])
+      out.steps.push({ kind: 'check', pid, atMs: Number.isFinite(atMs) ? atMs : 0, status: statusOf(cols[3]), waitedSec: Number.isFinite(waited) ? waited : 0 })
+    } else if (tag === 'X' && (cols[2] === 'gone' || cols[2] === 'own')) out.steps.push({ kind: 'skip', pid, reason: cols[2] })
+    else if (tag === 'F') out.final.push({ pid, status: statusOf(cols[2]), state: (cols[3] ?? '').trim() })
+  }
+  return out
+}
+
+/** The listing of a tree as TREE_SCRIPT reads it: the tree, or an error when no R or N line came (the listing failed). */
+export function treeOf(stdout: string): ProcTree {
+  const parsed = parseStopOutput(stdout)
+  if (!parsed.isListed) throw new Error('the process tree could not be listed')
+  return parsed.tree
+}
+
+/** The stop's targets as the scripts and the helper take them, `<pid>:<start>`: the root first, then its descendants. */
+export function stopTargets(tree: ProcTree): string[] {
+  return [...(tree.root === undefined ? [] : [tree.root]), ...tree.descendants].map(one => `${one.pid}:${one.start}`)
+}
+
+/**
+ * The answer of a stop that signals nothing: the root is no longer the process asked for (gone, or its pid reused), or
+ * it is this session's own process or one of its ancestors. Undefined when the stop may go on.
+ */
+export function unstoppable(tree: ProcTree, target: StopTarget): StopReport | undefined {
+  const step = (reason: 'gone' | 'own'): StopStep => ({ kind: 'skip', pid: target.pid, reason })
+  if (tree.root === undefined || tree.root.pid !== target.pid || tree.root.start !== target.start) return { tree, steps: [step('gone')], final: [{ pid: target.pid, status: 'gone', state: '' }], notes: [] }
+  if (tree.ancestors.includes(target.pid)) return { tree, steps: [step('own')], final: [{ pid: target.pid, status: 'alive', state: tree.root.state }], notes: [] }
+  return undefined
 }

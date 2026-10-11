@@ -13,6 +13,8 @@
 //   tail          {path, lines, width, maxBytes?}     -> {text, dropped}
 //   rotate        {path, adding, maxBytes, moves}     -> {rotated}
 //   filesNewerThan {dir, since, max}                  -> {files: [{path, mtimeMs}], total}   read-only
+//   processTree   {pid, start}                        -> {out}       Linux only: the lines of TREE_SCRIPT (read-only)
+//   stopProcesses {wait, targets: ['<pid>:<start>']}  -> {out}       Linux only: the lines of STOP_SCRIPT (signals sent)
 //   batch         {ops: [{op, ...request}, ...]}      -> {results}   file operations in order, in this one process;
 //                                                                    the first failure stops it: {ok:false, code, at}
 

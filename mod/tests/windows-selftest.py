@@ -577,5 +577,98 @@ try:
               f'a batch of 20 operations: median {statistics.median(batch_ms):.0f} ms per batch (runs {", ".join(f"{one:.0f}" for one in batch_ms)}); '
               f'the same 20 as single helper runs {sum(single_ms):.0f} ms in all (median {statistics.median(single_ms):.0f} ms each); '
               f'20 file-script appends {sum(ps_ms):.0f} ms in all (median {statistics.median(ps_ms):.0f} ms each); timed from WSL through interop)')
+
+    # --- the stop of stop_worker on Windows: TREE_PS1 lists a throwaway node.exe tree (a parent that started one
+    # child), then taskkill.exe through cmd.exe stops it the way the Windows adapter does: /T, the re-check by TREE_PS1's
+    # check, /T /F, the re-check. A second node.exe outside the tree must survive, a start that is not the process's
+    # own reads as gone, and the listing names this script's own ancestors. No claude starts.
+    node_win = os.environ.get('SC_WIN_NODE') or 'C:\\Program Files\\nodejs\\node.exe'
+    node = to_wsl(node_win)
+    if not os.path.exists(node):
+        print(f'windows-stop-selftest: skipped (no {node_win})')
+    else:
+        import time
+        tree_ps1 = constant('TREE_PS1')
+        CMD = shutil.which('cmd.exe') or '/mnt/c/Windows/System32/cmd.exe'
+        marker = os.path.join(work, 'stop-pids.txt')
+        open(os.path.join(work, 'stop-parent.js'), 'w').write(
+            "const { spawn } = require('child_process');\n"
+            "const fs = require('fs');\n"
+            "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });\n"
+            f"fs.writeFileSync({json.dumps(to_win(marker))}, process.pid + ' ' + child.pid);\n"
+            "setInterval(() => {}, 1000);\n")
+        by_marker = os.path.join(work, 'stop-bystander.txt')
+        open(os.path.join(work, 'stop-bystander.js'), 'w').write(
+            f"require('fs').writeFileSync({json.dumps(to_win(by_marker))}, String(process.pid));\nsetInterval(() => {{}}, 1000);\n")
+        # Popen's pid is the WSL side's interop process, never the Windows pid: every Windows pid here is the one the
+        # node.exe processes wrote themselves, and taskkill is only ever given those.
+        bystander = subprocess.Popen([node, f'{win}/stop-bystander.js'], cwd=work)
+        parent = subprocess.Popen([node, f'{win}/stop-parent.js'], cwd=work)
+        mine = {}
+        try:
+            for _ in range(300):
+                if os.path.exists(marker) and len(open(marker).read().split()) == 2 and os.path.exists(by_marker) and open(by_marker).read().strip():
+                    break
+                time.sleep(0.1)
+            root_pid, child_pid = (int(one) for one in open(marker).read().split())
+            by_pid = int(open(by_marker).read().strip())
+            to_ms = '[long][Math]::Floor(($t.ToUniversalTime() - (New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc))).TotalMilliseconds)'
+
+            def created(pid):
+                r = subprocess.run([PS, '-NoProfile', '-NonInteractive', '-Command', f'$t = (Get-CimInstance Win32_Process -Filter "ProcessId={pid}").CreationDate; {to_ms}'],
+                                   capture_output=True, text=True, timeout=60, cwd=work)
+                return r.stdout.strip()
+
+            root_start, child_start, by_start = created(root_pid), created(child_pid), created(by_pid)
+            mine = {root_pid: root_start, child_pid: child_start, by_pid: by_start}
+            assert all(one.isdigit() for one in mine.values()), mine
+            code, out, err = run('tree.ps1', tree_ps1, 'list', str(root_pid), root_start)
+            got = [line.split('\t') for line in out.splitlines()]
+            assert code == 0 and err == '' and '\r' not in out, (code, err)
+            assert ['R', str(root_pid)] == got[0][:2] and got[0][3] == root_start and got[0][5] == 'node.exe', got
+            # The node.exe child, and whatever Windows attached to the tree itself (a conhost.exe for a console process).
+            descendants = [cols for cols in got if cols[0] == 'D']
+            assert [cols[:4] + cols[5:] for cols in descendants if cols[1] == str(child_pid)] == [['D', str(child_pid), str(root_pid), child_start, 'node.exe']], got
+            assert all(cols[2] == str(root_pid) and cols[5] in ('node.exe', 'conhost.exe') for cols in descendants), got
+            tree = [(int(cols[1]), cols[3]) for cols in descendants]
+            mine.update(dict(tree))
+            ancestors = [cols[1] for cols in got if cols[0] == 'G']
+            assert len(ancestors) >= 1 and str(root_pid) not in ancestors, got
+            # a start that is not the process's own: the root is not that process (N), and the check says gone
+            code, out, err = run('tree.ps1', tree_ps1, 'list', str(root_pid), str(int(root_start) + 1))
+            assert code == 0 and out.splitlines()[0].split('\t')[:2] == ['N', str(root_pid)] and not [l for l in out.splitlines() if l.startswith('D')], out
+            code, out, err = run('tree.ps1', tree_ps1, 'check', '0', f'{root_pid}:{root_start}', f'{child_pid}:{child_start}', f'{root_pid}:{int(root_start) + 1}')
+            assert code == 0 and out.splitlines() == [f'F\t{root_pid}\talive\t', f'F\t{child_pid}\talive\t', f'F\t{root_pid}\tgone\t'], out
+            steps = []
+            r = subprocess.run([CMD, '/c', 'taskkill', '/PID', str(root_pid), '/T'], capture_output=True, timeout=60, cwd=work)
+            steps.append(f'taskkill /T exit {r.returncode}')
+            left = None
+            for waited in range(4):
+                code, out, err = run('tree.ps1', tree_ps1, 'check', '1' if waited else '0', f'{root_pid}:{root_start}', *(f'{pid}:{start}' for pid, start in tree))
+                left = [l.split('\t')[1] for l in out.splitlines() if l.split('\t')[2] == 'alive']
+                if not left:
+                    break
+            steps.append(f'after {waited} s: {len(left)} alive')
+            if left:
+                r = subprocess.run([CMD, '/c', 'taskkill', '/PID', str(root_pid), '/T', '/F'], capture_output=True, timeout=60, cwd=work)
+                steps.append(f'taskkill /T /F exit {r.returncode}')
+                code, out, err = run('tree.ps1', tree_ps1, 'check', '1', f'{root_pid}:{root_start}', *(f'{pid}:{start}' for pid, start in tree))
+                left = [l.split('\t')[1] for l in out.splitlines() if l.split('\t')[2] == 'alive']
+            parent.wait(timeout=60)
+            assert left == [], (left, steps)
+            code, out, err = run('tree.ps1', tree_ps1, 'check', '0', f'{root_pid}:{root_start}', *(f'{pid}:{start}' for pid, start in tree), f'{by_pid}:{by_start}')
+            assert out.splitlines() == [f'F\t{root_pid}\tgone\t', *(f'F\t{pid}\tgone\t' for pid, _ in tree), f'F\t{by_pid}\talive\t'], out
+            print(f'windows-stop-selftest: ok (node.exe tree {root_pid} with child {child_pid} ({len(tree)} descendants: {", ".join(cols[5] for cols in descendants)}): listed by TREE_PS1 with {len(ancestors)} ancestors of its own; {"; ".join(steps)}; the root and every descendant gone by the check; the node.exe {by_pid} outside the tree still runs)')
+        finally:
+            # Only this test's own node.exe processes, by the Windows pid each wrote and only while it still has the start read.
+            for pid, start in mine.items():
+                code, out, err = run('tree.ps1', tree_ps1, 'check', '0', f'{pid}:{start}')
+                if out.strip() == f'F\t{pid}\talive':
+                    subprocess.run([CMD, '/c', 'taskkill', '/PID', str(pid), '/T', '/F'], capture_output=True, timeout=60, cwd=work)
+            for proc in (parent, bystander):
+                try:
+                    proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
 finally:
     shutil.rmtree(work)

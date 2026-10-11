@@ -48,6 +48,92 @@ export function newerInMap(files: Map<string, string>, mtimes: ReadonlyMap<strin
     .sort((a, b) => b.mtimeMs - a.mtimeMs || (a.path < b.path ? -1 : 1))
 }
 
+/**
+ * A simulated process table for the stop of stop_worker: pid to its parent, start, state and name. A `stubborn` process
+ * ignores TERM (and taskkill without /F); every signal it gets is recorded in `signals`, so a test can prove which pids
+ * were touched. `own` are the pids above the listing process (the session's own chain).
+ */
+export type SimProc = { ppid: number; start: string; state: string; comm: string; isStubborn?: boolean }
+export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number }
+
+/** TREE_SCRIPT's (and the helper's processTree) lines over the table: R or N, the G lines, the D lines breadth first. */
+export function treeInTable(table: ProcTable, pid: number, start: string): string {
+  const root = table.procs.get(pid)
+  const isRoot = root !== undefined && root.start === start && start !== ''
+  const lines = [isRoot ? `R\t${pid}\t${root.ppid}\t${root.start}\t${root.state}\t${root.comm}` : `N\t${pid}\t${root?.start ?? ''}`]
+  for (const up of table.own) lines.push(`G\t${up}`)
+  if (isRoot) {
+    const queue = [pid]
+    for (let at = 0; at < queue.length; at++) {
+      for (const [child, one] of table.procs) {
+        if (one.ppid !== queue[at] || queue.includes(child)) continue
+        queue.push(child)
+        lines.push(`D\t${child}\t${one.ppid}\t${one.start}\t${one.state}\t${one.comm}`)
+      }
+    }
+  }
+  return lines.map(line => `${line}\n`).join('')
+}
+
+const sameIn = (table: ProcTable, pid: number, start: string) => table.procs.get(pid)?.start === start
+
+/** One signal over the table: TERM ends a process that is not stubborn, KILL ends any. Answers kill's exit code. */
+export function signalInTable(table: ProcTable, pid: number, signal: 'TERM' | 'KILL'): number {
+  table.signals.push({ pid, signal })
+  const one = table.procs.get(pid)
+  if (one === undefined) return 1
+  if (signal === 'KILL' || one.isStubborn !== true) table.procs.delete(pid)
+  return 0
+}
+
+/** STOP_SCRIPT's (and the helper's stopProcesses) lines over the table: the root, then the descendants still there; then F lines. */
+export function stopInTable(table: ProcTable, wait: number, targets: readonly string[]): string {
+  const parsed = targets.map(one => ({ pid: Number(one.split(':')[0]), start: one.split(':')[1] ?? '' }))
+  const lines: string[] = []
+  const tick = () => (table.nowMs += 7)
+  const group = (members: { pid: number; start: string }[]) => {
+    const live = []
+    for (const one of members) {
+      if (table.own.includes(one.pid)) lines.push(`X\t${one.pid}\town`)
+      else if (sameIn(table, one.pid, one.start)) {
+        lines.push(`S\t${one.pid}\tTERM\t${tick()}\t${signalInTable(table, one.pid, 'TERM')}`)
+        live.push(one)
+      } else lines.push(`X\t${one.pid}\tgone`)
+    }
+    if (live.length === 0) return
+    const waited = live.some(one => sameIn(table, one.pid, one.start)) ? wait : 0
+    const rest = live.filter(one => sameIn(table, one.pid, one.start))
+    for (const one of live) lines.push(`C\t${one.pid}\t${tick()}\t${rest.includes(one) ? 'alive' : 'gone'}\t${waited}`)
+    if (rest.length === 0) return
+    for (const one of rest) lines.push(`S\t${one.pid}\tKILL\t${tick()}\t${signalInTable(table, one.pid, 'KILL')}`)
+    for (const one of rest) lines.push(`C\t${one.pid}\t${tick()}\t${sameIn(table, one.pid, one.start) ? 'alive' : 'gone'}\t0`)
+  }
+  const [root, ...descendants] = parsed
+  if (root !== undefined) group([root])
+  group(descendants.filter(one => sameIn(table, one.pid, one.start)))
+  for (const one of parsed) lines.push(sameIn(table, one.pid, one.start) ? `F\t${one.pid}\talive\t${table.procs.get(one.pid)?.state ?? ''}` : `F\t${one.pid}\tgone\t`)
+  return lines.map(line => `${line}\n`).join('')
+}
+
+/** TREE_PS1's check over the table: an F line per `<pid>:<start>` target. */
+export function checkInTable(table: ProcTable, targets: readonly string[]): string {
+  return targets.map(one => `F\t${one.split(':')[0]}\t${sameIn(table, Number(one.split(':')[0]), one.split(':')[1] ?? '') ? 'alive' : 'gone'}\t\n`).join('')
+}
+
+/** taskkill /PID <pid> /T (and /F) over the table: the process and its descendants; without /F a stubborn one stays (exit 128). */
+export function taskkillInTable(table: ProcTable, pid: number, isForced: boolean): number {
+  const tree = [pid]
+  for (let at = 0; at < tree.length; at++) for (const [child, one] of table.procs) if (one.ppid === tree[at] && !tree.includes(child)) tree.push(child)
+  if (!table.procs.has(pid)) return 128
+  let isRefused = false
+  for (const one of tree.reverse()) {
+    table.signals.push({ pid: one, signal: isForced ? 'taskkill /F' : 'taskkill' })
+    if (isForced || table.procs.get(one)?.isStubborn !== true) table.procs.delete(one)
+    else isRefused = true
+  }
+  return isRefused ? 128 : 0
+}
+
 /** The helper's answer to one request over the map of files; `probeOut` is what its probe prints; `mtimes` the files' mtimes in ms. */
 export function helperAnswer(
   files: Map<string, string>,
@@ -57,10 +143,13 @@ export function helperAnswer(
   keyOf: KeyOf = path => path.replace(/\\/g, '/'),
   mtimes: ReadonlyMap<string, number> = new Map(),
   links: ReadonlyMap<string, string> = new Map(),
+  table?: ProcTable,
 ): Record<string, unknown> {
   const path = keyOf(String(request.path ?? ''))
   const fail = (code: string) => ({ ok: false, code })
   if (op === 'probe') return { ok: true, out: probeOut }
+  if (op === 'processTree' && table !== undefined) return { ok: true, out: treeInTable(table, Number(request.pid), String(request.start)) }
+  if (op === 'stopProcesses' && table !== undefined) return { ok: true, out: stopInTable(table, Number(request.wait), request.targets as string[]) }
   if (op === 'writeAtomic') {
     if (request.expected !== undefined && files.get(path) !== request.expected) return { ok: true, written: false }
     files.set(path, String(request.text))
@@ -93,7 +182,7 @@ export function helperAnswer(
   if (op === 'batch') {
     const results: unknown[] = []
     for (const [at, step] of (request.ops as Request[]).entries()) {
-      const one = helperAnswer(files, String(step.op), step, probeOut, keyOf, mtimes, links)
+      const one = helperAnswer(files, String(step.op), step, probeOut, keyOf, mtimes, links, table)
       if (one.ok !== true) return { ...one, at, results }
       results.push(one)
     }

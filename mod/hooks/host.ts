@@ -64,6 +64,47 @@ export type NewerFiles = { files: { path: string; mtimeMs: number }[]; total: nu
  */
 export type RemoveOutcome = 'removed' | 'absent' | 'symlink' | 'not-file' | 'failed'
 
+/**
+ * One process of the tree stop_worker works on: its pid, its parent's pid, its start (Linux: field 22 of
+ * /proc/<pid>/stat, in clock ticks; Windows: the creation time in epoch milliseconds), its state (Linux: the stat
+ * state letter, `Z` a zombie; '' on Windows) and its name.
+ */
+export type TreeProc = { pid: number; ppid: number; start: string; state: string; comm: string }
+
+/**
+ * The tree as listed before the first signal: the root when it is still the process asked for (the same pid with the
+ * same start; else undefined, with the start that pid has now, '' when it is gone), its descendants (children, their
+ * children, and so on), and the pids above the listing process: this session's own process and its ancestors, which
+ * are never signalled.
+ */
+export type ProcTree = { root?: TreeProc; rootStartNow: string; descendants: TreeProc[]; ancestors: number[] }
+
+/** The process a stop is asked for: its pid and the start the Abort check proved. */
+export type StopTarget = { pid: number; start: string }
+
+/**
+ * Where a process of a stop stands: `gone` (the pid is gone, or has another start: another process), `exited` (Linux:
+ * a zombie, state Z: it has ended and runs nothing, and its /proc entry stays until its parent reaps it) or `alive`.
+ */
+export type StopStatus = 'gone' | 'exited' | 'alive'
+
+/**
+ * One step of a stop: a signal sent (Linux `TERM`, `KILL`; Windows `taskkill /T`, `taskkill /T /F`) with its time in
+ * epoch milliseconds and the exit code of the call; a check after it with the seconds waited; or a process not
+ * signalled (`gone`: no longer the process listed, or a zombie; `own`: this session's process or one of its ancestors).
+ */
+export type StopStep =
+  | { kind: 'signal'; pid: number; signal: string; atMs: number; exitCode: number }
+  | { kind: 'check'; pid: number; atMs: number; status: StopStatus; waitedSec: number }
+  | { kind: 'skip'; pid: number; reason: 'gone' | 'own' }
+
+/**
+ * What a stop did: the tree listed before the first signal, the steps in order, where each process of the tree stands
+ * at the end (with the state letter of one still there), and notes on how it ran (a helper call that failed and the
+ * native operation that ran in its place).
+ */
+export type StopReport = { tree: ProcTree; steps: StopStep[]; final: { pid: number; status: StopStatus; state: string }[]; notes: string[] }
+
 /** The launch verdict's fields the command and the worker match read. */
 export type LaunchTarget = { configDir: string; resumeSid?: string; isConfigInherited?: boolean; name: string }
 
@@ -151,6 +192,16 @@ export type Host = {
    * point) is followed or listed. Undefined when `dir` is no directory or the listing failed.
    */
   filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined>
+  /**
+   * Stops a process and its descendants, and answers what it did (stop_worker). The tree is listed before the first
+   * signal (unless `tree`, a listing made before, is given). Nothing is signalled when the root no longer has the start
+   * asked or is this session's own process or one of its ancestors. Then the root: Linux `TERM`, re-checks every second
+   * for up to STOP_WAIT_SECONDS, `KILL`, re-checks for up to 3 seconds; Windows `taskkill /T`, the same re-checks,
+   * `taskkill /T /F`. Then every descendant still alive the same way. A process is signalled only while it still has
+   * the start the listing found, so a pid reused meanwhile is never touched. The waits run inside the operation's own
+   * processes, never on the engine's clock. Rejects when the tree cannot be listed or the stop cannot run.
+   */
+  stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport>
   /** Rotates the trace. */
   rotate(port: HostPort, plan: RotatePlan): Promise<void>
   /** The trace's write, untraced: the rotation when one is given, then the append; answers what went wrong with the append. */
@@ -191,6 +242,7 @@ export const HOST_MEMBERS = [
   'append',
   'tail',
   'filesNewerThan',
+  'stopProcessTree',
   'rotate',
   'rotateAndAppend',
 ] as const satisfies readonly (keyof Host)[]
