@@ -28,18 +28,22 @@ import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
 import { AUDIT_SCHEMA, auditText, retiredIds } from './audit'
 import {
-  PENDING_NOTICES_MAX,
+  ORPHANS_SHOWN,
+  TOASTS_PER_PASS,
   harvestNotices,
   isRegistrySound,
   isRepoDue,
   isRetireDue,
   markOrphan,
+  moreToastText,
   noticeKeyDir,
   noticeLine,
   noticeStoreKey,
+  orphanGroupNotice,
   orphanNotice,
   orphanStep,
   parseNoticeState,
+  pendingWith,
   pointStep,
   pruneHarvested,
   repoStep,
@@ -582,7 +586,7 @@ const shortIds = (ids: readonly string[]) => (ids.length === 0 ? 'none' : ids.ma
 const writeFailed = (why: string) => `registry write FAILED: ${why.slice(0, 120)}`
 
 /** A worker whose recorded pid is gone: classify, maybe merge into the registry, toast. */
-async function complete($: EngineInterface, entry: SessionEntry, taskStatus: string | undefined): Promise<void> {
+async function complete($: EngineInterface, entry: SessionEntry, taskStatus: string | undefined, toasts: ToastBudget): Promise<void> {
   const sid = entry.session_id
   if (typeof sid !== 'string') return
   // Keyed by session and pid: a resumed session finishes again under a new pid.
@@ -615,7 +619,7 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   await update($, pendingNotes, list => [...list, ...notes].slice(-20))
   // The harvest's notices: queued tasks that waited for it, its compliance check, and the queue maybe left empty.
   const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => undefined)
-  await withNotices($, state => [...harvestNotices(state, entry, outcome, queueText), ...unitStep(state, queueText, true)])
+  await withNotices($, state => [...harvestNotices(state, entry, outcome, queueText), ...unitStep(state, queueText, true)], toasts, 'harvest')
 }
 
 // ---------------------------------------------------------------- the poll-based notices (notices.ts)
@@ -670,26 +674,53 @@ function storeFailed($: EngineInterface, err: unknown): void {
  * One notice pass, after the passes before it: the work reads and changes the state and answers its notices; the state
  * is written back, then the notices go out. Nothing with the notices option off, or before the board is on.
  */
-async function withNotices($: EngineInterface, work: (state: NoticeState) => Notice[] | Promise<Notice[]>): Promise<void> {
+async function withNotices($: EngineInterface, work: (state: NoticeState) => Notice[] | Promise<Notice[]>, toasts: ToastBudget, source: ToastSource): Promise<void> {
   if (config.notices === 'off' || !isActive) return
   const pass = noticeChain.then(async () => {
     const state = await noticeStateOf($)
     const notices = await work(state)
     await saveNoticeState($)
-    await deliver($, notices)
+    await deliver($, notices, toasts, source)
   })
   noticeChain = pass.catch((err: unknown) => traceError($, 'notices', err))
   await noticeChain
 }
 
-/** A notice goes out three ways: a trace line (ids and counts), a toast titled by its kind, a line the next prompt carries. */
-async function deliver($: EngineInterface, notices: readonly Notice[]): Promise<void> {
+/** Where a notice pass comes from: the poll, the harvests of a refresh (all of them together), a queue change. */
+type ToastSource = 'poll' | 'harvest' | 'queue'
+
+/**
+ * The notice toasts of one refresh (decision mod-20): how many each source may still show (TOASTS_PER_PASS each) and
+ * how many went past that; those are told by one summary toast at the end of the refresh (toastMore).
+ */
+type ToastBudget = { left: Record<ToastSource, number>; more: number }
+
+const toastBudget = (): ToastBudget => ({ left: { poll: TOASTS_PER_PASS, harvest: TOASTS_PER_PASS, queue: TOASTS_PER_PASS }, more: 0 })
+
+/** The one summary toast of the notices past their toast cap, when there were any. */
+function toastMore($: EngineInterface, toasts: ToastBudget): void {
+  if (toasts.more === 0) return
+  $.ui.toast(toastText(TOAST_TITLES.moreNotices, moreToastText(toasts.more)), { timeoutMs: 10000 })
+  toasts.more = 0
+}
+
+/**
+ * A notice goes out three ways: a trace line (ids and counts), a toast titled by its kind while its source's toast cap
+ * allows (else it counts for the summary toast), a line the next prompt carries (pendingWith: past the cap of the
+ * waiting lines, the last says how many were not shown).
+ */
+async function deliver($: EngineInterface, notices: readonly Notice[], toasts: ToastBudget, source: ToastSource): Promise<void> {
   if (notices.length === 0) return
   for (const notice of notices) {
     trace($, 'notice', { kind: notice.kind, ...notice.fields })
-    $.ui.toast(toastText(TOAST_TITLES[notice.kind], notice.message), { timeoutMs: 10000 })
+    if (toasts.left[source] > 0) {
+      toasts.left[source] -= 1
+      $.ui.toast(toastText(TOAST_TITLES[notice.kind], notice.message), { timeoutMs: 10000 })
+    } else {
+      toasts.more += 1
+    }
   }
-  await update($, pendingNotices, list => [...list, ...notices.map(noticeLine)].slice(-PENDING_NOTICES_MAX))
+  await update($, pendingNotices, list => pendingWith(list, notices.map(noticeLine)))
 }
 
 /**
@@ -710,15 +741,29 @@ async function orphanSession($: EngineInterface, proc: ProcFact): Promise<{ isOw
  * alive), each at most once per hour. A registry that was not sound at this poll (isRegistrySound: missing, unreadable,
  * empty or not an array) skips every step that reads it, pruning included: only the queue and the points are looked at.
  */
-async function pollNotices($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number, files: { queueText?: string; pointsText?: string }, isTick: boolean, isRegistryOk: boolean): Promise<void> {
+async function pollNotices(
+  $: EngineInterface,
+  entries: readonly SessionEntry[],
+  facts: ProcFacts,
+  nowMs: number,
+  files: { queueText?: string; pointsText?: string },
+  isTick: boolean,
+  isRegistryOk: boolean,
+  toasts: ToastBudget,
+): Promise<void> {
   await withNotices($, async state => {
     const notices: Notice[] = []
     if (!isRegistryOk) return [...unitStep(state, files.queueText, false), ...pointStep(state, files.pointsText, nowMs)]
+    // The first ORPHANS_SHOWN orphans of a poll are told one by one, the rest in one notice; every one is marked told.
+    const grouped: number[] = []
     for (const proc of orphanStep(state, entries, facts, nowMs)) {
       const found = await orphanSession($, proc)
       markOrphan(state, proc.pid, found.isOwn ? 'own' : 'told')
-      if (!found.isOwn) notices.push(orphanNotice(proc, state, nowMs, found.sessionId))
+      if (found.isOwn) continue
+      if (notices.length < ORPHANS_SHOWN) notices.push(orphanNotice(proc, state, nowMs, found.sessionId))
+      else grouped.push(proc.pid)
     }
+    if (grouped.length > 0) notices.push(orphanGroupNotice(grouped))
     notices.push(...stallStep(state, entries, facts, nowMs))
     pruneHarvested(state, entries, files.queueText)
     notices.push(...unitStep(state, files.queueText, false))
@@ -731,13 +776,15 @@ async function pollNotices($: EngineInterface, entries: readonly SessionEntry[],
     const aliveCount = entries.filter(entry => rowStatus(entry, facts) === 'alive').length
     if (isTick && isRepoDue(state, nowMs, aliveCount)) notices.push(...repoStep(state, await gitState($, config.orchestratorDir), nowMs))
     return notices
-  })
+  }, toasts, 'poll')
 }
 
 /** After a queue_task change: unit-complete when no task is queued or running. */
 async function queueChanged($: EngineInterface): Promise<void> {
   const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => undefined)
-  await withNotices($, state => unitStep(state, queueText, true))
+  const toasts = toastBudget()
+  await withNotices($, state => unitStep(state, queueText, true), toasts, 'queue')
+  toastMore($, toasts)
 }
 
 /** Reads the points and the queue into the panel's atoms; answers the first problem with those files, and their text for the notices. */
@@ -757,6 +804,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   const problem = files.problem
   const registryText = await readRegistryFile($)
   const parsed = parseRegistry(registryText ?? '')
+  const toasts = toastBudget()
   const now = await $.clock.now()
   if (!parsed.ok) {
     // The last good rows stay on screen under the warning.
@@ -765,13 +813,14 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   }
   const facts = await probe($, parsed.entries)
   for (const entry of parsed.entries) {
-    if (rowStatus(entry, facts) === 'dead') await complete($, entry, taskStatus)
+    if (rowStatus(entry, facts) === 'dead') await complete($, entry, taskStatus, toasts)
   }
   const rows = buildRows(parsed.entries, facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
   noteError($, next.error)
   if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
-  await pollNotices($, parsed.entries, facts, now, files, isTick, isRegistrySound(registryText))
+  await pollNotices($, parsed.entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
+  toastMore($, toasts)
 }
 
 /** A problem is toasted once, when it first appears or changes. */

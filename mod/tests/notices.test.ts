@@ -11,18 +11,26 @@ import { TOAST_TITLES, parseProcFacts } from '../hooks/core'
 import type { ProcFacts } from '../hooks/core'
 import {
   NOTICE_PREFIX,
+  ORPHANS_SHOWN,
   ORPHAN_GRACE_SEC,
+  ORPHAN_PIDS_LISTED,
+  PENDING_NOTICES_MAX,
   STALL_SEC,
+  TOASTS_PER_PASS,
   freshNoticeState,
   harvestNotices,
   isRegistrySound,
   isRepoDue,
   isRetireDue,
+  moreLine,
+  moreToastText,
   noticeKeyDir,
   noticeLine,
   noticeStoreKey,
+  orphanGroupNotice,
   orphanStep,
   parseNoticeState,
+  pendingWith,
   pointStep,
   pruneHarvested,
   repoStep,
@@ -840,5 +848,130 @@ describe('notices.ts: the registry read', () => {
     expect(isRegistrySound('[]')).toBe(true)
     expect(isRegistrySound('[]\n')).toBe(true)
     expect(isRegistrySound('[{"title": "one"}]')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------- many at once (decision mod-20)
+
+const MORE_TITLE = TOAST_TITLES.moreNotices
+
+/** `count` live headless claudes no entry claims, pids from 7000 up, each with a sessions file of its own. */
+function seedOrphans(world: World, count: number): number[] {
+  const pids = Array.from({ length: count }, (_, at) => 7000 + at)
+  for (const pid of pids) seedOrphan(world, `7a7a7a7a-0000-4000-8000-${String(pid).padStart(12, '0')}`, pid)
+  return pids
+}
+
+/** `count` open points raised three days ago, ids op-01 up. */
+const oldPoints = (count: number, from = 1) =>
+  Array.from({ length: count }, (_, at) => ({ id: `op-${String(from + at).padStart(2, '0')}`, status: 'open', raised: localDate(NOW_MS - 3 * 86_400_000), title: `Question ${from + at}` }))
+
+describe('many notices at once', () => {
+  test('45 orphans in one poll: 5 told one by one and the other 40 in one notice; 3 toasts and one summary toast; every pid recorded, none told again', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    ownSession(on)
+    echoPrompt(on)
+    seed(world)
+    const pids = seedOrphans(world, 45)
+    await start($)
+    await poll(world, ORPHAN_GRACE_SEC)
+    const toasts = world.toasts.filter(text => text.startsWith(`${TOAST_TITLES.orphan} · `) || text.startsWith(`${MORE_TITLE} · `))
+    expect(toasts.length).toBe(4)
+    expect(toasts.slice(0, 3).every(text => text.startsWith(`${TOAST_TITLES.orphan} · pid 700`))).toBe(true)
+    expect(toasts[3]).toBe(`${MORE_TITLE} · 3 more notices: see the next prompt`)
+    const lines = noticeLines(await userPrompt($))
+    expect(lines.length).toBe(6)
+    expect(lines.slice(0, 5).map(line => line.slice(0, `${NOTICE_PREFIX} orphan: pid 7000 `.length))).toEqual([7000, 7001, 7002, 7003, 7004].map(pid => `${NOTICE_PREFIX} orphan: pid ${pid} `))
+    expect(lines[5]).toBe(`${NOTICE_PREFIX} orphan: 40 more unregistered sessions: 7005, 7006, 7007, 7008, 7009, 7010, 7011, 7012, 7013, 7014 and 30 not listed; list_sessions shows each; raise an open point naming them`)
+    const orphans = parseNoticeState(store.get(KEY)).orphans
+    expect(Object.keys(orphans).sort()).toEqual(pids.map(String).sort())
+    expect(Object.values(orphans).every(one => one.isTold === true)).toBe(true)
+    await poll(world, 120)
+    expect(noticeToasts(world).length).toBe(3)
+    expect(world.toasts.filter(text => text.startsWith(`${MORE_TITLE} · `)).length).toBe(1)
+    expect(noticeLines(await userPrompt($))).toEqual([])
+  })
+
+  test('a mix of kinds in one poll (2 orphans, a stall, 2 old open points): the first 3 toasted, one summary for the other 2, all 5 lines on the next prompt', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    ownSession(on)
+    echoPrompt(on)
+    seed(world, { entries: [seedLiveWorker(world, SID_LIVE)] })
+    seedOrphans(world, 2)
+    seedTranscript(world, SID_LIVE)
+    // The stall and the orphans come due at the same poll, 30 s on; the points file appears just before it.
+    world.mtimes.set(SID_LIVE, NOW_SEC + ORPHAN_GRACE_SEC - STALL_SEC)
+    await start($)
+    await poll(world, ORPHAN_GRACE_SEC - 5)
+    expect(noticeToasts(world)).toEqual([])
+    world.files.set(`${ORCH}/open-points.json`, JSON.stringify({ points: oldPoints(2) }))
+    await poll(world, 5)
+    const titles = world.toasts.filter(text => noticeToasts(world).includes(text) || text.startsWith(`${MORE_TITLE} · `)).map(text => text.slice(0, text.indexOf(' · ')))
+    expect(titles).toEqual([TOAST_TITLES.orphan, TOAST_TITLES.orphan, TOAST_TITLES.stall, MORE_TITLE])
+    expect(world.toasts.at(-1)).toBe(`${MORE_TITLE} · 2 more notices: see the next prompt`)
+    const kinds = noticeLines(await userPrompt($)).map(line => line.slice(NOTICE_PREFIX.length + 1, line.indexOf(': ', NOTICE_PREFIX.length + 1)))
+    expect(kinds).toEqual(['orphan', 'orphan', 'stall', 'open-point-age', 'open-point-age'])
+  })
+
+  test('a harvest with 4 queued tasks waiting and a compliance check, and 2 old open points, in one refresh: 3 toasts for the harvest, 2 for the poll, one summary', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seed(world, {
+      entries: [{ ...UNIT_ENTRY }],
+      queue: ['q-1', 'q-2', 'q-3', 'q-4'].map(id => ({ id, status: 'queued', title: id, waits_for: SID_UNIT })),
+      points: oldPoints(2),
+    })
+    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
+    await start($)
+    const shown = world.toasts.filter(text => noticeToasts(world).includes(text) || text.startsWith(`${MORE_TITLE} · `)).map(text => text.slice(0, text.indexOf(' · ')))
+    expect(shown).toEqual([TOAST_TITLES['queue-ready'], TOAST_TITLES['queue-ready'], TOAST_TITLES['queue-ready'], TOAST_TITLES['open-point-age'], TOAST_TITLES['open-point-age'], MORE_TITLE])
+    expect(world.toasts.at(-1)).toBe(`${MORE_TITLE} · 2 more notices: see the next prompt`)
+    const kinds = noticeLines(await userPrompt($)).map(line => line.slice(NOTICE_PREFIX.length + 1, line.indexOf(': ', NOTICE_PREFIX.length + 1)))
+    expect(kinds).toEqual(['queue-ready', 'queue-ready', 'queue-ready', 'queue-ready', 'compliance-due', 'open-point-age', 'open-point-age'])
+  })
+
+  test('more than 30 lines waiting: the first 29 stay and the last line says how many were not shown, added up over several passes; drained by the prompt', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seed(world, { points: oldPoints(40) })
+    await start($)
+    expect(noticeToasts(world).length).toBe(3)
+    expect(world.toasts.at(-1)).toBe(`${MORE_TITLE} · 37 more notices: see the next prompt`)
+    world.files.set(`${ORCH}/open-points.json`, JSON.stringify({ points: [...oldPoints(40), ...oldPoints(5, 41)] }))
+    await poll(world, 5)
+    const lines = noticeLines(await userPrompt($))
+    expect(lines.length).toBe(30)
+    expect(lines.slice(0, 29).map(line => /open point (op-\d+)/.exec(line)?.[1])).toEqual(oldPoints(29).map(point => point.id))
+    expect(lines[29]).toBe(`${NOTICE_PREFIX} more: 16 further notices not shown; run list_sessions and audit_state`)
+    expect(noticeLines(await userPrompt($))).toEqual([])
+  })
+})
+
+describe('notices.ts: the caps', () => {
+  test('pendingWith: under the cap the lines are kept as they come; past it 29 stay and the more line counts the rest, over several additions', () => {
+    const line = (at: number) => `${NOTICE_PREFIX} stall: line ${at}`
+    const lines = (from: number, count: number) => Array.from({ length: count }, (_, at) => line(from + at))
+    expect(pendingWith([], lines(1, 30))).toEqual(lines(1, 30))
+    const over = pendingWith(lines(1, 20), lines(21, 15))
+    expect(over.length).toBe(30)
+    expect(over.slice(0, 29)).toEqual(lines(1, 29))
+    expect(over[29]).toBe(moreLine(6))
+    expect(over[29]).toBe(`${NOTICE_PREFIX} more: 6 further notices not shown; run list_sessions and audit_state`)
+    expect(pendingWith(over, [line(36)])).toEqual([...lines(1, 29), moreLine(7)])
+    expect(moreLine(1)).toBe(`${NOTICE_PREFIX} more: 1 further notice not shown; run list_sessions and audit_state`)
+    expect(pendingWith(lines(1, 29), [line(30), line(31)])).toEqual([...lines(1, 29), moreLine(2)])
+  })
+
+  test('orphanGroupNotice and moreToastText: up to 10 pids listed, the count in the trace fields; singular and plural', () => {
+    expect(orphanGroupNotice([1, 2, 3])).toEqual({ kind: 'orphan', message: '3 more unregistered sessions: 1, 2, 3; list_sessions shows each; raise an open point naming them', fields: { count: 3, isGroup: true } })
+    const twelve = Array.from({ length: 12 }, (_, at) => 100 + at)
+    expect(orphanGroupNotice(twelve).message).toBe('12 more unregistered sessions: 100, 101, 102, 103, 104, 105, 106, 107, 108, 109 and 2 not listed; list_sessions shows each; raise an open point naming them')
+    expect(moreToastText(1)).toBe('1 more notice: see the next prompt')
+    expect(moreToastText(4)).toBe('4 more notices: see the next prompt')
+    expect([ORPHANS_SHOWN, ORPHAN_PIDS_LISTED, TOASTS_PER_PASS, PENDING_NOTICES_MAX]).toEqual([5, 10, 3, 30])
   })
 })

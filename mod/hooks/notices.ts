@@ -38,8 +38,17 @@ export const REPO_EVERY_SEC = 3600
 export const REPO_CHANGE_AGE_SEC = 30 * 60
 /** How many ids a notice that counts lists before `and N more`. */
 export const NOTICE_IDS_SHOWN = 3
-/** The most notices waiting for the next prompt; older ones give way. */
+/** The most notice lines waiting for the next prompt, the closing `more` line included (pendingWith). */
 export const PENDING_NOTICES_MAX = 30
+/**
+ * The most notice toasts one pass shows: the poll's notices, the harvests' notices of one refresh together, a queue
+ * change's; the rest of a refresh go to one summary toast (moreToastText).
+ */
+export const TOASTS_PER_PASS = 3
+/** The orphans of one poll told one by one; the rest are grouped into one notice (orphanGroupNotice). */
+export const ORPHANS_SHOWN = 5
+/** How many pids the grouped orphan notice lists. */
+export const ORPHAN_PIDS_LISTED = 10
 
 /** The finding kinds of audit_state the retire-due notice counts, by its three groups. */
 const RETIRE_GROUPS: readonly { kinds: readonly string[]; label: (n: number) => string }[] = [
@@ -127,6 +136,32 @@ export function parseNoticeState(value: unknown): NoticeState {
 /** The line the model reads. */
 export function noticeLine(notice: Notice): string {
   return `${NOTICE_PREFIX} ${notice.kind}: ${notice.message}`
+}
+
+/** The line that closes the notices waiting for the next prompt when the cap left some out: how many. */
+export function moreLine(count: number): string {
+  return `${NOTICE_PREFIX} more: ${count} further ${count === 1 ? 'notice' : 'notices'} not shown; run list_sessions and audit_state`
+}
+
+const MORE_LINE = /^session-control notice: more: (\d+) further notices? not shown; /
+
+/**
+ * The notice lines waiting for the next prompt with `lines` added: at most PENDING_NOTICES_MAX lines. Past the cap the
+ * first lines stay and the newer ones are counted: the last line (moreLine) says how many were not shown, so nothing
+ * is dropped silently, and a later addition adds to that count.
+ */
+export function pendingWith(list: readonly string[], lines: readonly string[]): string[] {
+  const found = MORE_LINE.exec(list[list.length - 1] ?? '')
+  const dropped = found === null ? 0 : Number(found[1])
+  const all = [...(found === null ? list : list.slice(0, -1)), ...lines]
+  if (dropped === 0 && all.length <= PENDING_NOTICES_MAX) return all
+  const room = PENDING_NOTICES_MAX - 1
+  return [...all.slice(0, room), moreLine(dropped + Math.max(0, all.length - room))]
+}
+
+/** The summary toast's message for the notices past the toast cap of a refresh. */
+export function moreToastText(count: number): string {
+  return `${count} more ${count === 1 ? 'notice' : 'notices'}: see the next prompt`
 }
 
 /** A free text of a helper file or the registry on one line: control characters dropped, secrets redacted, cut. */
@@ -250,6 +285,20 @@ export function orphanNotice(proc: ProcFact, state: NoticeState, nowMs: number, 
     kind: 'orphan',
     message: `pid ${proc.pid} is a live headless claude no registry entry claims (cwd ${oneLine(proc.cwd || '?', 120)}, config dir ${oneLine(proc.configDir || 'default', 120)}, age ${age}, unclaimed ${unclaimed}${session}); raise an open point naming it`,
     fields: { pid: proc.pid, unclaimedSec: Math.floor((nowMs - since) / 1000), isSessionRead: sessionId !== undefined },
+  }
+}
+
+/**
+ * The orphans of one poll past the first ORPHANS_SHOWN, grouped into one notice: how many, and the first
+ * ORPHAN_PIDS_LISTED pids.
+ */
+export function orphanGroupNotice(pids: readonly number[]): Notice {
+  const listed = pids.slice(0, ORPHAN_PIDS_LISTED).join(', ')
+  const rest = pids.length > ORPHAN_PIDS_LISTED ? ` and ${pids.length - ORPHAN_PIDS_LISTED} not listed` : ''
+  return {
+    kind: 'orphan',
+    message: `${pids.length} more unregistered sessions: ${listed}${rest}; list_sessions shows each; raise an open point naming them`,
+    fields: { count: pids.length, isGroup: true },
   }
 }
 
