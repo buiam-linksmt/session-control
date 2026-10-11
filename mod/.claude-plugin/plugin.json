@@ -70,8 +70,14 @@
     "notices": {
       "type": "string",
       "title": "Notices",
-      "description": "on: the poll-based notices (orphan, stall, queue-ready, unit-complete, compliance-due, open-point-age, retire-due, repo-state) reach the model with the next prompt, as a toast and in the debug trace. off: none of them; the completion notes stay. Any other value counts as on.",
+      "description": "on: the poll-based notices (orphan, stall, queue-ready, unit-complete, compliance-due, open-point-age, retire-due, repo-state, mod-drift) reach the model with the next prompt, as a toast and in the debug trace. off: none of them; the completion notes stay, and so does the drift band above the prompt (modSource off hides it). Any other value counts as on.",
       "default": "on"
+    },
+    "modSource": {
+      "type": "string",
+      "title": "Source mod folder",
+      "description": "The mod folder the loaded mod is compared with (hooks, helper, types and .claude-plugin/plugin.json, by content hash, at the start and every 5 minutes); while they differ a dim line above the prompt says so and how to reload. A leading ~ is the home directory. Empty: <orchestrator directory>/mod when it exists, else no band. off: no band.",
+      "default": ""
     }
   }
 }

@@ -30,6 +30,7 @@ import { AUDIT_SCHEMA, auditText, retiredIds } from './audit'
 import {
   ORPHANS_SHOWN,
   TOASTS_PER_PASS,
+  driftStep,
   harvestNotices,
   isRegistrySound,
   isRepoDue,
@@ -52,6 +53,7 @@ import {
   unitStep,
 } from './notices'
 import type { Notice, NoticeState } from './notices'
+import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from './drift'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
 import type { ProtectedFile } from './guard'
@@ -167,6 +169,7 @@ const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
 const snapshot = atom({ plugin: 'session-control', key: 'snapshot' } as const, null)
 const pendingNotes = atom({ plugin: 'session-control', key: 'pendingNotes' } as const, [])
 const pendingNotices = atom({ plugin: 'session-control', key: 'pendingNotices' } as const, [])
+const driftBand = atom({ plugin: 'session-control', key: 'drift' } as const, null)
 const ledger = atom({ plugin: 'session-control', key: 'ledger' } as const, [])
 const watch = atom({ plugin: 'session-control', key: 'watch' } as const, null)
 const queued = atom({ plugin: 'session-control', key: 'queued' } as const, null)
@@ -195,6 +198,8 @@ type Config = {
   launchRoute: 'bash' | 'powershell'
   /** `on`: the poll-based notices (notices.ts); `off`: none of them (the completion notes stay). */
   notices: 'on' | 'off'
+  /** The source mod folder the loaded mod is compared with (drift.ts); empty: `<orchestrator directory>/mod`; `off`: no band. */
+  modSource: string
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -210,6 +215,7 @@ let config: Config = {
   nodePath: '',
   launchRoute: 'bash',
   notices: 'on',
+  modSource: '',
 }
 let isActive = false
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
@@ -250,6 +256,10 @@ let noticeSaved = ''
 let noticeChain: Promise<void> = Promise.resolve()
 /** A $.store failure is traced once per load: a store that keeps failing would add a line at every change. */
 let isStoreFailTraced = false
+/** The drift check's interval (drift.ts, driftEverySec), when it last ran (epoch ms) and whether one runs now. */
+let driftEvery = DRIFT_EVERY_SEC
+let driftAt: number | undefined
+let isDriftChecking = false
 
 // The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
 // wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
@@ -792,6 +802,54 @@ async function queueChanged($: EngineInterface): Promise<void> {
   toastMore($, toasts)
 }
 
+/**
+ * The loaded-mod drift check (drift.ts): at most once per driftEvery seconds (the start, then from the poll), the loaded
+ * plugin's folder ($.plugin.root) and the source mod folder hashed by one host.hashTrees call; the band shows the
+ * difference, and its first sight of a set of changed files is one mod-drift notice (with the notices option on). A
+ * source that is off or not there, or a folder that cannot be read, shows nothing.
+ */
+async function driftCheck($: EngineInterface, nowMs: number): Promise<void> {
+  if (!isActive || isDriftChecking) return
+  if (driftAt !== undefined && nowMs - driftAt < driftEvery * 1000) return
+  isDriftChecking = true
+  driftAt = nowMs
+  try {
+    const found = await driftChanged($)
+    const changed = found?.changed
+    const text = found === undefined || changed === undefined || changed.length === 0 ? null : driftBandText(found.dir, changed)
+    if ((await read($, driftBand))?.text !== text) await update($, driftBand, () => (text === null ? null : { text }))
+    trace($, 'drift', { isSourceThere: found !== undefined, isCompared: changed !== undefined, changed: changed?.length ?? 0 })
+    if (found !== undefined) {
+      const toasts = toastBudget()
+      await withNotices($, state => driftStep(state, changed, driftNoticeMessage(found.dir, changed ?? [])), toasts, 'poll')
+      toastMore($, toasts)
+    }
+  } catch (err) {
+    traceError($, 'drift', err)
+  } finally {
+    isDriftChecking = false
+  }
+}
+
+/**
+ * The source mod folder and the files that differ from the loaded mod's (changedFiles), or `changed` undefined when a
+ * folder cannot be read; undefined when there is no source (modSource off, or the folder not there).
+ */
+async function driftChanged($: EngineInterface): Promise<{ dir: string; changed?: string[] } | undefined> {
+  const source = sourceModDir(config.modSource, config.orchestratorDir)
+  if (source === undefined) return undefined
+  const machine = await hostOf($)
+  const dir = machine.nativePath(expandHome(source, await homeDir($))).replace(/[\\/]+$/, '')
+  if (!(await $.fs.exists(dir).catch(() => false))) return undefined
+  const loaded = machine.nativePath($.plugin.root).replace(/[\\/]+$/, '')
+  // The same folder (a session started with --plugin-dir on the source itself): nothing can differ.
+  const [own, other] = await Promise.all([loaded, dir].map(path => $.fs.stat(path, { resolve: true }).then(one => one.realPath, () => undefined)))
+  if (own !== undefined && own === other) return { dir, changed: [] }
+  const trees = await machine.hashTrees(portOf($), [loaded, dir], DRIFT_SPEC)
+  const [mine, theirs] = trees ?? []
+  return mine === undefined || theirs === undefined ? { dir } : { dir, changed: changedFiles(mine, theirs) }
+}
+
 /** Reads the points and the queue into the panel's atoms; answers the first problem with those files, and their text for the notices. */
 async function loadPoints($: EngineInterface): Promise<{ problem?: string; queueText?: string; pointsText?: string }> {
   const text = await $.fs.read(orchPath('open-points.json')).catch(() => undefined)
@@ -814,6 +872,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   if (!parsed.ok) {
     // The last good rows stay on screen under the warning.
     await showError($, problem === undefined ? parsed.error : `${parsed.error}; ${problem}`, now)
+    if (isTick) void driftCheck($, now)
     return
   }
   const facts = await probe($, parsed.entries)
@@ -826,6 +885,9 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
   await pollNotices($, parsed.entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
   toastMore($, toasts)
+  // The drift check, at most once per its interval, from the poll's timer and on its own: a hash of the two folders
+  // never holds the poll.
+  if (isTick) void driftCheck($, now)
 }
 
 /** A problem is toasted once, when it first appears or changes. */
@@ -1759,6 +1821,7 @@ async function activate($: EngineInterface): Promise<void> {
     $.clock.every(config.pollMs, () => tick($))
   }
   await refresh($)
+  await driftCheck($, await $.clock.now())
 }
 
 /** session.start: register the command; in the orchestrator directory turn the board on. */
@@ -1778,8 +1841,9 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
   if (config.orchestratorDir !== '') config.orchestratorDir = machine.nativePath(config.orchestratorDir)
   const isHere = machine.isSameDir(cwd, config.orchestratorDir)
   if (isTraceWanted) {
-    // The picker command is a command line of its own: the trace says only whether one is set.
-    const { pollMs, registrySetting, licencePickCommand, ...rest } = config
+    // The picker command is a command line of its own: the trace says only whether one is set. modSource is left to
+    // the drift line (whether a source is there).
+    const { pollMs, registrySetting, licencePickCommand, modSource, ...rest } = config
     const options = { ...rest, registryPath: registrySetting, pollSeconds: pollMs / 1000, licencePickCommand: licencePickCommand.trim() === '' ? 'empty' : 'set' }
     traceStart = { cwd, platform: machine.platform, isOrchestratorDir: config.orchestratorDir !== '' && isHere, options }
   }
@@ -1854,6 +1918,18 @@ async function debugSwitch($: EngineInterface): Promise<string | undefined> {
   }
 }
 
+/**
+ * The drift check's interval (drift.ts, driftEverySec): DRIFT_EVERY_SEC unless the test-only shortening is set, which
+ * counts only with SESSION_CONTROL_TEST=1; an environment that cannot be read leaves the default.
+ */
+async function driftInterval($: EngineInterface): Promise<number> {
+  try {
+    return driftEverySec(await $.env.get('SESSION_CONTROL_TEST'), await $.env.get('SESSION_CONTROL_DRIFT_SECONDS'))
+  } catch {
+    return DRIFT_EVERY_SEC
+  }
+}
+
 /** The fields of a tool call the trace shows: the named ones that are set, never free text. */
 function pickFields(e: unknown, names: readonly string[]): Record<string, unknown> {
   const input = plain(e)
@@ -1871,6 +1947,9 @@ export const register: Register = (on, options) => {
   noticeSaved = ''
   noticeChain = Promise.resolve()
   isStoreFailTraced = false
+  driftEvery = DRIFT_EVERY_SEC
+  driftAt = undefined
+  isDriftChecking = false
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
@@ -1883,6 +1962,7 @@ export const register: Register = (on, options) => {
     nodePath: String(options.nodePath ?? ''),
     launchRoute: options.launchRoute === 'powershell' ? 'powershell' : 'bash',
     notices: options.notices === 'off' ? 'off' : 'on',
+    modSource: String(options.modSource ?? ''),
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -1892,6 +1972,7 @@ export const register: Register = (on, options) => {
     // The trace is wanted from the launch, by the debug option or by the environment (an environment that cannot be
     // read leaves it off); it is written once the board is on.
     if (!config.debug && isTraceSwitch(await debugSwitch($))) isTraceWanted = true
+    driftEvery = await driftInterval($)
     await traced($, () => startSession($, e.cwd))
     return started
   })
@@ -2118,6 +2199,16 @@ export const register: Register = (on, options) => {
       return next({ ...e, offset: holdOffset(e.offset, e.by, e.contentRows, e.bodyRows) })
     }
     return fits ? next({ ...e, offset: 0 }) : next(e)
+  })
+
+  // The loaded-mod drift band (decision win-35): one dim line above the prompt while the loaded mod differs from the
+  // source mod folder, as the engine's own "Update installed" line; a survey, or nothing to say, leaves the band to the
+  // engine. It is no notice: the notices option does not switch it off (modSource off does).
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const band = await read($, driftBand)
+    if (band === null || e.props.hasSurvey) return next(e)
+    const { Text } = $.ui.resolve(e)
+    return <Text dimColor>{band.text}</Text>
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

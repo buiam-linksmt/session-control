@@ -35,8 +35,15 @@ export type World = {
   passed: { tool: string; input: Record<string, unknown> }[]
   /** Where the next launch's worker runs: its cwd and the session id its sessions file names. */
   launch: { cwd: string; sid: string }
-  /** Operations made to fail: `tree` (the listing cannot run), `stop` (the stop script sends nothing and exits 1). */
-  breaks: Set<'tree' | 'stop'>
+  /**
+   * Operations made to fail: `tree` (the listing cannot run), `stop` (the stop script sends nothing and exits 1),
+   * `helper` (node starts but the helper script is not there: exit 1, nothing on stdout).
+   */
+  breaks: Set<'tree' | 'stop' | 'helper'>
+  /** Every path $.fs.stat was asked about, in order (with `resolve` marked `+resolve`). */
+  statted: string[]
+  /** Every folder $.fs.list was asked for, in order. */
+  listed: string[]
   /** Files that are there but cannot be read (over the read cap, say). */
   unreadable: Set<string>
   /** A transcript's mtime the probe reports, epoch seconds, by session id (not listed: 5 s before the fixture's start). */
@@ -74,7 +81,7 @@ function probeLines(world: World, args: readonly string[]): string {
   return lines.map(line => `${line}\n`).join('')
 }
 
-export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
+export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<string, string> } = {}): World {
   const world: World = {
     files: new Map(),
     links: new Map(),
@@ -86,6 +93,8 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
     passed: [],
     launch: { cwd: '/w/work', sid: 'abcdabcd-0000-4000-8000-000000000001' },
     breaks: new Set(),
+    statted: [],
+    listed: [],
     unreadable: new Set(),
     mtimes: new Map(),
     clock: mock.clock(on, { now: NOW_MS }),
@@ -98,7 +107,7 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
     files.set(real(path), text)
     record(path, via)
   }
-  mock.env(on, { HOME })
+  mock.env(on, { HOME, ...opts.env })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   on('tool.register', ($, e) => {
@@ -117,6 +126,7 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
   })
   on('fs.exists', ($, e) => ({ value: files.has(real(e.path)) || isDir(e.path) }))
   on('fs.stat', ($, e) => {
+    world.statted.push((e as { resolve?: boolean }).resolve === true ? `${e.path}+resolve` : e.path)
     const path = e.path.replace(/\/+$/, '')
     const target = real(path)
     const base = { mtimeMs: NOW_MS, isLink: links.has(path) }
@@ -126,9 +136,18 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
     throw new Error(`ENOENT ${e.path}`)
   })
   on('fs.list', ($, e) => {
+    world.listed.push(e.path)
     const dir = real(e.path)
     const names = new Set([...files.keys()].filter(key => key.startsWith(`${dir}/`)).map(key => key.slice(dir.length + 1).split('/')[0] ?? ''))
-    return { value: [...names].map(name => ({ name, kind: files.has(`${dir}/${name}`) ? 'file' : 'dir', size: (files.get(`${dir}/${name}`) ?? '').length, mtimeMs: NOW_MS })) as never }
+    // A link (in links) is listed as one, as the engine lists it: `other`, isLink, not followed.
+    for (const link of links.keys()) if (link.startsWith(`${dir}/`) && !link.slice(dir.length + 1).includes('/')) names.add(link.slice(dir.length + 1))
+    return {
+      value: [...names].map(name =>
+        links.has(`${dir}/${name}`)
+          ? { name, kind: 'other', size: 0, mtimeMs: 0, isLink: true }
+          : { name, kind: files.has(`${dir}/${name}`) ? 'file' : 'dir', size: (files.get(`${dir}/${name}`) ?? '').length, mtimeMs: NOW_MS },
+      ) as never,
+    }
   })
   on('process.run', ($, e) => {
     const argv = e.argv.map(String)
@@ -139,6 +158,7 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
       return { value: ok('v24.14.0\n') }
     }
     if (cmd === 'node' && argv[1]?.endsWith('/helper/host.mjs')) {
+      if (world.breaks.has('helper')) return { value: { ...ok('', 1), stderr: 'Error: Cannot find module' } }
       const op = argv[2] ?? ''
       const request = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
       const steps = op === 'batch' ? (request.ops as Record<string, unknown>[]) : [{ op, ...request }]

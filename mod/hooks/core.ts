@@ -331,10 +331,25 @@ export const TOAST_TITLES = {
   'open-point-age': 'Open point waiting',
   'retire-due': 'Housekeeping due',
   'repo-state': 'Repository state',
+  'mod-drift': 'Mod out of date',
   // The one summary toast of the notices past the toast cap of a refresh.
   moreNotices: 'More notices',
 } as const satisfies Record<
-  SessionOutcomeKind | 'tracking' | 'directWrite' | 'trace' | 'helper' | 'orphan' | 'stall' | 'queue-ready' | 'unit-complete' | 'compliance-due' | 'open-point-age' | 'retire-due' | 'repo-state' | 'moreNotices',
+  | SessionOutcomeKind
+  | 'tracking'
+  | 'directWrite'
+  | 'trace'
+  | 'helper'
+  | 'orphan'
+  | 'stall'
+  | 'queue-ready'
+  | 'unit-complete'
+  | 'compliance-due'
+  | 'open-point-age'
+  | 'retire-due'
+  | 'repo-state'
+  | 'mod-drift'
+  | 'moreNotices',
   string
 >
 

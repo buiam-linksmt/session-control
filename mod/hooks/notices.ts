@@ -12,7 +12,16 @@ import type { Finding, GitState } from './audit'
 import { clean } from './inspect'
 import { localDate } from './store'
 
-export type NoticeKind = 'orphan' | 'stall' | 'queue-ready' | 'unit-complete' | 'compliance-due' | 'open-point-age' | 'retire-due' | 'repo-state'
+export type NoticeKind =
+  | 'orphan'
+  | 'stall'
+  | 'queue-ready'
+  | 'unit-complete'
+  | 'compliance-due'
+  | 'open-point-age'
+  | 'retire-due'
+  | 'repo-state'
+  | 'mod-drift'
 
 /** One notice: its kind, its message (one line) and the trace's fields (ids, counts and switches only, never free text). */
 export type Notice = { kind: NoticeKind; message: string; fields: Record<string, string | number | boolean> }
@@ -82,6 +91,8 @@ export type NoticeState = {
   retireCheckAt?: number
   /** When the repo-state check last ran git (epoch ms). */
   repoAt?: number
+  /** The changed files (one per line) the last mod-drift notice was told for; absent while the trees match. */
+  drift?: string
 }
 
 export function freshNoticeState(): NoticeState {
@@ -128,6 +139,7 @@ export function parseNoticeState(value: unknown): NoticeState {
     const at = finite(value[key])
     if (at !== undefined) state[key] = at
   }
+  if (typeof value.drift === 'string' && value.drift !== '') state.drift = value.drift
   return state
 }
 
@@ -473,4 +485,23 @@ export function repoStep(state: NoticeState, git: GitState | undefined, nowMs: n
   if (isStaleChange) parts.push(`has ${git.changed.length} tracked ${git.changed.length === 1 ? 'file' : 'files'} uncommitted, the oldest change ${formatAge((nowMs - (oldest as number)) / 1000)} old`)
   if (parts.length === 0) return []
   return [{ kind: 'repo-state', message: `the orchestrator directory ${parts.join(' and ')}, with no worker alive: run audit_state`, fields: { isOffDefault, isStaleChange, changed: git.changed.length } }]
+}
+
+// ---------------------------------------------------------------- mod-drift
+
+/**
+ * mod-drift (decision win-35): the first time a set of changed files is seen (driftNoticeMessage), told once; a match
+ * (`changed` empty) clears it, so the next drift is told again, as is a drift whose set of files changes. `changed`
+ * undefined (a folder could not be read) tells nothing and changes nothing.
+ */
+export function driftStep(state: NoticeState, changed: readonly string[] | undefined, message: string): Notice[] {
+  if (changed === undefined) return []
+  if (changed.length === 0) {
+    delete state.drift
+    return []
+  }
+  const key = changed.join('\n')
+  if (state.drift === key) return []
+  state.drift = key
+  return [{ kind: 'mod-drift', message, fields: { changed: changed.length } }]
 }

@@ -79,6 +79,8 @@ declare module 'claude-code' {
       pendingNotes: string[]
       /** Notice lines (`session-control notice: <kind>: ...`) not yet handed to the model; the next prompt of any origin carries them. */
       pendingNotices: string[]
+      /** The loaded-mod drift band's line (drift.ts) while the loaded mod differs from the source mod folder; null when they match or nothing could be compared. */
+      drift: { text: string } | null
       /** The watched worker's recent readable transcript lines, with the session id they were read for; null before a watch. */
       watch: { sid: string; title: string; lines: string[] } | null
       /** The box shown in the compact (inline) panel. */
