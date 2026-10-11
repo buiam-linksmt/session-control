@@ -857,6 +857,13 @@ test('probeUsage parser: the helper gives each recorded and written case its ans
   for (const one of USAGE_CASES) assert.deepEqual(parseUsage(one.stdout, one.stderr ?? '', one.exitCode ?? 0), one.expect, one.name)
 })
 
+test('probeUsage parser: a label with no percent after it is a missing window, never PARSE; the other window is read; with neither the no-window code', { skip: !HAS_TS }, async () => {
+  const { parseUsage } = await import('../helper/usage.mjs')
+  const { USAGE_MISSING_CASES } = await import('./usage-fixtures.ts')
+  assert.ok(USAGE_MISSING_CASES.filter(one => one.name.startsWith('mixed: ')).length >= 8)
+  for (const one of USAGE_MISSING_CASES) assert.deepEqual(parseUsage(one.stdout, one.stderr ?? '', one.exitCode ?? 0), one.expect, one.name)
+})
+
 test('probeUsage parser: an answer holds the two windows and nothing else of the text', { skip: !HAS_TS }, async () => {
   const { parseUsage } = await import('../helper/usage.mjs')
   const { USAGE_FIXTURES } = await import('./usage-fixtures.ts')

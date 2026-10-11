@@ -131,3 +131,68 @@ export const USAGE_CASES: UsageCase[] = [
     expect: { ok: true, five: { percent: 95, resets: '6pm (Europe/Rome)' }, seven: { percent: 91, resets: 'Oct 14, 9am (Europe/Rome)' } },
   },
 ]
+
+/**
+ * A window's label with no percent after it, where it may stand or further down before the next label: that window is
+ * missing (null), never PARSE; the other window is read, and a later label of the same window may still give it. With
+ * neither window the answer is the code of a text with no window. The `mixed:` cases are texts of the shuffled mixes
+ * the helper's tests once ran through both parsers (seed 7, 300 rounds of lines of USAGE_CASES; seed 11, 500 rounds of
+ * the good and refused forms), one per outcome class those 800 texts fell into, each answer read from usage.mjs.
+ */
+export const USAGE_MISSING_CASES: UsageCase[] = [
+  { name: 'the session label alone, no percent anywhere after it: the session missing, the week read', stdout: `${WEEK}\nCurrent session\n  Resets 6pm (Europe/Rome)\n`, expect: { ok: true, five: null, seven: MAIN.seven } },
+  { name: 'the weekly label alone, no percent anywhere after it: the week missing, the session read', stdout: `${SESSION}\nCurrent week (all models)\n  Resets Oct 14, 9am (Europe/Rome)\n`, expect: { ok: true, five: MAIN.five, seven: null } },
+  {
+    name: 'the session label alone, the next line the weekly label and its bar: the bar is the week\'s, the session missing',
+    stdout: 'Current session\nCurrent week (all models)\n  ██                  9% used\n  Resets Oct 14, 9am (Europe/Rome)\n',
+    expect: { ok: true, five: null, seven: { percent: 9, resets: 'Oct 14, 9am (Europe/Rome)' } },
+  },
+  {
+    name: 'the session label alone, the next line another model\'s label and its bar: the bar is that window\'s, the session missing',
+    stdout: `Current session\nCurrent week (Sonnet only)\n  █                   80% used\n${WEEK}\n`,
+    expect: { ok: true, five: null, seven: MAIN.seven },
+  },
+  { name: 'both labels alone, no percent after either: no window, PARSE with exit 0', stdout: 'Current session\n  Resets 6pm (Europe/Rome)\nCurrent week (all models)\n  Resets Oct 14, 9am (Europe/Rome)\n', expect: { ok: false, code: 'PARSE' } },
+  { name: 'both labels alone, no percent after either: no window, FAILED with a non-zero exit', stdout: 'Current session\n  Resets 6pm (Europe/Rome)\nCurrent week (all models)\n  Resets Oct 14, 9am (Europe/Rome)\n', exitCode: 1, expect: { ok: false, code: 'FAILED' } },
+  { name: 'both labels alone after the cost summary: no window, NOT_LOGGED_IN', stdout: 'Total cost:            $0.0000\nCurrent session\nCurrent week (all models)\n', expect: { ok: false, code: 'NOT_LOGGED_IN' } },
+  { name: 'mixed: a percent with no label, a non-zero exit (FAILED)', stdout: '  37% used', exitCode: 1, expect: { ok: false, code: 'FAILED' } },
+  {
+    name: 'mixed: the session label alone among other lines, a non-zero exit (the session missing, FAILED)',
+    stdout: 'Last 24h · 760 requests\n  18% of your usage came from subagent-heavy sessions\nCurrent session\nLast 7d · 764 requests · 58 sessions\n',
+    exitCode: 1,
+    expect: { ok: false, code: 'FAILED' },
+  },
+  {
+    name: 'mixed: an error text, then the session label alone (the session missing, FAILED with exit 0)',
+    stdout: 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}\n\nCurrent session\n  23% of your usage was while 4+ sessions ran in parallel\n',
+    expect: { ok: false, code: 'FAILED' },
+  },
+  { name: 'mixed: the cost summary among filler, a non-zero exit (NOT_LOGGED_IN)', stdout: `${JUNK_LINE}Last 7d · 16008 requests · 405 sessions\nTotal cost:            $0.0000\n${JUNK_LINE}`, exitCode: 1, expect: { ok: false, code: 'NOT_LOGGED_IN' } },
+  {
+    name: 'mixed: the cost summary, another model\'s window and the session label alone last (NOT_LOGGED_IN)',
+    stdout: `Total cost:            $0.0000\n${JUNK_LINE}Current week (Fable): 0% used\n\n\n\n${JUNK_LINE}\nCurrent session`,
+    expect: { ok: false, code: 'NOT_LOGGED_IN' },
+  },
+  { name: 'mixed: a percent with no label, exit 0 (PARSE)', stdout: '  9% used', expect: { ok: false, code: 'PARSE' } },
+  { name: 'mixed: both labels alone after a blank line (PARSE)', stdout: '\nCurrent session\nCurrent week (all models)', expect: { ok: false, code: 'PARSE' } },
+  {
+    name: 'mixed: the weekly label and its percent below it, then a one-line session',
+    stdout: 'Current week (all models)\n  37% used\nCurrent session: <1% used · resets 6pm',
+    expect: { ok: true, five: { percent: 0, resets: '6pm' }, seven: { percent: 37, resets: '' } },
+  },
+  {
+    name: 'mixed: the session label alone first, a later session line gives the window (both read)',
+    stdout: 'Current session\nCurrent week (all models): 5% used · resets Oct 18, 6am (Europe/Budapest)\nCurrent session: <5% used\nCurrent session\n',
+    exitCode: 1,
+    expect: { ok: true, five: { percent: 4, resets: '' }, seven: { percent: 5, resets: 'Oct 18, 6am (Europe/Budapest)' } },
+  },
+  { name: 'mixed: a reset line before the session label is not its reset (the session alone)', stdout: '  Resets 6pm\nCurrent session\n  100% used', expect: { ok: true, five: { percent: 100, resets: '' }, seven: null } },
+  { name: 'mixed: the session read, the weekly label alone with a reset under it (the week missing)', stdout: 'Current session: 12% used · resets 6pm (UTC)\nCurrent week (all models)\n  Resets 6pm', expect: { ok: true, five: { percent: 12, resets: '6pm (UTC)' }, seven: null } },
+  { name: 'mixed: a reset line, then the weekly label and its percent on the line below (the week alone)', stdout: '  Resets 6pm\nCurrent week (all models)\n  9% used', expect: { ok: true, five: null, seven: { percent: 9, resets: '' } } },
+  { name: 'mixed: the week read, then a blank line and the session label alone last (the session missing)', stdout: '\nCurrent week (all models)\n  37% used\n\nCurrent session', expect: { ok: true, five: null, seven: { percent: 37, resets: '' } } },
+  {
+    name: 'mixed: three session labels alone, then the week (the session missing three times)',
+    stdout: 'Current session\nCurrent session\n\n\nCurrent session\n\nCurrent week (all models): 41% used · resets Oct 16, 1pm (UTC)',
+    expect: { ok: true, five: null, seven: { percent: 41, resets: 'Oct 16, 1pm (UTC)' } },
+  },
+]
