@@ -1,9 +1,8 @@
-// What the Node ports of the end-to-end scripts (mod/tests/e2e-*.mjs) share: the check lines, the scratch directory
-// and its cleanup, the headless orchestrator's start and wait, the reading of its transcript, and the process checks.
-// Each port does what its shell twin (e2e-*.sh, which stays beside it) does, line for line, with the Node standard
-// library only: no sh, grep, tr, sed, jq or cygpath, so a port runs on Windows without Git Bash. The /proc checks are
-// Linux-only; elsewhere they print a `skip` line where the shell script skips, and no process that is not this run's
-// own throwaway is ever signalled. Node 22 or newer.
+// What the end-to-end scripts (mod/tests/e2e-*.mjs) share: the check lines, the scratch directory and its cleanup, the
+// headless orchestrator's start and wait, the reading of its transcript, and the process checks. The Node standard
+// library only: no sh, grep, tr, sed, jq or cygpath, so a script runs on Windows without Git Bash. The /proc checks are
+// Linux-only; elsewhere they print a `skip` line, and no process that is not this run's own throwaway is ever
+// signalled. Node 22 or newer.
 
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -19,7 +18,7 @@ export const HOME = process.env.HOME || homedir()
 /** The configuration the sessions inherit: this process's CLAUDE_CONFIG_DIR, else ~/.claude. */
 export const CFG_DEFAULT = process.env.CLAUDE_CONFIG_DIR || join(HOME, '.claude')
 
-/** One line per check, in the shell scripts' format; `failed` is set by the first FAIL. */
+/** One line per check (`ok   `, `FAIL `, `skip `, `info `); `failed` is set by the first FAIL. */
 export const kit = {
   failed: false,
   pass: text => out(`ok   ${text}`),
@@ -57,14 +56,14 @@ export function isExecutable(path) {
   }
 }
 
-/** A path as claude and the mod take it: C:/... on Windows, unchanged elsewhere (the shell's `native`). */
+/** A path as claude and the mod take it: C:/... on Windows, unchanged elsewhere. */
 export const native = path => (IS_WINDOWS ? path.replaceAll('\\', '/') : path)
-/** Its /c/... form on Windows (the shell's `msys`), unchanged elsewhere. */
+/** Its /c/... form on Windows (Git Bash's), unchanged elsewhere. */
 export const msys = path => native(path).replace(/^([A-Za-z]):\//, '/$1/')
 
 export const sleep = ms => new Promise(done => setTimeout(done, ms))
 export const readText = path => fs.readFileSync(path, 'utf8')
-/** The text of a file, or '' when it cannot be read (the shell's `2>/dev/null`). */
+/** The text of a file, or '' when it cannot be read. */
 export function readOr(path, fallback = '') {
   try {
     return readText(path)
@@ -127,9 +126,9 @@ export function countedList(names) {
   for (const name of [...names].sort()) counts.set(name, (counts.get(name) ?? 0) + 1)
   return [...counts].map(([name, n]) => ` ${n} ${name};`).join('')
 }
-/** The part before the first '-' (the shell's ${id%%-*}). */
+/** The part before the first '-'. */
 export const shortId = id => id.split('-')[0]
-/** Every character outside A-Z, a-z and 0-9 as '-' (the shell's sanitized(), the engine's project folder name). */
+/** Every character outside A-Z, a-z and 0-9 as '-' (the engine's project folder name). */
 export const sanitized = text => text.replace(/[^A-Za-z0-9]/g, '-')
 /** `date -u -d @<sec> +%Y-%m-%dT%H:%M:%S.000Z` */
 export const iso = sec => new Date(sec * 1000).toISOString().replace(/\.\d{3}Z$/, '.000Z')
@@ -162,7 +161,7 @@ export function regularFiles(dir) {
   walk(dir)
   return found.sort()
 }
-/** The node on a PATH and its major version (`node --version`), as the shell scripts read them; undefined when none. */
+/** The node on a PATH and its major version (`node --version`); undefined when none. */
 export function nodeMajor(path = process.env.PATH ?? '') {
   const node = which('node', path)
   if (node === undefined) return { node: undefined, major: undefined }
@@ -222,7 +221,7 @@ export function cmdline(pid) {
     return undefined
   }
 }
-/** Field 22 of /proc/<pid>/stat, the start (the shell's start_of), or '' when gone. Linux only. */
+/** Field 22 of /proc/<pid>/stat, the start, or '' when gone. Linux only. */
 export function startOf(pid) {
   if (!HAS_PROC) return ''
   try {
@@ -241,9 +240,9 @@ export const procCwd = pid => {
   }
 }
 export const ppid = pid => firstMatch(readOr(`/proc/${pid}/status`), /^PPid:\s*(\d+)/m)
-/** The numeric entries of /proc in the order the shell's glob /proc/[0-9]* gives them. */
+/** The numeric entries of /proc, sorted as a glob /proc/[0-9]* gives them. */
 export const procPids = () => (HAS_PROC ? fs.readdirSync('/proc').filter(name => /^[0-9]+$/.test(name)).sort() : [])
-/** Whether a pid is still one this run started: its command line names the scratch directory (the shell's ours()). */
+/** Whether a pid is still one this run started: its command line names the scratch directory. */
 export const ours = (pid, dir) => Boolean(pid) && (cmdline(pid)?.includes(dir) || cmdline(pid)?.includes(native(dir))) === true
 /** Whether a process with that pid exists (`kill -0` without a signal: /proc on Linux, signal 0 elsewhere). */
 export function pidExists(pid) {
@@ -267,7 +266,7 @@ export function signal(pid, sig = 'SIGTERM') {
 }
 
 /**
- * The shell scripts' others_naming: the first three processes other than this one and its parent whose command line
+ * The first three processes other than this one and its parent whose command line
  * or working directory names the directory, as `<pid> <command line>`, with ` (cwd <dir>)` after it when the working
  * directory names it. Only those two pids are left out, never a process by its name: every other process of this run
  * that is still there is reported. /proc on Linux (command line and working directory); elsewhere the command lines
@@ -295,7 +294,7 @@ export function processesNaming(dir) {
 }
 
 /**
- * A script's KEEP_OUT copies as its shell twin makes them: `mkdir -p <keep> && cp <files> <keep>/`, then each further
+ * A script's KEEP_OUT copies, as `mkdir -p <keep> && cp <files> <keep>/` makes them, then each further
  * cp. `steps` are cp calls: `{ files }` into the folder, `{ files: [file], name }` to a name of its own there. A cp
  * copies what it can and goes on; a failure (the folder not made, a file missing or unreadable) never ends the run.
  * With `quiet` false each failure is said on stderr, as by cp without 2>/dev/null. Answers whether every step copied
@@ -307,7 +306,7 @@ export function keepOut(keep, steps, quiet = true) {
   try {
     fs.mkdirSync(keep, { recursive: true })
   } catch (error) {
-    // mkdir's message is never hidden in the shell scripts.
+    // mkdir's message is never hidden.
     fs.writeSync(2, `mkdir: cannot create directory '${keep}': ${error.code ?? error.message}\n`)
     made = false
   }
@@ -337,7 +336,7 @@ const before = (text, sep) => (text.includes(sep) ? text.slice(0, text.indexOf(s
 
 /**
  * The headless orchestrator: `(cd <cwd> && <env> exec claude <args> < <stdin> > <stdout> 2> <stderr>) &`. The child is
- * claude itself, so its pid is the orchestrator's, as the shell's $!. Only this run's own child is ever signalled:
+ * claude itself, so its pid is the orchestrator's. Only this run's own child is ever signalled:
  * stop() signals it while Node still holds it unreaped.
  */
 export function startClaude({ claude, cwd, args, stdin, stdout, stderr, env = {} }) {
@@ -374,7 +373,7 @@ export function withEnv(env) {
   }
   return all
 }
-/** The claude on the PATH, or the FAIL line and exit 1 the shell scripts give (`command -v claude`). */
+/** The claude on the PATH (`command -v claude`), or a FAIL line and exit 1. */
 export function requireClaude(path = process.env.PATH ?? '', what = 'claude is on the PATH') {
   const claude = which('claude', path)
   if (claude === undefined) {
@@ -390,7 +389,7 @@ export function requireClaude(path = process.env.PATH ?? '', what = 'claude is o
 }
 /**
  * The wait for the orchestrator: up to `limit` seconds, one tick a second (`tick` runs each second, before the pause);
- * then the shell's verdict lines. `isOk` reads orchestrator.json (is_error false). Returns the elapsed seconds.
+ * then the verdict lines. `isOk` reads orchestrator.json (is_error false). Returns the elapsed seconds.
  */
 export async function awaitOrchestrator(orch, { limit, dir, tick = async () => sleep(1000), isOk }) {
   let elapsed = 0
@@ -502,7 +501,7 @@ function jqContent(content) {
 /** A value as jq -r prints it: a string as it is, anything else as JSON (an object or an array indented by two). */
 const jqRaw = value => (typeof value === 'string' ? value : isObject(value) || Array.isArray(value) ? JSON.stringify(value, null, 2) : JSON.stringify(value))
 /**
- * `jq -r '(.[] | select(.title == "<title>")).<path> // <alt>' <registry>` as the shell's $(...) holds it: the value at
+ * `jq -r '(.[] | select(.title == "<title>")).<path> // <alt>' <registry>` as a shell's $(...) holds it: the value at
  * the path (keys, as `.outcome.kind`) of every entry with that title, those that are neither null nor false, one per
  * line; `alt` when there is none. Where jq stops with an error (a registry that is missing, no JSON, null or a scalar;
  * an entry that is no object; a path through a scalar) the values before it stand and `alt` is not given. Two entries
@@ -603,7 +602,7 @@ export function jsonValues(text) {
 /** The tool names the orchestrator called, as the info line lists them. */
 export const callCounts = entries => countedList(toolUses(entries).map(c => c.name))
 
-/** A node script for the orchestrator's Bash tool to run with this node (process.execPath): the shell scripts' `sh <file>`. */
+/** A node script for the orchestrator's Bash tool to run with this node (process.execPath). */
 export function nodeCommand(script, ...args) {
   const quote = text => `"${native(text)}"`
   return [quote(process.execPath), quote(script), ...args.map(quote)].join(' ')

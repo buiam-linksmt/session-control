@@ -3,7 +3,7 @@
 // Bash. withPowerShellLaunch lays the route over the Windows adapter: launchTool, launchCommand, launchToolHint,
 // launchPidFile and launchRefusal are its own, every other member (the launch guards, the probe, the worker match) the
 // adapter's.
-// Nothing here runs a process: the command is text for the PowerShell tool. tests/windows-selftest.py renders it with
+// Nothing here runs a process: the command is text for the PowerShell tool. tests/windows-selftest.mjs renders it with
 // this file and runs it under Windows PowerShell 5.1 and PowerShell 7, with node.exe standing in for claude.exe.
 
 import { WORKER_SETTINGS } from './core'
@@ -60,7 +60,7 @@ export function wildcardEscape(path: string): string {
  * Why the PowerShell route cannot start a launch, or undefined. Start-Process also reads its redirection paths as
  * wildcard patterns, and no spelling of a path with `[`, `]` or a backtick reaches both versions whole: plain, the
  * pattern finds no file; escaped, PowerShell 7 looks for the backticks themselves (and 5.1 for the standard input's).
- * Measured with tests/windows-selftest.py's layouts. The launch directory is escaped instead (wildcardEscape).
+ * Measured with tests/windows-selftest.mjs's layouts. The launch directory is escaped instead (wildcardEscape).
  */
 export function powershellLaunchRefusal(args: LaunchArgs, runsDir: string): string | undefined {
   const named = [

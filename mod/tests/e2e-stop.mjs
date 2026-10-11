@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// The Node port of e2e-stop.sh, which stays beside it: the same checks, the same lines, the same options. Run with
-// `node mod/tests/e2e-stop.mjs` (Node 22 or newer); no sh, grep, tr, sed, jq or cygpath is needed.
+// Run with `node mod/tests/e2e-stop.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
+// needed.
 //
 // End-to-end test of stop_worker against the real claude, in a scratch directory it makes and removes. A headless haiku
 // orchestrator (capped at --max-budget-usd 0.25) launches one haiku worker through launch_worker whose task is to run
@@ -12,7 +12,7 @@
 // tool answered is read from the orchestrator's transcript and checked, and kept for the report with KEEP_OUT=<dir>.
 // Everything the mod reads or writes is in the scratch directory (registry, helper files, runs directory, trace); the
 // real registry is never touched and the licence picker option is empty: the worker inherits the default
-// configuration, where both transcripts stay. Linux /proc is required, as for the shell script: elsewhere the run
+// configuration, where both transcripts stay. Linux /proc is required: elsewhere the run
 // fails at once. One line per check; exit 1 on a failure. Only this run's own processes are ever signalled: the
 // worker's tree as recorded, each only while it still has its recorded start, and the bystander likewise.
 

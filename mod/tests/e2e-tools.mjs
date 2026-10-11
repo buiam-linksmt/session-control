@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// The Node port of e2e-tools.sh, which stays beside it: the same checks, the same lines, the same options. Run with
-// `node mod/tests/e2e-tools.mjs` (Node 22 or newer); no sh, grep, tr, sed, jq or cygpath is needed.
+// Run with `node mod/tests/e2e-tools.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
+// needed.
 //
 // End-to-end test of the six read-only inspection tools of the session-control mod against the real claude, in a
 // scratch directory it makes and removes. It seeds a scratch registry with three finished sessions (a clean one with

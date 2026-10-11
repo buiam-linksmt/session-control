@@ -16,13 +16,18 @@
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, byteSize, callCounts, entriesOf, finish, globIn, grepF, isErrorFalse, join, keepOut, kit, native, ours,
+  CFG_DEFAULT, IS_WINDOWS, MOD, awaitOrchestrator, byteSize, callCounts, entriesOf, finish, globIn, grepF, isErrorFalse, join, keepOut, kit, native, ours,
   processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings, startClaude, toolUses,
-  transcriptOf, writeJson, writeLines,
+  transcriptOf, which, writeJson, writeLines,
 } from './lib/e2e.mjs'
 
 const { pass, fail, info } = kit
 const CLAUDE = requireClaude()
+// Step (3) runs jq through the orchestrator's Bash tool, whose PATH on Linux and WSL is this one.
+if (!IS_WINDOWS && which('jq') === undefined) {
+  fail('jq is on the PATH')
+  process.exit(1)
+}
 let orch
 const S = scratch('session-control-e2e-guard', dir => {
   if (orch?.alive() && ours(orch.pid, dir)) orch.stop()

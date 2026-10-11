@@ -422,7 +422,7 @@ describe('launch guard', () => {
 describe('probe script text', () => {
   // The script is shell inside a JS string: a nested double quote that lost its backslash breaks `sh`
   // (it did once, and the pid proof and the transcript lookup silently returned nothing).
-  // The syntax and behaviour under a real `sh` are checked by tests/probe-selftest.py.
+  // The syntax and behaviour under a real `sh` are checked by tests/probe-selftest.mjs.
   test('reads the sessions file with jq and keeps no sed pattern with bare nested quotes', () => {
     expect(PROBE_SCRIPT).toContain('jq -r ".procStart // empty"')
     expect(PROBE_SCRIPT).toContain('jq -r ".sessionId // empty"')

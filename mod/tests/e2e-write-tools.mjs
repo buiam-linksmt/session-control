@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// The Node port of e2e-write-tools.sh, which stays beside it: the same checks, the same lines, the same options. Run
-// with `node mod/tests/e2e-write-tools.mjs` (Node 22 or newer); no sh, grep, tr, sed, jq or cygpath is needed.
+// Run with `node mod/tests/e2e-write-tools.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or
+// cygpath is needed.
 //
 // End-to-end test of the write-side tools of the session-control mod against the real claude, in a scratch directory
 // it makes and removes. A headless haiku orchestrator (capped at --max-budget-usd 0.25) launches one tiny haiku worker
@@ -16,7 +16,7 @@
 // Everything the mod reads or writes is in the scratch directory (registry, helper files, runs directory, trace); the
 // real registry, helper files and runs directory are never touched, and the licence picker option is empty: the worker
 // inherits the default configuration (this process's CLAUDE_CONFIG_DIR, else ~/.claude), where both transcripts stay.
-// The symbolic links need a system that lets this process make them (Linux, as the shell script says). One line per
+// The symbolic links need a system that lets this process make them (Linux). One line per
 // check; exit 1 on a failure. KEEP_OUT=<dir> copies the outputs, the prompt copy and the answer there before the
 // scratch directory goes.
 

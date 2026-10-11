@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// The Node port of e2e-digest.sh, which stays beside it: the same checks, the same lines, the same options. Run with
-// `node mod/tests/e2e-digest.mjs` (Node 22 or newer); no sh, grep, tr, sed, jq or cygpath is needed.
+// Run with `node mod/tests/e2e-digest.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
+// needed.
 //
 // End-to-end test of turn_digest against the real claude, in a scratch directory it makes and removes. It seeds a
 // scratch registry with one worker whose recorded pid is gone and whose result file is a clean report (the first poll

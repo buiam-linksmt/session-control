@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-// The Node port of windows-selftest.py: run with `node mod/tests/windows-selftest.mjs` (Node 22 or newer). It checks
-// the same things with the same fixtures and prints the same `ok` lines; windows-selftest.py stays beside it, and the
-// two must agree (a difference is a bug in one of them). Only the Node standard library is used.
+// Run with `node mod/tests/windows-selftest.mjs` (Node 22 or newer); it prints one `ok` (or `skipped`) line per part and
+// stops with exit 1 at the first failed check. Only the Node standard library is used.
 //
 // Where it runs: from WSL, where Windows PowerShell is reachable through interop (paths converted with wslpath, the
-// Windows programs started from Linux), as the Python version runs; and natively on Windows (process.platform win32),
+// Windows programs started from Linux); and natively on Windows (process.platform win32),
 // where it starts powershell.exe, cmd.exe, Git Bash's bash.exe and node.exe directly and uses Windows paths as they
 // are. THE NATIVE WINDOWS BRANCH IS UNVERIFIED: it has not been run on a Windows host; only the WSL branch has.
 // Without powershell.exe it prints `skipped`.

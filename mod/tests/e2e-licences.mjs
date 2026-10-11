@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// The Node port of e2e-licences.sh, which stays beside it: the same checks, the same lines, the same options. Run with
-// `node mod/tests/e2e-licences.mjs` (Node 22 or newer); no sh, grep, tr, sed, jq or cygpath is needed.
+// Run with `node mod/tests/e2e-licences.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
+// needed.
 //
 // End-to-end test of the licence tools of the session-control mod against the real claude and the real licences of
 // this machine, in a scratch directory it makes and removes. A headless haiku orchestrator (capped at --max-budget-usd

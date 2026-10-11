@@ -1,8 +1,7 @@
 #!/usr/bin/env node
-// The Node port of e2e-lint.sh, which stays beside it: the same checks, the same lines, the same options. Run with
-// `node mod/tests/e2e-lint.mjs` (Node 22 or newer); the test itself needs no sh, grep, tr, sed, jq or cygpath. The
-// orchestrator is still told to run a heredoc and `git push --force` through its Bash tool, because those commands are
-// what the guards are tested on.
+// Run with `node mod/tests/e2e-lint.mjs` (Node 22 or newer), from any directory; the test itself needs no sh, grep, tr,
+// sed, jq or cygpath. The orchestrator is told to run a heredoc and `git push --force` through its Bash tool, because
+// those commands are what the guards are tested on.
 //
 // End-to-end test of the T3b checks against the real claude, in a scratch directory it makes and removes. A headless
 // haiku orchestrator (capped at --max-budget-usd 0.30) runs in a scratch orchestrator directory and is told to
@@ -56,7 +55,7 @@ writeJson(join(ORCH, 'task-queue.json'), { tasks: [{ id: 'e2e-t', status: 'queue
 writeJson(join(ORCH, 'open-points.json'), { points: [] })
 writeLines(join(ORCH, 'open-points-archive.md'), '# Open points archive')
 fs.copyFileSync(join(ORCH, 'task-queue.json'), join(S, 'queue-before.json'))
-// The result text as the shell script hands it to jq --arg: its "\n" stay a backslash and an n.
+// The result text with its "\n" kept as a backslash and an n.
 writeJson(join(RUNS, 'leaky.json'), { type: 'result', subtype: 'success', is_error: false, result: `Done. The build log printed ${RESULT_CANARY} by mistake.\\n## main...origin/main\\nexit 0`, total_cost_usd: 0.01, duration_ms: 1000, num_turns: 2 })
 fs.writeFileSync(join(RUNS, 'leaky.err'), '')
 writeJson(REG, [{ title: 'e2e leaky worker', pid: DEAD_PID, session_id: LEAKY_SID, name: 'w-e2e-leaky-worker-261011090000', config_dir: CFG_DEFAULT, cwd: WORK, model: 'haiku', effort: 'low', result_file: join(RUNS, 'leaky.json'), err_file: join(RUNS, 'leaky.err'), started_at: 1790000000 }])

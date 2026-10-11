@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// The Node port of e2e-smoke.sh, which stays beside it: the same checks, the same lines, the same options. Run with
-// `node mod/tests/e2e-smoke.mjs` (Node 22 or newer); no sh, grep, tr, sed, jq or cygpath is needed.
+// Run with `node mod/tests/e2e-smoke.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
+// needed.
 //
 // End-to-end smoke test of the session-control mod against the real claude, in a scratch directory it makes and
 // removes: (a) one headless haiku orchestrator launches one haiku worker through launch_worker and waits for it in the
@@ -71,7 +71,7 @@ if (NODE_FOUND) {
 const HELPER_WANTED = NODE_MAJOR !== '' && Number(NODE_MAJOR) >= 22
 info(`node for the sessions: ${NODE_FOUND || 'none'} (major ${NODE_MAJOR || 'none'}); the helper is expected ${HELPER_WANTED ? 'active' : 'inactive'}`)
 // Windows: the claude.exe offers its Bash tool only when it finds Git Bash: point it at the bash.exe of the Git on the
-// PATH when nothing names one (the shell script does the same from Git Bash).
+// PATH when nothing names one.
 if (IS_WINDOWS && !process.env.CLAUDE_CODE_GIT_BASH_PATH) {
   const git = which('git.exe')
   const root = git ? git.replace(/\\(cmd|bin|mingw64\\bin)\\git\.exe$/i, '') : ''
@@ -456,7 +456,12 @@ for (const p of projects) {
   for (const t of names) info(`session ${t.slice(0, -'.jsonl'.length)} in ${p}`)
 }
 if (process.env.KEEP_TRACE && fs.existsSync(TRACE)) {
-  fs.copyFileSync(TRACE, process.env.KEEP_TRACE)
-  info(`trace copied to ${process.env.KEEP_TRACE}`)
+  try {
+    fs.copyFileSync(TRACE, process.env.KEEP_TRACE)
+    info(`trace copied to ${process.env.KEEP_TRACE}`)
+  } catch (err) {
+    // A copy that fails is said on stderr and ends nothing: the checks above stand.
+    process.stderr.write(`the trace could not be copied to ${process.env.KEEP_TRACE}: ${err instanceof Error ? err.message : String(err)}\n`)
+  }
 }
 finish(S)

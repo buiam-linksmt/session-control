@@ -1,15 +1,13 @@
 #!/usr/bin/env node
-// The Node port of probe-selftest.py: run with `node mod/tests/probe-selftest.mjs` (Node 22 or newer), from any
-// directory. It checks the same things with the same fixtures and prints the same `ok` lines; probe-selftest.py stays
-// beside it, and the two must agree (a difference is a bug in one of them).
+// Run with `node mod/tests/probe-selftest.mjs` (Node 22 or newer), from any directory; it prints one `ok` line per part
+// and stops with exit 1 at the first failed check.
 //
 // Extracts PROBE_SCRIPT from hooks/host-posix.ts, checks it parses under `sh -n` and runs it against a fixture config
 // dir: a transcript with a known mtime and a sessions file whose procStart matches this process. Then REGISTER_SCRIPT,
 // CLEAR_SCRIPT and ACK_SCRIPT of hooks/core.ts on scratch registries and against the differential cases of
 // REGISTRY_GOLDEN in tests/fixtures.ts, the <Button> shape of hooks/register.tsx, APPEND_SCRIPT and ROTATE_SCRIPT.
-// The scripts under test are sh scripts that call jq and /proc: like the Python version, this runs on Linux and WSL.
-// Unlike the Python version it removes every scratch directory it made (the Python one leaves four under the temp dir).
-// Only the Node standard library is used.
+// The scripts under test are sh scripts that call jq and /proc: this runs on Linux and WSL. It removes every scratch
+// directory it made. Only the Node standard library is used.
 
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'

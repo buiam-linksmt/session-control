@@ -872,7 +872,7 @@ export const WINDOWS_PROMPT_MAX_CHARS = 30_000
  * A prompt Git Bash would rewrite on its way to claude.exe: it turns an argument that starts like a POSIX path into
  * a Windows one (`/c/x` and `/tmp/x` to C:/..., `-I/x`, a first word `NAME=/x`, lists `/a:/b`), and the prompt is one
  * argument. Leading white space, a heading or a word first, `//x`, `x:/y`, URLs and C:/ paths pass untouched
- * (tests/windows-selftest.py runs the MSYS_PROMPTS cases of tests/fixtures.ts through Git Bash).
+ * (tests/windows-selftest.mjs runs the MSYS_PROMPTS cases of tests/fixtures.ts through Git Bash).
  */
 export const MSYS_REWRITTEN = /^(\/(?!\/)|-[^\s/=]*\/|\S*=\/)/
 
@@ -1227,7 +1227,7 @@ jq --argjson ids "$ids" --arg k "$K" 'map(if (.session_id as $s | $ids | index($
 
 // The three registry scripts above as pure functions of the registry text. On the registry the mod writes they
 // give what jq 1.7 writes, byte for byte (the differential cases REGISTRY_GOLDEN in tests/fixtures.ts, run
-// against the scripts by tests/probe-selftest.py). On purpose they differ in two places: registering into an
+// against the scripts by tests/probe-selftest.mjs). On purpose they differ in two places: registering into an
 // empty file keeps the entry (jq writes an empty file), and a text JSON.parse refuses is refused, never rewritten.
 // A number jq keeps as written (1.0, 1E+2) comes out as JavaScript writes it, the same value, as mergeCompletion
 // writes it already.

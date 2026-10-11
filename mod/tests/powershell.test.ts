@@ -1,6 +1,6 @@
 // The PowerShell launch route (hooks/host-powershell.ts): the command text the PowerShell tool runs on native Windows,
 // its quoting at both levels (the PowerShell string, and the Windows command line claude.exe reads back), the pid file,
-// and the adapter it makes. tests/windows-selftest.py runs the same text under Windows PowerShell 5.1 and PowerShell 7.
+// and the adapter it makes. tests/windows-selftest.mjs runs the same text under Windows PowerShell 5.1 and PowerShell 7.
 
 import { describe, expect, test } from 'claude-code/testing'
 

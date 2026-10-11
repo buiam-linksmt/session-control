@@ -1,6 +1,6 @@
-// What the Node ports of the Python self-tests (probe-selftest.mjs, windows-selftest.mjs) share: the few Python
-// built-ins they lean on, written out so each port reads the TypeScript sources exactly as its Python twin does.
-// Node standard library only.
+// What the self-tests (probe-selftest.mjs, windows-selftest.mjs) share: a few Python built-ins written out (string
+// literals, json.dumps, splitlines, equality and truth values, slices), the forms the TypeScript sources and fixtures they
+// read are written to. Node standard library only.
 
 /** Python's `text.split(sep, 1)[1]`: what follows the first `sep`; a missing `sep` is an error, as Python's IndexError. */
 export function after(text, sep) {

@@ -162,7 +162,7 @@ export const TASK_NOTIFICATION_KILLED =
 
 /**
  * Differential cases of the registry edits (registerEntry, removeEntries, ackEntries), shared with
- * tests/probe-selftest.py, which runs REGISTER_SCRIPT, CLEAR_SCRIPT and ACK_SCRIPT under sh and jq on the same
+ * tests/probe-selftest.mjs, which runs REGISTER_SCRIPT, CLEAR_SCRIPT and ACK_SCRIPT under sh and jq on the same
  * inputs: the text between the markers is plain JSON, which that script parses. `registry` null is a missing file.
  * `expect` is the TypeScript side (`text`, the cleared `log`, or `refused`; `unchanged` for a missing file that
  * nothing writes) and, without `old`, the jq side too, byte for byte. `old` names where the jq side differs on
@@ -235,7 +235,7 @@ export const REGISTRY_GOLDEN: RegistryGolden[] = [
 // REGISTRY_GOLDEN:END
 
 /**
- * Prompts as Git Bash hands them to a Windows program (claude.exe), shared with tests/windows-selftest.py, which runs
+ * Prompts as Git Bash hands them to a Windows program (claude.exe), shared with tests/windows-selftest.mjs, which runs
  * them through Git Bash: `rewritten` when MSYS turns the start of the argument into a Windows path. The text between
  * the markers is plain JSON.
  */
