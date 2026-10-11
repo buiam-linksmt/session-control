@@ -13,6 +13,7 @@ import {
   STOP_WAIT_SECONDS,
   TAIL_SHAPED_MAX_BYTES,
   bashLaunchCommand,
+  nativeHashTrees,
   parseNewerListing,
   parseStopOutput,
   removeOutcomeOfExit,
@@ -307,6 +308,8 @@ export const posixHost: Host = {
     const ran = await port.run(['sh', '-c', NEWER_SCRIPT, 'session-newer', dir, String(Math.floor(epochSeconds)), String(NEWER_MAX)], { timeoutMs: 30_000 })
     return ran.exitCode === 0 && !ran.isStdoutTruncated ? parseNewerListing(ran.stdout) : undefined
   },
+  /** Through `$.fs` (list, stat, read): no process (nativeHashTrees). */
+  hashTrees: nativeHashTrees,
   stopProcessTree,
   /** ROTATE_SCRIPT, which checks the size again itself; untraced (the trace is what it rotates). */
   async rotate(port: HostPort, plan: RotatePlan): Promise<void> {

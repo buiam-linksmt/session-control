@@ -12,9 +12,10 @@ Its last part copies the Node helper (mod/helper/*.mjs) to the scratch directory
 the Windows node.exe (SC_WIN_NODE, else C:\\Program Files\\nodejs\\node.exe), as the mod does on native Windows:
 rename over an existing file (also while another process holds it open), append, remove, the tail of a 3 MB UTF-8
 file with CRLF line ends and non-ASCII text, filesNewerThan over the tree NEWER_PS1 listed (the junction neither
-followed nor listed), and a batch of 20 operations, with the time per batch. Without that
-node.exe it prints `skipped`."""
-import ast, json, os, shutil, subprocess, sys, tempfile
+followed nor listed), hashTree over two copies of a mod folder (the SHA-256 of each file against Python's, a junction
+in hooks neither followed nor hashed, the generated .claude-plugin/types and tests left out, the fixed codes), and a
+batch of 20 operations, with the time per batch. Without that node.exe it prints `skipped`."""
+import ast, hashlib, json, os, shutil, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = open(os.path.join(HERE, '..', 'hooks', 'core.ts'), encoding='utf-8').read()
@@ -545,6 +546,47 @@ try:
         assert answer['total'] == 3 and len(answer['files']) == 1, answer
         answer, _ = helper('filesNewerThan', {'dir': w('no such folder'), 'since': T, 'max': 1})
         assert answer == {'ok': False, 'code': 'NOT_FOUND'}, answer
+        # hashTree (the drift band): two copies of a mod folder that differ in one file; the SHA-256 of each file as
+        # Python computes it over the same bytes (CRLF and non-ASCII kept); a junction in hooks out of the folder (made
+        # with New-Item, no admin right) neither followed nor hashed; .claude-plugin/types, tests and a nested folder
+        # never; paths relative with / on Windows too; a missing root and a bad request are fixed codes.
+        mod_files = {
+            'hooks/register.tsx': 'export const register = 1\r\n// caf\u00e9 \u2615\r\n',
+            'hooks/core.ts': 'export const core = 1\n',
+            'helper/host.mjs': '// helper\n',
+            'types/index.d.ts': 'export type X = 1\n',
+            '.claude-plugin/plugin.json': '{"name":"x"}\n',
+            '.claude-plugin/types/claude-code.d.ts': '// generated\n',
+            'tests/core.test.ts': '// test\n',
+            'hooks/deeper/inner.ts': '// nested\n',
+        }
+        def put_deep(name, text):
+            os.makedirs(os.path.dirname(os.path.join(work, name)), exist_ok=True)
+            put(name, text)
+        for root in ('hmod-a', 'hmod-b'):
+            for rel, text in mod_files.items():
+                put_deep(f'{root}/{rel}', text)
+        put_deep('hmod-b/hooks/core.ts', 'export const core = 2\n')
+        put_deep('hmod-out/secret.ts', 'outside')
+        code, out, err = run('junction.ps1', "param([string]$L, [string]$T)\r\n$null = New-Item -ItemType Junction -Path $L -Target $T\r\n",
+                             to_win(os.path.join(work, 'hmod-a', 'hooks', 'out'), '\\'), to_win(os.path.join(work, 'hmod-out'), '\\'))
+        assert code == 0 and os.path.exists(os.path.join(work, 'hmod-a', 'hooks', 'out', 'secret.ts')), (code, err[:200])
+        spec = {'dirs': ['hooks', 'helper', 'types'], 'files': ['.claude-plugin/plugin.json']}
+        answer, hash_ms = helper('batch', {'ops': [{'op': 'hashTree', 'root': w(root), **spec} for root in ('hmod-a', 'hmod-b')]})
+        assert answer['ok'] is True and len(answer['results']) == 2, answer
+        want_paths = ['.claude-plugin/plugin.json', 'helper/host.mjs', 'hooks/core.ts', 'hooks/register.tsx', 'types/index.d.ts']
+        trees = [{one['path']: one['sha256'] for one in result['files']} for result in answer['results']]
+        for tree, root in zip(trees, ('hmod-a', 'hmod-b')):
+            assert list(tree) == want_paths, tree
+            for rel in want_paths:
+                with open(os.path.join(work, root, *rel.split('/')), 'rb') as f:
+                    assert tree[rel] == hashlib.sha256(f.read()).hexdigest(), (root, rel)
+        assert [rel for rel in want_paths if trees[0][rel] != trees[1][rel]] == ['hooks/core.ts']
+        assert hashlib.sha256(b'outside').hexdigest() not in json.dumps(answer) and work not in json.dumps(answer), answer
+        assert helper('hashTree', {'root': w('no such mod'), **spec})[0] == {'ok': False, 'code': 'NOT_FOUND'}
+        for bad in ({'root': w('hmod-a'), 'dirs': ['..\\x'], 'files': []}, {'root': w('hmod-a'), 'dirs': ['C:/x'], 'files': []}, {'root': w('hmod-a'), 'dirs': ['\\x'], 'files': []}):
+            assert helper('hashTree', bad)[0] == {'ok': False, 'code': 'BAD_REQUEST'}, bad
+        assert get('hmod-out/secret.ts') == 'outside'
         # a batch of 20 file operations in one process, in order; timed against 20 helper runs and 20 file-script runs
         def batch_ops(n):
             ops = []
@@ -573,7 +615,7 @@ try:
             code, out, err = run('files.ps1', files, 'append', w('ps.add'), w('ps.log'))
             ps_ms.append((time.perf_counter() - started) * 1000)
             assert code == 0, err
-        print(f'windows-helper-selftest: ok (node {version}; rename over a held file {held_ms:.0f} ms; tail of {size / 1e6:.1f} MB {tail_ms:.0f} ms; filesNewerThan {newer_ms:.0f} ms; '
+        print(f'windows-helper-selftest: ok (node {version}; rename over a held file {held_ms:.0f} ms; tail of {size / 1e6:.1f} MB {tail_ms:.0f} ms; filesNewerThan {newer_ms:.0f} ms; hashTree of two mod folders {hash_ms:.0f} ms; '
               f'a batch of 20 operations: median {statistics.median(batch_ms):.0f} ms per batch (runs {", ".join(f"{one:.0f}" for one in batch_ms)}); '
               f'the same 20 as single helper runs {sum(single_ms):.0f} ms in all (median {statistics.median(single_ms):.0f} ms each); '
               f'20 file-script appends {sum(ps_ms):.0f} ms in all (median {statistics.median(ps_ms):.0f} ms each); timed from WSL through interop)')

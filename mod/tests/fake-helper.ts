@@ -2,6 +2,7 @@
 // host contract (host.test.ts) and the helper's own tests on the mock engine (helper.test.ts). Not a test file itself.
 
 import { tailLines } from '../hooks/core'
+import { cyrb53 } from '../hooks/host-shared'
 
 type Request = Record<string, unknown>
 
@@ -187,6 +188,10 @@ export function helperAnswer(
     const found = newerInMap(files, mtimes, keyOf(String(request.dir ?? '')), Number(request.since))
     return found === undefined ? fail('NOT_FOUND') : { ok: true, files: found.slice(0, Number(request.max)), total: found.length }
   }
+  if (op === 'hashTree') {
+    const found = treeInMap(files, links, keyOf(String(request.root ?? '')), request.dirs as string[], request.files as string[])
+    return typeof found === 'string' ? fail(found) : { ok: true, files: found, total: found.length }
+  }
   if (op === 'batch') {
     const results: unknown[] = []
     for (const [at, step] of (request.ops as Request[]).entries()) {
@@ -197,4 +202,36 @@ export function helperAnswer(
     return { ok: true, results }
   }
   return fail('BAD_OP')
+}
+
+/**
+ * The helper's hashTree over the map: the direct files of each folder of `dirs` and each file of `files` under `root`,
+ * a link (in `links`) passed over, sorted by path; a 64-digit stand-in digest (cyrb53 of the text, padded), which only
+ * has to change with the text; NOT_FOUND for a root with nothing under it.
+ */
+export function treeInMap(files: Map<string, string>, links: ReadonlyMap<string, string>, root: string, dirs: readonly string[], names: readonly string[]): { path: string; sha256: string }[] | string {
+  const top = root.replace(/\/+$/, '')
+  if (![...files.keys()].some(key => key.startsWith(`${top}/`))) return 'NOT_FOUND'
+  const found = new Set<string>()
+  for (const dir of dirs) {
+    if (links.has(`${top}/${dir}`)) continue
+    for (const key of files.keys()) {
+      const rest = key.startsWith(`${top}/${dir}/`) ? key.slice(top.length + 1) : undefined
+      if (rest !== undefined && rest.split('/').length === dir.split('/').length + 1 && !links.has(key)) found.add(rest)
+    }
+  }
+  for (const name of names) if (files.has(`${top}/${name}`) && !links.has(`${top}/${name}`)) found.add(name)
+  return [...found].sort().map(rel => ({ path: rel, sha256: cyrb53(files.get(`${top}/${rel}`) ?? '').padStart(64, '0') }))
+}
+
+/** `$.fs.list` over the map: the direct entries of `dir`, a file or a folder each, an entry in `links` as a link (`other`). */
+export function listInMap(files: ReadonlyMap<string, string>, links: ReadonlyMap<string, string>, dir: string): { name: string; kind: 'file' | 'dir' | 'other'; size: number; mtimeMs: number; isLink: boolean }[] {
+  const top = dir.replace(/\/+$/, '')
+  const names = new Set([...files.keys(), ...links.keys()].filter(key => key.startsWith(`${top}/`)).map(key => key.slice(top.length + 1).split('/')[0] ?? ''))
+  return [...names].map(name => {
+    const full = `${top}/${name}`
+    if (links.has(full)) return { name, kind: 'other' as const, size: 0, mtimeMs: 0, isLink: true }
+    const text = files.get(full)
+    return text === undefined ? { name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } : { name, kind: 'file' as const, size: text.length, mtimeMs: 1, isLink: false }
+  })
 }

@@ -5,7 +5,7 @@ import type { FsStat } from 'claude-code'
 
 import type { LaunchArgs } from './core'
 import { buildLaunchArgv, tailLines } from './core'
-import type { Host, HostPort, LaunchTarget, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopStatus, StopStep, StopTarget, TailShape, TreeProc } from './host'
+import type { Host, HostPort, LaunchTarget, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopStatus, StopStep, StopTarget, TailShape, TreeHashes, TreeProc, TreeSpec } from './host'
 import { tmpPath } from './store'
 
 /**
@@ -185,4 +185,68 @@ export function unstoppable(tree: ProcTree, target: StopTarget): StopReport | un
   if (tree.root === undefined || tree.root.pid !== target.pid || tree.root.start !== target.start) return { tree, steps: [step('gone')], final: [{ pid: target.pid, status: 'gone', state: '' }], notes: [] }
   if (tree.ancestors.includes(target.pid)) return { tree, steps: [step('own')], final: [{ pid: target.pid, status: 'alive', state: tree.root.state }], notes: [] }
   return undefined
+}
+
+// ---------------------------------------------------------------- hashTrees, natively
+
+/** The most files hashTrees hashes under one root (the helper's TREE_MAX_FILES). */
+export const TREE_MAX_FILES = 500
+
+/**
+ * cyrb53, a 53-bit string hash (two 32-bit multiply-xor lanes folded together), over a text's UTF-16 code units, as 14
+ * hex digits: the native fallback's digest. Stable across runs and machines; not cryptographic, which a check of
+ * whether two copies of the mod differ does not need.
+ */
+export function cyrb53(text: string): string {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (let at = 0; at < text.length; at++) {
+    const code = text.charCodeAt(at)
+    h1 = Math.imul(h1 ^ code, 2654435761)
+    h2 = Math.imul(h2 ^ code, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, '0')
+}
+
+const joinRel = (root: string, rel: string) => `${root.replace(/[\\/]+$/, '')}/${rel}`
+
+/** One root, natively: undefined when it is no directory, holds too many files or a file cannot be read. */
+async function nativeTree(port: HostPort, root: string, spec: TreeSpec): Promise<Record<string, string> | undefined> {
+  const top = await port.stat(root).catch(() => undefined)
+  if (top?.kind !== 'dir') return undefined
+  const found: string[] = []
+  for (const dir of spec.dirs) {
+    // The folder itself is looked at without following a link: a linked folder is passed over.
+    const own = await port.stat(joinRel(root, dir)).catch(() => undefined)
+    if (own === undefined || own.isLink || own.kind !== 'dir') continue
+    const entries = await port.list(joinRel(root, dir)).catch(() => undefined)
+    if (entries === undefined) return undefined
+    for (const entry of entries) if (entry.kind === 'file' && !entry.isLink) found.push(`${dir}/${entry.name}`)
+  }
+  for (const file of spec.files) {
+    const own = await port.stat(joinRel(root, file)).catch(() => undefined)
+    if (own !== undefined && !own.isLink && own.kind === 'file') found.push(file)
+  }
+  const unique = [...new Set(found)].sort()
+  if (unique.length > TREE_MAX_FILES) return undefined
+  const files: Record<string, string> = {}
+  for (const rel of unique) {
+    const text = await port.read(joinRel(root, rel)).catch(() => undefined)
+    if (text === undefined) return undefined
+    files[rel] = cyrb53(text)
+  }
+  return files
+}
+
+/** hashTrees through `$.fs` alone (list, stat, read), on both systems: cyrb53 over each file's text. */
+export async function nativeHashTrees(port: HostPort, roots: readonly string[], spec: TreeSpec): Promise<TreeHashes[] | undefined> {
+  const trees: TreeHashes[] = []
+  for (const root of roots) {
+    const files = await nativeTree(port, root, spec)
+    if (files === undefined) return undefined
+    trees.push({ method: 'cyrb53', files })
+  }
+  return trees
 }

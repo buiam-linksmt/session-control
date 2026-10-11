@@ -12,7 +12,7 @@ import type { ProcessRunResult } from 'claude-code'
 import type { SessionEntry } from '../types'
 import { parseProcFacts, probeArgs } from './core'
 import type { ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopTarget, TailShape } from './host'
+import type { Host, HostPort, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopTarget, TailShape, TreeHashes, TreeSpec } from './host'
 import { NEWER_MAX, PANE_TAIL, STOP_TIMEOUT_MS, STOP_WAIT_SECONDS, TAIL_SHAPED_MAX_BYTES, parseStopOutput, readTail, stopTargets, unstoppable } from './host-shared'
 
 /** The helper's entry point under the plugin's directory. */
@@ -28,7 +28,7 @@ export const HELPER_REDETECT_MS = 10 * 60_000
 export type HelperSetup = { node: string; script: string }
 
 /** The helper's operations as its protocol names them. */
-export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'processTree' | 'stopProcesses' | 'batch'
+export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'hashTree' | 'processTree' | 'stopProcesses' | 'batch'
 
 /** One step of a batch: a file operation and its request. */
 export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'processTree' | 'stopProcesses' | 'batch'> } & Record<string, unknown>
@@ -114,6 +114,24 @@ export function newerAnswer(fields: Record<string, unknown>): NewerFiles | undef
   if (!Array.isArray(files) || typeof total !== 'number' || !Number.isSafeInteger(total) || total < files.length) return undefined
   const isFile = (one: unknown): one is { path: string; mtimeMs: number } => isRecord(one) && typeof one.path === 'string' && typeof one.mtimeMs === 'number'
   return files.every(isFile) ? { files: files.map(one => ({ path: one.path, mtimeMs: one.mtimeMs })), total } : undefined
+}
+
+/**
+ * The codes of a hashTree step that answer for the trees themselves (a root that is not there or no directory, too
+ * many or too large files, a file that cannot be read): nothing is compared, and the native operation is not asked,
+ * since it would find the same. Any other failure (Node, the helper itself) falls back to it.
+ */
+export const TREE_ANSWER_CODES: readonly string[] = ['NOT_FOUND', 'NOT_DIR', 'TOO_LARGE', 'ACCESS', 'IO']
+
+/** A helper hashTree answer as TreeHashes: an array of `{path, sha256}` (64 hex digits each), or undefined. */
+export function treeAnswer(fields: unknown): TreeHashes | undefined {
+  if (!isRecord(fields) || !Array.isArray(fields.files)) return undefined
+  const files: Record<string, string> = {}
+  for (const one of fields.files) {
+    if (!isRecord(one) || typeof one.path !== 'string' || typeof one.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(one.sha256)) return undefined
+    files[one.path] = one.sha256
+  }
+  return { method: 'sha256', files }
 }
 
 /** The rotation request of a plan. */
@@ -339,6 +357,22 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         undefined,
         LISTING_TIMEOUT_MS,
       ).then(done => done.found)
+    },
+
+    /**
+     * Every root hashed by the helper's hashTree in one batch (one process, SHA-256 over the bytes, so both trees share
+     * the method). A step that fails on the trees themselves (TREE_ANSWER_CODES) answers undefined with no fallback and no
+     * note; any other failure falls back to the native operation for every root, which hashes them all its own way.
+     */
+    async hashTrees(port: HostPort, roots: readonly string[], spec: TreeSpec): Promise<TreeHashes[] | undefined> {
+      if (!(await isReady(port))) return base.hashTrees(port, roots, spec)
+      const steps = roots.map(root => ({ op: 'hashTree', root, dirs: [...spec.dirs], files: [...spec.files] }))
+      const answer = await call(port, 'batch', { ops: steps }, false, { ops: steps.map(step => step.op), roots: roots.length }, LISTING_TIMEOUT_MS)
+      if (!answer.ok && TREE_ANSWER_CODES.includes(answer.code)) return undefined
+      const trees = answer.ok && Array.isArray(answer.fields.results) && answer.fields.results.length === roots.length ? answer.fields.results.map(treeAnswer) : undefined
+      if (trees !== undefined && trees.every((one): one is TreeHashes => one !== undefined)) return trees
+      port.noteHelper({ kind: 'fallback', op: 'hashTree', code: answer.ok ? 'BAD_ANSWER' : answer.code, isQuiet: false })
+      return base.hashTrees(port, roots, spec)
     },
 
     /**

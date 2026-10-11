@@ -25,6 +25,7 @@ import {
   STOP_WAIT_SECONDS,
   bashLaunchCommand,
   clockPause,
+  nativeHashTrees,
   parseNewerListing,
   parseStopOutput,
   readTail,
@@ -568,6 +569,8 @@ export const windowsHost: Host = {
     })
     return ran?.exitCode === 0 && !ran.isStdoutTruncated ? parseNewerListing(ran.stdout, winPath) : undefined
   },
+  /** Through `$.fs` (list, stat, read): no process (nativeHashTrees). */
+  hashTrees: nativeHashTrees,
   stopProcessTree,
   /** Each rename of the plan by the file script, where a file another session moved meanwhile is no failure. */
   async rotate(port: HostPort, plan: RotatePlan): Promise<void> {

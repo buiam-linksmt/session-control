@@ -6,7 +6,7 @@
 // import. register.tsx hands each operation a HostPort instead, the engine facilities it may use, built over the
 // hook's own `$`. What pure TypeScript and `$.fs` do alike on both systems lives in host-shared.ts.
 
-import type { FsStat, ProcessRunInit, ProcessRunResult } from 'claude-code'
+import type { FsEntry, FsStat, ProcessRunInit, ProcessRunResult } from 'claude-code'
 
 import type { SessionEntry } from '../types'
 import type { LaunchArgs, LaunchFacts, LaunchInput, ProcFact, ProcFacts } from './core'
@@ -29,6 +29,8 @@ export type HostPort = {
   exists(path: string): Promise<boolean>
   /** `$.fs.stat`. */
   stat(path: string): Promise<FsStat>
+  /** `$.fs.list`: a directory's entries as they stand (a symbolic link is `other`, not followed). */
+  list(path: string): Promise<FsEntry[]>
   /** `$.clock.now`, epoch milliseconds. */
   now(): Promise<number>
   /** `$.clock.sleep`. */
@@ -104,6 +106,16 @@ export type StopStep =
  * native operation that ran in its place).
  */
 export type StopReport = { tree: ProcTree; steps: StopStep[]; final: { pid: number; status: StopStatus; state: string }[]; notes: string[] }
+
+/** What hashTrees hashes under each root: the folders whose direct regular files count, and single files (relative paths). */
+export type TreeSpec = { dirs: readonly string[]; files: readonly string[] }
+
+/**
+ * One tree's hashes: per relative path (`/`-separated), the file's digest. `method` names the hash: `sha256` (the Node
+ * helper, over the bytes) or `cyrb53` (the native fallback, over the text `$.fs.read` gives): two trees are compared only
+ * when one call hashed both, so always with the same method.
+ */
+export type TreeHashes = { method: 'sha256' | 'cyrb53'; files: Record<string, string> }
 
 /** The launch verdict's fields the command and the worker match read. */
 export type LaunchTarget = { configDir: string; resumeSid?: string; isConfigInherited?: boolean; name: string }
@@ -193,6 +205,14 @@ export type Host = {
    */
   filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined>
   /**
+   * The hashes of the files `spec` names under each root, all with one method (TreeHashes), read-only. A root is
+   * followed when it is a link; inside it no symbolic link is followed or hashed, a folder in a folder of `spec.dirs` is
+   * passed over, and a folder or file of `spec` that is not there counts as empty or absent. Undefined when a root is
+   * no directory or cannot be read, holds more than TREE_MAX_FILES files, or a file cannot be read whole (the helper's
+   * 8 MiB, `$.fs.read`'s 4 MiB): nothing is compared then.
+   */
+  hashTrees(port: HostPort, roots: readonly string[], spec: TreeSpec): Promise<TreeHashes[] | undefined>
+  /**
    * Stops a process and its descendants, and answers what it did (stop_worker). The tree is listed before the first
    * signal (unless `tree`, a listing made before, is given). Nothing is signalled when the root no longer has the start
    * asked or is this session's own process or one of its ancestors. Then the root: Linux `TERM`, re-checks every second
@@ -242,6 +262,7 @@ export const HOST_MEMBERS = [
   'append',
   'tail',
   'filesNewerThan',
+  'hashTrees',
   'stopProcessTree',
   'rotate',
   'rotateAndAppend',

@@ -18,7 +18,7 @@ import { NEWER_MAX } from '../hooks/host-shared'
 import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, STOP_SCRIPT, TAIL_SHAPED_SCRIPT, TREE_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, NEWER_PS1, PROBE_PS1, TREE_PS1, windowsHost } from '../hooks/host-windows'
 import { localDate } from '../hooks/store'
-import { checkInTable, helperAnswer, newerInMap, removeRegularInMap, stopInTable, taskkillInTable, throughLinks, treeInTable } from './fake-helper'
+import { checkInTable, helperAnswer, listInMap, newerInMap, removeRegularInMap, stopInTable, taskkillInTable, throughLinks, treeInTable } from './fake-helper'
 import type { ProcTable } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
@@ -223,6 +223,7 @@ function portOf(m: Machine, runsDir: string, notes: string[] = []): HostPort {
     },
     exists: async path => m.exists(path),
     stat: async path => m.stat(path),
+    list: async path => listInMap(m.files, new Map(), keyOf(path)) as never,
     now: async () => NOW_MS,
     sleep: async ms => {
       m.sleeps.push(ms)

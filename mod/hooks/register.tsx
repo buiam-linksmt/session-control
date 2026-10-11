@@ -436,6 +436,7 @@ function portOf($: EngineInterface): HostPort {
     write: (path, text, isQuiet) => write($, path, text, isQuiet),
     exists: path => $.fs.exists(path),
     stat: path => $.fs.stat(path),
+    list: path => $.fs.list(path),
     now: () => $.clock.now(),
     sleep: ms => $.clock.sleep(ms),
     env: name => hostEnv($, name),

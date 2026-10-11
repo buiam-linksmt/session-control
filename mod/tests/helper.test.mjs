@@ -3,6 +3,7 @@
 // is checked against the shell probe (PROBE_SCRIPT of hooks/host-posix.ts) run over the same fake /proc tree.
 
 import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -796,4 +797,128 @@ test('stop: a bad request is a fixed code, and a target list is never read from 
   // The probe's fake tree variable changes nothing here: the live /proc is read (pid 1 has the start it has there).
   const live = helper('processTree', { pid: 1, start: startOf(1) }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: '/nonexistent' })
   assert.equal(lines(live.answer.out)[0][0], 'R')
+})
+
+// ---------------------------------------------------------------- hashTree (the drift band)
+
+const sha256 = text => createHash('sha256').update(text).digest('hex')
+const SPEC = { dirs: ['hooks', 'helper', 'types'], files: ['.claude-plugin/plugin.json'] }
+
+/** A mod folder: the compared files, and what never is (tests, the engine's generated types, a nested folder). */
+function modTree(root, extra = {}) {
+  const files = {
+    'hooks/register.tsx': 'export const register = 1\n',
+    'hooks/core.ts': 'export const core = 1\n',
+    'helper/host.mjs': '// helper\n',
+    'types/index.d.ts': 'export type X = 1\n',
+    '.claude-plugin/plugin.json': '{"name":"x"}\n',
+    '.claude-plugin/types/claude-code.d.ts': '// generated\n',
+    'tests/core.test.ts': '// test\n',
+    'hooks/deeper/inner.ts': '// nested\n',
+    ...extra,
+  }
+  for (const [rel, text] of Object.entries(files)) {
+    if (text === undefined) continue
+    fs.mkdirSync(dirname(join(root, rel)), { recursive: true })
+    fs.writeFileSync(join(root, rel), text)
+  }
+  return files
+}
+
+test('hashTree: the SHA-256 of the direct files of hooks, helper and types and of plugin.json, sorted, relative paths and hex only; tests, generated types and nested folders never', () => {
+  const top = scratch()
+  try {
+    const root = join(top, 'mod')
+    const files = modTree(root)
+    const run = helper('hashTree', { root, ...SPEC })
+    assert.equal(run.code, 0, run.stdout)
+    const want = ['.claude-plugin/plugin.json', 'helper/host.mjs', 'hooks/core.ts', 'hooks/register.tsx', 'types/index.d.ts']
+    assert.deepEqual(run.answer, { ok: true, files: want.map(rel => ({ path: rel, sha256: sha256(files[rel]) })), total: want.length })
+    assert.ok(!run.stdout.includes(top), run.stdout)
+    assert.equal(run.stderr, '')
+    // Read-only: nothing added or changed.
+    assert.deepEqual(fs.readdirSync(join(root, 'hooks')).sort(), ['core.ts', 'deeper', 'register.tsx'])
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true })
+  }
+})
+
+test('hashTree: no symbolic link inside the root is followed or hashed (a file link, a folder link for types, a dangling one); the root itself is followed', { skip: process.platform === 'win32' }, () => {
+  const top = scratch()
+  try {
+    const root = join(top, 'mod')
+    modTree(root, { 'types/index.d.ts': undefined })
+    const outside = join(top, 'outside')
+    fs.mkdirSync(outside)
+    fs.writeFileSync(join(outside, 'secret.ts'), 'canary-outside-content\n')
+    fs.symlinkSync(join(outside, 'secret.ts'), join(root, 'hooks', 'linked.ts'))
+    fs.symlinkSync(outside, join(root, 'types'))
+    fs.symlinkSync(join(top, 'nowhere'), join(root, 'helper', 'dangling.mjs'))
+    const linkedRoot = join(top, 'linked-mod')
+    fs.symlinkSync(root, linkedRoot)
+    for (const one of [root, linkedRoot]) {
+      const run = helper('hashTree', { root: one, ...SPEC })
+      assert.equal(run.code, 0, run.stdout)
+      assert.deepEqual(run.answer.files.map(file => file.path), ['.claude-plugin/plugin.json', 'helper/host.mjs', 'hooks/core.ts', 'hooks/register.tsx'])
+      assert.ok(!run.stdout.includes(sha256('canary-outside-content\n')), run.stdout)
+    }
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true })
+  }
+})
+
+test('hashTree: a folder or file of the request that is not there counts as empty or absent; one changed byte changes its digest only', () => {
+  const top = scratch()
+  try {
+    const a = join(top, 'a')
+    const b = join(top, 'b')
+    modTree(a)
+    modTree(b, { 'hooks/core.ts': 'export const core = 2\n' })
+    fs.rmSync(join(b, 'helper'), { recursive: true, force: true })
+    fs.rmSync(join(b, '.claude-plugin', 'plugin.json'))
+    const run = helper('batch', { ops: [a, b].map(root => ({ op: 'hashTree', root, ...SPEC })) })
+    assert.equal(run.code, 0, run.stdout)
+    const [one, two] = run.answer.results.map(result => Object.fromEntries(result.files.map(file => [file.path, file.sha256])))
+    assert.deepEqual(Object.keys(two), ['hooks/core.ts', 'hooks/register.tsx', 'types/index.d.ts'])
+    assert.notEqual(one['hooks/core.ts'], two['hooks/core.ts'])
+    assert.equal(one['hooks/register.tsx'], two['hooks/register.tsx'])
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true })
+  }
+})
+
+test('hashTree: a root that is not there or is a file, a bad request, over 500 files, a file over 8 MiB: fixed codes, never a path', () => {
+  const top = scratch()
+  try {
+    const root = join(top, 'mod')
+    modTree(root)
+    assertFailure(helper('hashTree', { root: join(top, 'none'), ...SPEC }), 'NOT_FOUND', top)
+    assertFailure(helper('hashTree', { root: join(root, 'hooks', 'core.ts'), ...SPEC }), 'NOT_DIR', top)
+    for (const bad of [
+      { root, dirs: ['../x'], files: [] },
+      { root, dirs: ['hooks/../..'], files: [] },
+      { root, dirs: ['/etc'], files: [] },
+      { root, dirs: ['C:/x'], files: [] },
+      { root, dirs: [''], files: [] },
+      { root, dirs: ['./hooks'], files: [] },
+      { root, dirs: 'hooks', files: [] },
+      { root, dirs: [1], files: [] },
+      { root, dirs: Array.from({ length: 21 }, (_, at) => `d${at}`), files: [] },
+      { root, dirs: [], files: ['a\u0000b'] },
+      { root: '', dirs: [], files: [] },
+      { dirs: [], files: [] },
+    ]) {
+      assertFailure(helper('hashTree', bad), 'BAD_REQUEST', top)
+    }
+    for (let at = 0; at < 501; at++) fs.writeFileSync(join(root, 'helper', `f${String(at).padStart(3, '0')}.mjs`), `${at}\n`)
+    assertFailure(helper('hashTree', { root, ...SPEC }), 'TOO_LARGE', top)
+    fs.rmSync(join(root, 'helper'), { recursive: true, force: true })
+    assert.equal(helper('hashTree', { root, ...SPEC }).code, 0)
+    const big = fs.openSync(join(root, 'hooks', 'big.ts'), 'w')
+    fs.ftruncateSync(big, 8 * 1024 * 1024 + 1)
+    fs.closeSync(big)
+    assertFailure(helper('hashTree', { root, ...SPEC }), 'TOO_LARGE', top)
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true })
+  }
 })

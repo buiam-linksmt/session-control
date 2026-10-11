@@ -1,8 +1,8 @@
 // The file operations, alike on Linux and Windows: an atomic write through a sibling temp file, a rename over an
-// existing file, a removal, a true OS append, the tail of a file read from its end, the trace rotation, and the
-// read-only listing of the files written after a time under a directory.
+// existing file, a removal, a true OS append, the tail of a file read from its end, the trace rotation, the read-only
+// listing of the files written after a time under a directory, and the read-only content hashes of a mod folder.
 
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import * as fs from 'node:fs'
 import { dirname } from 'node:path'
 
@@ -291,5 +291,70 @@ export function filesNewerThan(request) {
   return { files: found.slice(0, max), total: found.length }
 }
 
+/** The most files hashTree hashes under one root; one more is TOO_LARGE. */
+export const TREE_MAX_FILES = 500
+
+/** The largest file hashTree hashes; a larger one is TOO_LARGE. */
+export const TREE_MAX_FILE_BYTES = 8 * 1024 * 1024
+
+/** A folder or file name of hashTree's request: a relative path of plain names, no `.` or `..` part, no empty part. */
+function treePart(value) {
+  if (typeof value !== 'string' || value === '' || value.includes('\0') || /^([\\/]|[A-Za-z]:)/.test(value)) throw new HelperError('BAD_REQUEST')
+  if (value.split(/[\\/]/).some(part => part === '' || part === '.' || part === '..')) throw new HelperError('BAD_REQUEST')
+  return value.replace(/\\/g, '/')
+}
+
+/** A list field of hashTree's request: an array of at most 20 relative paths. */
+function treeParts(request, name) {
+  const value = request[name]
+  if (!Array.isArray(value) || value.length > 20) throw new HelperError('BAD_REQUEST')
+  return value.map(treePart)
+}
+
+/** The lstat of a path, or undefined when it is not there (or a part of it is no folder). */
+function lstatOrUndefined(file) {
+  try {
+    return fs.lstatSync(file)
+  } catch (err) {
+    if (err?.code === 'ENOENT' || err?.code === 'ENOTDIR') return undefined
+    throw err
+  }
+}
+
+/**
+ * `{root, dirs, files}`: the SHA-256 of the regular files directly in each folder of `dirs` and of each file of
+ * `files`, all relative to `root`, as `{files: [{path, sha256}], total}` sorted by path: relative paths and hex digests
+ * only. Read-only. `root` is followed when it is a link (the engine names the plugin's folder); inside it nothing is:
+ * an entry (a folder of `dirs`, a file in it, a file of `files`) is taken by lstat, and a symbolic link (on Windows
+ * also a junction) is passed over, as is a folder in a folder of `dirs`. A folder of `dirs` or a file of `files` that
+ * is not there counts as empty or absent. `root` itself must be a directory (NOT_FOUND, NOT_DIR); more than
+ * TREE_MAX_FILES files, or one over TREE_MAX_FILE_BYTES, is TOO_LARGE.
+ */
+export function hashTree(request) {
+  const root = path(request, 'root')
+  const dirs = treeParts(request, 'dirs')
+  const files = treeParts(request, 'files')
+  if (!fs.statSync(root).isDirectory()) throw new HelperError('NOT_DIR')
+  const found = []
+  const take = (rel, stat) => {
+    if (stat === undefined || !stat.isFile()) return
+    if (found.length >= TREE_MAX_FILES || stat.size > TREE_MAX_FILE_BYTES) throw new HelperError('TOO_LARGE')
+    found.push(rel)
+  }
+  for (const dir of dirs) {
+    const stat = lstatOrUndefined(joined(root, dir))
+    if (stat === undefined || !stat.isDirectory()) continue
+    for (const name of fs.readdirSync(joined(root, dir)).sort()) take(`${dir}/${name}`, lstatOrUndefined(joined(root, `${dir}/${name}`)))
+  }
+  for (const file of files) take(file, lstatOrUndefined(joined(root, file)))
+  const unique = [...new Set(found)].sort()
+  const hashed = unique.map(rel => {
+    const bytes = fs.readFileSync(joined(root, rel))
+    if (bytes.length > TREE_MAX_FILE_BYTES) throw new HelperError('TOO_LARGE')
+    return { path: rel, sha256: createHash('sha256').update(bytes).digest('hex') }
+  })
+  return { files: hashed, total: hashed.length }
+}
+
 /** The file operations by name, for a request of its own or one step of a batch. */
-export const FILE_OPS = Object.freeze({ writeAtomic, renameOver, removeFile, append, tail, rotate, filesNewerThan })
+export const FILE_OPS = Object.freeze({ writeAtomic, renameOver, removeFile, append, tail, rotate, filesNewerThan, hashTree })

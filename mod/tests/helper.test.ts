@@ -8,12 +8,12 @@ import type { On, ProcessRunResult } from 'claude-code'
 
 import { parseProcFacts, tailLines } from '../hooks/core'
 import type { Host, HostPort, RotatePlan } from '../hooks/host'
-import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, appendNotRepeated, appendText, fallbackFields, fallbackToast, newerAnswer, nodeMajor, readAnswer, rejectionCode, withHelper } from '../hooks/host-helper'
-import { TAIL_SHAPED_MAX_BYTES } from '../hooks/host-shared'
+import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, TREE_ANSWER_CODES, appendNotRepeated, appendText, fallbackFields, fallbackToast, newerAnswer, nodeMajor, readAnswer, rejectionCode, treeAnswer, withHelper } from '../hooks/host-helper'
+import { TAIL_SHAPED_MAX_BYTES, cyrb53 } from '../hooks/host-shared'
 import type { HelperNote } from '../hooks/host-helper'
 import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, TAIL_SHAPED_SCRIPT, posixHost } from '../hooks/host-posix'
 import { FILES_PS1, NEWER_PS1, PROBE_PS1, windowsHost } from '../hooks/host-windows'
-import { helperAnswer as fakeHelper, removeRegularInMap } from './fake-helper'
+import { helperAnswer as fakeHelper, listInMap, removeRegularInMap } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
 const ran = (stdout = '', exitCode = 0, stderr = '', isStdoutTruncated = false): ProcessRunResult => ({ exitCode, stdout, stderr, isStdoutTruncated, isStderrTruncated: false })
@@ -151,6 +151,7 @@ function portOf(sim: Sim, cap = Infinity): HostPort {
       if (text === undefined) throw new Error(`ENOENT ${path}`)
       return { kind: 'file', size: text.length, mtimeMs: NOW_MS, isLink: false } as never
     },
+    list: async path => listInMap(sim.files, new Map(), keyOf(path)) as never,
     now: async () => sim.nowMs,
     sleep: async () => undefined,
     env: async name => (name === 'SystemRoot' ? 'C:\\Windows' : '/m/home'),
@@ -898,5 +899,101 @@ describe('helper options, through the plugin', () => {
     expect(trace.filter(line => line.event === 'process.run' && line.helper === 'probe').length).toBeGreaterThan(0)
     expect(trace.filter(line => line.event === 'helper.fallback')).toEqual([])
     expect(trace.every(line => line.event !== 'process.run' || !('argv' in line) || !String(line.argv).includes('helper'))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------- hashTrees (the drift band, feature/drift-digest)
+
+describe('withHelper: hashTrees', () => {
+  const SPEC = { dirs: ['hooks', 'helper', 'types'], files: ['.claude-plugin/plugin.json'] }
+  /** The two mod folders of the simulated machine, alike but for hooks/b.ts; the port also tells a folder by what is under it. */
+  function trees(sim: Sim): HostPort {
+    for (const root of ['/m/loaded', '/m/source']) {
+      sim.files.set(`${root}/hooks/a.ts`, 'a\n')
+      sim.files.set(`${root}/types/index.d.ts`, 't\n')
+      sim.files.set(`${root}/.claude-plugin/plugin.json`, '{}\n')
+      sim.files.set(`${root}/tests/x.test.ts`, root)
+    }
+    sim.files.set('/m/loaded/hooks/b.ts', 'b1\n')
+    sim.files.set('/m/source/hooks/b.ts', 'b2\n')
+    const base = portOf(sim)
+    return {
+      ...base,
+      stat: async path => {
+        const key = keyOf(path).replace(/\/+$/, '')
+        if ([...sim.files.keys()].some(one => one.startsWith(`${key}/`))) return { kind: 'dir', size: 0, mtimeMs: NOW_MS, isLink: false } as never
+        return base.stat(path)
+      },
+    }
+  }
+  const NATIVE = [
+    { method: 'cyrb53', files: { '.claude-plugin/plugin.json': cyrb53('{}\n'), 'hooks/a.ts': cyrb53('a\n'), 'hooks/b.ts': cyrb53('b1\n'), 'types/index.d.ts': cyrb53('t\n') } },
+    { method: 'cyrb53', files: { '.claude-plugin/plugin.json': cyrb53('{}\n'), 'hooks/a.ts': cyrb53('a\n'), 'hooks/b.ts': cyrb53('b2\n'), 'types/index.d.ts': cyrb53('t\n') } },
+  ]
+
+  test('one helper batch hashes both folders with the same method, at the listing\'s 30 s limit; no fallback', async () => {
+    const sim = machine()
+    const port = trees(sim)
+    const timeouts: (number | undefined)[] = []
+    const timed: HostPort = { ...port, run: (argv, init, isQuiet, shown) => (timeouts.push(init?.timeoutMs), port.run(argv, init, isQuiet, shown)) }
+    const found = await helped().hashTrees(timed, ['/m/loaded', '/m/source'], SPEC)
+    expect(found?.map(one => one.method)).toEqual(['sha256', 'sha256'])
+    expect(Object.keys(found?.[0]?.files ?? {})).toEqual(['.claude-plugin/plugin.json', 'hooks/a.ts', 'hooks/b.ts', 'types/index.d.ts'])
+    expect(found?.[0]?.files['hooks/a.ts']).toBe(found?.[1]?.files['hooks/a.ts'])
+    expect(found?.[0]?.files['hooks/b.ts']).not.toBe(found?.[1]?.files['hooks/b.ts'])
+    expect(calls(sim)).toEqual([{ op: 'batch', request: { ops: ['/m/loaded', '/m/source'].map(root => ({ op: 'hashTree', root, dirs: SPEC.dirs, files: SPEC.files })) } }])
+    expect(timeouts).toEqual([5_000, 30_000])
+    expect(fallbacks(sim)).toEqual([])
+  })
+
+  for (const code of TREE_ANSWER_CODES) {
+    test(`a ${code} from the helper is the answer: nothing compared, no native hash, no fallback note`, async () => {
+      const sim = machine(() => ran(`{"ok":false,"code":"${code}","at":1,"results":[]}`, 1))
+      const port = trees(sim)
+      expect(await helped().hashTrees(port, ['/m/loaded', '/m/source'], SPEC)).toBeUndefined()
+      expect(fallbacks(sim)).toEqual([])
+    })
+  }
+
+  for (const [name, answering, code] of [
+    ['node that cannot start', 'spawn', 'SPAWN'],
+    ['a helper that times out', 'timeout', 'TIMEOUT'],
+    ['a helper script that is not there (no answer)', () => ran('', 1, 'Error: Cannot find module'), 'BAD_JSON'],
+    ['an older helper without the operation', () => ran('{"ok":false,"code":"BAD_OP","at":0,"results":[]}', 1), 'BAD_OP'],
+    ['an answer of the wrong shape', () => ran('{"ok":true,"results":[{"ok":true,"files":[{"path":"a","sha256":"x"}]},{"ok":true,"files":[]}]}'), 'BAD_ANSWER'],
+  ] as const) {
+    test(`${name}: the native hash answers for both folders, the fallback told by its code`, async () => {
+      const sim = machine(answering)
+      const port = trees(sim)
+      expect(await helped().hashTrees(port, ['/m/loaded', '/m/source'], SPEC)).toEqual(NATIVE as never)
+      expect(fallbacks(sim)).toEqual([{ kind: 'fallback', op: 'hashTree', code, isQuiet: false }])
+    })
+  }
+
+  test('Node missing: the native hash, no helper call, no note; on Windows too', async () => {
+    for (const base of [posixHost, windowsHost]) {
+      const sim = machine('real', null)
+      const port = trees(sim)
+      expect(await helped(base).hashTrees(port, ['/m/loaded', '/m/source'], SPEC)).toEqual(NATIVE as never)
+      expect(calls(sim)).toEqual([])
+      expect(fallbacks(sim)).toEqual([])
+    }
+  })
+
+  test('on Windows the helper hashes too (node.exe takes the same request)', async () => {
+    const sim = machine()
+    const port = trees(sim)
+    expect((await helped(windowsHost).hashTrees(port, ['/m/loaded', '/m/source'], SPEC))?.map(one => one.method)).toEqual(['sha256', 'sha256'])
+    expect(calls(sim).map(one => one.op)).toEqual(['batch'])
+  })
+
+  test('treeAnswer: an array of path and 64-digit hex sha256 pairs, nothing else', () => {
+    const digest = 'a'.repeat(64)
+    expect(treeAnswer({ files: [{ path: 'hooks/a.ts', sha256: digest }], total: 1 })).toEqual({ method: 'sha256', files: { 'hooks/a.ts': digest } })
+    expect(treeAnswer({ files: [{ path: 'hooks/a.ts', sha256: 'A'.repeat(64) }] })).toBeUndefined()
+    expect(treeAnswer({ files: [{ path: 'hooks/a.ts', sha256: digest.slice(1) }] })).toBeUndefined()
+    expect(treeAnswer({ files: [{ path: 1, sha256: digest }] })).toBeUndefined()
+    expect(treeAnswer({ files: 'x' })).toBeUndefined()
+    expect(treeAnswer(null)).toBeUndefined()
   })
 })
