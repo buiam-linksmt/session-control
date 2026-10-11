@@ -702,6 +702,8 @@ export type LaunchInput = Partial<LaunchArgs> & {
   section?: string
   /** Whether the standard rules block is appended when the prompt lacks the guard's items (RULES_DEFAULT). */
   rules?: boolean
+  /** A discovered licence (licences.ts) the launch runs under instead of the picker's choice: its config_dir or name. */
+  config_dir?: string
 }
 
 export type LaunchFacts = {
@@ -765,6 +767,13 @@ export const LAUNCH_SCHEMA = {
       type: 'boolean',
       description:
         'Append the standard rules block (no AI attribution, no human answers, no credentials, foreground waits, never end the turn on a live run, the report with git status -sb and git log --oneline @{u}..HEAD and their exit codes) when the prompt lacks what the launch guard checks. Default true with prompt or section, false for a prompt_file given alone (that file is launched as it is). A prompt that already carries the items, or a skill test, gets no block.',
+    },
+    config_dir: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 4096,
+      description:
+        'A discovered licence (list_licences), by its config_dir or name: a fresh launch runs under it and the licence picker is not run (no refusal for licence room; a warning when a probe of the last 60 s showed it over 90%). Refused when it is not a discovered licence. A resume runs under its entry\'s own config_dir: another one is refused. Absent: the picker when one is configured, else the default directory.',
     },
   },
 } as const
@@ -844,7 +853,7 @@ export function filledFields(input: LaunchInput, filled: LaunchInput): string[] 
 
 /** The launch's arguments once the prompt file is known: a field still missing is empty, which checkLaunch refuses. */
 export function launchArgsOf(input: LaunchInput, promptFile: string): LaunchArgs {
-  const { prompt: _prompt, section: _section, rules: _rules, ...rest } = input
+  const { prompt: _prompt, section: _section, rules: _rules, config_dir: _configDir, ...rest } = input
   return { ...rest, dir: input.dir ?? '', prompt_file: promptFile, model: input.model ?? '', effort: input.effort ?? '', title: input.title ?? '' }
 }
 

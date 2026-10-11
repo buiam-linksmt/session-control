@@ -45,8 +45,12 @@ export type World = {
   toasts: string[]
   /** The Bash and PowerShell calls that reached the bottom of the chain (the guard let them through), and the file tools'. */
   passed: { tool: string; input: Record<string, unknown> }[]
-  /** Where the next launch's worker runs: its cwd and the session id its sessions file names. */
-  launch: { cwd: string; sid: string }
+  /**
+   * Where the next launch's worker runs: its cwd and the session id its sessions file names. With `isFound` its command
+   * line carries the model as the shell hands it on (unquoted), so the launch finds the worker and registers it; without,
+   * the line keeps the quotes and the launch answers that no worker appeared (what the older tests rely on).
+   */
+  launch: { cwd: string; sid: string; isFound?: boolean }
   /**
    * Operations made to fail: `tree` (the listing cannot run), `stop` (the stop script sends nothing and exits 1),
    * `helper` (node starts but the helper script is not there: exit 1, nothing on stdout).
@@ -76,6 +80,8 @@ export type World = {
    * per probe; `onRun` is told when a probe starts.
    */
   usageKnobs: { linger?: boolean; hold?: Promise<void>; stepMs?: number; onRun?: () => void }
+  /** Other commands by their executable (a licence picker, say): what each prints and exits with. */
+  commands: Map<string, (argv: readonly string[]) => { stdout: string; exitCode: number }>
 }
 
 const ok = (stdout = '', exitCode = 0) => ({ exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
@@ -126,6 +132,7 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     usageRuns: [],
     usageMaxInFlight: 0,
     usageKnobs: {},
+    commands: new Map(),
   }
   const { files, links } = world
   const real = (path: string) => throughLinks(links, path.replace(/\/+$/, ''))
@@ -280,17 +287,24 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
       const answer = world.git?.(argv.slice(1))
       return { value: answer === undefined ? ok('', 128) : ok(answer.stdout, answer.exitCode) }
     }
+    const command = world.commands.get(cmd ?? '')
+    if (command !== undefined) {
+      const answer = command(argv)
+      return { value: ok(answer.stdout, answer.exitCode) }
+    }
     throw new Error(`unexpected command ${argv.join(' ')}`)
   })
   // The launch's background task: the worker appears in the table, its sessions file written as the engine writes it.
   on('tool.call', { tool: 'Bash' }, ($, e) => {
     const command = String((e as { command?: unknown }).command ?? '')
     world.passed.push({ tool: 'Bash', input: { ...(e as object) } as Record<string, unknown> })
-    const model = /--model (\S+)/.exec(command)?.[1]
+    const model = (world.launch.isFound === true ? /--model '?([^'\s]+)'?/ : /--model (\S+)/).exec(command)?.[1]
     if ((e as { run_in_background?: unknown }).run_in_background === true && model !== undefined && command.includes(' -p ')) {
       const pid = 7001
-      world.table.procs.set(pid, { ppid: 6999, start: '777', state: 'S', comm: 'claude', claude: { cwd: world.launch.cwd, configDir: '', cmdline: `claude -p --model ${model} -n w-x --dangerously-skip-permissions --output-format json` } })
-      files.set(`${HOME}/.claude/sessions/${pid}.json`, JSON.stringify({ sessionId: world.launch.sid, procStart: '777' }))
+      // The worker's CLAUDE_CONFIG_DIR: the one on the line, else the orchestrator's own it inherits (none: the default).
+      const configDir = /CLAUDE_CONFIG_DIR='([^']*)'/.exec(command)?.[1] ?? opts.env?.CLAUDE_CONFIG_DIR ?? ''
+      world.table.procs.set(pid, { ppid: 6999, start: '777', state: 'S', comm: 'claude', claude: { cwd: world.launch.cwd, configDir, cmdline: `claude -p --model ${model} -n w-x --dangerously-skip-permissions --output-format json` } })
+      files.set(`${configDir === '' ? `${HOME}/.claude` : configDir}/sessions/${pid}.json`, JSON.stringify({ sessionId: world.launch.sid, procStart: '777' }))
     }
     return { result: 'Command running in background with ID: mock' }
   })

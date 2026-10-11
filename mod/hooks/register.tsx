@@ -152,7 +152,21 @@ import {
   resultReport,
   isWinAbsolute,
 } from './core'
-import { LIST_LICENCES_SCHEMA, PROBE_USAGE_SCHEMA, SCAN_CACHE_MS, findLicence, hasProbeRoom, isUsageFresh, licenceCandidates, licenceDirsOf, licenceOf, listLicencesText, probeUsageText } from './licences'
+import {
+  LIST_LICENCES_SCHEMA,
+  PROBE_USAGE_SCHEMA,
+  SCAN_CACHE_MS,
+  findLicence,
+  hasProbeRoom,
+  isUsageFresh,
+  licenceCandidates,
+  licenceDirsOf,
+  licenceOf,
+  listLicencesText,
+  notDiscoveredText,
+  probeUsageText,
+  usageWarning,
+} from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
 import type { ComposedPrompt, ExpandableId, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId } from './core'
 
@@ -1493,8 +1507,29 @@ async function launch($: EngineInterface, given: LaunchInput) {
   const picker = config.licencePickCommand.trim()
   const ownDir = await ownConfigDir($)
   const defaultDir = machine.defaultConfigDir(home, ownDir)
+  // An explicit config_dir (licences.ts): a discovered licence only, which wins over the picker for a fresh launch; a
+  // resume keeps its entry's own directory. No probe runs here: only a probe already made warns.
+  let explicit: Licence | undefined
+  if (filled.config_dir !== undefined) {
+    const { scan } = await scanLicences($)
+    const isSame = await sameDirOf($)
+    explicit = typeof filled.config_dir === 'string' ? findLicence(scan.licences, filled.config_dir, isSame) : undefined
+    const entryDir = resumeSid === undefined ? undefined : reg.entries.find(one => one.session_id === resumeSid)?.config_dir
+    const refusal =
+      explicit === undefined
+        ? notDiscoveredText(scan.licences)
+        : typeof entryDir === 'string' && entryDir !== '' && !isSame(entryDir, explicit.configDir)
+          ? `refused: a resume runs under its entry's own config_dir (${entryDir}), not ${explicit.configDir}; nothing was launched`
+          : undefined
+    if (refusal !== undefined) {
+      trace($, 'guard', { tool: 'launch_worker', isOk: false, check: 'config_dir', ...messageFields(refusal, 'reason') })
+      return { deny: `${PLUGIN}: ${refusal}` }
+    }
+  }
+  const explicitDir = explicit?.configDir
   let pick: { exitCode: number; stdout: string; stderr?: string } | undefined
-  if (resumeSid === undefined && picker === '') pick = { exitCode: 0, stdout: defaultDir }
+  if (resumeSid === undefined && explicitDir !== undefined) pick = { exitCode: 0, stdout: explicitDir }
+  else if (resumeSid === undefined && picker === '') pick = { exitCode: 0, stdout: defaultDir }
   else if (resumeSid === undefined) {
     const picked = machine.pickerArgv(pickArgv(picker, args.need ?? 40, home))
     if ('refusal' in picked) {
@@ -1527,9 +1562,14 @@ async function launch($: EngineInterface, given: LaunchInput) {
       return { deny: `${PLUGIN}: the prompt file ${own.path} could not be written (${errorText(err).slice(0, 160)}); nothing was launched.` }
     }
   }
-  // No CLAUDE_CONFIG_DIR on the line: a fresh launch without a picker, or a resume under the default directory.
-  const isConfigInherited = picker === '' && (verdict.resumeSid === undefined || machine.isDefaultConfigDir(verdict.configDir, defaultDir))
-  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, name, own, fromEntry, warnings: [...lint.warnings, ...signoff.warnings] })
+  // No CLAUDE_CONFIG_DIR on the line: a fresh launch without a picker, or a resume under the default directory; with an
+  // explicit config_dir, a fresh launch under the default directory (as a launch without a picker runs there).
+  const isExplicitFresh = explicit !== undefined && verdict.resumeSid === undefined
+  const isConfigInherited = isExplicitFresh ? machine.isDefaultConfigDir(verdict.configDir, defaultDir) : picker === '' && (verdict.resumeSid === undefined || machine.isDefaultConfigDir(verdict.configDir, defaultDir))
+  const usageWarned = explicit === undefined ? undefined : usageWarning(explicit, usageSeen.get(explicit.configDir), await $.clock.now())
+  const warnings = [...lint.warnings, ...signoff.warnings, ...(usageWarned === undefined ? [] : [usageWarned])]
+  const licenceNote = isExplicitFresh && explicit !== undefined ? ` Licence: ${explicit.name} (config_dir given; the licence picker was not run).` : undefined
+  return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, name, own, fromEntry, warnings, ...(licenceNote === undefined ? {} : { licenceNote }) })
 }
 
 /** Start the worker as a background task of the host's launch tool, find its real pid and session, register it. */
@@ -1540,7 +1580,7 @@ async function spawnWorker(
   entries: readonly SessionEntry[],
   before: ProcFacts,
   own: string | undefined,
-  launchRun: { base: string; name: string; own?: OwnPrompt; fromEntry: readonly string[]; warnings?: readonly string[] },
+  launchRun: { base: string; name: string; own?: OwnPrompt; fromEntry: readonly string[]; warnings?: readonly string[]; licenceNote?: string },
 ) {
   const machine = await hostOf($)
   const port = portOf($)
@@ -1622,7 +1662,7 @@ async function spawnWorker(
   const promptNote = ownPrompt === undefined ? '' : ` Prompt: ${ownPrompt.path} (written by the mod${added.length === 0 ? '' : `; ${added.join('; ')}`}).`
   const entryNote = fromEntry.length === 0 ? '' : ` From the entry: ${fromEntry.join(', ')}.`
   return {
-    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}${promptNote}${entryNote}${warningLines}`,
+    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}${promptNote}${entryNote}${launchRun.licenceNote ?? ''}${warningLines}`,
   }
 }
 
@@ -2053,7 +2093,8 @@ async function activate($: EngineInterface): Promise<void> {
         'Runs it as a background task, finds the real pid and session id and registers the worker. ' +
         'A fresh launch needs dir, model, effort, title and exactly one of prompt_file and prompt (inline text the mod writes to a prompt file of its own); ' +
         'a resume (resume_sid) takes dir, model, effort and title from its entry unless given. section appends a decisions section as binding; ' +
-        'rules appends the standard rules block when the prompt lacks the items the guard checks.',
+        'rules appends the standard rules block when the prompt lacks the items the guard checks. ' +
+        'config_dir runs a fresh launch under a discovered licence (list_licences) instead of the licence picker.',
       inputSchema: LAUNCH_SCHEMA as unknown as Record<string, unknown>,
     })
     await $.tool.register({
@@ -2552,7 +2593,7 @@ export const register: Register = (on, options) => {
 
   // The launch's fields are paths, names, numbers and switches; the title and the section are free text and stay out
   // (the title's slug is in the run's file names); the prompt, inline or in its file, never reaches the trace.
-  const LAUNCH_FIELDS = ['dir', 'prompt_file', 'model', 'effort', 'need', 'resume_sid', 'timeout_minutes', 'rules'] as const
+  const LAUNCH_FIELDS = ['dir', 'prompt_file', 'model', 'effort', 'need', 'resume_sid', 'timeout_minutes', 'rules', 'config_dir'] as const
   on('tool.call', { tool: TOOL }, ($, e) => tracedTool($, 'launch_worker', e, LAUNCH_FIELDS, () => launch($, e as unknown as LaunchInput))).catch(($, e, next) => {
     traceError($, 'launch_worker', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: launch_worker guard failed` }

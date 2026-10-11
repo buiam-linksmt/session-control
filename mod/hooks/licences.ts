@@ -204,6 +204,9 @@ export const USAGE_CALL_BUDGET_MS = 40_000
 /** The most one probe can take: claude's USAGE_TIMEOUT_MS, and the helper's start around it (USAGE_CALL_TIMEOUT_MS). */
 export const USAGE_PROBE_WORST_MS = USAGE_TIMEOUT_MS + 5_000
 
+/** A launch under an explicit config_dir warns when a probe of the last USAGE_CACHE_MS shows a window over this percent. */
+export const USAGE_WARN_PERCENT = 90
+
 /** One probe's answer and when it was made (epoch ms). */
 export type UsageSeen = { at: number; result: UsageProbe }
 
@@ -255,3 +258,23 @@ export function probeUsageText(rows: readonly UsageRow[], nowMs: number): string
   return bounded(lines.join('\n'))
 }
 
+/**
+ * The warning a launch under an explicit config_dir gives when a probe of that licence within USAGE_CACHE_MS showed a
+ * window over USAGE_WARN_PERCENT; undefined when none did (or no probe is that recent: nothing is probed for it).
+ */
+export function usageWarning(licence: Licence, seen: UsageSeen | undefined, nowMs: number): string | undefined {
+  if (seen === undefined || !seen.result.ok || nowMs - seen.at < 0 || nowMs - seen.at >= USAGE_CACHE_MS) return undefined
+  const over = [
+    ...(seen.result.five !== null && seen.result.five.percent > USAGE_WARN_PERCENT ? [`five_hour ${seen.result.five.percent}%`] : []),
+    ...(seen.result.seven !== null && seen.result.seven.percent > USAGE_WARN_PERCENT ? [`seven_day ${seen.result.seven.percent}%`] : []),
+  ]
+  if (over.length === 0) return undefined
+  const age = Math.floor((nowMs - seen.at) / 1000)
+  return `licence ${clean(licence.name)} was over ${USAGE_WARN_PERCENT}% in a probe ${age} s ago (${over.join(', ')}); launched as asked, it may stop at its limit`
+}
+
+/** The refusal of a config_dir that is no discovered licence: the names of those that are, never anything of their files. */
+export function notDiscoveredText(licences: readonly Licence[]): string {
+  const names = licences.slice(0, 20).map(one => clean(one.name))
+  return `refused: config_dir is not a discovered licence (discovered: ${names.length === 0 ? 'none' : names.join(', ')}${licences.length > 20 ? ', ...' : ''}; list_licences shows them); nothing was launched`
+}

@@ -387,6 +387,138 @@ describe('probe_licence_usage', () => {
   })
 })
 
+// ---------------------------------------------------------------- launch_worker's config_dir
+
+const PICKER = '/w/bin/pick --need {need}'
+const PICK_OPTIONS = { ...OPTIONS, licencePickCommand: PICKER }
+const LAUNCH = { dir: '/w/work', model: 'haiku', effort: 'low', title: 'licence launch', prompt: 'Reply PONG.' }
+const SID_RESUME = '40000000-aaaa-4bbb-8ccc-000000000004'
+
+/** The orchestrator and its licences, a picker that would choose .claude-work, and the launch's Bash command. */
+function seedLaunch(world: World): void {
+  seedUsage(world)
+  world.launch.isFound = true
+  world.commands.set('/w/bin/pick', () => ({ stdout: `${HOME}/.claude-work\n`, exitCode: 0 }))
+}
+const pickerRuns = (world: World) => world.runs.filter(argv => argv[0] === '/w/bin/pick')
+const launchCommands = (world: World) => world.passed.filter(one => one.tool === 'Bash' && String(one.input.command).includes(' claude -p ')).map(one => String(one.input.command))
+const registry = (world: World) => JSON.parse(world.files.get(REGISTRY) ?? '[]') as Record<string, unknown>[]
+
+describe("launch_worker's config_dir", () => {
+  test('an explicit config_dir wins over the picker: the picker is not run, the worker runs under it, the registry records it', { options: PICK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seedLaunch(world)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const text = await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: 'second' })
+    expect(text).toContain(`config_dir ${CLAUDE}/second, registered.`)
+    expect(text).toContain(' Licence: second (config_dir given; the licence picker was not run).')
+    expect(text.includes('WARNING')).toBe(false)
+    expect(pickerRuns(world)).toEqual([])
+    expect(launchCommands(world).length).toBe(1)
+    expect(launchCommands(world)[0]).toContain(`CLAUDE_CONFIG_DIR='${CLAUDE}/second' `)
+    expect(registry(world).at(-1)?.config_dir).toBe(`${CLAUDE}/second`)
+    // No probe runs inside a launch.
+    expect(world.usageRuns).toEqual([])
+  })
+
+  test('without config_dir the launch is as before: the picker chooses, its directory is on the line and in the registry, no licence note', { options: PICK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seedLaunch(world)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const text = await answerOf($, 'launch_worker', LAUNCH)
+    expect(pickerRuns(world)).toEqual([['/w/bin/pick', '--need', '40']])
+    expect(launchCommands(world)[0]).toContain(`CLAUDE_CONFIG_DIR='${HOME}/.claude-work' `)
+    expect(registry(world).at(-1)?.config_dir).toBe(`${HOME}/.claude-work`)
+    expect(text.includes('Licence:')).toBe(false)
+    expect(world.usageRuns).toEqual([])
+  })
+
+  test('a config_dir that is not a discovered licence is refused with the discovered names only; nothing runs and nothing is written', { options: PICK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seedLaunch(world)
+    licence(world, '/w/lic/undiscovered')
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const before = world.files.get(REGISTRY)
+    const written = world.written.length
+    for (const asked of ['/w/lic/undiscovered', `${CLAUDE}/half`, 'nobody']) {
+      expect(await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: asked })).toBe(
+        'session-control: refused: config_dir is not a discovered licence (discovered: default, second, .claude-work; list_licences shows them); nothing was launched',
+      )
+    }
+    expect(pickerRuns(world)).toEqual([])
+    expect(launchCommands(world)).toEqual([])
+    expect(world.files.get(REGISTRY)).toBe(before)
+    expect(world.written.slice(written).filter(one => one.path.startsWith(RUNS) && !one.path.endsWith('/trace.log'))).toEqual([])
+  })
+
+  test('the default directory given explicitly: no CLAUDE_CONFIG_DIR on the line, as a launch without a picker runs there; the registry records it', { options: PICK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seedLaunch(world)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const text = await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: `${CLAUDE}/` })
+    expect(text).toContain(`config_dir ${CLAUDE}, registered.`)
+    expect(launchCommands(world)[0]?.includes('CLAUDE_CONFIG_DIR')).toBe(false)
+    expect(registry(world).at(-1)?.config_dir).toBe(CLAUDE)
+    expect(pickerRuns(world)).toEqual([])
+  })
+
+  test('a warning when a probe of the last 60 s showed the licence over 90%; none from an older probe; the launch never probes', { options: PICK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seedLaunch(world)
+    world.usage.set(`${CLAUDE}/second`, { stdout: 'Current session: 95% used \u00b7 resets 6pm (Europe/Rome)\nCurrent week (all models): 91% used \u00b7 resets Oct 14, 9am (Europe/Rome)\n' })
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await answerOf($, 'probe_licence_usage', { config_dir: 'second' })
+    await world.clock.advance(20_000)
+    const warned = await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: 'second' })
+    expect(warned).toContain(`config_dir ${CLAUDE}/second, registered.`)
+    expect(warned.split('\n').filter(line => line.startsWith('WARNING:'))).toEqual(['WARNING: licence second was over 90% in a probe 20 s ago (five_hour 95%, seven_day 91%); launched as asked, it may stop at its limit'])
+    expect(world.usageRuns.length).toBe(1)
+    world.table.procs.delete(7001)
+    await world.clock.advance(41_000)
+    const later = await answerOf($, 'launch_worker', { ...LAUNCH, title: 'licence launch two', config_dir: 'second' })
+    expect(later.includes('WARNING')).toBe(false)
+    expect(world.usageRuns.length).toBe(1)
+  })
+
+  test('a resume runs under its entry\'s own config_dir: without config_dir as before, with another one refused, with its own accepted', { options: PICK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seedLaunch(world)
+    const entry = { title: 'to resume', session_id: SID_RESUME, config_dir: `${CLAUDE}/second`, cwd: '/w/work', model: 'haiku', effort: 'low', reported: true }
+    world.files.set(REGISTRY, `${JSON.stringify([entry], null, 2)}\n`)
+    world.files.set(`${CLAUDE}/second/projects/-w-work/${SID_RESUME}.jsonl`, '{}\n')
+    world.launch.sid = SID_RESUME
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const resume = { resume_sid: SID_RESUME, prompt: 'Continue the work.' }
+    expect(await answerOf($, 'launch_worker', { ...resume, config_dir: 'default' })).toBe(
+      `session-control: refused: a resume runs under its entry's own config_dir (${CLAUDE}/second), not ${CLAUDE}; nothing was launched`,
+    )
+    expect(launchCommands(world)).toEqual([])
+    const text = await answerOf($, 'launch_worker', resume)
+    expect(text).toContain(`config_dir ${CLAUDE}/second, registered.`)
+    expect(launchCommands(world)[0]).toContain(`CLAUDE_CONFIG_DIR='${CLAUDE}/second' `)
+    expect(launchCommands(world)[0]).toContain(`--resume '${SID_RESUME}'`)
+    expect(registry(world).find(one => one.session_id === SID_RESUME)?.config_dir).toBe(`${CLAUDE}/second`)
+    expect(pickerRuns(world)).toEqual([])
+    world.table.procs.delete(7001)
+    const again = await answerOf($, 'launch_worker', { ...resume, config_dir: `${CLAUDE}/second` })
+    expect(again).toContain(`config_dir ${CLAUDE}/second, registered.`)
+    expect(again.includes('Licence:')).toBe(false)
+  })
+
+  test('the debug trace names the config_dir given and the refusal, never anything of a licence file', { options: { ...PICK_OPTIONS, debug: true } }, async ($, on) => {
+    const world = mockWorld(on)
+    seedLaunch(world)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: 'nobody' })
+    await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: 'second' })
+    const trace = world.files.get(`${RUNS}/trace.log`) ?? ''
+    const lines = trace.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(lines.filter(line => line.event === 'tool.call' && line.tool === 'launch_worker').map(line => line.config_dir)).toEqual(['nobody', 'second'])
+    expect(lines.some(line => line.event === 'guard' && line.check === 'config_dir' && line.isOk === false)).toBe(true)
+    expectNoIdentity(trace)
+  })
+})
+
 // ---------------------------------------------------------------- Windows
 
 const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\w\\home' }

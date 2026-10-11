@@ -359,7 +359,9 @@ describe('tool surface', () => {
     // registered after turn_digest; every tool before it keeps its own pin (the next test).
     // Changed on purpose again by feature/licence-tools (15814:a639e0f9 before): probe_licence_usage (872:606c21ff) is
     // registered after list_licences; every tool before it keeps its own pin (the next test).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('16687:1371ae1b')
+    // Changed on purpose again by feature/licence-tools (16687:1371ae1b before): launch_worker's schema gains config_dir
+    // and its description a sentence (2916:5bd96840 to 3506:a5214540); every other tool keeps its own pin.
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('17277:e069d42b')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -393,9 +395,11 @@ describe('tool surface', () => {
     // launch_worker (together 4689:d2b85bc0) and the six inspection tools (together 3428:1484e7b6). The first six
     // were 6072:68e1b3f1 together while launch_worker was 1382:a077d922; feature/write-tools moved launch_worker's on
     // purpose (its new parameters) and added the two write-side tools.
+    // feature/licence-tools moved launch_worker's on purpose (config_dir; 2916:5bd96840 before) and added the two
+    // licence tools.
     const pins = Object.fromEntries(w.tools.map(tool => [tool.name, fingerprint(JSON.stringify(tool))]))
     expect(pins).toEqual({
-      launch_worker: '2916:5bd96840',
+      launch_worker: '3506:a5214540',
       acknowledge_workers: '875:8ed174c7',
       retire_workers: '1530:18bbed4e',
       open_point: '932:ad93390e',
