@@ -53,8 +53,34 @@ function labelOf(line: string): 'five' | 'seven' | 'other' | undefined {
   return word === 'week' && ALL_MODELS.test(found[2] ?? '') ? 'seven' : 'other'
 }
 
-const PERCENT = /(<\s*)?(\d{1,4}(?:[.,]\d+)?)\s*%\s*used\b/i
+/** A percent token: `<` or `>` (blanks may follow) or a minus right before the number, the number with any `.` or `,`, then `% used`. */
+const PERCENT = /([<>]\s*|[-\u2212])?(\d[\d.,]*)\s*%\s*used\b/i
 const RESETS = /\bresets?\b[\s:]*(.*)$/i
+const BAR_PREFIX = /^[\s\u2580-\u259f\u25a0-\u25ff#=|[\]_-]*$/
+const LABEL_ALONE = /^\s*:?\s*$/
+const ORPHAN_LINES = 20
+
+/**
+ * The floored percent of a line's first percent token; undefined when none; 'bad' when ambiguous or out of range (over
+ * 100, negative, `>`, a comma in the number, a number after `.` or `,`, more than one decimal point). `<1%` is 0.
+ */
+function percentOf(line: string): number | 'bad' | undefined {
+  const found = PERCENT.exec(line)
+  if (found === null) return undefined
+  const sign = (found[1] ?? '').trim()
+  const digits = found[2] ?? ''
+  const before = line[found.index - 1] ?? ''
+  if (sign === '>' || sign === '-' || sign === '\u2212' || before === '.' || before === ',' || !/^\d+(?:\.\d+)?$/.test(digits)) return 'bad'
+  const value = Number(digits)
+  if (!Number.isFinite(value) || value > 100) return 'bad'
+  return Math.max(0, Math.floor(value) - (sign === '<' ? 1 : 0))
+}
+
+/** Whether a label line holds the label alone (a colon allowed): the panel form. */
+function isLabelAlone(line: string): boolean {
+  const rest = LABEL.exec(line)?.[2] ?? ''
+  return LABEL_ALONE.test(labelOf(line) === 'seven' ? rest.replace(ALL_MODELS, '') : rest)
+}
 
 /** A reset in plain characters, an `@` word (an address) dropped first, cut to MAX_RESETS_CHARS. */
 function resetsText(raw: string): string {
@@ -67,25 +93,41 @@ function resetsText(raw: string): string {
     .trim()
 }
 
-/** One window from its label line, and up to three lines after it when the label line holds no percent. */
-function windowAt(lines: readonly string[], at: number): UsageWindow | null {
+/**
+ * One window from its label line, or 'PARSE' when its percent cannot be told for sure: the percent on the label's own
+ * line, or in the panel form (the label alone on its line) on a bar line of its own block (up to three lines, before a
+ * blank line or the next label, only bar characters before it). An ambiguous percent, one on any other of those lines,
+ * or one further down before the next label is PARSE; no percent at all is null.
+ */
+function windowAt(lines: readonly string[], at: number): UsageWindow | null | 'PARSE' {
   const first = lines[at] ?? ''
+  const own = percentOf(first)
+  if (own === 'bad') return 'PARSE'
   const block = [first]
-  if (!PERCENT.test(first)) {
+  if (own === undefined) {
     for (let next = at + 1; next < lines.length && next <= at + 3 && labelOf(lines[next] ?? '') === undefined; next++) block.push(lines[next] ?? '')
   }
-  let percent: number | undefined
+  let percent = own
+  let isOwnBlock = own === undefined && isLabelAlone(first)
+  for (const line of block.slice(1)) {
+    if (line.trim() === '') isOwnBlock = false
+    const found = percent === undefined ? percentOf(line) : undefined
+    if (found === undefined) continue
+    if (found === 'bad' || !isOwnBlock || !BAR_PREFIX.test(line.slice(0, PERCENT.exec(line)?.index ?? 0))) return 'PARSE'
+    percent = found
+  }
+  if (percent === undefined) {
+    for (let next = at + block.length; next < lines.length && next <= at + ORPHAN_LINES && labelOf(lines[next] ?? '') === undefined; next++) {
+      if (PERCENT.test(lines[next] ?? '')) return 'PARSE'
+    }
+    return null
+  }
   let resets = ''
   for (const line of block) {
-    const found = percent === undefined ? PERCENT.exec(line) : null
-    if (found !== null) {
-      const value = Number((found[2] ?? '').replace(',', '.'))
-      percent = Math.max(0, Math.floor(value) - (found[1] === undefined ? 0 : 1))
-    }
     const reset = resets === '' ? RESETS.exec(line) : null
     if (reset !== null) resets = resetsText(reset[1] ?? '')
   }
-  return percent === undefined || !Number.isFinite(percent) ? null : { percent, resets }
+  return { percent, resets }
 }
 
 const LOGIN = /not logged in|please (?:run )?\/login|run \/login|\/login to|invalid api key|oauth token (?:has )?expired|authentication[_ ]error|please log ?in|login required/i
@@ -93,16 +135,19 @@ const COST_SUMMARY = /^\s*total cost:/im
 const ERROR = /\b(error|failed|unable|could not)\b/i
 
 /**
- * The two windows of a /usage text, or a fixed code: NOT_LOGGED_IN (a login prompt in stdout or stderr, or the cost
- * summary of a config directory with no subscription login), FAILED (a non-zero exit or an error text, with no window),
- * PARSE (anything else, empty output among it).
+ * The two windows of a /usage text, or a fixed code: PARSE when a window's percent cannot be told for sure (windowAt),
+ * NOT_LOGGED_IN (a login prompt in stdout or stderr, or the cost summary of a config directory with no subscription
+ * login), FAILED (a non-zero exit or an error text, with no window), PARSE (anything else, empty output among it).
  */
 export function parseUsage(stdout: string, stderr = '', exitCode = 0): UsageProbe {
   const lines = linesOf(String(stdout))
   const found: { five: UsageWindow | null; seven: UsageWindow | null } = { five: null, seven: null }
   for (const [at, line] of lines.entries()) {
     const label = labelOf(line)
-    if ((label === 'five' || label === 'seven') && found[label] === null) found[label] = windowAt(lines, at)
+    if ((label !== 'five' && label !== 'seven') || found[label] !== null) continue
+    const window = windowAt(lines, at)
+    if (window === 'PARSE') return { ok: false, code: 'PARSE' }
+    found[label] = window
   }
   if (found.five !== null || found.seven !== null) return { ok: true, five: found.five, seven: found.seven }
   const text = lines.join('\n')

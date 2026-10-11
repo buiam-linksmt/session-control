@@ -992,6 +992,53 @@ test('probeUsage parser: the helper and the native fallback (hooks/usage.ts) giv
   }
 })
 
+test('probeUsage parser: an ambiguous or out-of-range percent, or one off its label line, is PARSE in both parsers wherever it stands; the good forms keep their figure', { skip: !HAS_TS }, async () => {
+  const { parseUsage } = await import('../helper/usage.mjs')
+  const twin = await import('../hooks/usage.ts')
+  const session = 'Current session: 12% used · resets 6pm (UTC)'
+  const week = 'Current week (all models): 41% used · resets Oct 16, 1pm (UTC)'
+  const bad = ['104%', '100.5%', '-5%', '\u22125%', '1,234%', '12,5%', '104,5 %', '12345%', '99999%', '>99%', '> 99%', '.5%', '1.2.3%']
+  const shapes = token => [
+    `Current session: ${token} used · resets 6pm\n${week}\n`,
+    `${session}\nCurrent week (all models): ${token} used\n`,
+    `Current session\n  ████ ${token} used\n  Resets 6pm\n${week}\n`,
+    `${session}\nCurrent week (all models)\n  ${token} used\n`,
+  ]
+  for (const token of bad) {
+    for (const text of shapes(token)) {
+      assert.deepEqual(parseUsage(text), { ok: false, code: 'PARSE' }, JSON.stringify(text))
+      assert.deepEqual(twin.parseUsage(text), { ok: false, code: 'PARSE' }, JSON.stringify(text))
+    }
+  }
+  const off = [
+    `Current session\n\n  37% used\n${week}\n`,
+    `Current session\n  Extra usage: 50% used\n${week}\n`,
+    `Current session: resets 6pm\n  37% used\n${week}\n`,
+    `Current session\n a\n b\n c\n  37% used\n${week}\n`,
+    `${session}\nCurrent week (all models)\n x\n\n  9% used\n`,
+  ]
+  for (const text of off) {
+    assert.deepEqual(parseUsage(text), { ok: false, code: 'PARSE' }, JSON.stringify(text))
+    assert.deepEqual(twin.parseUsage(text), { ok: false, code: 'PARSE' }, JSON.stringify(text))
+  }
+  for (const [token, percent] of [['0%', 0], ['<1%', 0], ['< 1%', 0], ['<5%', 4], ['7%', 7], ['07%', 7], ['99.9%', 99], ['100%', 100], ['100.0%', 100]]) {
+    for (const text of shapes(token)) {
+      const one = parseUsage(text)
+      assert.equal(one.ok, true, JSON.stringify(text))
+      assert.ok(one.five?.percent === percent || one.seven?.percent === percent, JSON.stringify(text))
+      assert.deepEqual(twin.parseUsage(text), one, JSON.stringify(text))
+    }
+  }
+  // Lines of the good and the refused forms shuffled together, with a fixed seed: both parsers agree on each mix.
+  const pool = [...bad, '12%', '<1%', '100%'].flatMap(shapes).flatMap(text => text.split('\n')).concat(off.flatMap(text => text.split('\n')))
+  let seed = 11
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648)
+  for (let round = 0; round < 500; round++) {
+    const text = Array.from({ length: 1 + (next() % 10) }, () => pool[next() % pool.length]).join('\n')
+    assert.deepEqual(parseUsage(text), twin.parseUsage(text), JSON.stringify(text).slice(0, 200))
+  }
+})
+
 /**
  * A fake `claude` first on the PATH, in a scratch folder: it records its arguments, cwd, CLAUDE_CONFIG_DIR and what it
  * read on stdin, and answers by the last component of CLAUDE_CONFIG_DIR (`inherited` when unset): `ok` and `inherited`
