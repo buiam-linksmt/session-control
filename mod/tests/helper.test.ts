@@ -843,7 +843,9 @@ describe('helper options, through the plugin', () => {
     expect(probes(w).every(argv => argv[0] === 'sh')).toBe(true)
   })
 
-  test('no Node at the start, installed later: the mock clock\'s ticks look again after 10 minutes, the helper takes over, one trace line per change', { options: { ...PLUGIN_OPTIONS, debug: true } }, async ($, on) => {
+  // 20 minutes of traced poll ticks on the mocked clock: about 1 s alone, but up to 5 s (the kit's default limit) while
+  // the suite's other files run beside it, on main too; the limit is raised, the assertions are as they were.
+  test('no Node at the start, installed later: the mock clock\'s ticks look again after 10 minutes, the helper takes over, one trace line per change', { options: { ...PLUGIN_OPTIONS, debug: true }, timeoutMs: 15_000 }, async ($, on) => {
     const w = world(on, 'node', 'real', null)
     await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
     const versions = () => nodeRuns(w).filter(argv => argv[1] === '--version').length
