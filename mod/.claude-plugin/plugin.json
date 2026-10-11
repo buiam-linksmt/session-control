@@ -1,7 +1,7 @@
 {
   "name": "session-control",
   "version": "0.1.0",
-  "description": "Session-control orchestrator mod: a side panel (/session-control) over the worker registry, queued work and open points, completion classification, launch/acknowledge/retire tools for workers, bookkeeping tools for the helper files, a secret scan of worker results, a prompt lint and a sign-off guard for worker launches, and guards on the orchestrator's own hand edits and git commands.",
+  "description": "Session-control orchestrator mod: a side panel (/session-control) over the worker registry, queued work and open points, completion classification, launch/acknowledge/retire tools for workers, bookkeeping tools for the helper files, licence tools (list_licences, probe_licence_usage and launch_worker's config_dir: licences found by the presence of their files only, usage as the CLI shows it, no credential read), a secret scan of worker results, a prompt lint and a sign-off guard for worker launches, and guards on the orchestrator's own hand edits and git commands.",
   "author": {
     "name": "Matteo Buia"
   },
@@ -40,7 +40,7 @@
     "licencePickCommand": {
       "type": "string",
       "title": "Licence picker command",
-      "description": "Command that chooses the licence for a fresh worker launch. {need} is replaced by the headroom percent; a leading ~/ is expanded. It prints one absolute config directory and exits 0, or exits 3 when no licence has room. Empty: workers start with the machine's default config directory (~/.claude).",
+      "description": "Command that chooses the licence for a fresh worker launch. {need} is replaced by the headroom percent; a leading ~/ is expanded. It prints one absolute config directory and exits 0, or exits 3 when no licence has room. Empty: workers start with the machine's default config directory (~/.claude). A launch given an explicit config_dir (a discovered licence) does not run it.",
       "default": ""
     },
     "debug": {
