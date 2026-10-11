@@ -164,6 +164,49 @@ describe('list_licences', () => {
     expectNoIdentity(before)
   })
 
+  test('a licence holds both files as regular files: directories, a link to a directory and a broken link in their place are no licence; a link to a regular file counts', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seed(world)
+    // The default directory with both names as directories: listed (a launch goes there), not logged in.
+    world.files.set(`${CLAUDE}/.credentials.json/x`, credentialsText())
+    world.files.set(`${CLAUDE}/.claude.json/x`, configText())
+    world.files.set(`${HOME}/.claude.json/x`, configText())
+    // Both names as directories.
+    world.files.set(`${CLAUDE}/dirs/.credentials.json/x`, credentialsText())
+    world.files.set(`${CLAUDE}/dirs/.claude.json/x`, configText())
+    // One regular file, one directory.
+    world.files.set(`${CLAUDE}/mixed/.credentials.json`, credentialsText())
+    world.files.set(`${CLAUDE}/mixed/.claude.json/x`, configText())
+    // Links to regular files elsewhere: a licence.
+    world.files.set('/w/store/c.json', credentialsText())
+    world.files.set('/w/store/a.json', configText())
+    world.files.set(`${CLAUDE}/linkfile/notes.txt`, 'x')
+    world.links.set(`${CLAUDE}/linkfile/.credentials.json`, '/w/store/c.json')
+    world.links.set(`${CLAUDE}/linkfile/.claude.json`, '/w/store/a.json')
+    // Links to directories.
+    world.files.set('/w/store/d1/x', credentialsText())
+    world.files.set('/w/store/d2/x', configText())
+    world.files.set(`${CLAUDE}/linkdir/notes.txt`, 'x')
+    world.links.set(`${CLAUDE}/linkdir/.credentials.json`, '/w/store/d1')
+    world.links.set(`${CLAUDE}/linkdir/.claude.json`, '/w/store/d2')
+    // Broken links.
+    world.files.set(`${HOME}/.claude-broken/notes.txt`, 'x')
+    world.links.set(`${HOME}/.claude-broken/.credentials.json`, '/w/store/missing-c.json')
+    world.links.set(`${HOME}/.claude-broken/.claude.json`, '/w/store/missing-a.json')
+    for (const path of [...world.files.keys()]) if (path.includes('.credentials.json') || path.includes('.claude.json') || path.startsWith('/w/store/')) world.unreadable.add(path)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const text = await answerOf($, 'list_licences')
+    expect(text.split('\n').slice(0, 3)).toEqual([
+      '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
+      `- default | config_dir ${CLAUDE} | source default | logged_in no | sessions 1 live, 1 in all`,
+      `- linkfile | config_dir ${CLAUDE}/linkfile | source child | logged_in yes | sessions 0 live, 0 in all`,
+    ])
+    expectNoIdentity(text)
+    // Asked by stat (kind), never by exists alone and never read.
+    for (const name of ['dirs', 'mixed', 'linkdir', 'linkfile']) expect(world.statted).toContain(`${CLAUDE}/${name}/.credentials.json`)
+    expect(world.statted).toContain(`${HOME}/.claude-broken/.credentials.json`)
+  })
+
   test('the registry unreadable: the licences with ? counts and the reason', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seed(world)
@@ -529,7 +572,7 @@ const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z
 
 /** A small Windows machine: files by their C:/ path (case kept as given), folders listed by what is under them, no process. */
 function winWorld(on: On) {
-  const w = { files: new Map<string, string>(), runs: [] as string[][], usageInits: [] as unknown[], clock: mock.clock(on, { now: NOW_MS }) }
+  const w = { files: new Map<string, string>(), links: new Map<string, string>(), runs: [] as string[][], usageInits: [] as unknown[], clock: mock.clock(on, { now: NOW_MS }) }
   mock.env(on, WIN_ENV)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -546,8 +589,17 @@ function winWorld(on: On) {
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: find(e.path) !== undefined }))
+  // A file is `file`, a folder (something under it) `dir`; a link (in links, by its C:/ path) is followed, and one that
+  // leads nowhere is `other`, as the engine says it.
+  const isFolder = (path: string) => [...w.files.keys()].some(one => one.toLowerCase().startsWith(`${key(path).replace(/\/+$/, '')}/`))
+  const linkOf = (path: string) => [...w.links.entries()].find(([one]) => one.toLowerCase() === key(path))?.[1]
   on('fs.stat', ($, e) => {
-    if (find(e.path) !== undefined) return { value: { kind: 'file', size: 1, mtimeMs: NOW_MS, isLink: false } as never }
+    const target = linkOf(e.path)
+    const path = target ?? e.path
+    const isLink = target !== undefined
+    if (find(path) !== undefined) return { value: { kind: 'file', size: 1, mtimeMs: NOW_MS, isLink } as never }
+    if (isFolder(path)) return { value: { kind: 'dir', size: 0, mtimeMs: NOW_MS, isLink } as never }
+    if (isLink) return { value: { kind: 'other', size: 0, mtimeMs: NOW_MS, isLink } as never }
     throw new Error(`ENOENT ${e.path}`)
   })
   on('fs.list', ($, e) => {
@@ -597,6 +649,36 @@ describe('list_licences on Windows', () => {
     expectNoIdentity(text)
     // No process but the mod's own PowerShell scripts: the discovery is listings and presence only.
     expect(w.runs.every(argv => argv[0] === POWERSHELL || argv[0] === 'git')).toBe(true)
+  })
+
+  test('a licence holds both files as regular files: directories, a link to a folder and a broken link are no licence; a link to a regular file counts', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {
+    const w = winWorld(on)
+    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
+    w.files.set(WIN_REGISTRY, '[]\n')
+    w.files.set('C:/w/home/.claude/.credentials.json', credentialsText())
+    w.files.set('C:/w/home/.claude/.claude.json', configText())
+    w.files.set('C:/w/home/.claude/Dirs/.credentials.json/x', credentialsText())
+    w.files.set('C:/w/home/.claude/Dirs/.claude.json/x', configText())
+    w.files.set('C:/w/store/c.json', credentialsText())
+    w.files.set('C:/w/store/a.json', configText())
+    w.files.set('C:/w/store/d1/x', credentialsText())
+    w.files.set('C:/w/home/.claude/LinkFile/notes.txt', 'x')
+    w.links.set('C:/w/home/.claude/LinkFile/.credentials.json', 'C:/w/store/c.json')
+    w.links.set('C:/w/home/.claude/LinkFile/.claude.json', 'C:/w/store/a.json')
+    w.files.set('C:/w/home/.claude/LinkDir/notes.txt', 'x')
+    w.links.set('C:/w/home/.claude/LinkDir/.credentials.json', 'C:/w/store/d1')
+    w.links.set('C:/w/home/.claude/LinkDir/.claude.json', 'C:/w/store/d1')
+    w.files.set('C:/w/home/.claude-Broken/notes.txt', 'x')
+    w.links.set('C:/w/home/.claude-Broken/.credentials.json', 'C:/w/store/gone.json')
+    w.links.set('C:/w/home/.claude-Broken/.claude.json', 'C:/w/store/gone.json')
+    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    const text = await answerOf($, 'list_licences')
+    expect(text.split('\n')).toEqual([
+      '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
+      '- default | config_dir C:/w/home/.claude | source default | logged_in yes | sessions 0 live, 0 in all',
+      '- LinkFile | config_dir C:/w/home/.claude/LinkFile | source child | logged_in yes | sessions 0 live, 0 in all',
+    ])
+    expectNoIdentity(text)
   })
 
   test('probe_licence_usage: claude.exe with the three arguments, in the drive root, CLAUDE_CONFIG_DIR in the native form (none for the inherited default)', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {

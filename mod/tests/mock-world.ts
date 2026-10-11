@@ -187,6 +187,8 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     const realPath = (e as { resolve?: boolean }).resolve === true ? { realPath: target } : {}
     if (files.has(target)) return { value: { ...base, kind: 'file', size: (files.get(target) ?? '').length, ...realPath } as FsStat }
     if (isDir(path) || target === '/' || [HOME, ORCH, '/w', '/w/work'].includes(target)) return { value: { ...base, kind: 'dir', size: 0, ...realPath } as FsStat }
+    // A link that leads nowhere is `other`, as the engine says it, with no realPath.
+    if (links.has(path)) return { value: { ...base, kind: 'other', size: 0 } as FsStat }
     throw new Error(`ENOENT ${e.path}`)
   })
   on('fs.list', ($, e) => {

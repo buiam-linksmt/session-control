@@ -1967,8 +1967,9 @@ async function auditState($: EngineInterface) {
 }
 
 // ---------------------------------------------------------------- the licence tools (licences.ts)
-// A licence is a config directory holding both .credentials.json and .claude.json: the scan reads directory listings and
-// asks whether those two files are there, nothing else; no file of a licence is ever opened.
+// A licence is a config directory holding both .credentials.json and .claude.json as regular files: the scan reads
+// directory listings and asks $.fs.stat what kind each of those two paths is, nothing else; no file of a licence is ever
+// opened.
 
 /** Two config directories compared as the host compares them (the registry and the launch compare them so). */
 async function sameDirOf($: EngineInterface): Promise<(a: string, b: string) => boolean> {
@@ -1991,7 +1992,9 @@ async function scanLicences($: EngineInterface): Promise<{ scan: LicenceScan; is
   if (kept !== undefined && kept.key === key && nowMs >= kept.scan.scannedAt && nowMs - kept.scan.scannedAt < SCAN_CACHE_MS) return { scan: kept.scan, isCached: true }
   const isSame = await sameDirOf($)
   const listed = async (dir: string) => (await $.fs.list(dir).catch(() => [])).map(one => ({ name: one.name, kind: one.kind }))
-  const isThere = (path: string) => $.fs.exists(path).catch(() => false)
+  // A regular file, or a link that leads to one ($.fs.stat follows a link): a directory, a broken link or anything else
+  // in the file's place does not count. A stat opens nothing.
+  const isThere = (path: string) => $.fs.stat(path).then(one => one.kind === 'file', () => false)
   const isAbsolute = (path: string) => (machine.platform === 'windows' ? isWinAbsolute(path) : path.startsWith('/'))
   const explicit = licenceDirsOf(config.licenceDirs, home, isAbsolute)
   const found = licenceCandidates({ home, defaultDir, children: await listed(`${home}/.claude`), homeEntries: await listed(home), explicit: explicit.dirs.map(dir => machine.nativePath(dir)), isSame })

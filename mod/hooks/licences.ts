@@ -1,8 +1,9 @@
 // Pure parts of the licence tools (list_licences, probe_licence_usage, launch_worker's config_dir): the discovery of the
 // machine's licences from directory listings, and the plain text each tool answers with. A licence is a config
-// directory; it counts when it holds both .credentials.json and .claude.json, a test of their presence only: neither is
-// ever opened, so no credential and no account identity can reach an answer, the trace or a log. No `$`, no I/O:
-// register.tsx lists the directories, asks whether the two files are there, and hands the answers here.
+// directory; it counts when it holds both .credentials.json and .claude.json as regular files (or links that lead to
+// regular files), a test of their presence and kind only: neither is ever opened, so no credential and no account
+// identity can reach an answer, the trace or a log. No `$`, no I/O: register.tsx lists the directories, asks $.fs.stat
+// what kind the two paths are, and hands the answers here.
 
 import type { SessionEntry } from '../types'
 import { rowStatus } from './core'
@@ -30,7 +31,7 @@ export const PROBE_USAGE_SCHEMA = {
 
 // ---------------------------------------------------------------- discovery
 
-/** The two files a licence directory holds, looked for by presence only. */
+/** The two files a licence directory holds, looked for by presence and kind only (a regular file, never opened). */
 export const LICENCE_FILES = ['.credentials.json', '.claude.json'] as const
 
 /** How long a directory scan is kept in memory before a call scans again. */
@@ -111,7 +112,8 @@ export function licenceCandidates(input: {
 }
 
 /**
- * Whether a candidate counts, from the presence of its two files: the default directory always (a launch goes there
+ * Whether a candidate counts, from the presence of its two files as regular files (a directory or a broken link in a
+ * file's place is not there): the default directory always (a launch goes there
  * whether or not it is logged in), any other only with both. <home>/.claude may keep its .claude.json at <home>/.claude.json,
  * where Claude Code keeps it when CLAUDE_CONFIG_DIR is not set: either place counts for it.
  */
