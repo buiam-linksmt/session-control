@@ -59,6 +59,8 @@ const SCENARIOS: Record<string, Record<string, unknown>> = {
   session_writes: { session_id: SID_ACK },
   panel_snapshot: {},
   audit_state: {},
+  // Writes no file: the time of the call goes to $.store, which is no file the guard could protect.
+  turn_digest: {},
 }
 
 const answerOf = (answer: unknown) => {

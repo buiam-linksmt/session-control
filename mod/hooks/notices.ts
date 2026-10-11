@@ -263,6 +263,11 @@ function openPoints(text: string | undefined): Point[] | undefined {
     .map(one => ({ id: str(one.id), title: str(one.title), isHeld: one.hold === true, ...(typeof one.raised === 'string' ? { raised: one.raised } : {}) }))
 }
 
+/** How many points are open (held ones included); undefined when the file cannot be read as the points file. */
+export function openPointCount(text: string | undefined): number | undefined {
+  return openPoints(text)?.length
+}
+
 /** The end of a local calendar day YYYY-MM-DD (the next local midnight, epoch ms); undefined when it is not a date. */
 function dayEndMs(date: string): number | undefined {
   const found = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date)

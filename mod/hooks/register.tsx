@@ -41,6 +41,7 @@ import {
   noticeKeyDir,
   noticeLine,
   noticeStoreKey,
+  openPointCount,
   orphanGroupNotice,
   orphanNotice,
   orphanStep,
@@ -48,6 +49,7 @@ import {
   pendingWith,
   pointStep,
   pruneHarvested,
+  queueTasks,
   registryStep,
   repoStep,
   retireStep,
@@ -57,6 +59,8 @@ import {
 import type { LockSeen, Notice, NoticeState, RegistryWatch } from './notices'
 import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from './drift'
 import { HOLDER_FILES, LOCK_EVERY_SEC, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from './locks'
+import { DIGEST_SCHEMA, digestStoreKey, digestText, lastCallOf, withEvent } from './digest'
+import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
 import type { ProtectedFile } from './guard'
@@ -163,6 +167,7 @@ const AUDIT_TOOL = 'mcp__session-control__audit_state'
 const CLOSE_TOOL = 'mcp__session-control__close_worker'
 const ARCHIVE_TOOL = 'mcp__session-control__archive_decisions'
 const STOP_TOOL = 'mcp__session-control__stop_worker'
+const DIGEST_TOOL = 'mcp__session-control__turn_digest'
 /** The engine tools the helper-file guard looks at (guard.ts): the file tools by their path, Bash and PowerShell by their command. */
 const GUARDED_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell)$/
 
@@ -270,6 +275,10 @@ let driftAt: number | undefined
 let isDriftChecking = false
 /** When the lock check last ran (epoch ms). */
 let lockAt: number | undefined
+/** turn_digest's ledger of this load (digest.ts): the events since the last call, how many were dropped, and the load's start. */
+let digestEvents: DigestEvent[] = []
+let digestDropped = 0
+let loadedAt = 0
 
 // The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
 // wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
@@ -640,6 +649,7 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
     }
   }
   $.ui.toast(toastText(TOAST_TITLES[outcome.kind], `${label}`), { timeoutMs: 8000 })
+  recordDigest({ at: await $.clock.now(), kind: 'completion', text: label })
   const notes = reportNote === undefined ? [label] : [label, `${who}: report check: ${reportNote}`]
   await update($, pendingNotes, list => [...list, ...notes].slice(-20))
   // The harvest's notices: queued tasks that waited for it, its compliance check, and the queue maybe left empty.
@@ -736,8 +746,10 @@ function toastMore($: EngineInterface, toasts: ToastBudget): void {
  */
 async function deliver($: EngineInterface, notices: readonly Notice[], toasts: ToastBudget, source: ToastSource): Promise<void> {
   if (notices.length === 0) return
+  const at = await $.clock.now().catch(() => 0)
   for (const notice of notices) {
     trace($, 'notice', { kind: notice.kind, ...notice.fields })
+    recordDigest({ at, kind: notice.kind, text: notice.message })
     if (toasts.left[source] > 0) {
       toasts.left[source] -= 1
       $.ui.toast(toastText(TOAST_TITLES[notice.kind], notice.message), { timeoutMs: 10000 })
@@ -923,6 +935,54 @@ async function driftChanged($: EngineInterface): Promise<{ dir: string; changed?
   const trees = await machine.hashTrees(portOf($), [loaded, dir], DRIFT_SPEC)
   const [mine, theirs] = trees ?? []
   return mine === undefined || theirs === undefined ? { dir } : { dir, changed: changedFiles(mine, theirs) }
+}
+
+/** One event of turn_digest's ledger (digest.ts). */
+function recordDigest(event: DigestEvent): void {
+  const next = withEvent(digestEvents, digestDropped, event)
+  digestEvents = next.events
+  digestDropped = next.dropped
+}
+
+/**
+ * turn_digest: the ledger since the last call, the peer ledger and the state line from a fresh read of the registry
+ * (with the probe), the queue and the points; then the call's time goes to $.store and the ledger starts again. It
+ * writes no file.
+ */
+async function turnDigest($: EngineInterface) {
+  const nowMs = await $.clock.now()
+  const key = digestStoreKey(config.orchestratorDir)
+  const lastCallAt = lastCallOf(await $.store.get(key).catch(() => undefined))
+  const registryText = await readRegistryFile($)
+  const parsed = parseRegistry(registryText ?? '')
+  const isRegistryRead = isRegistrySound(registryText) && parsed.ok
+  const entries = isRegistryRead && parsed.ok ? parsed.entries : []
+  const facts = isRegistryRead ? await probe($, entries) : undefined
+  const statuses = facts === undefined ? [] : entries.map(entry => rowStatus(entry, facts))
+  const [queueText, pointsText] = await Promise.all([$.fs.read(orchPath('task-queue.json')).catch(() => undefined), $.fs.read(orchPath('open-points.json')).catch(() => undefined)])
+  const tasks = queueTasks(queueText) ?? []
+  const text = digestText({
+    events: digestEvents,
+    dropped: digestDropped,
+    nowMs,
+    ...(lastCallAt === undefined ? {} : { lastCallAt }),
+    loadedAt,
+    isNoticesOff: config.notices === 'off',
+    peers: await read($, ledger),
+    counts: {
+      alive: statuses.filter(one => one === 'alive').length,
+      finished: statuses.filter(one => one === 'dead' || one === 'unreported' || one === 'done').length,
+      queued: tasks.filter(task => task.status === 'queued').length,
+      running: tasks.filter(task => task.status === 'running').length,
+      openPoints: openPointCount(pointsText) ?? 0,
+      isRegistryRead,
+    },
+  })
+  trace($, 'digest', { events: digestEvents.length, dropped: digestDropped, isFirst: lastCallAt === undefined })
+  digestEvents = []
+  digestDropped = 0
+  await $.store.set(key, { lastCallAt: nowMs }).catch((err: unknown) => storeFailed($, err))
+  return { result: text }
 }
 
 /** Reads the points and the queue into the panel's atoms; answers the first problem with those files, and their text for the notices. */
@@ -1893,6 +1953,16 @@ async function activate($: EngineInterface): Promise<void> {
     ] as const) {
       await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
     }
+    // Registered last: every tool before it keeps its name, description, schema and place.
+    await $.tool.register({
+      name: 'turn_digest',
+      description:
+        "Read-only: writes no file (it keeps the time of the call in the mod's store). What changed since the previous call: worker completions harvested, " +
+        'notices fired by kind and count, sessions that became orphans or stalled, queue tasks that became ready, open points that aged past 24 h, ' +
+        'unacknowledged peer messages, then one state line (sessions alive and finished, queue queued and running, open points); everything is then ' +
+        "marked seen. The first call reports from the mod's load. At most 40 lines, redacted, plain text.",
+      inputSchema: DIGEST_SCHEMA as unknown as Record<string, unknown>,
+    })
   }
   if (!isPolling) {
     isPolling = true
@@ -2030,6 +2100,9 @@ export const register: Register = (on, options) => {
   driftAt = undefined
   isDriftChecking = false
   lockAt = undefined
+  digestEvents = []
+  digestDropped = 0
+  loadedAt = 0
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
@@ -2053,6 +2126,7 @@ export const register: Register = (on, options) => {
     // The trace is wanted from the launch, by the debug option or by the environment (an environment that cannot be
     // read leaves it off); it is written once the board is on.
     if (!config.debug && isTraceSwitch(await debugSwitch($))) isTraceWanted = true
+    loadedAt = await $.clock.now()
     driftEvery = await driftInterval($)
     await traced($, () => startSession($, e.cwd))
     return started
@@ -2255,6 +2329,11 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: AUDIT_TOOL }, ($, e) => tracedTool($, 'audit_state', e, [], () => auditState($), true)).catch(($, e, next) => {
     traceError($, 'audit_state', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: audit_state failed` }
+  })
+
+  on('tool.call', { tool: DIGEST_TOOL }, ($, e) => tracedTool($, 'turn_digest', e, [], () => turnDigest($), true)).catch(($, e, next) => {
+    traceError($, 'turn_digest', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: turn_digest failed` }
   })
 
   // The launch's fields are paths, names, numbers and switches; the title and the section are free text and stay out

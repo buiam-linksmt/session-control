@@ -353,7 +353,9 @@ describe('tool surface', () => {
     // unchanged: the next test pins each.
     // Changed on purpose again by feature/stop-guard (13443:c93b222a before): stop_worker (1129:9b87c2b9) is registered
     // after archive_decisions; every tool before it keeps its own pin (the next test), record_decision included.
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('14573:6cee2b74')
+    // Changed on purpose again by feature/drift-digest (14573:6cee2b74 before): turn_digest is registered after
+    // stop_worker; every tool before it keeps its own pin (the next test).
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('15209:9b0c2251')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -376,6 +378,8 @@ describe('tool surface', () => {
       'archive_decisions',
       // Added on purpose by feature/stop-guard, after archive_decisions: every tool before it is unchanged.
       'stop_worker',
+      // Added on purpose by feature/drift-digest, after stop_worker: every tool before it is unchanged.
+      'turn_digest',
     ])
     // Each tool's own pin. Unchanged since before feature/write-tools, byte for byte: the five of the first six after
     // launch_worker (together 4689:d2b85bc0) and the six inspection tools (together 3428:1484e7b6). The first six
@@ -398,6 +402,8 @@ describe('tool surface', () => {
       close_worker: '1529:9741bcb0',
       archive_decisions: '879:39a97972',
       stop_worker: '1129:9b87c2b9',
+      // Added on purpose by feature/drift-digest.
+      turn_digest: '635:cbba99b4',
     })
     expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4689:d2b85bc0')
     expect(fingerprint(JSON.stringify(w.tools.slice(6, 12)))).toBe('3428:1484e7b6')
