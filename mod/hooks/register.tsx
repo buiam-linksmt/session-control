@@ -27,6 +27,26 @@ import { HELPER_SCRIPT, fallbackFields, fallbackToast, withHelper } from './host
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
 import { AUDIT_SCHEMA, auditText, retiredIds } from './audit'
+import {
+  PENDING_NOTICES_MAX,
+  harvestNotices,
+  isRepoDue,
+  isRetireDue,
+  markOrphan,
+  noticeKeyDir,
+  noticeLine,
+  noticeStoreKey,
+  orphanNotice,
+  orphanStep,
+  parseNoticeState,
+  pointStep,
+  pruneHarvested,
+  repoStep,
+  retireStep,
+  stallStep,
+  unitStep,
+} from './notices'
+import type { Notice, NoticeState } from './notices'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles } from './guard'
 import type { ProtectedFile } from './guard'
@@ -140,6 +160,7 @@ const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
 
 const snapshot = atom({ plugin: 'session-control', key: 'snapshot' } as const, null)
 const pendingNotes = atom({ plugin: 'session-control', key: 'pendingNotes' } as const, [])
+const pendingNotices = atom({ plugin: 'session-control', key: 'pendingNotices' } as const, [])
 const ledger = atom({ plugin: 'session-control', key: 'ledger' } as const, [])
 const watch = atom({ plugin: 'session-control', key: 'watch' } as const, null)
 const queued = atom({ plugin: 'session-control', key: 'queued' } as const, null)
@@ -166,6 +187,8 @@ type Config = {
   nodePath: string
   /** `bash`: workers start through the Bash tool; `powershell`: on native Windows through the PowerShell tool (host-powershell.ts). */
   launchRoute: 'bash' | 'powershell'
+  /** `on`: the poll-based notices (notices.ts); `off`: none of them (the completion notes stay). */
+  notices: 'on' | 'off'
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -180,6 +203,7 @@ let config: Config = {
   helper: 'auto',
   nodePath: '',
   launchRoute: 'bash',
+  notices: 'on',
 }
 let isActive = false
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
@@ -208,6 +232,18 @@ const issuedNames = new Set<string>()
  * and the guard passes every call.
  */
 let guard: { cwd: string; isWindows: boolean; files: ProtectedFile[] } | undefined
+/**
+ * The notices' debounce state of this load (notices.ts), read from $.store at its first use under the orchestrator
+ * directory's key and written back when it changes; `noticeSaved` is the text last written. A store that cannot be read
+ * or written leaves the state in memory for the load.
+ */
+let noticeState: NoticeState | undefined
+let noticeKey: string | undefined
+let noticeSaved = ''
+/** The notice passes run one after the other: each reads and changes the one state. */
+let noticeChain: Promise<void> = Promise.resolve()
+/** A $.store failure is traced once per load: a store that keeps failing would add a line at every change. */
+let isStoreFailTraced = false
 
 // The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
 // wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
@@ -570,22 +606,146 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   $.ui.toast(toastText(TOAST_TITLES[outcome.kind], `${label}`), { timeoutMs: 8000 })
   const notes = reportNote === undefined ? [label] : [label, `${who}: report check: ${reportNote}`]
   await update($, pendingNotes, list => [...list, ...notes].slice(-20))
+  // The harvest's notices: queued tasks that waited for it, its compliance check, and the queue maybe left empty.
+  const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => undefined)
+  await withNotices($, state => [...harvestNotices(state, entry, outcome, queueText), ...unitStep(state, queueText, true)])
 }
 
-/** Reads the points and the queue into the panel's atoms; answers the first problem with those files. */
-async function loadPoints($: EngineInterface): Promise<string | undefined> {
+// ---------------------------------------------------------------- the poll-based notices (notices.ts)
+// Each is one line for the model (the next prompt carries it, whatever started that prompt), a toast titled by its kind
+// and a trace line with its ids and counts. The debounce state lives in $.store, so a reload tells nothing again.
+
+/** The notice state of the orchestrator directory: $.store's value at the first use of a load, then this load's copy. */
+async function noticeStateOf($: EngineInterface): Promise<NoticeState> {
+  const key = noticeStoreKey(config.orchestratorDir)
+  if (noticeState !== undefined && noticeKey === key) return noticeState
+  const stored = await $.store.get(key).catch((err: unknown) => {
+    storeFailed($, err)
+    return undefined
+  })
+  noticeKey = key
+  noticeState = parseNoticeState(stored)
+  noticeSaved = JSON.stringify(noticeState)
+  await pruneNoticeKeys($, key)
+  return noticeState
+}
+
+/** Drops the notice state of an orchestrator directory that is no longer there (a scratch directory removed), once per load. */
+async function pruneNoticeKeys($: EngineInterface, own: string): Promise<void> {
+  const keys = await $.store.keys().catch(() => [] as string[])
+  for (const key of keys) {
+    const dir = noticeKeyDir(key)
+    if (dir === undefined || key === own) continue
+    if (!(await $.fs.exists(dir).catch(() => true))) await $.store.delete(key).catch(() => undefined)
+  }
+}
+
+/** Writes the notice state back when it changed. */
+async function saveNoticeState($: EngineInterface): Promise<void> {
+  if (noticeState === undefined || noticeKey === undefined) return
+  const text = JSON.stringify(noticeState)
+  if (text === noticeSaved) return
+  try {
+    await $.store.set(noticeKey, noticeState)
+    noticeSaved = text
+  } catch (err) {
+    storeFailed($, err)
+  }
+}
+
+function storeFailed($: EngineInterface, err: unknown): void {
+  if (isStoreFailTraced) return
+  isStoreFailTraced = true
+  traceError($, 'notices.store', err)
+}
+
+/**
+ * One notice pass, after the passes before it: the work reads and changes the state and answers its notices; the state
+ * is written back, then the notices go out. Nothing with the notices option off, or before the board is on.
+ */
+async function withNotices($: EngineInterface, work: (state: NoticeState) => Notice[] | Promise<Notice[]>): Promise<void> {
+  if (config.notices === 'off' || !isActive) return
+  const pass = noticeChain.then(async () => {
+    const state = await noticeStateOf($)
+    const notices = await work(state)
+    await saveNoticeState($)
+    await deliver($, notices)
+  })
+  noticeChain = pass.catch((err: unknown) => traceError($, 'notices', err))
+  await noticeChain
+}
+
+/** A notice goes out three ways: a trace line (ids and counts), a toast titled by its kind, a line the next prompt carries. */
+async function deliver($: EngineInterface, notices: readonly Notice[]): Promise<void> {
+  if (notices.length === 0) return
+  for (const notice of notices) {
+    trace($, 'notice', { kind: notice.kind, ...notice.fields })
+    $.ui.toast(toastText(TOAST_TITLES[notice.kind], notice.message), { timeoutMs: 10000 })
+  }
+  await update($, pendingNotices, list => [...list, ...notices.map(noticeLine)].slice(-PENDING_NOTICES_MAX))
+}
+
+/**
+ * An orphan's sessions file (under its config dir, or the default one when it has none): whether it names this
+ * session's own id (the orchestrator's own process, when it runs headless, is never told), and the session id it names.
+ */
+async function orphanSession($: EngineInterface, proc: ProcFact): Promise<{ isOwn: boolean; sessionId?: string }> {
+  const machine = await hostOf($)
+  const dir = proc.configDir !== '' ? proc.configDir : machine.defaultConfigDir(await homeDir($), undefined)
+  const file = sessionFileFacts(await $.fs.read(`${dir.replace(/[\\/]+$/, '')}/sessions/${proc.pid}.json`).catch(() => ''))
+  const own = await $.session.id().catch(() => undefined)
+  return { isOwn: own !== undefined && own !== '' && file.sessionId === own, ...(file.sessionId === undefined ? {} : { sessionId: file.sessionId }) }
+}
+
+/**
+ * The notices of one poll, over what the poll read: orphans, stalls, the queue (re-arming unit-complete), the open
+ * points; from the poll's timer only (`isTick`), retire-due (with the cleared log) and repo-state (git, with no worker
+ * alive), each at most once per hour.
+ */
+async function pollNotices($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number, files: { queueText?: string; pointsText?: string }, isTick: boolean): Promise<void> {
+  await withNotices($, async state => {
+    const notices: Notice[] = []
+    for (const proc of orphanStep(state, entries, facts, nowMs)) {
+      const found = await orphanSession($, proc)
+      markOrphan(state, proc.pid, found.isOwn ? 'own' : 'told')
+      if (!found.isOwn) notices.push(orphanNotice(proc, state, nowMs, found.sessionId))
+    }
+    notices.push(...stallStep(state, entries, facts, nowMs))
+    pruneHarvested(state, entries, files.queueText)
+    notices.push(...unitStep(state, files.queueText, false))
+    notices.push(...pointStep(state, files.pointsText, nowMs))
+    if (isTick && isRetireDue(state, nowMs)) {
+      const cleared = await $.fs.read(`${await runsPath($)}/cleared.jsonl`).catch(() => undefined)
+      const retired = retiredIds(cleared)
+      notices.push(...retireStep(state, { entries, facts, nowMs, ...(files.queueText === undefined ? {} : { queueText: files.queueText }), ...(retired === undefined ? {} : { retired }) }))
+    }
+    const aliveCount = entries.filter(entry => rowStatus(entry, facts) === 'alive').length
+    if (isTick && isRepoDue(state, nowMs, aliveCount)) notices.push(...repoStep(state, await gitState($, config.orchestratorDir), nowMs))
+    return notices
+  })
+}
+
+/** After a queue_task change: unit-complete when no task is queued or running. */
+async function queueChanged($: EngineInterface): Promise<void> {
+  const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => undefined)
+  await withNotices($, state => unitStep(state, queueText, true))
+}
+
+/** Reads the points and the queue into the panel's atoms; answers the first problem with those files, and their text for the notices. */
+async function loadPoints($: EngineInterface): Promise<{ problem?: string; queueText?: string; pointsText?: string }> {
   const text = await $.fs.read(orchPath('open-points.json')).catch(() => undefined)
   const parsed = text === undefined ? ({ ok: true, points: [] } as const) : parseOpenPoints(text)
   const list: PresentedPoint[] | null = parsed.ok ? parsed.points : null
   if (!isSame(await read($, points), list)) await update($, points, () => list)
-  const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => '')
-  const queue = parseQueuedWork(queueText)
+  const queueRead = await $.fs.read(orchPath('task-queue.json')).catch(() => undefined)
+  const queue = parseQueuedWork(queueRead ?? '')
   if (!isSame(await read($, queued), queue)) await update($, queued, () => queue)
-  return parsed.ok ? undefined : parsed.error
+  return { ...(parsed.ok ? {} : { problem: parsed.error }), ...(queueRead === undefined ? {} : { queueText: queueRead }), ...(text === undefined ? {} : { pointsText: text }) }
 }
 
-async function gather($: EngineInterface, taskStatus: string | undefined): Promise<void> {
-  const problem = await loadPoints($)
+async function gather($: EngineInterface, taskStatus: string | undefined, isTick = false): Promise<void> {
+  const files = await loadPoints($)
+  const problem = files.problem
   const parsed = parseRegistry(await readRegistryText($))
   const now = await $.clock.now()
   if (!parsed.ok) {
@@ -601,6 +761,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined): Promi
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
   noteError($, next.error)
   if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
+  await pollNotices($, parsed.entries, facts, now, files, isTick)
 }
 
 /** A problem is toasted once, when it first appears or changes. */
@@ -616,11 +777,11 @@ async function showError($: EngineInterface, error: string, now: number): Promis
   await update($, snapshot, prev => ({ at: now, rows: prev?.rows ?? [], error }))
 }
 
-async function refresh($: EngineInterface, taskStatus?: string): Promise<void> {
+async function refresh($: EngineInterface, taskStatus?: string, isTick = false): Promise<void> {
   if (!isActive || isBusy) return
   isBusy = true
   try {
-    await gather($, taskStatus)
+    await gather($, taskStatus, isTick)
   } catch (err) {
     traceError($, 'refresh', err)
     await showError($, String(err).slice(0, 200), await $.clock.now())
@@ -694,7 +855,7 @@ function tick($: EngineInterface): void {
   // A panel shown again (after another pane in front of it, or a reload) gets its display tick back here.
   if (displayTick === undefined) void armDisplayTick($)
   if (!isTracing) {
-    void refresh($)
+    void refresh($, undefined, true)
     void refreshWatch($)
     return
   }
@@ -737,7 +898,7 @@ async function tracedTick($: EngineInterface): Promise<void> {
   if (traceRenders > 0) trace($, 'ui.render', { count: traceRenders })
   traceRenders = 0
   trace($, 'poll.tick')
-  await Promise.allSettled([refresh($), refreshWatch($)])
+  await Promise.allSettled([refresh($, undefined, true), refreshWatch($)])
   await flushTrace($)
 }
 
@@ -1641,6 +1802,11 @@ export const register: Register = (on, options) => {
   quietFallbacksTraced.clear()
   host = undefined
   guard = undefined
+  noticeState = undefined
+  noticeKey = undefined
+  noticeSaved = ''
+  noticeChain = Promise.resolve()
+  isStoreFailTraced = false
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
@@ -1652,6 +1818,7 @@ export const register: Register = (on, options) => {
     helper: options.helper === 'off' ? 'off' : 'auto',
     nodePath: String(options.nodePath ?? ''),
     launchRoute: options.launchRoute === 'powershell' ? 'powershell' : 'bash',
+    notices: options.notices === 'off' ? 'off' : 'on',
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -1709,6 +1876,15 @@ export const register: Register = (on, options) => {
         extra.push(`session-control completions: ${notes.join('; ')}`)
       }
     }
+    // The notices ride on the next prompt, whatever started it: one line each.
+    let notices: string[] = []
+    if ((await read($, pendingNotices)).length > 0) {
+      await update($, pendingNotices, list => {
+        notices = list
+        return []
+      })
+    }
+    if (notices.length > 0) extra.push(notices.join('\n'))
     if (isAfterCompact) {
       isAfterCompact = false
       await refresh($)
@@ -1745,7 +1921,11 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: QUEUE_TOOL }, ($, e) =>
-    tracedTool($, 'queue_task', e, ['action', 'id', 'status'], () => editHelper($, 'task-queue.json', 'queue-task', text => editQueue(text, plain(e)))),
+    tracedTool($, 'queue_task', e, ['action', 'id', 'status'], async () => {
+      const answer = await editHelper($, 'task-queue.json', 'queue-task', text => editQueue(text, plain(e)))
+      if ('result' in answer) await queueChanged($)
+      return answer
+    }),
   ).catch(($, e, next) => {
     traceError($, 'queue_task', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: queue_task failed` }

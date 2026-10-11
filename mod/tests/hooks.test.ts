@@ -108,6 +108,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   const w: World = { bash: [], powershell: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
   // A test that answers env.get itself says so.
   if (!isEnvOwn) mock.env(on, env)
+  // The engine keeps a plugin's own store (the notices' state, notices.ts): an empty one in memory.
+  mock.store(on)
   const isWin = env.OS === 'Windows_NT' && /^[A-Za-z]:[\\/]/.test(env.USERPROFILE ?? '')
   const seen = (path: string) => given(path, isWin)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -1937,6 +1939,7 @@ describe('debug trace', () => {
         helper: 'auto',
         nodePath: '',
         launchRoute: 'bash',
+        notices: 'on',
       },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)

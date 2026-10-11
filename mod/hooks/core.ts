@@ -322,7 +322,19 @@ export const TOAST_TITLES = {
   directWrite: 'Write not atomic',
   trace: 'Debug trace failed',
   helper: 'Node helper',
-} as const satisfies Record<SessionOutcomeKind | 'tracking' | 'directWrite' | 'trace' | 'helper', string>
+  // The poll-based notices (notices.ts), one title per kind.
+  orphan: 'Unregistered session',
+  stall: 'Session stalled',
+  'queue-ready': 'Queued task ready',
+  'unit-complete': 'Queue empty',
+  'compliance-due': 'Compliance check due',
+  'open-point-age': 'Open point waiting',
+  'retire-due': 'Housekeeping due',
+  'repo-state': 'Repository state',
+} as const satisfies Record<
+  SessionOutcomeKind | 'tracking' | 'directWrite' | 'trace' | 'helper' | 'orphan' | 'stall' | 'queue-ready' | 'unit-complete' | 'compliance-due' | 'open-point-age' | 'retire-due' | 'repo-state',
+  string
+>
 
 /**
  * A toast's text: the title, a separator, then the message. A toast is one line of text (the engine draws a line break

@@ -77,6 +77,8 @@ declare module 'claude-code' {
       now: number
       /** Completion lines not yet handed to the model. */
       pendingNotes: string[]
+      /** Notice lines (`session-control notice: <kind>: ...`) not yet handed to the model; the next prompt of any origin carries them. */
+      pendingNotices: string[]
       /** The watched worker's recent readable transcript lines, with the session id they were read for; null before a watch. */
       watch: { sid: string; title: string; lines: string[] } | null
       /** The box shown in the compact (inline) panel. */

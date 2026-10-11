@@ -66,6 +66,12 @@
       "title": "Launch route",
       "description": "bash: workers start through the Bash tool (on native Windows Claude Code offers it only when it finds Git Bash). powershell: on native Windows workers start through the PowerShell tool instead (claude.exe started by Start-Process, the prompt on standard input from the prompt file); on Linux and WSL the option changes nothing. Any other value counts as bash.",
       "default": "bash"
+    },
+    "notices": {
+      "type": "string",
+      "title": "Notices",
+      "description": "on: the poll-based notices (orphan, stall, queue-ready, unit-complete, compliance-due, open-point-age, retire-due, repo-state) reach the model with the next prompt, as a toast and in the debug trace. off: none of them; the completion notes stay. Any other value counts as on.",
+      "default": "on"
     }
   }
 }
