@@ -39,6 +39,12 @@ export type World = {
   breaks: Set<'tree' | 'stop'>
   /** Files that are there but cannot be read (over the read cap, say). */
   unreadable: Set<string>
+  /** A transcript's mtime the probe reports, epoch seconds, by session id (not listed: 5 s before the fixture's start). */
+  mtimes: Map<string, number>
+  /** How `git` answers (its arguments after the program); not set: exit 128, as where there is no repository. */
+  git?: (args: readonly string[]) => { exitCode: number; stdout: string }
+  /** The mocked clock, which moves only when a test advances it. */
+  clock: ReturnType<typeof mock.clock>
 }
 
 const ok = (stdout = '', exitCode = 0) => ({ exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
@@ -46,7 +52,7 @@ const ok = (stdout = '', exitCode = 0) => ({ exitCode, stdout, stderr: '', isStd
 /** The probe's lines over the table and the map, as PROBE_SCRIPT prints them for its arguments. */
 function probeLines(world: World, args: readonly string[]): string {
   const lines: string[] = []
-  for (const [pid, proc] of world.table.procs) if (proc.claude !== undefined) lines.push(['P', pid, 'claude', 3, proc.claude.cwd, proc.claude.configDir, proc.claude.cmdline].join('\t'))
+  for (const [pid, proc] of world.table.procs) if (proc.claude !== undefined) lines.push(['P', pid, 'claude', proc.claude.elapsedSec ?? 3, proc.claude.cwd, proc.claude.configDir, proc.claude.cmdline].join('\t'))
   for (const arg of args) {
     if (arg.startsWith('pid:')) {
       const [pid = '', cfg = ''] = arg.slice(4).split('|')
@@ -62,7 +68,7 @@ function probeLines(world: World, args: readonly string[]): string {
     } else if (arg.startsWith('t:')) {
       const [sid = '', cfg = ''] = arg.slice(2).split('|')
       const found = [...world.files.keys()].some(key => key.startsWith(`${cfg}/projects/`) && key.endsWith(`/${sid}.jsonl`))
-      if (found) lines.push(['T', sid, Math.floor(NOW_MS / 1000) - 5].join('\t'))
+      if (found) lines.push(['T', sid, world.mtimes.get(sid) ?? Math.floor(NOW_MS / 1000) - 5].join('\t'))
     }
   }
   return lines.map(line => `${line}\n`).join('')
@@ -81,6 +87,8 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
     launch: { cwd: '/w/work', sid: 'abcdabcd-0000-4000-8000-000000000001' },
     breaks: new Set(),
     unreadable: new Set(),
+    mtimes: new Map(),
+    clock: mock.clock(on, { now: NOW_MS }),
   }
   const { files, links } = world
   const real = (path: string) => throughLinks(links, path.replace(/\/+$/, ''))
@@ -90,7 +98,6 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
     files.set(real(path), text)
     record(path, via)
   }
-  mock.clock(on, { now: NOW_MS })
   mock.env(on, { HOME })
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -186,7 +193,10 @@ export function mockWorld(on: On, opts: { isHelper?: boolean } = {}): World {
       const isThere = argv[1] === '-d' ? isDir(path) || ['/w/work', ORCH].includes(path) : argv[1] === '-s' ? (files.get(real(path)) ?? '') !== '' : files.has(real(path)) || isDir(path)
       return { value: ok('', isThere ? 0 : 1) }
     }
-    if (cmd === 'git') return { value: ok('', 128) }
+    if (cmd === 'git') {
+      const answer = world.git?.(argv.slice(1))
+      return { value: answer === undefined ? ok('', 128) : ok(answer.stdout, answer.exitCode) }
+    }
     throw new Error(`unexpected command ${argv.join(' ')}`)
   })
   // The launch's background task: the worker appears in the table, its sessions file written as the engine writes it.

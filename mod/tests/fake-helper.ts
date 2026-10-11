@@ -59,8 +59,8 @@ export type SimProc = {
   state: string
   comm: string
   isStubborn?: boolean
-  /** A claude process as the probe reads it: its cwd, CLAUDE_CONFIG_DIR and command line. */
-  claude?: { cwd: string; configDir: string; cmdline: string }
+  /** A claude process as the probe reads it: its cwd, CLAUDE_CONFIG_DIR and command line (and its age in seconds, 3 when not given). */
+  claude?: { cwd: string; configDir: string; cmdline: string; elapsedSec?: number }
 }
 export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number }
 
