@@ -20,8 +20,8 @@ import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import {
   CFG_DEFAULT, HAS_PROC, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, isErrorFalse, join, kit,
-  linesOf, nodeCommand, ours, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings, signal,
-  startClaude, startOf, toolUses, transcriptOf, writeJson, writeLines,
+  linesOf, nodeCommand, ours, procPids, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings,
+  signal, startClaude, startOf, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
 
 const { pass, fail, info } = kit
@@ -64,7 +64,9 @@ BYSTANDER = String(bystander.pid)
 BYSTANDER_START = startOf(BYSTANDER)
 
 // Waits until the worker is alive with a sleep below it, then records its tree (pid, start, name per line), the claude
-// processes alive at that moment, and prints the worker's pid.
+// processes alive at that moment, and prints the worker's pid. A pid of the tree whose start cannot be read when it is
+// recorded has ended meanwhile: it is no member of the tree and goes to tree-dropped.txt instead. The worker itself
+// must still have its start, or the wait fails.
 fs.writeFileSync(join(S, 'wait-alive.mjs'),
   "import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'\n" +
   "import { join } from 'node:path'\n" +
@@ -85,9 +87,12 @@ fs.writeFileSync(join(S, 'wait-alive.mjs'),
   "  if (pid && existsSync(`/proc/${pid}`)) { t = tree(pid); if (t.some(p => comm(p) === 'sleep')) break }\n" +
   '  pause(2000)\n' +
   '}\n' +
-  "writeFileSync(join(out, 'tree-before.txt'), t.map(p => `${p} ${startOf(p)} ${comm(p)}\\n`).join(''))\n" +
+  'const rec = t.map(p => [p, startOf(p)])\n' +
+  "writeFileSync(join(out, 'tree-dropped.txt'), rec.filter(([, st]) => !st).map(([p]) => `${p}\\n`).join(''))\n" +
+  "writeFileSync(join(out, 'tree-before.txt'), rec.filter(([, st]) => st).map(([p, st]) => `${p} ${st} ${comm(p)}\\n`).join(''))\n" +
+  "if (!rec.some(([p, st]) => p === pid && st)) { console.log(`the worker pid ${pid} ended while its tree was recorded`); process.exit(1) }\n" +
   "writeFileSync(join(out, 'claude-before.txt'), pids().filter(p => comm(p) === 'claude').map(p => `${p} ${startOf(p)} ${read(`/proc/${p}/cmdline`).replace(/[\\0\\n\\t]/g, ' ').split(' ').slice(0, 3).join(' ')}\\n`).join(''))\n" +
-  'console.log(`worker pid ${pid} is alive with ${t.length} processes in its tree, a sleep among them`)\n')
+  'console.log(`worker pid ${pid} is alive with ${rec.filter(([, st]) => st).length} processes in its tree, a sleep among them`)\n')
 const SETTINGS = scratchSettings(ORCH, REG, RUNS)
 const WORKER_PROMPT = `This is a process test, scratch directory ${S}. Run the Bash command: sleep 20 (in the foreground, with a timeout of 60000 ms), and when it ends run it again, twelve times in all, one call after the other. Do nothing else and write no file. When all twelve are done answer with the word done.`
 fs.writeFileSync(join(S, 'instruction.txt'),
@@ -99,6 +104,30 @@ fs.writeFileSync(join(S, 'instruction.txt'),
   `5. Call mcp__session-control__stop_worker with session_id "${FIN}".\n` +
   'Then answer with one line: done.\n')
 
+// The worker's descendants seen from outside after the tree was recorded, until the orchestrator has ended: about three
+// times a second /proc is read, and a process whose parent is a member is a member (the members to start from: every
+// recorded or already seen pid that still has its start). The new members go to treeSeen (pid to start). A signal of
+// the proof to a pid outside the recorded tree is excused only when this watch saw that pid in the tree: a child the
+// worker spawned after the recording.
+const treeSeen = new Map()
+const watchTree = () => {
+  const recorded = new Map(linesOf(readOr(join(S, 'tree-before.txt'))).map(l => l.split(' ')).filter(([p, st]) => p && st).map(([p, st]) => [p, st]))
+  if (recorded.size === 0) return
+  const stat = new Map()
+  for (const p of procPids()) {
+    const s = readOr(`/proc/${p}/stat`)
+    if (!s) continue
+    const f = s.slice(s.lastIndexOf(') ') + 2).split(' ')
+    stat.set(p, { ppid: f[1], start: f[19] })
+  }
+  const members = new Set([...recorded, ...treeSeen].filter(([p, st]) => stat.get(p)?.start === st).map(([p]) => p))
+  for (let grown = true; grown; ) {
+    grown = false
+    for (const [p, { ppid }] of stat) if (!members.has(p) && members.has(ppid)) members.add(p), (grown = true)
+  }
+  for (const p of members) if (!recorded.has(p) && !treeSeen.has(p)) treeSeen.set(p, stat.get(p).start)
+}
+const watcher = setInterval(watchTree, 300)
 orch = startClaude({
   claude: CLAUDE,
   cwd: ORCH,
@@ -109,6 +138,8 @@ orch = startClaude({
   env: { SESSION_CONTROL_DEBUG: '1' },
 })
 await awaitOrchestrator(orch, { limit: 540, dir: S, isOk: () => isErrorFalse(join(S, 'orchestrator.json')) })
+clearInterval(watcher)
+fs.writeFileSync(join(S, 'tree-seen.txt'), [...treeSeen].map(([p, st]) => `${p} ${st}\n`).join(''))
 const OPID_DONE = String(orch.pid)
 const ojson = readJson(join(S, 'orchestrator.json'))
 const OSID = typeof ojson?.session_id === 'string' ? ojson.session_id : ''
@@ -143,6 +174,8 @@ const treeBefore = linesOf(readOr(join(S, 'tree-before.txt')))
 const WPID = (treeBefore[0] ?? '').split(' ')[0]
 const WSID = String((readJson(REG) ?? []).filter?.(e => e?.title === 'e2e sleeper').at(-1)?.session_id ?? '')
 info(`worker session ${WSID}, pid ${WPID} (config dir ${CFG_DEFAULT}, cwd ${WORK}); tree before the stop: ${treeBefore.map(l => l + ';').join('')}`)
+const dropped = linesOf(readOr(join(S, 'tree-dropped.txt')))
+info(`${dropped.length} pids of the tree had no readable start when it was recorded (they had ended): dropped from the recorded set${dropped.length ? `: ${dropped.join(' ')}` : ''}`)
 check('launch', `Launched pid ${WPID}, session ${WSID}`, 'the launch registered the worker the tree was read from')
 
 // ---------------------------------------------------------------- the proof
@@ -156,13 +189,14 @@ check('stop', `Abort check after: dead: pid ${WPID} is gone (no /proc/${WPID}).`
 check('stop', `Result: pid ${WPID} is dead`, 'the result')
 check('stop', 'Surviving descendants: none.', 'no survivor')
 check('stop', 'The registry is unchanged', 'no registry field written')
-// Every signal went to a pid of the tree recorded before the stop.
+// Every signal went to a pid of the tree recorded before the stop, or to a child the worker spawned after the recording
+// that the outside watch saw in its tree (such a pid is not required dead either); any other pid is a stray signal.
 const stopLines = linesOf(readOr(outPath('stop')))
 const treePids = new Set(treeBefore.map(l => l.split(' ')[0]))
-const STRAY = stopLines
-  .filter(l => /^- [0-9TZ:.-]+ (SIGTERM|SIGKILL) to [0-9]+/.test(l))
-  .map(l => /^.* to ([0-9]+).*$/.exec(l)[1])
-  .filter(p => !treePids.has(p))
+const signalled = stopLines.filter(l => /^- [0-9TZ:.-]+ (SIGTERM|SIGKILL) to [0-9]+/.test(l)).map(l => /^.* to ([0-9]+).*$/.exec(l)[1])
+const LATE = [...new Set(signalled.filter(p => !treePids.has(p) && treeSeen.has(p)))]
+const STRAY = signalled.filter(p => !treePids.has(p) && !treeSeen.has(p))
+info(`signalled pids outside the recorded tree that the outside watch saw in the worker's tree after the recording (not required dead, not stray): ${LATE.length ? LATE.join(' ') : 'none'}`)
 if (STRAY.length === 0) pass(`every signal of the proof went to a process of the worker's tree (${stopLines.filter(l => /SIG(TERM|KILL) to/.test(l)).length} signals)`)
 else fail(`a signal went outside the recorded tree: ${STRAY.join(' ')}`)
 
@@ -203,7 +237,7 @@ if (process.env.KEEP_OUT) {
   const keep = process.env.KEEP_OUT
   fs.mkdirSync(keep, { recursive: true })
   const names = fs.readdirSync(S).filter(name => /^out-.*\.txt$/.test(name)).map(name => join(S, name))
-  for (const f of [...names, join(S, 'tree-before.txt'), join(S, 'claude-before.txt'), join(S, 'orchestrator.json'), TRACE]) {
+  for (const f of [...names, join(S, 'tree-before.txt'), join(S, 'tree-dropped.txt'), join(S, 'tree-seen.txt'), join(S, 'claude-before.txt'), join(S, 'orchestrator.json'), TRACE]) {
     try {
       fs.copyFileSync(f, join(keep, basename(f)))
     } catch {}

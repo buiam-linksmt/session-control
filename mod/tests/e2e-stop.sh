@@ -63,7 +63,9 @@ BYSTANDER=$!
 BYSTANDER_START=$(start_of "$BYSTANDER")
 
 # Waits until the worker is alive with a sleep below it, then records its tree (pid, start, name per line), the claude
-# processes alive at that moment, and prints the worker's pid.
+# processes alive at that moment, and prints the worker's pid. A pid of the tree whose start cannot be read when it is
+# recorded has ended meanwhile: it is no member of the tree and goes to tree-dropped.txt instead. The worker itself
+# must still have its start, or the wait fails.
 cat > "$S/wait-alive.sh" <<'EOF'
 reg=$1; out=$2; n=0
 start_of() { sed -n 's/^.*) //p' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20; }
@@ -78,10 +80,37 @@ while :; do
   fi
   sleep 2
 done
-for p in $t; do printf '%s %s %s\n' "$p" "$(start_of "$p")" "$(cat "/proc/$p/comm" 2>/dev/null)"; done > "$out/tree-before.txt"
+: > "$out/tree-dropped.txt"
+for p in $t; do
+  st=$(start_of "$p")
+  if [ -n "$st" ]; then printf '%s %s %s\n' "$p" "$st" "$(cat "/proc/$p/comm" 2>/dev/null)"; else echo "$p" >> "$out/tree-dropped.txt"; fi
+done > "$out/tree-before.txt"
+grep -q "^$pid " "$out/tree-before.txt" || { echo "the worker pid $pid ended while its tree was recorded"; exit 1; }
 for d in /proc/[0-9]*; do [ "$(cat "$d/comm" 2>/dev/null)" = claude ] && printf '%s %s %s\n' "${d#/proc/}" "$(start_of "${d#/proc/}")" "$(tr '\0\n\t' '   ' < "$d/cmdline" 2>/dev/null | cut -d' ' -f1-3)"; done > "$out/claude-before.txt"
-echo "worker pid $pid is alive with $(echo $t | wc -w) processes in its tree, a sleep among them"
+echo "worker pid $pid is alive with $(grep -c . "$out/tree-before.txt") processes in its tree, a sleep among them"
 EOF
+# The worker's descendants seen from outside after the tree was recorded, until the orchestrator has ended: about three
+# times a second /proc is read, and a process whose parent is a member is a member (the members to start from: every
+# recorded or already seen pid that still has its start). The new members go to tree-seen.txt (pid, start per line).
+# A signal of the proof to a pid outside the recorded tree is excused only when this watch saw that pid in the tree: a
+# child the worker spawned after the recording. It runs in the scratch directory, so no command line names it.
+watch_tree() {
+  cd "$S" || return 0
+  while [ -e watch.on ]; do
+    [ -s tree-before.txt ] && cat /proc/[0-9]*/stat 2>/dev/null | awk '
+      BEGIN {
+        while ((getline l < "tree-before.txt") > 0) { split(l, k, " "); want[k[1]] = k[2]; known[k[1]] = 1 }
+        while ((getline l < "tree-seen.txt") > 0) { split(l, k, " "); want[k[1]] = k[2]; known[k[1]] = 1 }
+      }
+      { r = $0; sub(/^.*\) /, "", r); split(r, f, " "); par[$1] = f[2]; st[$1] = f[20] }
+      END {
+        for (p in want) if ((p in st) && st[p] == want[p]) mem[p] = 1
+        do { n = 0; for (p in par) if (!(p in mem) && ((par[p]) in mem)) { mem[p] = 1; n++ } } while (n > 0)
+        for (p in mem) if (!(p in known)) print p, st[p]
+      }' >> tree-seen.txt
+    sleep 0.3 2>/dev/null || sleep 1
+  done
+}
 SETTINGS=$(jq -nc --arg o "$ORCH" --arg r "$REG" --arg runs "$RUNS" '{pluginConfigs: {"session-control@inline": {options: {orchestratorDir: $o, registryPath: $r, runsDir: $runs, licencePickCommand: "", completionWrites: true, pollSeconds: 2, debug: false}}}}')
 WORKER_PROMPT="This is a process test, scratch directory $S. Run the Bash command: sleep 20 (in the foreground, with a timeout of 60000 ms), and when it ends run it again, twelve times in all, one call after the other. Do nothing else and write no file. When all twelve are done answer with the word done."
 cat > "$S/instruction.txt" <<EOF
@@ -94,6 +123,10 @@ This is an automated test of the session-control mod's stop_worker tool. Do exac
 Then answer with one line: done.
 EOF
 
+: > "$S/tree-seen.txt"
+touch "$S/watch.on"
+watch_tree &
+WATCHER=$!
 (cd "$ORCH" && SESSION_CONTROL_DEBUG=1 exec claude -p --plugin-dir "$MOD" --model haiku --dangerously-skip-permissions \
   --max-budget-usd 0.25 --output-format json --settings "$SETTINGS" < "$S/instruction.txt" > "$S/orchestrator.json" 2> "$S/orchestrator.err") &
 OPID=$!
@@ -114,6 +147,8 @@ else
 fi
 OPID_DONE=$OPID
 OPID=''
+rm -f "$S/watch.on"
+wait "$WATCHER" 2>/dev/null
 OSID=$(jq -r '.session_id // empty' "$S/orchestrator.json" 2>/dev/null)
 info "orchestrator cost USD $(jq -r '.total_cost_usd // "?"' "$S/orchestrator.json" 2>/dev/null), session $OSID (config dir $CFG_DEFAULT, cwd $ORCH)"
 OT=$(ls "$CFG_DEFAULT"/projects/*/"$OSID".jsonl 2>/dev/null | head -n 1)
@@ -139,6 +174,7 @@ check wait 'is alive with' 'the worker was alive with a sleep below it before th
 WPID=$(head -n 1 "$S/tree-before.txt" 2>/dev/null | cut -d' ' -f1)
 WSID=$(jq -r '(.[] | select(.title == "e2e sleeper")).session_id // empty' "$REG" 2>/dev/null)
 info "worker session $WSID, pid $WPID (config dir $CFG_DEFAULT, cwd $WORK); tree before the stop: $(tr '\n' ';' < "$S/tree-before.txt" 2>/dev/null)"
+info "$(cat "$S/tree-dropped.txt" 2>/dev/null | grep -c .) pids of the tree had no readable start when it was recorded (they had ended): dropped from the recorded set$(tr '\n' ' ' < "$S/tree-dropped.txt" 2>/dev/null | sed 's/^./: &/')"
 check launch "Launched pid $WPID, session $WSID" 'the launch registered the worker the tree was read from'
 
 # ---------------------------------------------------------------- the proof
@@ -152,11 +188,16 @@ check stop "Abort check after: dead: pid $WPID is gone (no /proc/$WPID)." 'the A
 check stop "Result: pid $WPID is dead" 'the result'
 check stop 'Surviving descendants: none.' 'no survivor'
 check stop 'The registry is unchanged' 'no registry field written'
-# Every signal went to a pid of the tree recorded before the stop.
+# Every signal went to a pid of the tree recorded before the stop, or to a child the worker spawned after the recording
+# that the outside watch saw in its tree (such a pid is not required dead either); any other pid is a stray signal.
 STRAY=''
+LATE=''
 for p in $(grep -E '^- [0-9TZ:.-]+ (SIGTERM|SIGKILL) to [0-9]+' "$S/out-stop.txt" | sed -E 's/^.* to ([0-9]+).*$/\1/'); do
-  grep -q "^$p " "$S/tree-before.txt" || STRAY="$STRAY $p"
+  if grep -q "^$p " "$S/tree-before.txt"; then :
+  elif grep -q "^$p " "$S/tree-seen.txt" 2>/dev/null; then case " $LATE " in *" $p "*) ;; *) LATE="$LATE $p" ;; esac
+  else STRAY="$STRAY $p"; fi
 done
+info "signalled pids outside the recorded tree that the outside watch saw in the worker's tree after the recording (not required dead, not stray):${LATE:- none}"
 [ -z "$STRAY" ] && pass "every signal of the proof went to a process of the worker's tree ($(grep -c -E 'SIG(TERM|KILL) to' "$S/out-stop.txt") signals)" || fail "a signal went outside the recorded tree:$STRAY"
 
 # ---------------------------------------------------------------- /proc from outside
@@ -188,7 +229,7 @@ check finished "refused: session $FIN is not alive: its entry records no pid" 'a
 check finished 'nothing was signalled' 'and nothing is signalled'
 
 if [ -n "${KEEP_OUT:-}" ]; then
-  mkdir -p "$KEEP_OUT" && cp "$S"/out-*.txt "$S/tree-before.txt" "$S/claude-before.txt" "$S/orchestrator.json" "$TRACE" "$KEEP_OUT"/ 2>/dev/null
+  mkdir -p "$KEEP_OUT" && cp "$S"/out-*.txt "$S/tree-before.txt" "$S/tree-dropped.txt" "$S/tree-seen.txt" "$S/claude-before.txt" "$S/orchestrator.json" "$TRACE" "$KEEP_OUT"/ 2>/dev/null
   info "outputs copied to $KEEP_OUT"
 fi
 STILL=$(ps -eo pid,args 2>/dev/null | grep -F "$S" | grep -v -e grep -e 'e2e-stop' | head -n 3)
