@@ -15,6 +15,7 @@ import {
   STALL_SEC,
   freshNoticeState,
   harvestNotices,
+  isRegistrySound,
   isRepoDue,
   isRetireDue,
   noticeKeyDir,
@@ -714,5 +715,130 @@ describe('notices.ts', () => {
     expect(repoStep(freshNoticeState(), { changed: [] }, NOW_MS)[0]?.message).toBe('the orchestrator directory has a detached HEAD, with no worker alive: run audit_state')
     const tasks = ['a', 'b', 'c', 'd', 'e'].map(id => ({ id, status: 'done' }))
     expect(retireStep(freshNoticeState(), { entries: [], facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks }) })[0]?.message).toBe('5 queue tasks look stale (a, b, c and 2 more): run audit_state')
+  })
+})
+
+// ---------------------------------------------------------------- a registry that cannot be read (decision mod-20)
+
+const SID_SECOND = '66666666-aaaa-4bbb-8ccc-666666666666'
+
+/** A second live registered worker, pid 4201, whose transcript is fresh (never stalled). */
+function seedSecondWorker(world: World): Record<string, unknown> {
+  const cfg = `${HOME}/.claude`
+  world.table.procs.set(4201, { ppid: 4000, start: '6000', state: 'S', comm: 'claude', claude: { cwd: '/w/work2', configDir: cfg, cmdline: 'claude -p --model haiku --output-format json' } })
+  world.files.set(`${cfg}/sessions/4201.json`, JSON.stringify({ sessionId: SID_SECOND, procStart: '6000' }))
+  world.files.set(`${cfg}/projects/-w-work2/${SID_SECOND}.jsonl`, '{"type":"user"}\n')
+  world.mtimes.set(SID_SECOND, NOW_SEC + 7 * 86_400)
+  return { title: 'second worker', pid: 4201, session_id: SID_SECOND, config_dir: cfg, cwd: '/w/work2', model: 'haiku', effort: 'low', result_file: `${RUNS}/second.json` }
+}
+
+/** The ways a registry read fails, each set on the world and undone by `restore`. */
+const FAILED_READS: readonly [string, (world: World) => void][] = [
+  ['empty', world => world.files.set(REGISTRY, '')],
+  ['missing', world => world.files.delete(REGISTRY)],
+  ['unreadable', world => world.unreadable.add(REGISTRY)],
+  ['whitespace-only', world => world.files.set(REGISTRY, '  \n\t\n')],
+  ['unparsable', world => world.files.set(REGISTRY, '[{"title": "half')],
+]
+
+function restore(world: World, text: string): void {
+  world.unreadable.delete(REGISTRY)
+  world.files.set(REGISTRY, text)
+}
+
+const toastsOf = (world: World, kind: NoticeKind) => noticeToasts(world).filter(text => text.startsWith(`${TOAST_TITLES[kind]} · `))
+
+describe('a registry that cannot be read', () => {
+  test('flapping between readable and unreadable (empty, missing, unreadable, whitespace-only, unparsable) every other poll for 5 minutes: one stall notice, no orphan notice', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries: [seedLiveWorker(world, SID_LIVE), seedSecondWorker(world)] })
+    const good = world.files.get(REGISTRY) ?? ''
+    seedTranscript(world, SID_LIVE)
+    world.mtimes.set(SID_LIVE, NOW_SEC - STALL_SEC - 60)
+    await start($)
+    expect(toastsOf(world, 'stall').length).toBe(1)
+    for (let at = 0; at < 60; at++) {
+      const failed = FAILED_READS[Math.floor(at / 2) % FAILED_READS.length]
+      if (at % 2 === 0) failed?.[1](world)
+      else restore(world, good)
+      await poll(world, 5)
+      // The stall stays remembered through every failed read.
+      expect(parseNoticeState(store.get(KEY)).stalls[SID_LIVE]).toBe(NOW_SEC - STALL_SEC - 60)
+    }
+    restore(world, good)
+    await poll(world, 10)
+    expect(toastsOf(world, 'stall').length).toBe(1)
+    expect(toastsOf(world, 'orphan')).toEqual([])
+    const lines = noticeLines(await userPrompt($))
+    expect(lines.filter(line => line.startsWith(`${NOTICE_PREFIX} stall: `)).length).toBe(1)
+    expect(lines.filter(line => line.startsWith(`${NOTICE_PREFIX} orphan: `))).toEqual([])
+    // No timer was started for a registered worker on a failed read.
+    expect(parseNoticeState(store.get(KEY)).orphans).toEqual({})
+  })
+
+  for (const [how, fail] of FAILED_READS) {
+    test(`${how} for 40 s with a registered live worker: no orphan notice, nothing pruned, nothing told again once it reads back`, { options: OPTIONS }, async ($, on) => {
+      const world = mockWorld(on)
+      const store = storeOf(on)
+      echoPrompt(on)
+      seed(world, { entries: [seedLiveWorker(world, SID_LIVE), seedSecondWorker(world)] })
+      const good = world.files.get(REGISTRY) ?? ''
+      seedTranscript(world, SID_LIVE)
+      world.mtimes.set(SID_LIVE, NOW_SEC - STALL_SEC - 60)
+      await start($)
+      const before = clone(store.get(KEY))
+      fail(world)
+      await poll(world, 40)
+      expect(toastsOf(world, 'orphan')).toEqual([])
+      expect(store.get(KEY)).toEqual(before)
+      restore(world, good)
+      await poll(world, 60)
+      expect(toastsOf(world, 'orphan')).toEqual([])
+      expect(toastsOf(world, 'stall').length).toBe(1)
+    })
+  }
+
+  test('a registry that parses to [] is a sound, empty registry: a live unclaimed headless process is told as an orphan after 30 s', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    ownSession(on)
+    echoPrompt(on)
+    seed(world, { entries: [seedLiveWorker(world, SID_LIVE)] })
+    await start($)
+    await poll(world, 10)
+    // The entry is gone from a registry that reads back as []: pid 4101 is an orphan from the next poll on (5 s later),
+    // and told once it has been unclaimed for 30 s.
+    world.files.set(REGISTRY, '[]')
+    await poll(world, ORPHAN_GRACE_SEC)
+    expect(toastsOf(world, 'orphan')).toEqual([])
+    await poll(world, 5)
+    expect(toastsOf(world, 'orphan').length).toBe(1)
+    expect(toastsOf(world, 'orphan')[0]).toContain('pid 4101 is a live headless claude no registry entry claims')
+    expect(noticeLines(await userPrompt($)).filter(line => line.startsWith(`${NOTICE_PREFIX} orphan: pid 4101 `)).length).toBe(1)
+  })
+
+  test('a failed read still looks at the queue and the points: unit-complete re-arms and an old open point is told', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    seed(world, { points: [{ id: 'op-old', status: 'open', raised: localDate(NOW_MS - 3 * 86_400_000), title: 'Old question' }] })
+    world.files.set(REGISTRY, '')
+    await start($)
+    expect(toastsOf(world, 'open-point-age').length).toBe(1)
+  })
+})
+
+describe('notices.ts: the registry read', () => {
+  test('isRegistrySound: read, not blank and a JSON array; [] is sound', () => {
+    expect(isRegistrySound(undefined)).toBe(false)
+    expect(isRegistrySound('')).toBe(false)
+    expect(isRegistrySound(' \n\t')).toBe(false)
+    expect(isRegistrySound('[{"title": "half')).toBe(false)
+    expect(isRegistrySound('{"sessions": []}')).toBe(false)
+    expect(isRegistrySound('null')).toBe(false)
+    expect(isRegistrySound('[]')).toBe(true)
+    expect(isRegistrySound('[]\n')).toBe(true)
+    expect(isRegistrySound('[{"title": "one"}]')).toBe(true)
   })
 })

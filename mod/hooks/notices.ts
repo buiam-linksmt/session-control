@@ -149,6 +149,23 @@ function idList(ids: readonly string[]): string {
   return ids.length > NOTICE_IDS_SHOWN ? `${shown} and ${ids.length - NOTICE_IDS_SHOWN} more` : shown
 }
 
+// ---------------------------------------------------------------- the registry as the notices read it
+
+/**
+ * Whether the registry text read at a poll can carry the registry-dependent notices (orphan, stall, queue-ready,
+ * compliance-due, retire-due, repo-state) and their pruning: read (not missing, not unreadable), not empty or blank,
+ * and a JSON array. Otherwise those steps are skipped for that poll: nothing fires and nothing is forgotten, so a
+ * failed read never counts as an empty registry. A registry that parses to `[]` is a sound, empty registry.
+ */
+export function isRegistrySound(text: string | undefined): boolean {
+  if (text === undefined || text.trim() === '') return false
+  try {
+    return Array.isArray(JSON.parse(text))
+  } catch {
+    return false
+  }
+}
+
 // ---------------------------------------------------------------- the helper files as the notices read them
 
 type Task = { id: string; status: string; waitsFor: string }

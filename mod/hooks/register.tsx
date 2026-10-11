@@ -30,6 +30,7 @@ import { AUDIT_SCHEMA, auditText, retiredIds } from './audit'
 import {
   PENDING_NOTICES_MAX,
   harvestNotices,
+  isRegistrySound,
   isRepoDue,
   isRetireDue,
   markOrphan,
@@ -487,9 +488,15 @@ async function registryPath($: EngineInterface): Promise<string> {
   return settingPath($, config.registrySetting)
 }
 
+/** The registry's text; a missing or unreadable file reads as empty (readRegistryFile tells them apart). */
 async function readRegistryText($: EngineInterface): Promise<string> {
+  return (await readRegistryFile($)) ?? ''
+}
+
+/** The registry's text, or undefined when the file is missing or cannot be read. */
+async function readRegistryFile($: EngineInterface): Promise<string | undefined> {
   const path = await registryPath($)
-  return $.fs.read(path).catch(() => '')
+  return $.fs.read(path).catch(() => undefined)
 }
 
 /** Writes a file through a temporary sibling and a rename (host.writeAtomic); false when `expected` no longer holds. */
@@ -700,11 +707,13 @@ async function orphanSession($: EngineInterface, proc: ProcFact): Promise<{ isOw
 /**
  * The notices of one poll, over what the poll read: orphans, stalls, the queue (re-arming unit-complete), the open
  * points; from the poll's timer only (`isTick`), retire-due (with the cleared log) and repo-state (git, with no worker
- * alive), each at most once per hour.
+ * alive), each at most once per hour. A registry that was not sound at this poll (isRegistrySound: missing, unreadable,
+ * empty or not an array) skips every step that reads it, pruning included: only the queue and the points are looked at.
  */
-async function pollNotices($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number, files: { queueText?: string; pointsText?: string }, isTick: boolean): Promise<void> {
+async function pollNotices($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number, files: { queueText?: string; pointsText?: string }, isTick: boolean, isRegistryOk: boolean): Promise<void> {
   await withNotices($, async state => {
     const notices: Notice[] = []
+    if (!isRegistryOk) return [...unitStep(state, files.queueText, false), ...pointStep(state, files.pointsText, nowMs)]
     for (const proc of orphanStep(state, entries, facts, nowMs)) {
       const found = await orphanSession($, proc)
       markOrphan(state, proc.pid, found.isOwn ? 'own' : 'told')
@@ -746,7 +755,8 @@ async function loadPoints($: EngineInterface): Promise<{ problem?: string; queue
 async function gather($: EngineInterface, taskStatus: string | undefined, isTick = false): Promise<void> {
   const files = await loadPoints($)
   const problem = files.problem
-  const parsed = parseRegistry(await readRegistryText($))
+  const registryText = await readRegistryFile($)
+  const parsed = parseRegistry(registryText ?? '')
   const now = await $.clock.now()
   if (!parsed.ok) {
     // The last good rows stay on screen under the warning.
@@ -761,7 +771,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
   noteError($, next.error)
   if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
-  await pollNotices($, parsed.entries, facts, now, files, isTick)
+  await pollNotices($, parsed.entries, facts, now, files, isTick, isRegistrySound(registryText))
 }
 
 /** A problem is toasted once, when it first appears or changes. */
