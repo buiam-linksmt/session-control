@@ -260,3 +260,63 @@ export const MSYS_PROMPTS: { text: string; rewritten: boolean }[] = [
   {"text": "/c/a:/c/b", "rewritten": true}
 ]
 // MSYS_PROMPTS:END
+
+/**
+ * The cwds of the orphan rule's e2e exemption (isE2eRunDir): the orchestrator and worker directories of an e2e script's
+ * scratch directory right under the system temporary directory are exempt, every other form keeps an orphan an orphan.
+ * Linux with `/tmp` and with `TMPDIR=/var/tmp/`; Windows under a `Temp` folder in any case, either separator.
+ */
+export const E2E_CWDS = {
+  linux: {
+    exempt: [
+      '/tmp/session-control-e2e-tools.Ab12Cd/orch',
+      '/tmp/session-control-e2e.XyZ123/work',
+      '/tmp/session-control-e2e-stop.q_9-z/work/',
+      '/tmp//session-control-e2e-lint.a/orch',
+    ],
+    kept: [
+      '/home/u/session-control-e2e-tools.Ab12Cd/orch',
+      '/var/tmp/session-control-e2e-tools.Ab12Cd/orch',
+      '/home/u/Temp/session-control-e2e-tools.Ab12Cd/orch',
+      '/tmp/x/session-control-e2e-tools.a/orch',
+      '/tmp/notes-session-control-e2e-tools.a/orch',
+      '/tmp/session-control-e2e-tools.a/orch/sub',
+      '/tmp/session-control-e2e',
+      '/tmp/session-control-e2e-tools.a',
+      '/tmp/session-control-e2e-tools.a/orch2',
+      '/tmp/session-control-e2e-tools a/orch',
+      '/tmp/x/../session-control-e2e-tools.a/orch',
+      '/tmp/./session-control-e2e-tools.a/orch',
+      '/tmp/session-control-e2e-tools.a/../orch',
+      '/tmp/session-control-e2e-tools.a/orch/..',
+      '/tmp\\session-control-e2e-tools.a\\orch',
+      'tmp/session-control-e2e-tools.a/orch',
+      '',
+    ],
+    /** Exempt only with TMPDIR=/var/tmp/. */
+    tmpdir: ['/var/tmp/session-control-e2e-tools.Ab12Cd/orch', '/var/tmp/session-control-e2e.x/work'],
+  },
+  windows: {
+    exempt: [
+      'C:\\Users\\u\\AppData\\Local\\Temp\\session-control-e2e-tools.Ab12Cd\\orch',
+      'C:/Users/u/AppData/Local/Temp/session-control-e2e.XyZ123/work',
+      'c:\\users\\u\\appdata\\local\\TEMP\\session-control-e2e-stop.q\\work\\',
+      'C:\\Users\\u\\AppData\\Local\\Temp/session-control-e2e-lint.a\\orch',
+      'C:\\Temp\\session-control-e2e.a\\orch',
+    ],
+    kept: [
+      'C:\\w\\session-control-e2e-tools.Ab12Cd\\orch',
+      'C:\\Temp2\\session-control-e2e-tools.a\\orch',
+      'C:\\Users\\u\\AppData\\Local\\MyTemp\\session-control-e2e-tools.a\\orch',
+      'C:\\Users\\u\\AppData\\Local\\Temp\\x\\session-control-e2e-tools.a\\orch',
+      'C:\\Users\\u\\AppData\\Local\\Temp\\notes-session-control-e2e-tools.a\\orch',
+      'C:\\Users\\u\\AppData\\Local\\Temp\\session-control-e2e',
+      'C:\\Users\\u\\AppData\\Local\\Temp\\session-control-e2e-tools.a\\orch2',
+      'C:\\Users\\u\\AppData\\Local\\Temp\\session-control-e2e-tools.a\\orch\\sub',
+      'C:\\x\\..\\Temp\\session-control-e2e-tools.a\\orch',
+      'C:\\Users\\u\\AppData\\Local\\Temp\\session-control-e2e-tools.a\\..\\orch',
+      'Temp\\session-control-e2e-tools.a\\orch',
+      '',
+    ],
+  },
+} as const

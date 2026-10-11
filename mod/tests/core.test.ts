@@ -67,6 +67,7 @@ import {
   findNewWorker,
   isHeadless,
   isLicenceRun,
+  isE2eRunDir,
   elapsedSeconds,
   formatAge,
   isSameWinPath,
@@ -102,6 +103,7 @@ import {
   REGISTRY_GOLDEN,
   WIN_PROBE_STDOUT,
   MSYS_PROMPTS,
+  E2E_CWDS,
 } from './fixtures'
 import type { SessionEntry } from '../types'
 
@@ -237,6 +239,46 @@ describe('licence runs are not orphans', () => {
     expect(findNewWorker(probes, want, new Set())).toBeUndefined()
     const bare = parseProcFacts(LICENCE.map((cmd, i) => ['P', 8000 + i, 'claude', 1, '', '', cmd].join('\t')).join('\n'))
     expect(findNewWindowsWorker(bare, { ...want, dir: 'C:\\' }, new Set(), 5)).toBeUndefined()
+  })
+})
+
+describe('e2e scratch exemption', () => {
+  const LINUX = { isWindows: false, dirs: ['/tmp'] }
+  const WITH_TMPDIR = { isWindows: false, dirs: ['/tmp', '/var/tmp/'] }
+  const WINDOWS = { isWindows: true, dirs: [] }
+  const { linux, windows } = E2E_CWDS
+  const probeLine = (pid: number, cwd: string) => ['P', pid, 'claude', 1, cwd, '/fixture/lic/a', 'claude -p --model haiku --output-format stream-json'].join('\t')
+
+  test('Linux: <tmp>/session-control-e2e<suffix>/orch or /work is an e2e run directory; every other form is not', () => {
+    expect(linux.exempt.map(cwd => isE2eRunDir(cwd, LINUX))).toEqual(linux.exempt.map(() => true))
+    expect(linux.kept.map(cwd => isE2eRunDir(cwd, LINUX))).toEqual(linux.kept.map(() => false))
+    expect(linux.tmpdir.map(cwd => isE2eRunDir(cwd, LINUX))).toEqual(linux.tmpdir.map(() => false))
+    // Facts without temp places are read as Linux with /tmp only.
+    expect(linux.exempt.every(cwd => isE2eRunDir(cwd))).toBe(true)
+  })
+
+  test('Linux with TMPDIR: its own scratch directories count too, /tmp still does, the rest stays out', () => {
+    expect([...linux.exempt, ...linux.tmpdir].every(cwd => isE2eRunDir(cwd, WITH_TMPDIR))).toBe(true)
+    const kept = linux.kept.filter(cwd => !cwd.startsWith('/var/tmp/'))
+    expect(kept.map(cwd => isE2eRunDir(cwd, WITH_TMPDIR))).toEqual(kept.map(() => false))
+    expect(isE2eRunDir('/var/tmp/x/session-control-e2e.a/orch', WITH_TMPDIR)).toBe(false)
+    expect(isE2eRunDir('/tmp/session-control-e2e.a/orch', { isWindows: false, dirs: ['relative/tmp'] })).toBe(false)
+  })
+
+  test('Windows: under a folder named Temp in any case, either separator; the Linux forms and the other Windows forms are not', () => {
+    expect(windows.exempt.map(cwd => isE2eRunDir(cwd, WINDOWS))).toEqual(windows.exempt.map(() => true))
+    expect(windows.kept.map(cwd => isE2eRunDir(cwd, WINDOWS))).toEqual(windows.kept.map(() => false))
+    // A Windows form on a Linux host is no temporary directory there.
+    expect(windows.exempt.map(cwd => isE2eRunDir(cwd, LINUX))).toEqual(windows.exempt.map(() => false))
+  })
+
+  test('no orphan row for an e2e run directory (Linux and Windows facts); every kept form is still an orphan row', () => {
+    for (const [stdout, cases, temp] of [[PROBE_STDOUT, linux, LINUX], [WIN_PROBE_STDOUT, windows, WINDOWS]] as const) {
+      const extra = [...cases.exempt, ...cases.kept].map((cwd, i) => probeLine(8000 + i, cwd))
+      const rows = buildRows(REGISTRY, { ...parseProcFacts([stdout, ...extra].join('\n')), temp }, NOW_SEC)
+      const orphans = rows.filter(row => row.status === 'orphan').map(row => row.pid)
+      expect(orphans).toEqual([4999, ...cases.kept.map((_, i) => 8000 + cases.exempt.length + i)])
+    }
   })
 })
 

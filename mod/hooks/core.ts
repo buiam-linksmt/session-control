@@ -53,7 +53,14 @@ export type ProcFacts = {
   pidProof: Map<number, { startTicks: string; fileStart: string; fileSid: string; state?: string }>
   /** Newest transcript mtime (epoch seconds) per session id. */
   transcriptMtime: Map<string, number>
+  /** Where the system temporary directory is (isE2eRunDir); set by the plugin's probe, absent: Linux with `/tmp` only. */
+  temp?: TempPlaces
 }
+
+/** The system temporary directory: on Linux the paths in `dirs` (`/tmp` and `$TMPDIR`); on Windows any folder named `Temp`. */
+export type TempPlaces = { isWindows: boolean; dirs: readonly string[] }
+
+const LINUX_TEMP: TempPlaces = { isWindows: false, dirs: ['/tmp'] }
 
 /** The probe's arguments for a registry: each recorded pid, each session's transcript. */
 export function probeArgs(entries: readonly SessionEntry[]): string[] {
@@ -132,6 +139,28 @@ export function isLicenceRun(cmdline: string): boolean {
   return words.slice(at + 2).every((word, i, rest) => word !== '--' && (word.startsWith('-') || (rest[i - 1] ?? '').startsWith('--')))
 }
 
+/** The scratch directory of an e2e script of the mod: `scratch(<prefix>)` in tests/lib/e2e.mjs names it `<prefix>.<random>`. */
+const E2E_SCRATCH = /^session-control-e2e[-A-Za-z0-9_.]*$/
+
+/**
+ * Whether a cwd is the orchestrator or worker directory of one of the mod's own e2e runs: `<temp>/<scratch>/orch` or
+ * `<temp>/<scratch>/work`, where `<scratch>` matches E2E_SCRATCH and `<temp>` is the system temporary directory (on
+ * Linux exactly one of `temp.dirs`; on Windows a path whose last folder is `Temp` in any case, `\` and `/` both
+ * separators). A cwd with a `.` or `..` folder in it is never one.
+ */
+export function isE2eRunDir(cwd: string, temp: TempPlaces = LINUX_TEMP): boolean {
+  const sep = temp.isWindows ? /[\\/]+/ : /\/+/
+  const parts = cwd.split(sep)
+  if (parts.length > 1 && parts.at(-1) === '') parts.pop()
+  if (parts.some(part => part === '.' || part === '..')) return false
+  const [scratch, leaf] = parts.slice(-2)
+  if (parts.length < 4 || (leaf !== 'orch' && leaf !== 'work') || !E2E_SCRATCH.test(scratch ?? '')) return false
+  const above = parts.slice(0, -2)
+  if (temp.isWindows) return above.at(-1)?.toLowerCase() === 'temp'
+  const tidy = (dir: string) => dir.replace(/\/+/g, '/').replace(/\/+$/, '')
+  return temp.dirs.some(dir => dir.startsWith('/') && tidy(dir) === above.join('/'))
+}
+
 // ---------------------------------------------------------------- rows
 
 /**
@@ -166,14 +195,17 @@ const STATUS_ORDER: Record<SessionRowStatus, number> = {
 
 /**
  * The orphans: each live headless claude process no registry entry claims (by its recorded pid) that is not one of the
- * licence daemon's own runs. The one predicate of the orphan rows, list_sessions and the orphan notice (notices.ts).
+ * licence daemon's own runs and does not run in an e2e script's scratch directory (isE2eRunDir). The one predicate of
+ * the orphan rows, list_sessions and the orphan notice (notices.ts).
  */
 export function orphanProcs(entries: readonly SessionEntry[], facts: ProcFacts): ProcFact[] {
   const claimed = new Set(entries.map(entry => entry.pid).filter((pid): pid is number => typeof pid === 'number'))
-  return facts.claude.filter(proc => !claimed.has(proc.pid) && isHeadless(proc.cmdline) && !isLicenceRun(proc.cmdline))
+  return facts.claude.filter(
+    proc => !claimed.has(proc.pid) && isHeadless(proc.cmdline) && !isLicenceRun(proc.cmdline) && !isE2eRunDir(proc.cwd, facts.temp),
+  )
 }
 
-/** One row per registry entry, plus one per live headless claude no entry claims that is not a licence run. */
+/** One row per registry entry, plus one per orphan (orphanProcs). */
 export function buildRows(
   entries: readonly SessionEntry[],
   facts: ProcFacts,

@@ -10,8 +10,9 @@
 // point raised ten days ago, a decisions section and two backups of one kind. A headless haiku orchestrator (capped
 // at --max-budget-usd 0.25) is asked to call each tool once and to answer with their outputs verbatim; each output is
 // then read from the orchestrator's own transcript and checked against the seeded data, and no output, no answer and no
-// trace line may hold the canary secret. The orphan row is the orchestrator itself, a live claude -p no registry entry
-// claims; the other live claude processes of the machine show as they are and are never touched.
+// trace line may hold the canary secret. The orchestrator itself is no orphan row: its cwd is the orch directory of an
+// e2e scratch directory under the temporary directory; the other live claude processes of the machine show as they are
+// and are never touched.
 // Everything the mod reads or writes is in the scratch directory (registry, helper files, runs directory, trace); the
 // real registry, helper files and runs directory are never touched, and the licence picker option is empty. The
 // orchestrator runs under the default configuration (this process's CLAUDE_CONFIG_DIR, else ~/.claude): its
@@ -160,7 +161,7 @@ else fail('list_sessions: the first line is the count')
 check('list_sessions', `- finished | e2e clean worker | session_id ${SID_CLEAN} | name w-e2e-clean-1 | pid - | elapsed 5m00s | model haiku/low | cwd ${S}/work-clean | config_dir ${CFG} | outcome clean (clean: The parser is done; 14 tests pass.) | cost USD 0.42`, 'the clean row with every field')
 check('list_sessions', `- finished-unreported | e2e chatter worker | session_id ${SID_CHATTER} |`, 'the chatter row, finished-unreported')
 check('list_sessions', `| e2e writer | session_id ${SID_WRITER} |`, 'the writer row')
-check('list_sessions', `| cwd ${ORCH} | config_dir `, 'the orchestrator itself is an orphan row (a live claude -p no entry claims), with its cwd')
+lacks('list_sessions', `| cwd ${ORCH} | config_dir `, 'the orchestrator itself is no orphan row (its cwd is an e2e scratch orch directory)')
 
 check('read_result', 'source: the transcript, its last substantial assistant message', 'the chatter fallback reads the transcript')
 check('read_result', 'because the result file .result is chatter (Done.)', 'it says why')

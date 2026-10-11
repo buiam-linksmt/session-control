@@ -167,7 +167,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { ComposedPrompt, ExpandableId, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId } from './core'
+import type { ComposedPrompt, ExpandableId, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -270,6 +270,8 @@ let isNodeWarned = false
 const TRACE_HELD_MAX = 2000
 /** The host adapter of this load (hostOf); a hot reload, or a test's fresh register, chooses again. */
 let host: Promise<Host> | undefined
+/** The system temporary directory of the orphan rule (tempPlaces), read at the first probe of a load. */
+let temp: Promise<TempPlaces> | undefined
 const harvested = new Set<string>()
 /** Session names this session gave to launches: two launches in the same second still get different names. */
 const issuedNames = new Set<string>()
@@ -623,7 +625,16 @@ async function ensureHelperFiles($: EngineInterface): Promise<void> {
 
 /** The process facts (host.probe); `configDirs` are where the probe may look for sessions files too. */
 async function probe($: EngineInterface, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
-  return (await hostOf($)).probe(portOf($), entries, configDirs)
+  const machine = await hostOf($)
+  const facts = await machine.probe(portOf($), entries, configDirs)
+  temp ??= tempPlaces($, machine.platform === 'windows')
+  return { ...facts, temp: await temp }
+}
+
+/** The system temporary directory for the orphan rule's e2e exemption: on Linux `/tmp` and `$TMPDIR` when it is set. */
+async function tempPlaces($: EngineInterface, isWindows: boolean): Promise<TempPlaces> {
+  const tmpdir = isWindows ? undefined : await $.env.get('TMPDIR').catch(() => undefined)
+  return { isWindows, dirs: tmpdir === undefined || tmpdir === '' ? ['/tmp'] : ['/tmp', tmpdir] }
 }
 
 /** The registry entries with the live process facts, or the refusal when the registry cannot be read. */
@@ -2316,6 +2327,7 @@ export const register: Register = (on, options) => {
   quietFailuresTraced.clear()
   isNodeWarned = false
   host = undefined
+  temp = undefined
   isGuarded = false
   noticeState = undefined
   noticeKey = undefined

@@ -44,7 +44,7 @@ import {
 import type { Notice, NoticeKind } from '../hooks/notices'
 import { localDate } from '../hooks/store'
 import { nodeAnswer } from './fake-helper'
-import { NOW_MS, RESULTS } from './fixtures'
+import { E2E_CWDS, NOW_MS, RESULTS } from './fixtures'
 import { HOME, OPTIONS, ORCH, REGISTRY, RUNS, mockWorld, seedLiveWorker } from './mock-world'
 import type { World } from './mock-world'
 
@@ -173,6 +173,61 @@ describe('orphan', () => {
     await poll(world, 60)
     expect(noticeToasts(world)).toEqual([])
     expect(parseNoticeState(store.get(KEY)).orphans).toEqual({})
+  })
+})
+
+/** The pids of the orphan rows list_sessions lists, in its order. */
+async function orphanRowPids($: { tool: { call: (e: never) => Promise<unknown> } }): Promise<number[]> {
+  const answer = (await $.tool.call({ tool: 'mcp__session-control__list_sessions' } as never)) as { result?: unknown }
+  return String(answer.result ?? '')
+    .split('\n')
+    .filter(line => line.startsWith('- orphan '))
+    .map(line => Number(/\| pid (\d+) \|/.exec(line)?.[1]))
+}
+
+/** A live headless haiku claude in `cwd`, as an e2e script starts its orchestrator; no sessions file names it. */
+function seedE2eProc(world: World, pid: number, cwd: string): void {
+  const cmdline = 'claude -p --model haiku --max-budget-usd 0.25 --output-format stream-json --verbose'
+  world.table.procs.set(pid, { ppid: 1, start: '42', state: 'S', comm: 'claude', claude: { cwd, configDir: `${HOME}/.claude`, cmdline, elapsedSec: 600 } })
+}
+
+describe('orphan: the e2e scripts\' own runs', () => {
+  const { linux } = E2E_CWDS
+  const exempt = linux.exempt.map((cwd, i) => [7100 + i, cwd] as const)
+  const kept = linux.kept.map((cwd, i) => [7200 + i, cwd] as const)
+
+  test('Linux: a live headless claude in /tmp/session-control-e2e<suffix>/orch or /work is no orphan row and no notice; each other form stays an orphan, told and listed', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    ownSession(on)
+    echoPrompt(on)
+    seed(world)
+    for (const [pid, cwd] of [...exempt, ...kept]) seedE2eProc(world, pid, cwd)
+    await start($)
+    await poll(world, 90)
+    const orphans = parseNoticeState(store.get(KEY)).orphans
+    expect(Object.keys(orphans).sort()).toEqual(kept.map(([pid]) => String(pid)).sort())
+    expect(Object.values(orphans).every(one => one.isTold === true)).toBe(true)
+    expect((await orphanRowPids($)).sort()).toEqual(kept.map(([pid]) => pid).sort())
+    const lines = noticeLines(await userPrompt($)).join('\n')
+    for (const [pid] of exempt) expect(lines).not.toContain(`${pid}`)
+    expect(world.toasts.join('\n')).not.toContain('pid 71')
+    expect(toastsOf(world, 'orphan').length).toBeGreaterThan(0)
+  })
+
+  test('Linux with TMPDIR: its own scratch directories are exempt as well as /tmp\'s; one level deeper or elsewhere stays an orphan', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: { TMPDIR: '/var/tmp/' } })
+    const store = storeOf(on)
+    ownSession(on)
+    seed(world)
+    const free = [...linux.tmpdir, linux.exempt[0]].map((cwd, i) => [7300 + i, cwd] as const)
+    const still = ['/var/tmp/x/session-control-e2e.a/orch', '/home/u/session-control-e2e-tools.Ab12Cd/orch', '/var/tmp/session-control-e2e.a/orch2'].map((cwd, i) => [7400 + i, cwd] as const)
+    for (const [pid, cwd] of [...free, ...still]) seedE2eProc(world, pid, cwd)
+    await start($)
+    await poll(world, 60)
+    expect(Object.keys(parseNoticeState(store.get(KEY)).orphans).sort()).toEqual(still.map(([pid]) => String(pid)))
+    expect(toastsOf(world, 'orphan').length).toBe(still.length)
+    expect((await orphanRowPids($)).sort()).toEqual(still.map(([pid]) => pid))
   })
 })
 
@@ -813,6 +868,30 @@ describe('Windows host', () => {
     expect(winNoticeToasts(w).length).toBe(1)
   })
 
+  test('orphan: a live headless claude.exe in <...>\\Temp\\session-control-e2e<suffix>\\orch or \\work is no orphan row and no notice; each other form stays an orphan', { options: WIN_OPTIONS }, async ($, on) => {
+    const tab = (...cols: (string | number)[]) => cols.join('\t')
+    const cmd = '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model haiku --max-budget-usd 0.25 --output-format stream-json --verbose'
+    const { windows } = E2E_CWDS
+    const exempt = windows.exempt.map((cwd, i) => [7100 + i, cwd] as const)
+    const kept = windows.kept.map((cwd, i) => [7200 + i, cwd] as const)
+    const w = winWorld(on, [...exempt, ...kept].map(([pid, cwd]) => tab('P', pid, 'claude', 600, cwd, 'C:\\w\\home\\.claude', cmd)))
+    const store = storeOf(on)
+    ownSession(on)
+    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
+    w.files.set(WIN_REGISTRY, '[]\n')
+    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    for (let step = 0; step < 18; step++) await w.clock.advance(5000)
+    // The one notice state of the load, under the key of its Windows orchestrator directory.
+    const keys = [...store.keys()].filter(key => key.startsWith('notices:'))
+    expect(keys.length).toBe(1)
+    const orphans = parseNoticeState(store.get(keys[0]!)).orphans
+    expect(Object.keys(orphans).sort()).toEqual(kept.map(([pid]) => String(pid)).sort())
+    expect(Object.values(orphans).every(one => one.isTold === true)).toBe(true)
+    expect(w.toasts.join('\n')).not.toContain('pid 71')
+    expect(winNoticeToasts(w).length).toBeGreaterThan(0)
+    expect((await orphanRowPids($)).sort()).toEqual(kept.map(([pid]) => pid).sort())
+  })
+
   test('stall: a live registered worker (the probe\'s A line proves it) with an old transcript', { options: WIN_OPTIONS }, async ($, on) => {
     const tab = (...cols: (string | number)[]) => cols.join('\t')
     const w = winWorld(on, [
@@ -869,6 +948,17 @@ describe('notices.ts', () => {
     expect(orphanStep(state, [], seen, 1000 + ORPHAN_GRACE_SEC * 1000).map(one => one.pid)).toEqual([9])
     expect(orphanStep(state, [{ pid: 9, session_id: 's' }], seen, 99_999)).toEqual([])
     expect(state.orphans).toEqual({})
+  })
+
+  test('orphanStep: an e2e run directory under the temporary directory is never remembered or due, on Linux and Windows; the other forms are', () => {
+    const line = (pid: number, cwd: string) => ['P', pid, 'claude', 1, cwd, '/c', 'claude -p --model haiku'].join('\t')
+    for (const [cases, temp] of [[E2E_CWDS.linux, { isWindows: false, dirs: ['/tmp'] }], [E2E_CWDS.windows, { isWindows: true, dirs: [] }]] as const) {
+      const state = freshNoticeState()
+      const seen = { ...facts([...cases.exempt.map((cwd, i) => line(100 + i, cwd)), ...cases.kept.map((cwd, i) => line(200 + i, cwd))]), temp }
+      expect(orphanStep(state, [], seen, 1000)).toEqual([])
+      expect(orphanStep(state, [], seen, 1000 + ORPHAN_GRACE_SEC * 1000).map(one => one.pid)).toEqual(cases.kept.map((_, i) => 200 + i))
+      expect(Object.keys(state.orphans).sort()).toEqual(cases.kept.map((_, i) => String(200 + i)).sort())
+    }
   })
 
   test('stallStep: needs the Abort check alive and a known transcript mtime', () => {

@@ -318,7 +318,7 @@ else pass('no temporary file left in the orchestrator directory')
 // ---------------------------------------------------------------- list_sessions
 check('list', 'session row', 'the count line')
 lacks('list', SID, 'the retired worker is no row')
-check('list', `| cwd ${ORCH} | config_dir `, 'the orchestrator itself is the orphan row')
+lacks('list', `| cwd ${ORCH} | config_dir `, 'the orchestrator itself is no orphan row (its cwd is an e2e scratch orch directory)')
 
 // ---------------------------------------------------------------- the trace keeps no prompt or section text
 const trace = readOr(TRACE)
