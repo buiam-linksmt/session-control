@@ -33,7 +33,7 @@ function batch(request) {
   return { ok: true, results }
 }
 
-/** The answer to one request. */
+/** The answer to one request: an object, or for probeUsage the promise of one. */
 export function answer(op, request) {
   try {
     if (op === 'batch') return batch(request)
@@ -44,8 +44,8 @@ export function answer(op, request) {
     // The stop of stop_worker (Linux only, as the probe): never in a batch.
     if (op === 'processTree') return { ok: true, ...processTree(request) }
     if (op === 'stopProcesses') return { ok: true, ...stopProcesses(request) }
-    // The usage probe of probe_licence_usage: one claude process, never in a batch.
-    if (op === 'probeUsage') return { ok: true, ...probeUsage(request) }
+    // The usage probe of probe_licence_usage: one claude process (its group on Linux), never in a batch.
+    if (op === 'probeUsage') return probeUsage(request).then(fields => ({ ok: true, ...fields }), err => failure(err))
     return { ok: true, ...runFileOp(op, request) }
   } catch (err) {
     return failure(err)

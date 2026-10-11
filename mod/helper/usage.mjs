@@ -7,13 +7,13 @@
 // The parser has a twin in hooks/usage.ts (the native fallback's); helper.test.mjs runs both over the recorded
 // outputs of tests/usage-fixtures.ts and requires the same answer from each.
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { isAbsolute, parse } from 'node:path'
 
 import { HelperError, path } from './protocol.mjs'
 
-/** How long one probe may run before claude is killed (SIGKILL) and the answer is TIMEOUT. */
+/** How long one probe may run before claude (on Linux its whole process group) is killed (SIGKILL) and the answer is TIMEOUT. */
 export const USAGE_TIMEOUT_MS = 15_000
 
 /** The most bytes of stdout and of stderr kept: the two figures are at the top of the text. */
@@ -187,35 +187,115 @@ export function parseUsage(stdout, stderr = '', exitCode = 0) {
 
 /** The claude executable as spawn looks for it on the PATH, with no shell: claude.exe on Windows. */
 const CLAUDE = process.platform === 'win32' ? 'claude.exe' : 'claude'
+const ARGS = ['-p', '/usage', '--no-session-persistence']
+
+/** After claude exits, how long its output may stay open (a process it left holds it) before its group is killed. */
+const PIPE_GRACE_MS = 500
+
+/** After the group is killed, how long the output may take to close before the answer is given anyway. */
+const KILL_WAIT_MS = 2_000
+
+/**
+ * One run of claude in a process group of its own (Linux): spawned detached, so claude leads a new group, and on the
+ * timeout, on an output past MAX_OUTPUT_BYTES, or when its output stays open PIPE_GRACE_MS after claude exited, the
+ * whole group is sent SIGKILL (the negative pid): no process claude started survives the probe in that group (one that
+ * left the group with setsid of its own is out of reach). `{stdout, stderr, status, errorCode}` as spawnSync reports
+ * them: errorCode ETIMEDOUT, ENOBUFS (the output cut at the cap), the spawn's own (ENOENT, EACCES), or undefined.
+ */
+function runInGroup({ timeout, ...options }) {
+  return new Promise(resolve => {
+    const kept = { stdout: [], stderr: [] }
+    const size = { stdout: 0, stderr: 0 }
+    const timers = []
+    let errorCode
+    let status = null
+    let isDone = false
+    let child
+    const finish = () => {
+      if (isDone) return
+      isDone = true
+      for (const timer of timers) clearTimeout(timer)
+      resolve({ stdout: Buffer.concat(kept.stdout), stderr: Buffer.concat(kept.stderr), status, errorCode })
+    }
+    const killGroup = () => {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        // ESRCH: the group is gone already.
+      }
+    }
+    const closeAll = () => {
+      child.stdout?.destroy()
+      child.stderr?.destroy()
+      finish()
+    }
+    const stop = code => {
+      if (isDone) return
+      errorCode ??= code
+      killGroup()
+      timers.push(setTimeout(closeAll, KILL_WAIT_MS))
+    }
+    try {
+      child = spawn(CLAUDE, ARGS, { ...options, detached: true })
+    } catch (err) {
+      errorCode = err?.code ?? 'FAILED'
+      finish()
+      return
+    }
+    child.on('error', err => {
+      errorCode ??= err?.code ?? 'FAILED'
+      if (child.pid === undefined) finish()
+    })
+    for (const name of ['stdout', 'stderr']) {
+      child[name].on('data', chunk => {
+        if (errorCode !== undefined) return
+        const room = MAX_OUTPUT_BYTES - size[name]
+        kept[name].push(chunk.length > room ? chunk.subarray(0, room) : chunk)
+        size[name] += Math.min(chunk.length, room)
+        if (chunk.length > room) stop('ENOBUFS')
+      })
+    }
+    child.on('exit', code => {
+      status = code
+      timers.push(
+        setTimeout(() => {
+          killGroup()
+          closeAll()
+        }, PIPE_GRACE_MS),
+      )
+    })
+    child.on('close', finish)
+    timers.push(setTimeout(() => stop('ETIMEDOUT'), timeout))
+  })
+}
+
+/** One run of claude through spawnSync (Windows, where the process tree is not reached): claude alone is killed. */
+function runAlone(options) {
+  const ran = spawnSync(CLAUDE, ARGS, { ...options, killSignal: 'SIGKILL', maxBuffer: MAX_OUTPUT_BYTES })
+  return { stdout: ran.stdout, stderr: ran.stderr, status: ran.status, errorCode: ran.error === undefined ? undefined : (ran.error.code ?? 'FAILED') }
+}
 
 /**
  * `{configDir, isInherited?}`: the usage of that config directory, `{five, seven}`. CLAUDE_CONFIG_DIR is set to the
  * directory, or left out when `isInherited` (the machine's default directory, as a launch without a picker leaves it
  * out). No shell; stdin closed; the cwd the root of the temporary directory's drive (`/` on Linux), so no project's
- * files are read; stdout and stderr kept in memory only. Throws a fixed code (BAD_REQUEST, NO_CLAUDE, TIMEOUT,
- * NOT_LOGGED_IN, PARSE, FAILED).
+ * files are read; stdout and stderr kept in memory only. On Linux claude runs in a process group of its own, killed
+ * whole on the timeout or an output flood (runInGroup); elsewhere claude alone is killed. Throws a fixed code
+ * (BAD_REQUEST, NO_CLAUDE, TIMEOUT, NOT_LOGGED_IN, PARSE, FAILED).
  */
-export function probeUsage(request) {
+export async function probeUsage(request) {
   const configDir = path(request, 'configDir')
   if (!isAbsolute(configDir)) throw new HelperError('BAD_REQUEST')
   const env = { ...process.env }
   if (request.isInherited === true) delete env.CLAUDE_CONFIG_DIR
   else env.CLAUDE_CONFIG_DIR = configDir
-  const ran = spawnSync(CLAUDE, ['-p', '/usage', '--no-session-persistence'], {
-    cwd: parse(tmpdir()).root,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: timeoutMs(),
-    killSignal: 'SIGKILL',
-    maxBuffer: MAX_OUTPUT_BYTES,
-    windowsHide: true,
-    shell: false,
-  })
-  const code = ran.error?.code
+  const options = { cwd: parse(tmpdir()).root, env, stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs(), windowsHide: true, shell: false }
+  const ran = process.platform === 'linux' ? await runInGroup(options) : runAlone(options)
+  const code = ran.errorCode
   if (code === 'ENOENT' || code === 'EACCES' || code === 'ENOEXEC') throw new HelperError('NO_CLAUDE')
   if (code === 'ETIMEDOUT') throw new HelperError('TIMEOUT')
   // ENOBUFS: the output passed its cap and claude was stopped; what was read is parsed (the figures come first).
-  if (ran.error !== undefined && code !== 'ENOBUFS') throw new HelperError('FAILED')
+  if (code !== undefined && code !== 'ENOBUFS') throw new HelperError('FAILED')
   const parsed = parseUsage(ran.stdout?.toString('utf8') ?? '', ran.stderr?.toString('utf8') ?? '', code === 'ENOBUFS' ? 0 : (ran.status ?? 1))
   if (!parsed.ok) throw new HelperError(parsed.code)
   return { five: parsed.five, seven: parsed.seven }

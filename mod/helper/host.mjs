@@ -29,7 +29,7 @@ async function main() {
   const op = process.argv[2] ?? ''
   let reply
   try {
-    reply = answer(op, parseRequest(await readStdin()))
+    reply = await answer(op, parseRequest(await readStdin()))
   } catch (err) {
     reply = failure(err)
   }

@@ -1043,8 +1043,55 @@ test('probeUsage parser: an ambiguous or out-of-range percent, or one off its la
  * A fake `claude` first on the PATH, in a scratch folder: it records its arguments, cwd, CLAUDE_CONFIG_DIR and what it
  * read on stdin, and answers by the last component of CLAUDE_CONFIG_DIR (`inherited` when unset): `ok` and `inherited`
  * the recorded text of a licence, `login` a login prompt, `slow` five seconds of nothing (its pid written first),
- * `empty` nothing, `fail` an API error, `long` the text and then 2 MB more, `garbage` a text with no window.
+ * `empty` nothing, `fail` an API error, `long` the text and then 2 MB more, `garbage` a text with no window. Three
+ * start a grandchild first (`sleep GRANDCHILD_SLEEP`, its pid in rec-<name>.pid), which holds the output open:
+ * `grandchild` then becomes a sleep itself (its pid in rec-grandchild-parent.pid), `linger` prints the text and exits, `floodgc`
+ * prints the text and 2 MB more.
  */
+/** The sleep a fake claude's grandchild runs: an odd length, so a cleanup can tell the test's own throwaway by its command line. */
+const GRANDCHILD_SLEEP = '27.31'
+
+/** Whether a pid is a grandchild sleep of these tests (its command line exactly `sleep GRANDCHILD_SLEEP`). */
+const isOwnSleep = pid => {
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8') === `sleep\0${GRANDCHILD_SLEEP}\0`
+  } catch {
+    return false
+  }
+}
+
+/** Whether a pid is gone, not even a zombie (kill 0 answers ESRCH and /proc has no entry), within `ms`. */
+async function isGoneWithin(pid, ms) {
+  const end = Date.now() + ms
+  for (;;) {
+    let isThere = true
+    try {
+      process.kill(pid, 0)
+    } catch (err) {
+      isThere = err.code !== 'ESRCH'
+    }
+    if (!isThere && !fs.existsSync(`/proc/${pid}`)) return true
+    if (Date.now() > end) return false
+    await new Promise(done => setTimeout(done, 50))
+  }
+}
+
+/** The pid a fake recorded, waited for a moment (the grandchild writes it as it starts). */
+async function recordedPid(top, name) {
+  const file = join(top, `rec-${name}.pid`)
+  for (let tries = 0; tries < 40 && !fs.existsSync(file); tries++) await new Promise(done => setTimeout(done, 50))
+  return Number(fs.readFileSync(file, 'utf8'))
+}
+
+/** Kills what is left of the tests' own grandchild sleeps only (checked by command line), so a failing test leaves nothing behind. */
+function killOwnLeftovers(top) {
+  for (const name of ['grandchild-parent', 'grandchild', 'linger', 'floodgc']) {
+    const file = join(top, `rec-${name}.pid`)
+    const pid = fs.existsSync(file) ? Number(fs.readFileSync(file, 'utf8')) : 0
+    if (pid > 1 && isOwnSleep(pid)) process.kill(pid, 'SIGKILL')
+  }
+}
+
 async function fakeClaude() {
   const { USAGE_FIXTURES } = await import('./usage-fixtures.ts')
   const top = scratch()
@@ -1063,6 +1110,9 @@ case "$name" in
   fail) echo 'API Error: 500 Internal server error'; exit 1 ;;
   long) cat "${top}/usage.txt"; yes 'filler line of the long output' | head -n 70000 ;;
   garbage) echo 'Something else entirely' ;;
+  grandchild) sh -c 'echo $$ > "$1"; exec sleep ${GRANDCHILD_SLEEP}' gc "$rec-grandchild.pid" & echo $$ > "$rec-grandchild-parent.pid"; exec sleep ${GRANDCHILD_SLEEP} ;;
+  linger) sh -c 'echo $$ > "$1"; exec sleep ${GRANDCHILD_SLEEP}' gc "$rec-linger.pid" & cat "${top}/usage.txt" ;;
+  floodgc) sh -c 'echo $$ > "$1"; exec sleep ${GRANDCHILD_SLEEP}' gc "$rec-floodgc.pid" & cat "${top}/usage.txt"; yes 'filler line of the long output' | head -n 70000 ;;
 esac
 `
   fs.writeFileSync(join(bin, 'claude'), script, { mode: 0o755 })
@@ -1150,6 +1200,43 @@ test('probeUsage: past its time claude is killed and the answer is TIMEOUT; the 
     assertFailure(fake.run({ configDir: dir }, { SC_HELPER_USAGE_TIMEOUT_MS: '500' }), 'PARSE', dir)
     assert.ok(Date.now() - again >= 4500)
   } finally {
+    fs.rmSync(fake.top, { recursive: true, force: true })
+  }
+})
+
+test('probeUsage: on Linux claude runs in a process group of its own; at the timeout the whole group is killed, a sleeping grandchild with it, and no zombie stays', { skip: !IS_LINUX || !HAS_TS }, async () => {
+  const fake = await fakeClaude()
+  try {
+    const dir = fake.cfg('grandchild')
+    const started = Date.now()
+    assertFailure(fake.run({ configDir: dir }, { SC_HELPER_TEST: '1', SC_HELPER_USAGE_TIMEOUT_MS: '500' }), 'TIMEOUT', dir)
+    assert.ok(Date.now() - started < 4000)
+    const parent = await recordedPid(fake.top, 'grandchild-parent')
+    const grandchild = await recordedPid(fake.top, 'grandchild')
+    assert.ok(parent > 1 && grandchild > 1 && parent !== grandchild)
+    assert.ok(await isGoneWithin(parent, 3000), `claude ${parent} is still there`)
+    assert.ok(await isGoneWithin(grandchild, 3000), `its grandchild ${grandchild} is still there`)
+  } finally {
+    killOwnLeftovers(fake.top)
+    fs.rmSync(fake.top, { recursive: true, force: true })
+  }
+})
+
+test('probeUsage: an output flood kills the whole group too, and a grandchild that holds the output after claude exits is killed after a short grace; the windows are read in both', { skip: !IS_LINUX || !HAS_TS }, async () => {
+  const fake = await fakeClaude()
+  try {
+    const flood = fake.run({ configDir: fake.cfg('floodgc') })
+    assert.deepEqual(flood.answer, { ok: true, ...MAIN_WINDOWS })
+    const floodChild = await recordedPid(fake.top, 'floodgc')
+    assert.ok(await isGoneWithin(floodChild, 3000), `the flood's grandchild ${floodChild} is still there`)
+    const started = Date.now()
+    const linger = fake.run({ configDir: fake.cfg('linger') })
+    assert.deepEqual(linger.answer, { ok: true, ...MAIN_WINDOWS })
+    assert.ok(Date.now() - started < 4000, 'the answer waited for the grandchild')
+    const lingerChild = await recordedPid(fake.top, 'linger')
+    assert.ok(await isGoneWithin(lingerChild, 3000), `the lingering grandchild ${lingerChild} is still there`)
+  } finally {
+    killOwnLeftovers(fake.top)
     fs.rmSync(fake.top, { recursive: true, force: true })
   }
 })
