@@ -20,7 +20,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, iso, isErrorFalse, join, kit,
+  CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, grepF, iso, isErrorFalse, join, kit,
   localDate, native, nodeMajor, ours, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, sanitized, scratch,
   scratchSettings, shortId, startClaude, toolUses, touchAgo, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -140,7 +140,7 @@ const out = t => {
   fs.writeFileSync(outPath(t), resultText(entries, call.id))
   return byteSize(outPath(t)) > 0
 }
-const has = (t, text) => readOr(outPath(t)).includes(text)
+const has = (t, text) => grepF(readOr(outPath(t)), text)
 const check = (t, text, what) => (has(t, text) ? pass(`${t}: ${what}`) : fail(`${t}: ${what} (missing: ${text})`))
 const lacks = (t, text, what) => (has(t, text) ? fail(`${t}: ${what} (found: ${text})`) : pass(`${t}: ${what}`))
 const TOOLS = ['list_sessions', 'read_result', 'worker_tail', 'session_writes', 'panel_snapshot', 'audit_state']

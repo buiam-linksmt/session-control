@@ -16,7 +16,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, isErrorFalse, join, kit, native, ours,
+  CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, grepF, isErrorFalse, join, kit, native, ours,
   processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings, startClaude, toolUses,
   transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -77,7 +77,7 @@ const result = (tool, test, name) => {
   fs.writeFileSync(resPath(name), resultText(entries, call.id, true))
   return byteSize(resPath(name)) > 0
 }
-const has = (name, text) => readOr(resPath(name)).includes(text)
+const has = (name, text) => grepF(readOr(resPath(name)), text)
 const check = (name, text, what) => (has(name, text) ? pass(`${name}: ${what}`) : fail(`${name}: ${what} (missing: ${text})`))
 const str = value => (typeof value === 'string' ? value : '')
 for (const [tool, test, name] of [

@@ -19,7 +19,7 @@
 import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, HAS_PROC, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, isErrorFalse, join, kit,
+  CFG_DEFAULT, HAS_PROC, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, grepF, isErrorFalse, join, jqPick, kit,
   linesOf, nodeCommand, ours, procPids, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch, scratchSettings,
   signal, startClaude, startOf, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -70,6 +70,7 @@ BYSTANDER_START = startOf(BYSTANDER)
 fs.writeFileSync(join(S, 'wait-alive.mjs'),
   "import { readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs'\n" +
   "import { join } from 'node:path'\n" +
+  `import { jqPick } from ${JSON.stringify(LIB_URL)}\n` +
   'const [reg, out] = process.argv.slice(2)\n' +
   'const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)\n' +
   "const read = path => { try { return readFileSync(path, 'utf8') } catch { return '' } }\n" +
@@ -83,7 +84,7 @@ fs.writeFileSync(join(S, 'wait-alive.mjs'),
   'let t = []\n' +
   'for (;;) {\n' +
   "  n++; if (n > 120) { console.log('the worker never showed a sleep'); process.exit(1) }\n" +
-  "  try { pid = String(JSON.parse(read(reg)).filter(e => e?.title === 'e2e sleeper').at(-1)?.pid ?? '') } catch { pid = '' }\n" +
+  "  try { pid = jqPick(JSON.parse(read(reg)), 'e2e sleeper', 'pid') } catch { pid = '' }\n" +
   "  if (pid && existsSync(`/proc/${pid}`)) { t = tree(pid); if (t.some(p => comm(p) === 'sleep')) break }\n" +
   '  pause(2000)\n' +
   '}\n' +
@@ -157,7 +158,7 @@ const out = (tool, n, label) => {
   fs.writeFileSync(outPath(label), resultText(entries, id))
   return byteSize(outPath(label)) > 0
 }
-const has = (label, text) => readOr(outPath(label)).includes(text)
+const has = (label, text) => grepF(readOr(outPath(label)), text)
 const check = (label, text, what) => (has(label, text) ? pass(`${label}: ${what}`) : fail(`${label}: ${what} (missing: ${text})`))
 for (const [tool, n, label] of [['mcp__session-control__launch_worker', 1, 'launch'], ['Bash', 1, 'wait'], ['mcp__session-control__stop_worker', 1, 'stop'], ['mcp__session-control__stop_worker', 2, 'unknown'], ['mcp__session-control__stop_worker', 3, 'finished']]) {
   if (out(tool, n, label)) pass(`${label}: ${tool} call ${n} was made and answered (${byteSize(outPath(label))} bytes)`)
@@ -172,7 +173,7 @@ info(`tool calls of the orchestrator: ${callCounts(entries)}`)
 check('wait', 'is alive with', 'the worker was alive with a sleep below it before the stop')
 const treeBefore = linesOf(readOr(join(S, 'tree-before.txt')))
 const WPID = (treeBefore[0] ?? '').split(' ')[0]
-const WSID = String((readJson(REG) ?? []).filter?.(e => e?.title === 'e2e sleeper').at(-1)?.session_id ?? '')
+const WSID = jqPick(readJson(REG), 'e2e sleeper', 'session_id')
 info(`worker session ${WSID}, pid ${WPID} (config dir ${CFG_DEFAULT}, cwd ${WORK}); tree before the stop: ${treeBefore.map(l => l + ';').join('')}`)
 const dropped = linesOf(readOr(join(S, 'tree-dropped.txt')))
 info(`${dropped.length} pids of the tree had no readable start when it was recorded (they had ended): dropped from the recorded set${dropped.length ? `: ${dropped.join(' ')}` : ''}`)

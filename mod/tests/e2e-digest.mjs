@@ -17,7 +17,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, basename, entriesOf, finish, firstLine, isErrorFalse, join, kit, lastLine, lineCount, linesOf,
+  CFG_DEFAULT, MOD, awaitOrchestrator, basename, entriesOf, finish, firstLine, grepF, isErrorFalse, join, kit, lastLine, lineCount, linesOf,
   localDate, native, ours, pidExists, processesNaming, readJson, readOr, regularFiles, removeTree, requireClaude, resultText, scratch,
   scratchSettings, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -103,8 +103,8 @@ info('second output:')
 for (const l of linesOf(second)) console.log(`  | ${l}`)
 
 const outs = { 1: first, 2: second }
-const check = (n, text, what) => (outs[n].includes(text) ? pass(`call ${n}: ${what}`) : fail(`call ${n}: ${what} (missing: ${text})`))
-const lacks = (n, text, what) => (outs[n].includes(text) ? fail(`call ${n}: ${what} (found: ${text})`) : pass(`call ${n}: ${what}`))
+const check = (n, text, what) => (grepF(outs[n], text) ? pass(`call ${n}: ${what}`) : fail(`call ${n}: ${what} (missing: ${text})`))
+const lacks = (n, text, what) => (grepF(outs[n], text) ? fail(`call ${n}: ${what} (found: ${text})`) : pass(`call ${n}: ${what}`))
 
 const FIRST_HEAD = firstLine(first)
 if (FIRST_HEAD.startsWith("turn_digest: since the mod's load at ") && FIRST_HEAD.endsWith('; first call)')) pass(`call 1: reports from the mod's load (${FIRST_HEAD})`)

@@ -22,7 +22,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, isErrorFalse, join, kit, linesOf,
+  CFG_DEFAULT, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, entriesOf, finish, firstLine, grepF, isErrorFalse, join, jqPick, kit, linesOf,
   localDate, native, nodeCommand, ours, processesNaming, readJson, readOr, removeTree, requireClaude, resultText, scratch,
   scratchSettings, shortId, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -93,14 +93,15 @@ fs.writeFileSync(join(S, 'wait-outcome.mjs'),
   "import { copyFileSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'\n" +
   "import { dirname, join } from 'node:path'\n" +
   "import { fileURLToPath } from 'node:url'\n" +
+  `import { jqLastTruthy, jqPick } from ${JSON.stringify(LIB_URL)}\n` +
   'const out = dirname(fileURLToPath(import.meta.url))\n' +
   "const [reg, runs] = [join(out, 'headless-sessions.json'), join(out, 'runs')]\n" +
   'const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)\n' +
-  "const entry = () => { try { return JSON.parse(readFileSync(reg, 'utf8')).filter(e => e?.title === 'e2e pong worker').at(-1) } catch { return undefined } }\n" +
+  "const registry = () => { try { return JSON.parse(readFileSync(reg, 'utf8')) } catch { return undefined } }\n" +
   'let n = 0\n' +
-  'while (entry()?.outcome == null) { n++; if (n > 100) process.exit(1); pause(3000) }\n' +
-  'const p = entry().prompt_file\n' +
-  "if (p) copyFileSync(p, join(out, 'prompt-copy.md'))\n" +
+  "while (!jqLastTruthy(registry(), 'e2e pong worker', 'outcome')) { n++; if (n > 100) process.exit(1); pause(3000) }\n" +
+  "const p = jqPick(registry(), 'e2e pong worker', 'prompt_file')\n" +
+  "if (p) try { copyFileSync(p, join(out, 'prompt-copy.md')) } catch {}\n" +
   "copyFileSync(reg, join(out, 'registry-at-outcome.json'))\n" +
   "writeFileSync(join(out, 'runs-at-outcome.txt'), readdirSync(runs).sort().map(name => name + '\\n').join(''))\n")
 const SETTINGS = scratchSettings(native(ORCH), native(REG), native(RUNS))
@@ -131,7 +132,7 @@ await awaitOrchestrator(orch, {
   limit: 540,
   dir: S,
   tick: async () => {
-    if (!WPID) WPID = String(pongOf(REG)?.pid ?? '')
+    if (!WPID) WPID = jqPick(readJson(REG), 'e2e pong worker', 'pid')
     await sleep(1000)
   },
   isOk: () => isErrorFalse(join(S, 'orchestrator.json')),
@@ -153,7 +154,7 @@ const out = (tool, n, label) => {
   fs.writeFileSync(outPath(label), resultText(entries, id))
   return byteSize(outPath(label)) > 0
 }
-const has = (label, text) => readOr(outPath(label)).includes(text)
+const has = (label, text) => grepF(readOr(outPath(label)), text)
 const check = (label, text, what) => (has(label, text) ? pass(`${label}: ${what}`) : fail(`${label}: ${what} (missing: ${text})`))
 const lacks = (label, text, what) => (has(label, text) ? fail(`${label}: ${what} (found: ${text})`) : pass(`${label}: ${what}`))
 // The launch call that launched: the first launch_worker call whose answer says "Launched pid " (a refused or failed
@@ -181,14 +182,16 @@ if (input != null && input.prompt != null && input.prompt_file == null && input.
 else fail(`launch: called with an inline prompt and the section, no prompt_file, rules left to the default: ${INPUT}`)
 
 // ---------------------------------------------------------------- launch_worker and the prompt file it wrote
+// Every entry with the title, as jq gives them (two entries give two lines); the jq -e check below judges the last one.
 const atOutcome = pongOf(join(S, 'registry-at-outcome.json'))
-const str = value => (typeof value === 'string' ? value : value == null ? '' : String(value))
-const SID = str(atOutcome?.session_id)
-const SID8 = SID.slice(0, 8)
-const RESULT_FILE = str(atOutcome?.result_file)
-const ERR_FILE = str(atOutcome?.err_file)
-const PROMPT_FILE = str(atOutcome?.prompt_file)
-const WORKER_NAME = str(atOutcome?.name)
+const regAtOutcome = readJson(join(S, 'registry-at-outcome.json'))
+const SID = jqPick(regAtOutcome, 'e2e pong worker', 'session_id')
+// cut -c1-8: the first 8 characters of each line.
+const SID8 = SID.split('\n').map(line => line.slice(0, 8)).join('\n')
+const RESULT_FILE = jqPick(regAtOutcome, 'e2e pong worker', 'result_file')
+const ERR_FILE = jqPick(regAtOutcome, 'e2e pong worker', 'err_file')
+const PROMPT_FILE = jqPick(regAtOutcome, 'e2e pong worker', 'prompt_file')
+const WORKER_NAME = jqPick(regAtOutcome, 'e2e pong worker', 'name')
 const OWN_PROMPT = `${native(RUNS)}/${WORKER_NAME}.prompt.md`
 check('launch', 'Launched pid ', 'the worker was launched')
 check('launch', ', registered. Name: w-e2e-pong-worker-', 'registered under its session name')

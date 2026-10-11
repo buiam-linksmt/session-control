@@ -22,7 +22,7 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import { delimiter } from 'node:path'
 import {
-  CFG_DEFAULT, HAS_PROC, IS_WINDOWS, MOD, awaitOrchestrator, basename, cmdline, comm, finish, firstMatch, isExecutable, join, kit,
+  CFG_DEFAULT, HAS_PROC, IS_WINDOWS, MOD, awaitOrchestrator, basename, cmdline, comm, finish, firstMatch, grepF, isExecutable, join, kit,
   linesOf, msys, native, nodeCommand, ours, pidExists, ppid, procCwd, procPids, processesNaming, readOr, removeTree, requireClaude,
   sanitized, scratch, signal, sleep, startClaude, which, writeLines,
 } from './lib/e2e.mjs'
@@ -262,7 +262,7 @@ if (HAS_PROC) {
 }
 if (RESULT_FILE) info(`worker cost USD ${firstMatch(readOr(RESULT_FILE), /"total_cost_usd": *([0-9.e-]*)/)}`)
 
-const has = text => traceText().includes(text)
+const has = text => grepF(traceText(), text)
 if (has('"event":"tool.call","tool":"launch_worker"')) pass('trace has the launch tool.call line')
 else fail('trace has the launch tool.call line')
 if (has('"event":"process.run","argv":["sh","-c","<PROBE_SCRIPT>"') || has('"event":"process.run","helper":"probe"') || traceLines().some(l => l.includes('"event":"process.run"') && l.includes('probe.ps1'))) {

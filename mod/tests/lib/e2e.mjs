@@ -406,20 +406,109 @@ export const toolUses = entries =>
   entries.filter(e => e?.type === 'assistant').flatMap(e => (Array.isArray(e.message?.content) ? e.message.content : [])).filter(c => c?.type === 'tool_use')
 /**
  * The answer to a tool call as jq -r prints it: each tool_result of that id, its content (a string, or its text parts
- * joined by newlines), each followed by a newline; with `marked` each starts with OK or ERROR and a newline.
+ * joined by newlines), each followed by a newline; with `marked` each starts with OK or ERROR and a newline. Where jq
+ * stops with an error (a tool_result without content, or with a null, a number or a boolean as its content; a part that
+ * is no object; a text that is an object or an array), the rest of that transcript line gives nothing, as in jq, which
+ * goes on with the next line: a call whose only answer has no content has no answer.
  */
 export function resultText(entries, id, marked = false) {
   let text = ''
   for (const e of entries) {
-    if (e?.type !== 'user' || !Array.isArray(e.message?.content)) continue
-    for (const c of e.message.content) {
-      if (c?.type !== 'tool_result' || c.tool_use_id !== id) continue
-      const body = typeof c.content === 'string' ? c.content : (Array.isArray(c.content) ? c.content : []).filter(p => p?.type === 'text').map(p => p.text).join('\n')
+    const type = jqField(e, 'type')
+    if (type !== 'user') continue
+    const content = jqField(jqField(e, 'message'), 'content')
+    for (const c of jqEach(content) ?? []) {
+      const ctype = jqField(c, 'type')
+      if (ctype === JQ_ERROR) break
+      if (ctype !== 'tool_result' || jqField(c, 'tool_use_id') !== id) continue
+      const body = jqContent(jqField(c, 'content'))
+      if (body === JQ_ERROR) break
       text += (marked ? (c.is_error === true ? 'ERROR\n' : 'OK\n') : '') + body + '\n'
     }
   }
   return text
 }
+/** What jq gives instead of a value when it stops with an error. */
+const JQ_ERROR = Symbol('jq error')
+const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+/** jq's `.key`: null for null (and for a value already failed: the error), the field of an object (null when missing); an error for anything else. */
+function jqField(value, key) {
+  if (value === JQ_ERROR) return JQ_ERROR
+  if (value === null || value === undefined) return null
+  if (!isObject(value)) return JQ_ERROR
+  return Object.hasOwn(value, key) ? value[key] : null
+}
+/** jq's `.[]`: an array's items, an object's values; undefined (jq's error) for anything else. */
+const jqEach = value => (Array.isArray(value) ? value : isObject(value) ? Object.values(value) : undefined)
+/** `if type == "string" then . else (map(select(.type == "text") | .text) | join("\n")) end`, or JQ_ERROR. */
+function jqContent(content) {
+  if (typeof content === 'string') return content
+  const parts = jqEach(content)
+  if (parts === undefined) return JQ_ERROR
+  const texts = []
+  for (const part of parts) {
+    const type = jqField(part, 'type')
+    if (type === JQ_ERROR) return JQ_ERROR
+    if (type === 'text') texts.push(jqField(part, 'text'))
+  }
+  // join: null as '', a number or a boolean as its JSON text, an object or an array an error.
+  if (texts.some(text => text !== null && typeof text === 'object')) return JQ_ERROR
+  return texts.map(text => (text === null ? '' : typeof text === 'string' ? text : JSON.stringify(text))).join('\n')
+}
+/** A value as jq -r prints it: a string as it is, anything else as JSON (an object or an array indented by two). */
+const jqRaw = value => (typeof value === 'string' ? value : isObject(value) || Array.isArray(value) ? JSON.stringify(value, null, 2) : JSON.stringify(value))
+/**
+ * `jq -r '(.[] | select(.title == "<title>")).<path> // <alt>' <registry>` as the shell's $(...) holds it: the value at
+ * the path (keys, as `.outcome.kind`) of every entry with that title, those that are neither null nor false, one per
+ * line; `alt` when there is none. Where jq stops with an error (a registry that is missing, no JSON, null or a scalar;
+ * an entry that is no object; a path through a scalar) the values before it stand and `alt` is not given. Two entries
+ * with the title give two lines, which no single value equals.
+ */
+export function jqPick(registry, title, path, alt = '') {
+  const items = registry === undefined ? undefined : jqEach(registry)
+  if (items === undefined) return ''
+  const values = []
+  for (const item of items) {
+    const itemTitle = jqField(item, 'title')
+    if (itemTitle === JQ_ERROR) return values.join('\n')
+    if (itemTitle !== title) continue
+    let value = item
+    for (const key of path.split('.')) value = jqField(value, key)
+    if (value === JQ_ERROR) return values.join('\n')
+    if (value !== null && value !== false) values.push(jqRaw(value))
+  }
+  return values.length > 0 ? values.join('\n') : alt
+}
+/**
+ * `jq -e '.[] | select(.title == "<title>") | .<path>' <registry>` succeeds: there is an entry with that title, no error,
+ * and the value of the last one is neither null nor false (jq -e judges by its last output).
+ */
+export function jqLastTruthy(registry, title, path) {
+  const items = registry === undefined ? undefined : jqEach(registry)
+  if (items === undefined) return false
+  const values = []
+  for (const item of items) {
+    const itemTitle = jqField(item, 'title')
+    if (itemTitle === JQ_ERROR) return false
+    if (itemTitle !== title) continue
+    let value = item
+    for (const key of path.split('.')) value = jqField(value, key)
+    if (value === JQ_ERROR) return false
+    values.push(value)
+  }
+  return values.length > 0 && values.at(-1) !== null && values.at(-1) !== false
+}
+/**
+ * `grep -F -q -- <pattern>` over a text: each line of the pattern is a pattern of its own (a value read from two
+ * registry entries is two), any of them found within one line of the text matches, an empty one matches any line, and
+ * a text with no line matches nothing.
+ */
+export function grepF(text, pattern) {
+  const patterns = pattern.split('\n')
+  return linesOf(text).some(line => patterns.some(one => line.includes(one)))
+}
+/** This file as a URL: the scripts a test writes for the orchestrator's Bash tool import it from there. */
+export const LIB_URL = import.meta.url
 /** The tool names the orchestrator called, as the info line lists them. */
 export const callCounts = entries => countedList(toolUses(entries).map(c => c.name))
 

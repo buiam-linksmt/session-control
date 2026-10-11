@@ -20,7 +20,7 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, HAS_PROC, MOD, awaitOrchestrator, basename, byteSize, callCounts, cmdline, entriesOf, finish, isErrorFalse, join, kit,
+  CFG_DEFAULT, HAS_PROC, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, cmdline, entriesOf, finish, grepF, isErrorFalse, join, jqPick, kit,
   lastLine, native, nodeCommand, ours, pidExists, procCwd, procPids, processesNaming, readJson, readOr, removeTree, requireClaude,
   resultText, scratch, scratchSettings, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
@@ -64,8 +64,9 @@ writeJson(REG, [{ title: 'e2e leaky worker', pid: DEAD_PID, session_id: LEAKY_SI
 const SETTINGS = scratchSettings(native(ORCH), native(REG), native(RUNS), 3)
 fs.writeFileSync(join(S, 'wait-outcome.mjs'),
   "import { readFileSync } from 'node:fs'\n" +
+  `import { jqLastTruthy } from ${JSON.stringify(LIB_URL)}\n` +
   'const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)\n' +
-  "const done = () => { try { return JSON.parse(readFileSync(process.argv[2], 'utf8')).some(e => e?.title === 'e2e lint pong' && e.outcome != null) } catch { return false } }\n" +
+  "const done = () => { try { return jqLastTruthy(JSON.parse(readFileSync(process.argv[2], 'utf8')), 'e2e lint pong', 'outcome') } catch { return false } }\n" +
   'let n = 0\n' +
   'while (!done()) { n++; if (n > 100) process.exit(1); pause(3000) }\n')
 const W = native(WORK)
@@ -111,7 +112,7 @@ const result = (tool, test, name) => {
   fs.writeFileSync(resPath(name), resultText(entries, call.id, true))
   return byteSize(resPath(name)) > 0
 }
-const has = (name, text) => readOr(resPath(name)).includes(text)
+const has = (name, text) => grepF(readOr(resPath(name)), text)
 const check = (name, text, what) => (has(name, text) ? pass(`${name}: ${what}`) : fail(`${name}: ${what} (missing: ${text})`))
 const lacks = (name, text, what) => (has(name, text) ? fail(`${name}: ${what} (found: ${text})`) : pass(`${name}: ${what}`))
 const L = 'mcp__session-control__launch_worker'
@@ -168,8 +169,7 @@ else fail(`registry: ${titles === undefined ? '' : JSON.stringify(titles)}`)
 const leaky = Array.isArray(reg) ? reg.filter(e => e?.session_id === LEAKY_SID) : []
 if (leaky.length > 0 && leaky.at(-1).outcome?.kind === 'clean' && !Object.hasOwn(leaky.at(-1), 'pid')) pass('registry: the seeded leaky entry was harvested')
 else fail('registry: the seeded leaky entry was harvested')
-const pong = Array.isArray(reg) ? reg.filter(e => e?.title === 'e2e lint pong').at(-1) : undefined
-info(`worker session ${pong?.session_id ?? ''} (config dir ${pong?.config_dir ?? ''}, cwd ${WORK}), outcome ${pong?.outcome?.kind ?? 'none'}`)
+info(`worker session ${jqPick(reg, 'e2e lint pong', 'session_id')} (config dir ${jqPick(reg, 'e2e lint pong', 'config_dir')}, cwd ${WORK}), outcome ${jqPick(reg, 'e2e lint pong', 'outcome.kind', 'none')}`)
 const EVERYTHING = [...fs.readdirSync(S).filter(name => /^res-.*\.txt$/.test(name)).sort().map(name => join(S, name)), join(S, 'orchestrator.json')].map(f => readOr(f)).join('')
 if (EVERYTHING.includes(PROMPT_CANARY) || EVERYTHING.includes(RESULT_CANARY)) fail('no canary in any tool answer or the final answer')
 else pass('no canary in any tool answer or the final answer')

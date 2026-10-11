@@ -20,8 +20,8 @@
 
 import * as fs from 'node:fs'
 import {
-  CFG_DEFAULT, HAS_PROC, HOME, MOD, awaitOrchestrator, basename, byteSize, callCounts, cmdline, entriesOf, finish, isErrorFalse, join,
-  kit, linesOf, native, nodeCommand, nodeMajor, ours, procCwd, procPids, processesNaming, readJson, readOr, removeTree, requireClaude,
+  CFG_DEFAULT, HAS_PROC, HOME, LIB_URL, MOD, awaitOrchestrator, basename, byteSize, callCounts, cmdline, entriesOf, finish, grepF, isErrorFalse, join,
+  jqPick, kit, linesOf, native, nodeCommand, nodeMajor, ours, procCwd, procPids, processesNaming, readJson, readOr, removeTree, requireClaude,
   resultText, scratch, scratchSettings, signal, sleep, startClaude, toolUses, transcriptOf, writeJson, writeLines,
 } from './lib/e2e.mjs'
 
@@ -98,8 +98,9 @@ fs.writeFileSync(REG, '[]\n')
 const SETTINGS = scratchSettings(native(ORCH), native(REG), native(RUNS), 3)
 fs.writeFileSync(join(S, 'wait-outcome.mjs'),
   "import { readFileSync } from 'node:fs'\n" +
+  `import { jqLastTruthy } from ${JSON.stringify(LIB_URL)}\n` +
   'const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)\n' +
-  "const done = () => { try { return JSON.parse(readFileSync(process.argv[2], 'utf8')).some(e => e?.title === 'e2e licence pong' && e.outcome != null) } catch { return false } }\n" +
+  "const done = () => { try { return jqLastTruthy(JSON.parse(readFileSync(process.argv[2], 'utf8')), 'e2e licence pong', 'outcome') } catch { return false } }\n" +
   'let n = 0\n' +
   'while (!done()) { n++; if (n > 100) process.exit(1); pause(3000) }\n')
 const NOT_A_LICENCE = `${native(S)}/not-a-licence`
@@ -140,7 +141,7 @@ const result = (tool, test, name, nth) => {
   fs.writeFileSync(resPath(name), resultText(entries, call.id, true))
   return byteSize(resPath(name)) > 0
 }
-const has = (name, text) => readOr(resPath(name)).includes(text)
+const has = (name, text) => grepF(readOr(resPath(name)), text)
 const check = (name, text, what) => (has(name, text) ? pass(`${name}: ${what}`) : fail(`${name}: ${what} (missing: ${text})`))
 const P = 'mcp__session-control__probe_licence_usage'
 const L = 'mcp__session-control__launch_worker'
@@ -185,13 +186,13 @@ check('launch-refused', 'nothing was launched', '(5) nothing was launched')
 // ---------------------------------------------------------------- launch_worker with the main licence
 check('launch', `config_dir ${MAIN_DIR}, registered.`, '(6) launched under the main licence and registered')
 check('launch', '(config_dir given; the licence picker was not run)', '(6) the answer says the picker was not run')
+// Every entry with the title, as jq gives them: two entries give two lines, and each check below fails.
 const reg = readJson(REG)
-const pong = Array.isArray(reg) ? reg.filter(e => e?.title === 'e2e licence pong').at(-1) : undefined
-const ENTRY_CFG = typeof pong?.config_dir === 'string' ? pong.config_dir : ''
+const ENTRY_CFG = jqPick(reg, 'e2e licence pong', 'config_dir')
 if (ENTRY_CFG === MAIN_DIR) pass(`(6) the registry entry's config_dir is ${MAIN_DIR}`)
 else fail(`(6) the registry entry's config_dir is ${MAIN_DIR} (got '${ENTRY_CFG}')`)
-const WSID = typeof pong?.session_id === 'string' ? pong.session_id : ''
-const OUTCOME = pong?.outcome?.kind ?? 'none'
+const WSID = jqPick(reg, 'e2e licence pong', 'session_id')
+const OUTCOME = jqPick(reg, 'e2e licence pong', 'outcome.kind', 'none')
 if (OUTCOME === 'clean') pass('(6) the worker finished clean')
 else fail(`(6) the worker finished clean (outcome ${OUTCOME})`)
 info(`worker session ${WSID} (config dir ${ENTRY_CFG}, cwd ${WORK}), outcome ${OUTCOME}`)
