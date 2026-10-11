@@ -4,6 +4,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
+import { stopProofText } from '../hooks/stop'
 import { HOME, OPTIONS, ORCH, REGISTRY, RUNS, mockWorld, seedLiveWorker } from './mock-world'
 import type { World } from './mock-world'
 
@@ -144,5 +145,32 @@ describe('stop_worker', () => {
     expect(trace).not.toContain('private reason')
     expect(trace).not.toContain('secret title')
     expect(lines.some(line => line.event === 'process.run' && line.helper === 'stopProcesses' && line.pid === 4101 && line.targets === 3)).toBe(true)
+  })
+
+  test('the proof on Windows names a program started through Git Bash with its MSYS parent, and the MSYS table note', () => {
+    const text = stopProofText({
+      entry: { title: 'w', session_id: SID, pid: 5000, config_dir: 'C:/m/cfg' },
+      before: { isAlive: true, text: 'alive: by the sessions file' },
+      report: {
+        tree: {
+          root: { pid: 5000, ppid: 1, start: '100', state: '', comm: 'claude.exe' },
+          rootStartNow: '100',
+          descendants: [
+            { pid: 5001, ppid: 5000, start: '101', state: '', comm: 'bash.exe' },
+            { pid: 5003, ppid: 5001, start: '103', state: 'msys', comm: 'sleep.exe' },
+          ],
+          ancestors: [900],
+        },
+        steps: [{ kind: 'signal', pid: 5000, signal: 'taskkill /T /F', atMs: 1_700_000_000_000, exitCode: 0 }],
+        final: [5000, 5001, 5003].map(pid => ({ pid, status: 'gone' as const, state: '' })),
+        notes: ['the MSYS process table of C:/Git/usr/bin (Git Bash) was read before the first signal: 1 program the worker started through Git Bash, whose Windows parent has exited, is among the descendants listed, each with its MSYS parent'],
+      },
+      after: { isAlive: false, text: 'dead: no process has pid 5000' },
+      isWindows: true,
+    })
+    expect(text).toContain('Descendants listed before the first signal (2): 5001 (bash.exe), parent 5000; 5003 (sleep.exe), MSYS parent 5001.')
+    expect(text).toContain('Note: the MSYS process table of C:/Git/usr/bin (Git Bash) was read before the first signal: 1 program the worker started through Git Bash, whose Windows parent has exited, is among the descendants listed, each with its MSYS parent.')
+    expect(text).toContain('Descendants at the end: 5001 (bash.exe) gone; 5003 (sleep.exe) gone.')
+    expect(text).toContain('Surviving descendants: none.')
   })
 })

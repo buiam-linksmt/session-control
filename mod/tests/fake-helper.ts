@@ -90,11 +90,25 @@ export type SimProc = {
   isStubborn?: boolean
   /** A claude process as the probe reads it: its cwd, CLAUDE_CONFIG_DIR and command line (and its age in seconds, 3 when not given). */
   claude?: { cwd: string; configDir: string; cmdline: string; elapsedSec?: number }
+  /**
+   * Windows: a program started through Git Bash, with the Windows pid of its MSYS parent; its own `ppid` names the fork
+   * that exec'd it, which is gone, so only the MSYS process table links it to the tree.
+   */
+  msysParent?: number
 }
-export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number }
+/**
+ * `msys`, Windows: the folder of the MSYS process table TREE_PS1 reads (Git's usr/bin), and whether that table cannot be
+ * read (its ps.exe fails).
+ */
+export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number; msys?: { dir: string; isUnreadable?: boolean } }
 
-/** The helper's processTree lines over the table (TREE_PS1's list prints the same): R or N, the G lines, the D lines breadth first. */
-export function treeInTable(table: ProcTable, pid: number, start: string): string {
+/**
+ * The helper's processTree lines over the table (TREE_PS1's list prints the same): R or N, the G lines, the D lines
+ * breadth first. `isWindows`: TREE_PS1's own part after them, the table's MSYS process table (`table.msys`) read for
+ * the programs started through Git Bash (a D line with state msys per process whose MSYS parent is a member and which
+ * started after it), then its M line.
+ */
+export function treeInTable(table: ProcTable, pid: number, start: string, isWindows = false): string {
   const root = table.procs.get(pid)
   const isRoot = root !== undefined && root.start === start && start !== ''
   const lines = [isRoot ? `R\t${pid}\t${root.ppid}\t${root.start}\t${root.state}\t${root.comm}` : `N\t${pid}\t${root?.start ?? ''}`]
@@ -106,6 +120,22 @@ export function treeInTable(table: ProcTable, pid: number, start: string): strin
         if (one.ppid !== queue[at] || queue.includes(child)) continue
         queue.push(child)
         lines.push(`D\t${child}\t${one.ppid}\t${one.start}\t${one.state}\t${one.comm}`)
+      }
+    }
+    if (isWindows && table.msys !== undefined) {
+      if (table.msys.isUnreadable === true) lines.push(`M\t-1\t${table.msys.dir}`)
+      else {
+        let added = 0
+        for (let at = 0; at < queue.length; at++) {
+          const parent = table.procs.get(queue[at] ?? 0)
+          for (const [child, one] of table.procs) {
+            if (one.msysParent !== queue[at] || queue.includes(child) || parent === undefined || BigInt(one.start) < BigInt(parent.start)) continue
+            queue.push(child)
+            added++
+            lines.push(`D\t${child}\t${queue[at]}\t${one.start}\tmsys\t${one.comm}`)
+          }
+        }
+        lines.push(`M\t${added}\t${table.msys.dir}`)
       }
     }
   }

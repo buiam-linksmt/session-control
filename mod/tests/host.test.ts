@@ -97,7 +97,7 @@ function machine(env: Record<string, string>): Machine {
     if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/tree.ps1')) {
       expect(files.get(keyOf(argv[6]))).toBe(TREE_PS1)
       const [op, a = '', b = ''] = argv.slice(7)
-      const out = op === 'list' ? treeInTable(table, Number(a), b) : checkInTable(table, argv.slice(9))
+      const out = op === 'list' ? treeInTable(table, Number(a), b, true) : checkInTable(table, argv.slice(9))
       return ran(out.replace(/\n/g, '\r\n'))
     }
     if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/probe.ps1')) {
@@ -431,6 +431,54 @@ describe('host contract', () => {
       expect(notes).toEqual([])
       expect(report.notes).toEqual([])
     })
+
+    if (one.platform === 'windows') {
+      test(`${one.name}: stopProcessTree reaches a program the worker started through Git Bash by the MSYS process table, and says when that table cannot be read`, async () => {
+        const GIT = 'C:\\Program Files\\Git\\usr\\bin'
+        /** The tree, plus a sleep.exe under the worker's bash 5001 through MSYS: its Windows parent 4999 (the fork that exec'd it) is gone. */
+        const seedMsys = (m: Machine) => {
+          seedTree(m)
+          m.table.procs.set(5003, { ppid: 4999, start: '103', state: '', comm: 'sleep.exe', msysParent: 5001 })
+          // Another session's MSYS program: its MSYS parent is outside the tree.
+          m.table.procs.set(6001, { ppid: 4998, start: '104', state: '', comm: 'sleep.exe', msysParent: 6000 })
+          // A program whose MSYS parent pid names a member that started after it: not that member's child.
+          m.table.procs.set(6002, { ppid: 4997, start: '90', state: '', comm: 'sleep.exe', msysParent: 5001 })
+        }
+        const m = machine(one.env)
+        seedMsys(m)
+        m.table.msys = { dir: GIT }
+        const report = await host.stopProcessTree(portOf(m, runs), { pid: 5000, start: '100' })
+        expect(report.tree.descendants.map(proc => [proc.pid, proc.ppid, proc.start, proc.state, proc.comm])).toEqual([
+          [5001, 5000, '101', 'S', 'bash'],
+          [5002, 5001, '102', 'S', 'sleep'],
+          [5003, 5001, '103', 'msys', 'sleep.exe'],
+        ])
+        expect(report.notes).toEqual([
+          'the MSYS process table of C:/Program Files/Git/usr/bin (Git Bash) was read before the first signal: 1 program the worker started through Git Bash, whose Windows parent has exited, is among the descendants listed, each with its MSYS parent',
+        ])
+        expect(signalsOf(report.steps).filter(sent => sent.startsWith('5003 '))).not.toEqual([])
+        expect(report.final).toEqual([5000, 5001, 5002, 5003].map(pid => ({ pid, status: 'gone', state: '' })))
+        expect([...m.table.procs.keys()].sort()).toEqual([6000, 6001, 6002])
+        expect(m.table.signals.some(sent => [6000, 6001, 6002].includes(sent.pid))).toBe(false)
+
+        // The same worker with a table that cannot be read: the program stays outside the stop, and the note says so.
+        const blind = machine(one.env)
+        seedMsys(blind)
+        blind.table.msys = { dir: GIT, isUnreadable: true }
+        const unread = await host.stopProcessTree(portOf(blind, runs), { pid: 5000, start: '100' })
+        expect(unread.tree.descendants.map(proc => proc.pid)).toEqual([5001, 5002])
+        expect(unread.notes).toEqual([
+          'the MSYS process table of C:/Program Files/Git/usr/bin (Git Bash) could not be read: a program the worker started through Git Bash whose Windows parent has exited is not among the descendants listed, and this stop does not reach it',
+        ])
+        expect(blind.table.procs.has(5003)).toBe(true)
+        expect(blind.table.signals.some(sent => [5003, 6000, 6001, 6002].includes(sent.pid))).toBe(false)
+
+        // No MSYS member in the tree: no table read, no note.
+        const plain = machine(one.env)
+        seedTree(plain)
+        expect((await host.stopProcessTree(portOf(plain, runs), { pid: 5000, start: '100' })).notes).toEqual([])
+      })
+    }
 
     test(`${one.name}: stopProcessTree signals nothing when the pid has another start (a reused pid) or is this session's own process or an ancestor of it`, async () => {
       const m = machine(one.env)

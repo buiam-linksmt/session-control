@@ -135,11 +135,21 @@ export const PROBE_PS1 = [
  * The process tree of a stop and its re-checks, for Windows PowerShell 5.1, run as a file like PROBE_PS1; it reads
  * Win32_Process (ProcessId, ParentProcessId, CreationDate, Name) as PROBE_PS1 does and signals nothing: the signals are
  * taskkill.exe, run by the adapter itself. A start is the creation time in epoch milliseconds (PROBE_PS1's arithmetic).
- *   list <pid> <start>             R or N for the root, G for each ancestor of this script, D for each descendant
+ *   list <pid> <start>             R or N for the root, G for each ancestor of this script, D for each descendant, M
+ *                                  for each MSYS process table read (below)
  *   check <seconds> <pid:start>... after a sleep of the seconds given, an F line per target (gone: no process with
  *                                  that pid and that start); the first target binds to $B, the rest come in $args
  * A parent is taken as one only when it was created before its child: Windows keeps a dead parent's pid in
  * ParentProcessId, and that pid may since name another process.
+ *
+ * A program the worker runs through Git Bash is an MSYS process: bash forks a copy of itself, which execs the program
+ * as a new Windows process and exits, so the program's ParentProcessId names a process that is gone and Win32_Process
+ * links it to no member of the tree. The MSYS runtime keeps its own process table, with each process's MSYS parent and
+ * its Windows pid; `ps.exe -al` of the same installation prints it. For each folder of a member's executable that holds
+ * the MSYS (msys-2.0.dll) or Cygwin (cygwin1.dll) runtime, that folder's ps.exe is run once, and every process whose
+ * MSYS parent is a member (or one found this way), and which was created after that parent, is a descendant too: a D
+ * line with state `msys` and the parent's Windows pid as its parent. An M line per folder gives how many it added
+ * (`M <count> <folder>`), or -1 when its table could not be read.
  */
 export const TREE_PS1 = [
   '# session-control: the process tree of a stop and its re-checks, for Windows PowerShell 5.1 (stop_worker)',
@@ -152,7 +162,7 @@ export const TREE_PS1 = [
   'function Flat($text) { if ($null -eq $text) { return \'\' } return ([string]$text -replace "[`t`r`n]", \' \') }',
   'try {',
   "  if ($Op -eq 'check' -and [int]$A -gt 0) { Start-Sleep -Seconds ([int]$A) }",
-  '  $procs = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate, Name)',
+  '  $procs = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate, Name, ExecutablePath)',
   '  $byPid = @{}',
   '  foreach ($proc in $procs) { $byPid[[long]$proc.ProcessId] = $proc }',
   '  function StartOf([long]$id) { $proc = $byPid[$id]; if ($null -eq $proc -or $null -eq $proc.CreationDate) { return \'\' }; return "$(Ms $proc.CreationDate)" }',
@@ -189,6 +199,57 @@ export const TREE_PS1 = [
   '          [void]$out.Append("D`t$id`t$here`t$(StartOf $id)`t`t$(Flat $proc.Name)`n")',
   '        }',
   '      }',
+  '      # The MSYS process tables of the members\' runtime folders (see above): Windows pid to `<folder>|<MSYS pid>`, and',
+  '      # `<folder>|<MSYS parent>` to the Windows pids of its children.',
+  '      $tables = @{}',
+  '      foreach ($id in @($seen.Keys)) {',
+  '        $exe = $byPid[$id].ExecutablePath',
+  '        if (-not $exe) { continue }',
+  '        try { $dir = [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($exe)) } catch { continue }',
+  '        if ([System.IO.File]::Exists("$dir\\msys-2.0.dll") -or [System.IO.File]::Exists("$dir\\cygwin1.dll")) { $tables[$dir] = $true }',
+  '      }',
+  '      $msysOf = @{}; $kidsOf = @{}; $added = @{}',
+  '      foreach ($dir in @($tables.Keys)) {',
+  '        $rows = @(); $code = -1',
+  "        $ErrorActionPreference = 'Continue'",
+  '        try { if ([System.IO.File]::Exists("$dir\\ps.exe")) { $rows = @(& "$dir\\ps.exe" -al 2>$null); $code = $LASTEXITCODE } } catch { $code = -1 }',
+  "        $ErrorActionPreference = 'Stop'",
+  '        if ($code -ne 0) { [void]$out.Append("M`t-1`t$(Flat $dir)`n"); continue }',
+  '        $added[$dir] = 0',
+  '        # PID PPID PGID WINPID ..., after a status letter in the first column when there is one.',
+  '        foreach ($row in $rows) {',
+  "          if ([string]$row -notmatch '^\\s*(?:[A-Za-z]\\s+)?(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)(\\s|$)') { continue }",
+  '          $msysOf[[long]$Matches[4]] = "$dir|$($Matches[1])"',
+  '          $up = "$dir|$($Matches[2])"',
+  '          if (-not $kidsOf.ContainsKey($up)) { $kidsOf[$up] = New-Object System.Collections.Generic.List[long] }',
+  '          $kidsOf[$up].Add([long]$Matches[4])',
+  '        }',
+  '      }',
+  '      # Every member again, now with its MSYS children (state msys) and the Windows children of those.',
+  '      if ($msysOf.Count -gt 0) {',
+  '        $todo = New-Object System.Collections.Generic.Queue[long]',
+  '        foreach ($id in @($seen.Keys)) { $todo.Enqueue($id) }',
+  '        while ($todo.Count -gt 0) {',
+  '          $here = $todo.Dequeue()',
+  '          $key = $msysOf[$here]',
+  '          if ($null -ne $key -and $kidsOf.ContainsKey($key)) {',
+  '            foreach ($id in $kidsOf[$key]) {',
+  '              $proc = $byPid[$id]',
+  '              if ($seen.ContainsKey($id) -or $null -eq $proc -or -not (IsChild $proc $here)) { continue }',
+  '              $seen[$id] = $true; $todo.Enqueue($id)',
+  "              $dir = $key.Substring(0, $key.LastIndexOf('|')); $added[$dir] = $added[$dir] + 1",
+  '              [void]$out.Append("D`t$id`t$here`t$(StartOf $id)`tmsys`t$(Flat $proc.Name)`n")',
+  '            }',
+  '          }',
+  '          foreach ($proc in $procs) {',
+  '            $id = [long]$proc.ProcessId',
+  '            if ([long]$proc.ParentProcessId -ne $here -or $seen.ContainsKey($id) -or -not (IsChild $proc $here)) { continue }',
+  '            $seen[$id] = $true; $todo.Enqueue($id)',
+  '            [void]$out.Append("D`t$id`t$here`t$(StartOf $id)`t`t$(Flat $proc.Name)`n")',
+  '          }',
+  '        }',
+  '      }',
+  '      foreach ($dir in @($added.Keys)) { [void]$out.Append("M`t$($added[$dir])`t$(Flat $dir)`n") }',
   '    }',
   "  } elseif ($Op -eq 'check') {",
   '    foreach ($one in (@($B) + @($args))) {',
@@ -207,6 +268,31 @@ export const TREE_PS1 = [
   '}',
   'exit 0',
 ].join('\r\n')
+
+/**
+ * The notes of TREE_PS1's M lines: per MSYS process table, what it added to the tree, or that it could not be read
+ * (then a program the worker started through Git Bash whose Windows parent has exited is outside the stop).
+ */
+export function msysNotes(stdout: string): string[] {
+  const notes: string[] = []
+  for (const line of stdout.replace(/\r/g, '').split('\n')) {
+    const [tag, count, ...rest] = line.split('\t')
+    const dir = rest.join(' ').trim()
+    if (tag !== 'M' || !/^-?\d+$/.test(count ?? '') || dir === '') continue
+    const table = `the MSYS process table of ${winPath(dir)} (Git Bash)`
+    const added = Number(count)
+    if (added < 0) notes.push(`${table} could not be read: a program the worker started through Git Bash whose Windows parent has exited is not among the descendants listed, and this stop does not reach it`)
+    else if (added === 0) notes.push(`${table} was read before the first signal: no program the worker started through Git Bash is outside its Windows process tree`)
+    else notes.push(`${table} was read before the first signal: ${added} program${added === 1 ? '' : 's'} the worker started through Git Bash, whose Windows parent has exited, ${added === 1 ? 'is' : 'are'} among the descendants listed, each with its MSYS parent`)
+  }
+  return notes
+}
+
+/** The tree of a stop by TREE_PS1's list, with the notes of its MSYS process tables. */
+async function listTree(port: HostPort, target: StopTarget): Promise<{ tree: ProcTree; notes: string[] }> {
+  const ran = await runScript(port, 'tree.ps1', TREE_PS1, ['list', String(target.pid), target.start], 30_000)
+  return { tree: treeOf(ran.stdout), notes: msysNotes(ran.stdout) }
+}
 
 /** taskkill.exe by absolute path, as Windows ships it. */
 async function taskkill(port: HostPort): Promise<string> {
@@ -229,7 +315,8 @@ async function stillAlive(port: HostPort, targets: readonly string[], sleepSec: 
  * then the end state of each.
  */
 async function stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport> {
-  const listing = tree ?? treeOf((await runScript(port, 'tree.ps1', TREE_PS1, ['list', String(target.pid), target.start], 30_000)).stdout)
+  const listed = tree === undefined ? await listTree(port, target) : { tree, notes: [] }
+  const listing = listed.tree
   const early = unstoppable(listing, target)
   if (early !== undefined) return early
   const exe = await taskkill(port)
@@ -280,7 +367,7 @@ async function stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTr
   await group(listing.descendants.filter(one => others.has(one.pid)))
   const all = [root, ...listing.descendants]
   const end = await stillAlive(port, all.map(key), 0)
-  return { tree: listing, steps, final: all.map(one => ({ pid: one.pid, status: end.has(one.pid) ? 'alive' : 'gone', state: '' })), notes: [] }
+  return { tree: listing, steps, final: all.map(one => ({ pid: one.pid, status: end.has(one.pid) ? 'alive' : 'gone', state: '' })), notes: listed.notes }
 }
 
 /** Windows PowerShell 5.1 by absolute path: on Windows `bash` is the WSL launcher, and sh, mv and pwsh are not on the PATH a command gets. */

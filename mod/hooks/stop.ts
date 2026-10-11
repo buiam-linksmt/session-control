@@ -94,7 +94,7 @@ export function stopProofText(proof: StopProof): string {
   const byPid = new Map<number, TreeProc>([...(tree?.root === undefined ? [] : [tree.root]), ...(tree?.descendants ?? [])].map(one => [one.pid, one]))
   if (tree === undefined) lines.push('Descendants listed before the first signal: unknown (the tree could not be listed).')
   else if (tree.descendants.length === 0) lines.push('Descendants listed before the first signal: none.')
-  else lines.push(`Descendants listed before the first signal (${tree.descendants.length}): ${tree.descendants.map(one => `${named(one, one.pid)}, parent ${one.ppid}`).join('; ')}.`)
+  else lines.push(`Descendants listed before the first signal (${tree.descendants.length}): ${tree.descendants.map(one => `${named(one, one.pid)}, ${one.state === 'msys' ? 'MSYS parent' : 'parent'} ${one.ppid}`).join('; ')}.`)
   const steps = report?.steps ?? []
   const iso = (ms: number) => (ms > 0 ? new Date(ms).toISOString() : 'time unknown')
   if (steps.length > 0) {

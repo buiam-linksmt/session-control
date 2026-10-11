@@ -66,7 +66,8 @@ export type RemoveOutcome = 'removed' | 'absent' | 'symlink' | 'not-file' | 'fai
 /**
  * One process of the tree stop_worker works on: its pid, its parent's pid, its start (Linux: field 22 of
  * /proc/<pid>/stat, in clock ticks; Windows: the creation time in epoch milliseconds), its state (Linux: the stat
- * state letter, `Z` a zombie; '' on Windows) and its name.
+ * state letter, `Z` a zombie; '' on Windows, `msys` for a program started through Git Bash that only the MSYS process
+ * table links to the tree, whose `ppid` is then its MSYS parent: TREE_PS1 of host-windows.ts) and its name.
  */
 export type TreeProc = { pid: number; ppid: number; start: string; state: string; comm: string }
 
