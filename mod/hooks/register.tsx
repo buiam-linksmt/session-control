@@ -649,9 +649,9 @@ async function probe($: EngineInterface, entries: readonly SessionEntry[], confi
 }
 
 /**
- * A claude process whose command line the probe could not read (on Windows: an elevated one, or one of another logon
- * session, seen by an orchestrator that is neither) never counts as a `-p` session, so it is no orphan row; the debug
- * trace counts them in a `probe` line each time that count changes.
+ * A claude process whose command line the probe could not read (on Windows: an elevated one, seen by an orchestrator
+ * that is not elevated) never counts as a `-p` session, so it is no orphan row; the debug trace counts them in a
+ * `probe` line each time that count changes.
  */
 function noteUnreadable($: EngineInterface, facts: ProcFacts): void {
   const count = facts.claude.filter(one => one.cmdline === '').length
