@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // The Node port of e2e-lint.sh, which stays beside it: the same checks, the same lines, the same options. Run with
 // `node mod/tests/e2e-lint.mjs` (Node 22 or newer); the test itself needs no sh, grep, tr, sed, jq or cygpath. The
-// orchestrator is still told to run a heredoc, an `echo` redirect and `git push --force` through its Bash tool, because
-// those commands are what the guards are tested on.
+// orchestrator is still told to run a heredoc and `git push --force` through its Bash tool, because those commands are
+// what the guards are tested on.
 //
 // End-to-end test of the T3b checks against the real claude, in a scratch directory it makes and removes. A headless
 // haiku orchestrator (capped at --max-budget-usd 0.30) runs in a scratch orchestrator directory and is told to
@@ -10,10 +10,9 @@
 // (2) launch_worker with a prompt that holds a secret canary: refused naming the kind and the line, never the value;
 // (3) launch_worker with a prompt that says "never force-push": launched (one tiny haiku worker that replies PONG), and
 // wait for its outcome in the foreground; (4) run a Bash heredoc that names task-queue.json only in its body: it runs;
-// (5) run a Bash redirect onto task-queue.json: refused by the helper-file guard; (6) run `git push --force` itself:
-// refused by the sign-off guard; (7) call read_result on a seeded finished session whose result holds a canary token:
-// its answer ends with the `secret scan:` line, and the canary is in no answer. The canaries are joined at run time, so
-// this file holds no string in a token's shape. Everything is in the scratch directory; both transcripts stay under the
+// (5) run `git push --force` itself: refused by the sign-off guard; (6) call read_result on a seeded finished session
+// whose result holds a canary token: its answer ends with the `secret scan:` line, and the canary is in no answer. The
+// canaries are joined at run time, so this file holds no string in a token's shape. Everything is in the scratch directory; both transcripts stay under the
 // default configuration. One line per check; exit 1 on a failure. KEEP_OUT=<dir> keeps the tool results. The worker
 // left running at the end (a claude whose working directory is the scratch work folder) is looked for in /proc on
 // Linux only.
@@ -82,9 +81,8 @@ fs.writeFileSync(join(S, 'instruction.txt'),
   `cat > ${SN}/prompt-note.md <<'NOTE_EOF'\n` +
   'Update task-queue.json only through queue_task; cp x task-queue.json is never run by hand.\n' +
   'NOTE_EOF\n' +
-  `6. Run this Bash command: echo '{}' > ${native(ORCH)}/task-queue.json\n` +
-  `7. Run this Bash command: git -C ${W} push --force origin feature/x\n` +
-  `8. Call mcp__session-control__read_result with session_id "${LEAKY_SID}".\n` +
+  `6. Run this Bash command: git -C ${W} push --force origin feature/x\n` +
+  `7. Call mcp__session-control__read_result with session_id "${LEAKY_SID}".\n` +
   'Then answer with one line: done. Put no secret text in it.\n')
 
 orch = startClaude({
@@ -122,7 +120,6 @@ for (const [tool, test, name] of [
   [L, input => input.title === 'e2e lint secret', 'secret'],
   [L, input => input.title === 'e2e lint pong', 'pong'],
   ['Bash', input => command(input).startsWith('cat > '), 'heredoc'],
-  ['Bash', input => command(input).startsWith('echo '), 'redirect'],
   ['Bash', input => command(input).startsWith('git '), 'push'],
   ['mcp__session-control__read_result', input => input.session_id != null, 'read'],
 ]) {
@@ -144,14 +141,12 @@ lacks('pong', 'WARNING', '(3) with no warning (it names no git work to do)')
 check('heredoc', 'OK', '(4) a heredoc that names task-queue.json only in its body runs')
 if (readOr(join(S, 'prompt-note.md')).includes('cp x task-queue.json is never run by hand')) pass('(4) disk: the heredoc wrote its file')
 else fail('(4) disk: the heredoc wrote its file')
-check('redirect', 'refused by the helper-file guard: task-queue.json is a helper file', '(5) a redirect onto task-queue.json is refused')
-check('redirect', '(Bash: an output redirection (>))', '(5) naming the redirection')
-check('push', 'refused by the sign-off guard: git push --force is a force-push or history rewrite', "(6) the orchestrator's own git push --force is refused")
-check('read', 'secret scan: 1 likely secret redacted (kinds: github-token)', '(7) read_result ends with the secret scan line')
+check('push', 'refused by the sign-off guard: git push --force is a force-push or history rewrite', "(5) the orchestrator's own git push --force is refused")
+check('read', 'secret scan: 1 likely secret redacted (kinds: github-token)', '(6) read_result ends with the secret scan line')
 const LAST = lastLine(readOr(resPath('read')))
-if (LAST === 'secret scan: 1 likely secret redacted (kinds: github-token)') pass('(7) as its last line')
-else fail(`(7) as its last line (last: ${LAST})`)
-lacks('read', RESULT_CANARY, '(7) the canary is redacted')
+if (LAST === 'secret scan: 1 likely secret redacted (kinds: github-token)') pass('(6) as its last line')
+else fail(`(6) as its last line (last: ${LAST})`)
+lacks('read', RESULT_CANARY, '(6) the canary is redacted')
 
 const same = (a, b) => {
   try {

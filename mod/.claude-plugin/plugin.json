@@ -1,7 +1,7 @@
 {
   "name": "session-control",
   "version": "0.1.0",
-  "description": "Session-control orchestrator mod: a side panel (/session-control) over the worker registry, queued work and open points, completion classification, launch/acknowledge/retire tools for workers, bookkeeping tools for the helper files, licence tools (list_licences, probe_licence_usage and launch_worker's config_dir: licences found by the presence of their files only, usage as the CLI shows it, no credential read), a secret scan of worker results, a prompt lint and a sign-off guard for worker launches, and guards on the orchestrator's own hand edits and git commands.",
+  "description": "Session-control orchestrator mod: a side panel (/session-control) over the worker registry, queued work and open points, completion classification, launch/acknowledge/retire tools for workers, bookkeeping tools for the helper files, licence tools (list_licences, probe_licence_usage and launch_worker's config_dir: licences found by the presence of their files only, usage as the CLI shows it, no credential read), a secret scan of worker results, a prompt lint and a sign-off guard for worker launches, and a sign-off guard on the orchestrator's own git commands.",
   "author": {
     "name": "Matteo Buia"
   },

@@ -87,8 +87,7 @@ writeJson(REG, [
 
 // Once the worker's outcome is in the registry: a copy of the prompt file the mod wrote and the runs directory's
 // listing, before close_worker deletes the run files. The script finds the registry, the scratch directory and the runs
-// directory beside itself: a node command line that names the registry next to the word "write" (which this scratch
-// directory's name holds) is taken by the helper-file guard for code that writes it (the shell's `sh <file>` is not).
+// directory beside itself.
 fs.writeFileSync(join(S, 'wait-outcome.mjs'),
   "import { copyFileSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'\n" +
   "import { dirname, join } from 'node:path'\n" +

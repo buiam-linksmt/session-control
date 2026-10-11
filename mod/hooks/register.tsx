@@ -64,11 +64,10 @@ import { HOLDER_FILES, LOCK_EVERY_SEC, holderState, lockCandidates, lockDirsOf, 
 import { DIGEST_SCHEMA, digestKeyDir, digestStoreKey, digestText, lastCallOf, withEvent } from './digest'
 import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
-import { commandVerdict, denyText, normalPath, pathVerdict, protectedFiles, signoffDenyText, signoffVerdict } from './guard'
+import { signoffDenyText, signoffVerdict } from './guard'
 import { findSecrets, secretScanLine, tallyFromAnswer, tallyOf } from './secrets'
 import { promptLint, signoffLint } from './lint'
 import type { SecretTally } from './secrets'
-import type { ProtectedFile } from './guard'
 import type { StopReport } from './host'
 import type { GitState, ListedFile } from './audit'
 import {
@@ -192,8 +191,8 @@ const STOP_TOOL = 'mcp__session-control__stop_worker'
 const DIGEST_TOOL = 'mcp__session-control__turn_digest'
 const LICENCES_TOOL = 'mcp__session-control__list_licences'
 const USAGE_TOOL = 'mcp__session-control__probe_licence_usage'
-/** The engine tools the helper-file guard looks at (guard.ts): the file tools by their path, Bash and PowerShell by their command. */
-const GUARDED_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell)$/
+/** The engine tools the sign-off guard looks at (guard.ts): Bash and PowerShell, by their command. */
+const SIGNOFF_TOOLS = /^(Bash|PowerShell)$/
 
 /** How much of a transcript read_result reads when the whole is over the read cap: a final report can be one long row. */
 const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
@@ -277,11 +276,10 @@ const harvested = new Set<string>()
 /** Session names this session gave to launches: two launches in the same second still get different names. */
 const issuedNames = new Set<string>()
 /**
- * The helper-file guard of this load: set only when the session runs in the orchestrator directory and the board is on
- * there (startSession), with the session's directory, the platform and the protected files (guard.ts); else undefined
- * and the guard passes every call.
+ * Whether the sign-off guard checks this load's commands: set only when the session runs in the orchestrator directory
+ * and the board is on there (startSession); else the guard passes every call.
  */
-let guard: { cwd: string; isWindows: boolean; files: ProtectedFile[] } | undefined
+let isGuarded = false
 /**
  * The notices' debounce state of this load (notices.ts), read from $.store at its first use under the orchestrator
  * directory's key and written back when it changes; `noticeSaved` is the text last written. A store that cannot be read
@@ -1833,48 +1831,6 @@ async function panelSnapshot($: EngineInterface) {
 }
 
 /**
- * Where a path lands through its symbolic links ($.fs.stat with resolve): the file's own real path, or, for a file not
- * there yet, its folder's real path and its name; undefined when neither resolves. A relative path is taken from the
- * session's directory first.
- */
-async function landing($: EngineInterface, path: string, cwd: string, isWindows: boolean): Promise<string | undefined> {
-  const isAbsolute = isWindows ? /^([A-Za-z]:[\\/]|[\\/]{2}|\/[A-Za-z]\/)/.test(path) : path.startsWith('/')
-  const whole = isAbsolute ? path : `${cwd.replace(/[\\/]+$/, '')}/${path}`
-  const own = await $.fs.stat(whole, { resolve: true }).catch(() => undefined)
-  if (own?.realPath !== undefined) return own.realPath
-  const cut = Math.max(whole.lastIndexOf('/'), whole.lastIndexOf('\\'))
-  const name = whole.slice(cut + 1)
-  if (cut < 0 || name === '' || name === '.' || name === '..') return undefined
-  const folder = await $.fs.stat(whole.slice(0, cut + 1), { resolve: true }).catch(() => undefined)
-  return folder?.realPath === undefined ? undefined : `${folder.realPath.replace(/[\\/]+$/, '')}/${name}`
-}
-
-/**
- * The helper-file guard's verdict on one tool call of this session (guard.ts): Bash and PowerShell by their command's
- * text, the file tools by the path they write, compared as given (made absolute, `..` folded) and where it lands
- * through its links, against each protected file the same two ways; the refusal text, or undefined to let it run.
- */
-async function guardRefusal($: EngineInterface, input: Record<string, unknown>): Promise<string | undefined> {
-  const active = guard
-  if (active === undefined) return undefined
-  const tool = String(input.tool ?? '')
-  if (tool === 'Bash' || tool === 'PowerShell') {
-    const hit = commandVerdict(typeof input.command === 'string' ? input.command : '', active.files, tool === 'PowerShell' ? 'powershell' : 'bash')
-    if (hit === undefined) return undefined
-    trace($, 'guard', { check: 'helper-file', tool, file: hit.file.name, isOk: false })
-    return denyText(tool, hit.file, hit.how)
-  }
-  const target = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : ''
-  if (target === '') return undefined
-  const landed = await landing($, target, active.cwd, active.isWindows)
-  const files = await Promise.all(active.files.map(async file => ({ ...file, spellings: [await landing($, file.path, active.cwd, active.isWindows)].filter((one): one is string => one !== undefined) })))
-  const hit = pathVerdict(landed === undefined ? [target] : [target, landed], files, active.cwd, active.isWindows)
-  if (hit === undefined) return undefined
-  trace($, 'guard', { check: 'helper-file', tool, file: hit.name, isOk: false })
-  return denyText(tool, hit, `a write of ${normalPath(target, active.cwd, active.isWindows)}`)
-}
-
-/**
  * The sign-off guard on the orchestrator's own Bash and PowerShell commands (guard.ts, README Sign-off guard): a git
  * force-push, remote deletion, reset --hard, forced clean or branch -D is refused; undefined lets the call on.
  */
@@ -2240,7 +2196,7 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
   }
   if (config.orchestratorDir !== '' && isHere) {
     await activate($)
-    guard = { cwd, isWindows: machine.platform === 'windows', files: protectedFiles({ orchestratorDir: config.orchestratorDir, registryPath: await registryPath($), runsDir: await runsPath($) }) }
+    isGuarded = true
   }
 }
 
@@ -2332,7 +2288,7 @@ export const register: Register = (on, options) => {
   isHelperFallbackNoted = false
   quietFallbacksTraced.clear()
   host = undefined
-  guard = undefined
+  isGuarded = false
   noticeState = undefined
   noticeKey = undefined
   noticeSaved = ''
@@ -2524,29 +2480,19 @@ export const register: Register = (on, options) => {
     return next.called ? next(e) : { deny: `${PLUGIN}: stop_worker failed` }
   })
 
-  // The helper-file guard (decision mod-2, guard.ts): in the orchestrator directory's own session only, a hand edit of a
-  // file the mod's tools write is refused, with the tool to use instead. The mod's own calls (the launch's Bash) pass
-  // untouched: the tools write through $.fs and the helper, never through a tool call. When the guard cannot run (a
-  // re-entry, or its own reads failed) the handler decides on the call's text alone, without the links resolved.
-  on('tool.call', { tool: GUARDED_TOOLS }, async ($, e, next) => {
-    if (guard === undefined || next.origin.plugin === PLUGIN) return next(e)
-    const refusal = signoffRefusal($, plain(e)) ?? (await guardRefusal($, plain(e)))
+  // The sign-off guard (guard.ts): in the orchestrator directory's own session only, a Bash or PowerShell command that
+  // runs a git action of the sign-off list is refused. The mod's own calls (the launch's Bash) pass untouched. When the
+  // hook cannot run (a re-entry) the handler decides on the call's text the same way.
+  on('tool.call', { tool: SIGNOFF_TOOLS }, async ($, e, next) => {
+    if (!isGuarded || next.origin.plugin === PLUGIN) return next(e)
+    const refusal = signoffRefusal($, plain(e))
     return refusal === undefined ? next(e) : { deny: refusal }
   }).catch(($, e, next) => {
-    if (next.called) return next(e)
-    const active = guard
-    if (active === undefined) return next(e)
+    if (next.called || !isGuarded) return next(e)
     const input = plain(e)
     const tool = String(input.tool ?? '')
-    if (tool === 'Bash' || tool === 'PowerShell') {
-      const signoff = signoffVerdict(typeof input.command === 'string' ? input.command : '', tool === 'PowerShell' ? 'powershell' : 'bash')
-      if (signoff !== undefined) return { deny: signoffDenyText(tool, signoff) }
-      const hit = commandVerdict(typeof input.command === 'string' ? input.command : '', active.files, tool === 'PowerShell' ? 'powershell' : 'bash')
-      return hit === undefined ? next(e) : { deny: denyText(tool, hit.file, hit.how) }
-    }
-    const target = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : ''
-    const hit = target === '' ? undefined : pathVerdict([target], active.files.map(file => ({ ...file, spellings: [] })), active.cwd, active.isWindows)
-    return hit === undefined ? next(e) : { deny: denyText(tool, hit, `a write of ${normalPath(target, active.cwd, active.isWindows)}`) }
+    const hit = signoffVerdict(typeof input.command === 'string' ? input.command : '', tool === 'PowerShell' ? 'powershell' : 'bash')
+    return hit === undefined ? next(e) : { deny: signoffDenyText(tool, hit) }
   })
 
   // The inspection tools: read-only; their answers reach the trace as a length only.
