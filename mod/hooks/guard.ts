@@ -706,8 +706,9 @@ const hasShort = (arg: string, letter: string) => /^-[a-zA-Z]+$/.test(arg) && ar
 
 /**
  * The sign-off action a git command runs, or undefined: a push with --force, -f, --force-with-lease or a `+` refspec
- * (a force-push), with --delete, -d or a `:ref` refspec (a remote branch or tag deletion); reset --hard; clean with -f
- * or --force; branch -D, or -d/--delete with -f/--force.
+ * (a force-push), with --delete, -d or a `:ref` refspec (a remote branch or tag deletion), with --mirror (overwrites and
+ * deletes remote refs) or --prune (deletes remote branches); reset --hard; clean with -f or --force; branch -D, or
+ * -d/--delete with -f/--force.
  */
 export function gitSignoffAction(args: readonly string[]): SignoffHit | undefined {
   let at = 0
@@ -717,6 +718,8 @@ export function gitSignoffAction(args: readonly string[]): SignoffHit | undefine
   if (sub === 'push') {
     if (rest.some(arg => arg === '--force' || arg.startsWith('--force-with-lease') || hasShort(arg, 'f') || /^\+./.test(arg))) return { how: 'git push --force', what: 'a force-push or history rewrite' }
     if (rest.some(arg => arg === '--delete' || hasShort(arg, 'd') || /^:./.test(arg))) return { how: 'git push --delete', what: 'deleting a remote branch or tag' }
+    if (rest.includes('--mirror')) return { how: 'git push --mirror', what: 'a mirror push, which overwrites and deletes remote refs' }
+    if (rest.includes('--prune')) return { how: 'git push --prune', what: 'deleting the remote branches that have no local counterpart' }
   }
   if (sub === 'reset' && rest.includes('--hard')) return { how: 'git reset --hard', what: 'reset --hard over uncommitted work' }
   if (sub === 'clean' && rest.some(arg => arg === '--force' || hasShort(arg, 'f'))) return { how: 'git clean -f', what: 'clean over uncommitted work' }
