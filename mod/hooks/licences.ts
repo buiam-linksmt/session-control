@@ -1,0 +1,173 @@
+// Pure parts of the licence tools (list_licences, probe_licence_usage, launch_worker's config_dir): the discovery of the
+// machine's licences from directory listings, and the plain text each tool answers with. A licence is a config
+// directory; it counts when it holds both .credentials.json and .claude.json, a test of their presence only: neither is
+// ever opened, so no credential and no account identity can reach an answer, the trace or a log. No `$`, no I/O:
+// register.tsx lists the directories, asks whether the two files are there, and hands the answers here.
+
+import type { SessionEntry } from '../types'
+import { rowStatus } from './core'
+import type { ProcFacts } from './core'
+import { bounded, clean } from './inspect'
+
+// ---------------------------------------------------------------- schemas
+
+export const LIST_LICENCES_SCHEMA = { type: 'object', additionalProperties: false, properties: {} } as const
+
+// ---------------------------------------------------------------- discovery
+
+/** The two files a licence directory holds, looked for by presence only. */
+export const LICENCE_FILES = ['.credentials.json', '.claude.json'] as const
+
+/** How long a directory scan is kept in memory before a call scans again. */
+export const SCAN_CACHE_MS = 60_000
+
+/** The most directories of one listing a scan looks into; the rest are counted, not examined. */
+export const SCAN_MAX_DIRS = 200
+
+/** The most licences an answer lists. */
+export const MAX_LICENCES = 50
+
+/**
+ * Where a licence was found: `default` the directory a launch with no picker and no config_dir uses (the orchestrator's
+ * own CLAUDE_CONFIG_DIR, else <home>/.claude: what the registry records for such a launch); `home` <home>/.claude when
+ * that is not the default; `child` <home>/.claude/<name>; `dash` <home>/.claude-<name>; `explicit` the licenceDirs option.
+ */
+export type LicenceSource = 'default' | 'home' | 'child' | 'dash' | 'explicit'
+
+/** One discovered licence: its directory in the host's path form, its name, where it was found and whether both files are there. */
+export type Licence = { configDir: string; name: string; source: LicenceSource; loggedIn: boolean }
+
+/** A scan's licences, with what it passed over: listing entries past SCAN_MAX_DIRS, and option entries that are not absolute. */
+export type LicenceScan = { licences: Licence[]; skipped: number; ignored: number; scannedAt: number }
+
+/** A candidate directory before its files are looked at. */
+export type LicenceCandidate = { configDir: string; source: LicenceSource; isHomeDefault: boolean }
+
+/** The directory entries a scan reads: name and kind, as `$.fs.list` gives them (a link is `other`, never followed). */
+export type ListedEntry = { name: string; kind: string }
+
+/**
+ * The licenceDirs option: comma separated directories, each absolute after a leading `~` is expanded (`isAbsolute`
+ * says what the platform takes as absolute); the others are ignored and counted.
+ */
+export function licenceDirsOf(option: string, home: string, isAbsolute: (path: string) => boolean): { dirs: string[]; ignored: number } {
+  const dirs: string[] = []
+  let ignored = 0
+  for (const raw of option.split(',')) {
+    const one = raw.trim()
+    if (one === '') continue
+    const expanded = one === '~' ? home : one.startsWith('~/') ? `${home}${one.slice(1)}` : one
+    if (isAbsolute(expanded)) dirs.push(expanded.replace(/[\\/]+$/, '') || expanded)
+    else ignored++
+  }
+  return { dirs, ignored }
+}
+
+/**
+ * The candidates in the order their sources rank (default, home, child, dash, explicit), each directory once (`isSame`
+ * compares as the platform compares paths; the first source wins). `children` and `home` are the listings of
+ * <home>/.claude and of <home>, directories only (a link, `other`, is not followed), each cut at SCAN_MAX_DIRS.
+ */
+export function licenceCandidates(input: {
+  home: string
+  defaultDir: string
+  children: readonly ListedEntry[]
+  homeEntries: readonly ListedEntry[]
+  explicit: readonly string[]
+  isSame: (a: string, b: string) => boolean
+}): { candidates: LicenceCandidate[]; skipped: number } {
+  const homeClaude = `${input.home}/.claude`
+  const childDirs = input.children.filter(one => one.kind === 'dir')
+  const dashDirs = input.homeEntries.filter(one => one.kind === 'dir' && one.name.startsWith('.claude-') && one.name.length > '.claude-'.length)
+  const skipped = Math.max(0, childDirs.length - SCAN_MAX_DIRS) + Math.max(0, dashDirs.length - SCAN_MAX_DIRS)
+  const all: Omit<LicenceCandidate, 'isHomeDefault'>[] = [
+    { configDir: input.defaultDir, source: 'default' },
+    { configDir: homeClaude, source: 'home' },
+    ...childDirs.slice(0, SCAN_MAX_DIRS).map(one => ({ configDir: `${homeClaude}/${one.name}`, source: 'child' as const })),
+    ...dashDirs.slice(0, SCAN_MAX_DIRS).map(one => ({ configDir: `${input.home}/${one.name}`, source: 'dash' as const })),
+    ...input.explicit.map(dir => ({ configDir: dir, source: 'explicit' as const })),
+  ]
+  const candidates: LicenceCandidate[] = []
+  for (const one of all) {
+    if (candidates.some(seen => input.isSame(seen.configDir, one.configDir))) continue
+    candidates.push({ ...one, isHomeDefault: input.isSame(one.configDir, homeClaude) })
+  }
+  return { candidates, skipped }
+}
+
+/**
+ * Whether a candidate counts, from the presence of its two files: the default directory always (a launch goes there
+ * whether or not it is logged in), any other only with both. <home>/.claude may keep its .claude.json at <home>/.claude.json,
+ * where Claude Code keeps it when CLAUDE_CONFIG_DIR is not set: either place counts for it.
+ */
+export function licenceOf(candidate: LicenceCandidate, has: { credentials: boolean; config: boolean; homeConfig: boolean }): Licence | undefined {
+  const loggedIn = has.credentials && (has.config || (candidate.isHomeDefault && has.homeConfig))
+  if (!loggedIn && candidate.source !== 'default') return undefined
+  return { configDir: candidate.configDir, name: licenceName(candidate), source: candidate.source, loggedIn }
+}
+
+/** A licence's name: `default` for the default directory, else the last component of its path. */
+export function licenceName(candidate: { configDir: string; source: LicenceSource }): string {
+  if (candidate.source === 'default') return 'default'
+  const parts = candidate.configDir.split(/[\\/]+/).filter(part => part !== '')
+  return parts.at(-1) ?? candidate.configDir
+}
+
+/** The discovered licence a config directory names, by its path (compared as the platform does) or by its name; undefined: none. */
+export function findLicence(licences: readonly Licence[], asked: string, isSame: (a: string, b: string) => boolean): Licence | undefined {
+  const given = asked.trim()
+  if (given === '') return undefined
+  return licences.find(one => isSame(one.configDir, given)) ?? licences.find(one => one.name === given)
+}
+
+// ---------------------------------------------------------------- list_licences
+
+/** Registry sessions per licence: live (the Abort check passes) and in all. */
+export function sessionCounts(licence: Licence, entries: readonly SessionEntry[], facts: ProcFacts, isSame: (a: string, b: string) => boolean): { live: number; all: number } {
+  const under = entries.filter(entry => typeof entry.config_dir === 'string' && entry.config_dir !== '' && isSame(entry.config_dir, licence.configDir))
+  return { live: under.filter(entry => rowStatus(entry, facts) === 'alive').length, all: under.length }
+}
+
+/** How old a scan is, in whole seconds. */
+const ageOf = (scan: LicenceScan, nowMs: number) => Math.max(0, Math.floor((nowMs - scan.scannedAt) / 1000))
+
+/**
+ * list_licences' answer: one summary line, then one line per licence (config_dir, name, source, logged_in, the
+ * registry's sessions under it). `registry` is undefined when the registry cannot be read (the counts are then `?`).
+ */
+export function listLicencesText(input: {
+  scan: LicenceScan
+  nowMs: number
+  isCached: boolean
+  registry?: { entries: readonly SessionEntry[]; facts: ProcFacts }
+  registryError?: string
+  isSame: (a: string, b: string) => boolean
+}): string {
+  const { scan } = input
+  const age = ageOf(scan, input.nowMs)
+  const count = scan.licences.length
+  const lines = [
+    `${count} licence${count === 1 ? '' : 's'} (directory scan ${input.isCached ? `cached, ${age} s old` : 'fresh'}; logged_in says only that .credentials.json and .claude.json are there: neither is opened).`,
+  ]
+  for (const licence of scan.licences.slice(0, MAX_LICENCES)) {
+    const counts = input.registry === undefined ? undefined : sessionCounts(licence, input.registry.entries, input.registry.facts, input.isSame)
+    lines.push(
+      [
+        `- ${clean(licence.name)}`,
+        `config_dir ${clean(licence.configDir)}`,
+        `source ${licence.source}`,
+        `logged_in ${licence.loggedIn ? 'yes' : 'no'}`,
+        `sessions ${counts === undefined ? '? live, ? in all' : `${counts.live} live, ${counts.all} in all`}`,
+      ].join(' | '),
+    )
+  }
+  if (count > MAX_LICENCES) lines.push(`(${count - MAX_LICENCES} more licences not shown)`)
+  if (input.registry !== undefined) {
+    const known = input.registry.entries.filter(entry => typeof entry.config_dir === 'string' && scan.licences.some(one => input.isSame(one.configDir, entry.config_dir as string))).length
+    const other = input.registry.entries.length - known
+    if (other > 0) lines.push(`${other} registry entr${other === 1 ? 'y is' : 'ies are'} under no discovered licence.`)
+  } else lines.push(`The registry cannot be read (${clean(input.registryError ?? 'unknown')}): no session counts.`)
+  if (scan.skipped > 0) lines.push(`${scan.skipped} director${scan.skipped === 1 ? 'y was' : 'ies were'} not examined (more than ${SCAN_MAX_DIRS} in one listing).`)
+  if (scan.ignored > 0) lines.push(`${scan.ignored} licenceDirs entr${scan.ignored === 1 ? 'y is' : 'ies are'} not an absolute path and ignored.`)
+  return bounded(lines.join('\n'))
+}

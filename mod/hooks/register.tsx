@@ -150,7 +150,10 @@ import {
   pidFromFile,
   reportCheck,
   resultReport,
+  isWinAbsolute,
 } from './core'
+import { LIST_LICENCES_SCHEMA, SCAN_CACHE_MS, licenceCandidates, licenceDirsOf, licenceOf, listLicencesText } from './licences'
+import type { Licence, LicenceScan } from './licences'
 import type { ComposedPrompt, ExpandableId, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId } from './core'
 
 const PLUGIN = 'session-control'
@@ -172,6 +175,7 @@ const CLOSE_TOOL = 'mcp__session-control__close_worker'
 const ARCHIVE_TOOL = 'mcp__session-control__archive_decisions'
 const STOP_TOOL = 'mcp__session-control__stop_worker'
 const DIGEST_TOOL = 'mcp__session-control__turn_digest'
+const LICENCES_TOOL = 'mcp__session-control__list_licences'
 /** The engine tools the helper-file guard looks at (guard.ts): the file tools by their path, Bash and PowerShell by their command. */
 const GUARDED_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit|Bash|PowerShell)$/
 
@@ -214,6 +218,8 @@ type Config = {
   modSource: string
   /** The lock folders of the lock-holder notice (locks.ts), comma separated; empty: off. */
   lockDirs: string
+  /** More licence directories for the licence tools (licences.ts), comma separated absolute paths; empty: none. */
+  licenceDirs: string
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -231,6 +237,7 @@ let config: Config = {
   notices: 'on',
   modSource: '',
   lockDirs: '',
+  licenceDirs: '',
 }
 let isActive = false
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
@@ -283,6 +290,8 @@ let lockAt: number | undefined
 let digestEvents: DigestEvent[] = []
 let digestDropped = 0
 let loadedAt = 0
+/** The licence tools' directory scan (licences.ts), kept SCAN_CACHE_MS in memory; `key` the home, default and option it was made for. */
+let licenceScan: { key: string; scan: LicenceScan } | undefined
 
 // The debug trace (the debug option or SESSION_CONTROL_DEBUG), written only once the board is on in this session: lines
 // wait here until the hook that made them ends or the next poll tick, whichever comes first. Off, every trace call
@@ -1908,6 +1917,58 @@ async function auditState($: EngineInterface) {
   }
 }
 
+// ---------------------------------------------------------------- the licence tools (licences.ts)
+// A licence is a config directory holding both .credentials.json and .claude.json: the scan reads directory listings and
+// asks whether those two files are there, nothing else; no file of a licence is ever opened.
+
+/** Two config directories compared as the host compares them (the registry and the launch compare them so). */
+async function sameDirOf($: EngineInterface): Promise<(a: string, b: string) => boolean> {
+  const machine = await hostOf($)
+  return (a, b) => machine.isDefaultConfigDir(a, b)
+}
+
+/**
+ * The machine's licences (licences.ts): the default directory, <home>/.claude, <home>/.claude/<name>, <home>/.claude-<name>
+ * and the licenceDirs option, by directory listings and the presence of the two files. Kept SCAN_CACHE_MS in memory;
+ * a call after that, or with another home, default directory or option, scans again.
+ */
+async function scanLicences($: EngineInterface): Promise<{ scan: LicenceScan; isCached: boolean }> {
+  const machine = await hostOf($)
+  const home = await homeDir($)
+  const defaultDir = machine.defaultConfigDir(home, await ownConfigDir($))
+  const nowMs = await $.clock.now()
+  const key = JSON.stringify([home, defaultDir, config.licenceDirs])
+  const kept = licenceScan
+  if (kept !== undefined && kept.key === key && nowMs >= kept.scan.scannedAt && nowMs - kept.scan.scannedAt < SCAN_CACHE_MS) return { scan: kept.scan, isCached: true }
+  const isSame = await sameDirOf($)
+  const listed = async (dir: string) => (await $.fs.list(dir).catch(() => [])).map(one => ({ name: one.name, kind: one.kind }))
+  const isThere = (path: string) => $.fs.exists(path).catch(() => false)
+  const isAbsolute = (path: string) => (machine.platform === 'windows' ? isWinAbsolute(path) : path.startsWith('/'))
+  const explicit = licenceDirsOf(config.licenceDirs, home, isAbsolute)
+  const found = licenceCandidates({ home, defaultDir, children: await listed(`${home}/.claude`), homeEntries: await listed(home), explicit: explicit.dirs.map(dir => machine.nativePath(dir)), isSame })
+  const homeConfig = await isThere(`${home}/.claude.json`)
+  const licences: Licence[] = []
+  for (const candidate of found.candidates) {
+    const credentials = await isThere(`${candidate.configDir}/.credentials.json`)
+    const one = licenceOf(candidate, { credentials, config: credentials && (await isThere(`${candidate.configDir}/.claude.json`)), homeConfig })
+    if (one !== undefined) licences.push(one)
+  }
+  const scan: LicenceScan = { licences, skipped: found.skipped, ignored: explicit.ignored, scannedAt: nowMs }
+  licenceScan = { key, scan }
+  trace($, 'licences.scan', { licences: licences.length, skipped: found.skipped, ignored: explicit.ignored })
+  return { scan, isCached: false }
+}
+
+/** list_licences: the scan, and the registry's sessions per licence from a fresh probe. */
+async function listLicences($: EngineInterface) {
+  const { scan, isCached } = await scanLicences($)
+  const parsed = parseRegistry(await readRegistryText($))
+  const registry = parsed.ok ? { entries: parsed.entries, facts: await probe($, parsed.entries) } : undefined
+  return {
+    result: listLicencesText({ scan, nowMs: await $.clock.now(), isCached, ...(registry === undefined ? {} : { registry }), ...(parsed.ok ? {} : { registryError: parsed.error }), isSame: await sameDirOf($) }),
+  }
+}
+
 /** Turn the board on: register the launch tool, start the poll once, gather. */
 async function activate($: EngineInterface): Promise<void> {
   isActive = true
@@ -2012,6 +2073,15 @@ async function activate($: EngineInterface): Promise<void> {
         "marked seen. The first call reports from the mod's load. At most 40 lines, redacted, plain text.",
       inputSchema: DIGEST_SCHEMA as unknown as Record<string, unknown>,
     })
+    // The licence tools after it: every tool before them keeps its name, description, schema and place.
+    await $.tool.register({
+      name: 'list_licences',
+      description:
+        'Read-only. The licences of this machine: config directories that hold both .credentials.json and .claude.json, a test of presence only (neither file is opened): ' +
+        'the default directory a launch without a picker uses, ~/.claude, ~/.claude/<name>, ~/.claude-<name> and the licenceDirs option. Per licence: config_dir, name, ' +
+        'source (default, home, child, dash, explicit), logged_in (the two files are there) and the registry sessions under it (live, in all). The directory scan is kept 60 s.',
+      inputSchema: LIST_LICENCES_SCHEMA as unknown as Record<string, unknown>,
+    })
   }
   if (!isPolling) {
     isPolling = true
@@ -2040,7 +2110,7 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
   if (isTraceWanted) {
     // The picker command is a command line of its own: the trace says only whether one is set. modSource and lockDirs
     // are left to the drift and locks lines (whether a source is there, how many folders were read).
-    const { pollMs, registrySetting, licencePickCommand, modSource, lockDirs, ...rest } = config
+    const { pollMs, registrySetting, licencePickCommand, modSource, lockDirs, licenceDirs, ...rest } = config
     const options = { ...rest, registryPath: registrySetting, pollSeconds: pollMs / 1000, licencePickCommand: licencePickCommand.trim() === '' ? 'empty' : 'set' }
     traceStart = { cwd, platform: machine.platform, isOrchestratorDir: config.orchestratorDir !== '' && isHere, options }
   }
@@ -2152,6 +2222,7 @@ export const register: Register = (on, options) => {
   digestEvents = []
   digestDropped = 0
   loadedAt = 0
+  licenceScan = undefined
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
@@ -2166,6 +2237,7 @@ export const register: Register = (on, options) => {
     notices: options.notices === 'off' ? 'off' : 'on',
     modSource: String(options.modSource ?? ''),
     lockDirs: String(options.lockDirs ?? ''),
+    licenceDirs: String(options.licenceDirs ?? ''),
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -2385,6 +2457,13 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: DIGEST_TOOL }, ($, e) => tracedTool($, 'turn_digest', e, [], () => turnDigest($), true)).catch(($, e, next) => {
     traceError($, 'turn_digest', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: turn_digest failed` }
+  })
+
+  // The licence tools: they read directory listings and file presence (and the usage probe's two figures); their
+  // answers reach the trace as a length only.
+  on('tool.call', { tool: LICENCES_TOOL }, ($, e) => tracedTool($, 'list_licences', e, [], () => listLicences($), true)).catch(($, e, next) => {
+    traceError($, 'list_licences', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: list_licences failed` }
   })
 
   // The launch's fields are paths, names, numbers and switches; the title and the section are free text and stay out

@@ -61,6 +61,8 @@ const SCENARIOS: Record<string, Record<string, unknown>> = {
   audit_state: {},
   // Writes no file: the time of the call goes to $.store, which is no file the guard could protect.
   turn_digest: {},
+  // Writes no file: directory listings and the presence of two files, kept in memory.
+  list_licences: {},
 }
 
 const answerOf = (answer: unknown) => {
