@@ -1233,6 +1233,63 @@ describe('worker-report check', () => {
     // A commit subject holding an exit-like word is not the log's exit code.
     expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix: exit 0 on cancel`)).toBe(lacking)
   })
+  // Layouts of real worker reports (results and transcripts of earlier workers) that the check flagged although they
+  // carry both reads with their exit codes; each is a correct report.
+  test('real layouts: the exit code on the line after the status or after its fence, in backticks, as => or a number alone; both commands above one block; a table', () => {
+    const layouts = [
+      // The status in a fence, then `exit code: \`0\`` below it; the log in prose with a backticked code.
+      '`git status -sb`, run last in `/w/repo`:\n```\n## main...origin/main\n M CLAUDE.md\n```\nexit code: `0`\n\n`git log --oneline @{u}..HEAD` printed nothing, exit code: `0`',
+      // Each command in a fence of its own, the exit line after the fence, the log's fence empty.
+      'git status -sb\n```\n## feature/x...origin/feature/x\n```\nexit code: 0\n\ngit log --oneline @{u}..HEAD\n```\n```\nexit code: 0',
+      // The exit code alone on the line after the output, inside one fence.
+      'Run last in `/w/repo`:\n```\n$ git status -sb\n## main...origin/main\n M CLAUDE.md\n0\n$ git log --oneline @{u}..HEAD\n0\n```\nEach `0` is the exit code of the command above it.',
+      // => as the marker.
+      '$ git status -sb\n## feature/x...origin/feature/x\n M CLAUDE.md\n=> 0\n$ git log --oneline @{u}..HEAD\n=> 0',
+      // A blank line between the output and the exit line.
+      'git log --oneline @{u}..HEAD\n\n(exit 0)\ngit status -sb\n## feature/x...origin/feature/x\n-> 0',
+      // The status inline in a list, the branch line in backticks.
+      '- `git status -sb` (exit 0): `## develop...origin/develop [behind 5]`\n- `git log --oneline @{u}..HEAD` (exit 0): empty output',
+      '- `git status -sb` → `## main...origin/main` (exit 0). No ahead/behind marker.\n- `git log --oneline @{u}..HEAD` → empty output (exit 0). Nothing unpushed.',
+      '- `git status -sb`: `## main...origin/main`, rc 0. The tree is clean.\n- `git log --oneline @{u}..HEAD`: empty output, rc 0.',
+      '**Last commands:** `git status -sb` printed `## develop...origin/develop [behind 5]` with exit 0, and the working tree is clean. `git log --oneline @{u}..HEAD` printed nothing, exit 0.',
+      // Both commands named on one line above one block.
+      '**`git status -sb` and `git log --oneline @{u}..HEAD`** in `/w/repo`, run last:\n```\n## main...origin/main        (exit 0)\n(no output: no unpushed commits)   (exit 0)\n```',
+      // A table with an exit column.
+      '| Command | Exit | Output |\n|---|---|---|\n| `git status -sb` | 0 | `## develop...origin/develop [behind 5]` |\n| `git log --oneline @{u}..HEAD` | 0 | empty |',
+      // The status output in a fence followed by its exit line, then the log in prose.
+      '`git status -sb` in `/w/repo`:\n```\n## main...origin/main\n M CLAUDE.md\n```\nexit code: `0`\n\n`git log --oneline @{u}..HEAD`: no output, exit code `0`. This was run on `main`.',
+    ]
+    for (const report of layouts) expect({ report, note: reportCheck(report) }).toEqual({ report, note: undefined })
+  })
+
+  test('still flagged: a missing status, a missing exit code, a log of another range, an exit line too far, a number that is a commit count', () => {
+    const lacksBoth = 'report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes'
+    const lacksLog = 'report lacks git log --oneline @{u}..HEAD with its exit code'
+    const lacksStatus = 'report lacks git status -sb with its exit code'
+    // The status output with no exit code and no log at all.
+    expect(reportCheck('`git status -sb` in `/w/repo`, run last:\n```\n## develop...origin/develop [behind 5]\n```')).toBe(lacksBoth)
+    expect(reportCheck('- `git status -sb` shows `## develop...origin/develop`, clean.')).toBe(lacksBoth)
+    // The status with its exit code and a log of another range.
+    expect(reportCheck('```\n$ git status -sb\n## x...origin/x\nexit 0\n$ git log --oneline origin/develop -4\n75989fe docs: a\nexit 0\n```')).toBe(lacksLog)
+    // An exit code three lines below the log's output block is not its.
+    expect(reportCheck('`git status -sb` (exit 0): `## main...origin/main`\ngit log --oneline @{u}..HEAD\n```\n```\n\nThe rest.\nMore.\nexit 0')).toBe(lacksLog)
+    // A number alone is an exit code only on its own line: a count in a sentence is none.
+    expect(reportCheck('`git status -sb` (exit 0): `## main...origin/main`\n`git log --oneline @{u}..HEAD` printed 0 lines.')).toBe(lacksLog)
+    // The branch line and no exit code; the exit code and no branch line.
+    expect(reportCheck('$ git status -sb\n## main...origin/main\n$ git log --oneline @{u}..HEAD\n=> 0')).toBe(lacksStatus)
+    expect(reportCheck('$ git status -sb\nexit 0\n$ git log --oneline @{u}..HEAD\n=> 0')).toBe(lacksStatus)
+    // Both named on one line, no exit code in the block.
+    expect(reportCheck('`git status -sb` and `git log --oneline @{u}..HEAD`:\n```\n## main...origin/main\n```')).toBe(lacksBoth)
+    // A table without an exit column.
+    expect(reportCheck('| Command | Output |\n|---|---|\n| `git status -sb` | `## main` |\n| `git log --oneline @{u}..HEAD` | 0 |')).toBe(lacksBoth)
+  })
+
+  test('the refined layouts still count commits and failures: a commit in the log\'s fence, a non-zero exit after it', () => {
+    expect(reportCheck('`git status -sb` (exit 0): `## main...origin/main [ahead 1]`\n`git log --oneline @{u}..HEAD`:\n```\n9b6e367 fix(toast): drop the plugin name\n```\nexit code: `0`')).toBe('git log @{u}..HEAD lists 1 unpushed commit')
+    expect(reportCheck('`git status -sb` (exit 0): `## feature/new`\n`git log --oneline @{u}..HEAD`:\n```\nfatal: no upstream configured\n```\n=> 128')).toBe('git log @{u}..HEAD exited 128')
+    expect(reportCheck('| Command | Exit |\n|---|---|\n| `git status -sb` `## x` | 0 |\n| `git log --oneline @{u}..HEAD` | 128 |')).toBe('git log @{u}..HEAD exited 128')
+  })
+
   test('resultReport: the result text of a result file, empty otherwise', () => {
     expect(resultReport(JSON.stringify({ result: 'x' }))).toBe('x')
     for (const text of ['', '{', 'null', '{"result":5}']) expect(resultReport(text)).toBe('')

@@ -450,17 +450,32 @@ const GIT_STATUS = /git\s+status\s+-sb\b/gi
 const GIT_LOG = /git\s+log\s+--oneline\s+@\{(?:u|upstream)\}\.\.HEAD/gi
 /** Either command named: where one command's text ends and the next begins. */
 const GIT_COMMAND = /git\s+(?:status\s+-sb|log\s+--oneline)/i
-/** An exit code as reports write it: `exit 0`, `exit=0`, `exit code: 0`, `exit status 0`, `exited 0`, `rc=0`, `→ 0`, `-> 0`. */
-const EXIT_CODE = /(?:\bexit(?:ed)?(?:\s+(?:code|status))?\s*[:=]?\s*|\brc\s*[:=]?\s*|(?:→|->)\s*)(\d+)/i
-/** A `git status -sb` branch line: `## main...origin/main [ahead 1]`, `## HEAD (no branch)`. */
-const BRANCH_LINE = /^[\s>]*##\s+\S/m
+/**
+ * An exit code as reports write it: `exit 0`, `exit=0`, `exit code: 0`, `exit status 0`, `exited 0`, `rc=0`, `→ 0`,
+ * `-> 0`, `=> 0`; the number may stand in backticks or asterisks (`exit code: \`0\``).
+ */
+const EXIT_CODE = /(?:\bexit(?:ed)?(?:\s+(?:code|status))?\s*[:=]?\s*|\brc\s*[:=]?\s*|(?:→|->|=>)\s*)[`*]*(\d+)(?!\w|\.\d)/i
+/** A `git status -sb` branch line: `## main...origin/main [ahead 1]`, `## HEAD (no branch)`; or the same in backticks inside a sentence. */
+const BRANCH_LINE = /^[\s>]*(?:[-*]\s+)?`?##\s+\S|`##\s+\S/m
+/** A branch line at the start of a line (in a block): its own line. */
+const BRANCH_START = /^[\s>]*`?##\s+\S/
+/** A `git status -sb` file line: two status letters (or blanks), a blank, a path. */
+const STATUS_FILE_LINE = /^[\s>]*[ MADRCUT?!]{2} \S/
 /** A `git log --oneline` line: an abbreviated sha holding a digit, then the subject; a list mark or backticks may lead. */
 const COMMIT_LINE = /^[\s>]*(?:[-*]\s+)?`?(?=[0-9a-f]*\d)[0-9a-f]{7,40}`?\s+\S/m
 /** Lines that end a command's output block: a heading, the next command, a code fence, a line opening with an exit marker. */
 const HEADING_LINE = /^[\s>]*#{1,6}\s/
 const COMMAND_LINE = /^[\s>]*(?:[-*]\s+)?[`$]*\s*git\s/i
 const FENCE_LINE = /^[\s>]*```/
-const EXIT_LINE = /^[\s>]*[([]?\s*(?:exit|exited|rc\b|→|->)/i
+/** A line that opens with an exit marker (`exit 0`, `(exit 0)`, `- **exit code:** 0`, `-> 0`, `=> 0`), or is a number alone (`0`, `` `0` ``). */
+const EXIT_LINE = /^[\s>]*(?:[-*]\s+)?[*_`]*[([]?\s*(?:exit|exited|rc\b|→|->|=>)|^[\s>]*[*_`(]*\d{1,3}[*_`)]*\s*$/i
+/** A line that is an exit code alone: the number, maybe in backticks, asterisks or parentheses. */
+const BARE_EXIT = /^[\s>]*[*_`(]*(\d{1,3})[*_`)]*\s*$/
+/** How many lines after the end of an output block an exit line may follow. */
+const EXIT_LINES_AFTER = 2
+
+/** The exit code a line carries: an exit marker with its number, or a number alone. */
+const exitOf = (line: string): string | undefined => EXIT_CODE.exec(line)?.[1] ?? BARE_EXIT.exec(line)?.[1]
 
 /** The text after a command mention up to the next mention of either command, at most `max` characters. */
 function after(text: string, end: number, max: number): string {
@@ -469,54 +484,131 @@ function after(text: string, end: number, max: number): string {
   return next < 0 ? rest : rest.slice(0, next)
 }
 
+/** Whether the position sits inside a code fence: an odd number of fence lines before its line. */
+function isInFence(report: string, at: number): boolean {
+  const before = report.slice(0, report.lastIndexOf('\n', at - 1) + 1)
+  return before.split('\n').filter(line => FENCE_LINE.test(line)).length % 2 === 1
+}
+
+/**
+ * The exit code of a command named in a Markdown table row: the row's cell in the column whose header says exit, rc or
+ * code (`| Command | Exit | Output |`), when that cell is a number.
+ */
+function tableExit(report: string, at: number): string | undefined {
+  const lines = report.split('\n')
+  let index = report.slice(0, at).split('\n').length - 1
+  if (!(lines[index] ?? '').trim().startsWith('|')) return undefined
+  const row = lines[index] ?? ''
+  while (index > 0 && (lines[index - 1] ?? '').trim().startsWith('|')) index--
+  const cells = (line: string) => line.trim().replace(/^\||\|$/g, '').split('|').map(one => one.trim())
+  const column = cells(lines[index] ?? '').findIndex(cell => /\b(?:exit|rc|code)\b/i.test(cell))
+  if (column < 0 || lines[index] === row) return undefined
+  return /^`?(\d+)`?$/.exec(cells(row)[column] ?? '')?.[1]
+}
+
+/** The exit code on one of the next EXIT_LINES_AFTER non-blank lines from `from`, when one of them is an exit line; a heading, a command or a fence stops. */
+function exitBelow(lines: readonly string[], from: number): string | undefined {
+  let seen = 0
+  for (let at = from; at < lines.length && seen < EXIT_LINES_AFTER; at++) {
+    const line = lines[at] ?? ''
+    if (line.trim() === '') continue
+    seen++
+    if (HEADING_LINE.test(line) || COMMAND_LINE.test(line) || FENCE_LINE.test(line)) return undefined
+    if (EXIT_LINE.test(line)) return exitOf(line)
+  }
+  return undefined
+}
+
+/** Past the status output at the head of a block the two commands share: its branch line, its file lines and its own exit line. */
+function pastStatus(lines: readonly string[], from: number): number {
+  let at = from
+  while (at < lines.length && !BRANCH_START.test(lines[at] ?? '')) {
+    if ((lines[at] ?? '').trim() === '' || FENCE_LINE.test(lines[at] ?? '')) return from
+    at++
+  }
+  if (at >= lines.length) return from
+  const hasExit = EXIT_CODE.test(lines[at] ?? '')
+  at++
+  while (at < lines.length && STATUS_FILE_LINE.test(lines[at] ?? '')) at++
+  if (!hasExit && EXIT_LINE.test(lines[at] ?? '')) at++
+  return at
+}
+
 /**
  * The exit code and the number of commits of the `git log` read that ends at `end`: the rest of its line, then the
- * output block below it, which stops at a blank line, a code-fence end, an exit marker, the next command or a heading.
- * The exit code sits on the command's line, in the block, or on the exit marker or the line right after the fence that
- * ends it; an `exit 0` further on in the report is not this log's.
+ * output block below it (an opening fence right below a command outside a fence holds it), which stops at a blank line,
+ * a code-fence end, an exit marker, the next command or a heading. The exit code sits on the command's line, in the
+ * block (a number alone counts), on the exit marker that ends it, or on an exit line within EXIT_LINES_AFTER non-blank
+ * lines after a blank line or the fence that ends it; an `exit 0` further on in the report is not this log's. In a table
+ * row it is the row's exit cell. When the line named `git status -sb` before it (`isShared`), the status output at the
+ * head of the block is passed over first.
  */
-function logRead(report: string, end: number): { exit?: string; commits: number } {
+function logRead(report: string, end: number, isShared = false): { exit?: string; commits: number } {
   const lines = report.slice(end).split('\n')
   const first = lines.shift() ?? ''
   const next = first.search(GIT_COMMAND)
-  let exit = EXIT_CODE.exec(next < 0 ? first : first.slice(0, next))?.[1]
+  let exit = EXIT_CODE.exec(next < 0 ? first : first.slice(0, next))?.[1] ?? tableExit(report, end)
   let commits = 0
-  if (next >= 0) return { exit, commits }
-  for (const [at, line] of lines.entries()) {
-    if (line.trim() === '' || HEADING_LINE.test(line) || COMMAND_LINE.test(line)) break
-    if (FENCE_LINE.test(line)) {
-      const following = lines[at + 1] ?? ''
-      if (EXIT_LINE.test(following)) exit ??= EXIT_CODE.exec(following)?.[1]
+  if (next >= 0) return exit === undefined ? { commits } : { exit, commits }
+  let at = !isInFence(report, end) && FENCE_LINE.test(lines[0] ?? '') ? 1 : 0
+  if (isShared) at = pastStatus(lines, at)
+  for (; at < lines.length; at++) {
+    const line = lines[at] ?? ''
+    if (line.trim() === '' || FENCE_LINE.test(line)) {
+      exit ??= exitBelow(lines, at + 1)
       break
     }
+    if (HEADING_LINE.test(line) || COMMAND_LINE.test(line)) break
     if (EXIT_LINE.test(line)) {
-      exit ??= EXIT_CODE.exec(line)?.[1]
+      exit ??= exitOf(line)
       break
     }
     if (COMMIT_LINE.test(line)) commits += 1
     else exit ??= EXIT_CODE.exec(line)?.[1]
   }
-  return { exit, commits }
+  return exit === undefined ? { commits } : { exit, commits }
+}
+
+/**
+ * Whether the `git status -sb` read that ends at `end` carries its branch line and its exit code: in the text up to the
+ * next mention of either command (600 characters at most: an exit marker or a number alone on its line, and a branch
+ * line, also one in backticks inside a sentence; or the row's exit cell in a table); or, when that next mention is on
+ * the same line (both commands named above one block), in the block below: its first branch line, with the exit code on
+ * it or on an exit line within EXIT_LINES_AFTER lines after its file lines.
+ */
+function statusRead(report: string, end: number): boolean {
+  const window = after(report, end, 600)
+  const isExit = EXIT_CODE.test(window) || window.split('\n').some(line => BARE_EXIT.test(line)) || tableExit(report, end) !== undefined
+  if (isExit && BRANCH_LINE.test(window)) return true
+  if (window.includes('\n')) return false
+  const lines = report.slice(end).split('\n').slice(1)
+  let at = !isInFence(report, end) && FENCE_LINE.test(lines[0] ?? '') ? 1 : 0
+  for (; at < lines.length && !BRANCH_START.test(lines[at] ?? ''); at++) if ((lines[at] ?? '').trim() === '' || FENCE_LINE.test(lines[at] ?? '')) return false
+  if (at >= lines.length) return false
+  if (EXIT_CODE.test(lines[at] ?? '')) return true
+  let below = at + 1
+  while (below < lines.length && STATUS_FILE_LINE.test(lines[below] ?? '')) below++
+  return exitBelow(lines, below) !== undefined
 }
 
 /**
  * The worker-report check: whether a final report carries the output of `git status -sb` and of
  * `git log --oneline @{u}..HEAD`, each with its exit code, as the worker prompts demand, and whether that log lists
  * commits that are not pushed (counted only in the log's own output block). Tolerant of case, code fences, `$ `
- * prompts and the spellings EXIT_CODE takes.
+ * prompts, the spellings EXIT_CODE takes, an exit line within two lines after the output, a number alone as the exit
+ * code, a table with an exit column, and both commands named on one line above one block.
  * Undefined when the report is in order; else one short line. It is a note only: it never changes the outcome.
  */
 export function reportCheck(report: string): string | undefined {
   let isStatus = false
-  for (const match of report.matchAll(GIT_STATUS)) {
-    const window = after(report, (match.index ?? 0) + match[0].length, 600)
-    if (EXIT_CODE.test(window) && BRANCH_LINE.test(window)) isStatus = true
-  }
+  for (const match of report.matchAll(GIT_STATUS)) if (statusRead(report, (match.index ?? 0) + match[0].length)) isStatus = true
   let isLog = false
   let commits = 0
   const failed: string[] = []
   for (const match of report.matchAll(GIT_LOG)) {
-    const read = logRead(report, (match.index ?? 0) + match[0].length)
+    const lineStart = report.lastIndexOf('\n', match.index ?? 0) + 1
+    const isShared = /git\s+status\s+-sb\b/i.test(report.slice(lineStart, match.index ?? 0))
+    const read = logRead(report, (match.index ?? 0) + match[0].length, isShared)
     if (read.exit === undefined) continue
     isLog = true
     if (read.exit !== '0') failed.push(read.exit)
