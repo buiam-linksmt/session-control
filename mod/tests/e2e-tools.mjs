@@ -215,8 +215,8 @@ if (trace.includes('"event":"tool.result","tool":"read_result","resultChars":'))
 else fail('the trace has the length of the answer only')
 const { major } = nodeMajor()
 if (major !== undefined && major >= 22) {
-  if (trace.includes('"event":"process.run","helper":"filesNewerThan"') && !trace.includes('"event":"helper.fallback"')) pass('the listing ran through the Node helper, no fallback')
-  else fail('the listing ran through the Node helper, no fallback')
+  if (trace.includes('"event":"process.run","helper":"filesNewerThan"') && !trace.includes('"event":"helper.failed"')) pass('the listing ran through the Node helper, no failed call')
+  else fail('the listing ran through the Node helper, no failed call')
 }
 // The answer: the six outputs verbatim, each after its line.
 const answer = typeof ojson?.result === 'string' ? ojson.result : ''

@@ -4,8 +4,8 @@
 // text itself is never returned, logged or written to disk: it lives in this process's memory until the answer is
 // printed. A failure is one fixed code: NO_CLAUDE, TIMEOUT, NOT_LOGGED_IN, PARSE or FAILED.
 //
-// The parser has a twin in hooks/usage.ts (the native fallback's); helper.test.mjs runs both over the recorded
-// outputs of tests/usage-fixtures.ts and requires the same answer from each.
+// helper.test.mjs runs the parser over the recorded and written outputs of tests/usage-fixtures.ts and requires each
+// case's answer.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'

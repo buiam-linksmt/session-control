@@ -1,144 +1,14 @@
 // The Windows adapter of the host interface (native Windows: Claude Code on Windows, Git Bash as the Bash tool's
-// shell, which has no sh, jq, mv or /proc on the PATH a command starts with). The file operations $.fs lacks and the
-// process probe are Windows PowerShell 5.1 scripts, written to the runs directory and run with -File; paths are kept
-// in the native C:/... form and compared as Windows compares them. Its scripts came here unchanged from core.ts.
-// trace.ts imports them to name them: this file never imports trace.ts.
+// shell, which has no sh, jq, mv or /proc on the PATH a command starts with). The process probe and the process tree of
+// stop_worker, which the Node helper does not do on Windows, are Windows PowerShell 5.1 scripts (PROBE_PS1, TREE_PS1),
+// written to the runs directory and run with -File, and the stop's signals are taskkill.exe; the file operations are
+// the helper's (host-helper.ts). Paths are kept in the native C:/... form and compared as Windows compares them.
 
 import type { SessionEntry } from '../types'
-import {
-  defaultConfigDir,
-  findNewWindowsWorker,
-  isDefaultConfigDir,
-  isSameWinPath,
-  isWinAbsolute,
-  parseProcFacts,
-  probeArgs,
-  transcriptPath,
-  windowsPickerRefusal,
-  winPath,
-} from './core'
+import { defaultConfigDir, findNewWindowsWorker, isDefaultConfigDir, isSameWinPath, isWinAbsolute, parseProcFacts, probeArgs, transcriptPath, windowsPickerRefusal, winPath } from './core'
 import type { LaunchInput, ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopStep, StopTarget, TailShape, WorkerWant } from './host'
-import {
-  NEWER_MAX,
-  PANE_TAIL,
-  STOP_WAIT_SECONDS,
-  bashLaunchCommand,
-  clockPause,
-  nativeHashTrees,
-  nativeUsageProbe,
-  parseNewerListing,
-  parseStopOutput,
-  readTail,
-  removeOutcomeOfExit,
-  rotateAndAppendWith,
-  statLaunchChecks,
-  treeOf,
-  unstoppable,
-  writeAtomicWith,
-  writeIfAbsent,
-} from './host-shared'
-
-/**
- * The file operations $.fs lacks, for Windows PowerShell 5.1: written to the runs directory and run with -File
- * (never as -Command text, whose quoting does not survive). `move <from> <to>` replaces an existing file in one
- * step (File.Replace: a reader never finds it missing) or moves it there; `remove <path>`; `removeregular <path>`
- * removes a regular file only (the attributes are read without following a link: a reparse point, a symbolic link or
- * a junction, exits 4, a directory 5, a path that is not there 3); `append <from> <to>`
- * adds the text of a file to the end of another and removes the first, never reading what the second holds;
- * `tail <path> <lines> <width>` for a transcript over the 4 MiB read cap. Output is UTF-8; a failure exits 1 with
- * the reason.
- */
-export const FILES_PS1 = [
-  '# session-control: file operations for Windows PowerShell 5.1 (move, remove, append, tail)',
-  'param([string]$Op, [string]$A, [string]$B, [string]$C)',
-  // A PowerShell 7 parent leaves its own module folders first; Windows PowerShell must load its own.
-  '$env:PSModulePath = "$PSHOME\\Modules"',
-  "$ErrorActionPreference = 'Stop'",
-  '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
-  'try {',
-  '  switch ($Op) {',
-  "    'move' {",
-  '      if ([System.IO.File]::Exists($B)) { [System.IO.File]::Replace($A, $B, [NullString]::Value) }',
-  '      else { [System.IO.File]::Move($A, $B) }',
-  '    }',
-  "    'remove' { if ([System.IO.File]::Exists($A)) { [System.IO.File]::Delete($A) } }",
-  "    'removeregular' {",
-  '      $attr = $null',
-  '      try { $attr = [System.IO.File]::GetAttributes($A) } catch [System.IO.IOException] { exit 3 }',
-  '      if ($attr -band [System.IO.FileAttributes]::ReparsePoint) { exit 4 }',
-  '      if ($attr -band [System.IO.FileAttributes]::Directory) { exit 5 }',
-  '      [System.IO.File]::Delete($A)',
-  '    }',
-  "    'append' {",
-  '      $utf8 = New-Object System.Text.UTF8Encoding $false',
-  '      [void][System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($B))',
-  '      [System.IO.File]::AppendAllText($B, [System.IO.File]::ReadAllText($A, $utf8), $utf8)',
-  '      [System.IO.File]::Delete($A)',
-  '    }',
-  "    'tail' {",
-  '      $width = [int]$C',
-  '      foreach ($line in @(Get-Content -LiteralPath $A -Tail ([int]$B) -Encoding UTF8)) {',
-  '        if ($line.Length -gt $width) { $line = $line.Substring(0, $width) }',
-  '        [Console]::Out.Write($line + "`n")',
-  '      }',
-  '    }',
-  '    default { throw "unknown operation: $Op" }',
-  '  }',
-  '} catch {',
-  '  [Console]::Error.WriteLine($_.Exception.Message)',
-  '  exit 1',
-  '}',
-  'exit 0',
-].join('\r\n')
-
-/**
- * The files under a directory written after a time, for Windows PowerShell 5.1, read-only, run as a file like
- * FILES_PS1: args are the directory, the epoch seconds and the most lines to print. A walk of its own over
- * System.IO.DirectoryInfo: no folder named `.git` is entered, and an entry with the ReparsePoint attribute (a symbolic
- * link, a junction) is neither followed nor listed; a folder it cannot read is passed over. It prints what NEWER_SCRIPT
- * prints: the newest first, the first `max` as `<mtime in seconds>\t<path>`, then `N\t<count of all>`. Exit 3 when
- * the directory is not there.
- */
-export const NEWER_PS1 = [
-  '# session-control: the files under a folder written after a time, for Windows PowerShell 5.1 (session_writes)',
-  'param([string]$Dir, [string]$Since, [string]$Max)',
-  '$env:PSModulePath = "$PSHOME\\Modules"',
-  "$ErrorActionPreference = 'Stop'",
-  '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
-  'try {',
-  '  if (-not [System.IO.Directory]::Exists($Dir)) { exit 3 }',
-  '  $epoch = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)',
-  '  $after = $epoch.AddSeconds([long]$Since)',
-  '  $skip = [System.IO.FileAttributes]::ReparsePoint',
-  '  $found = New-Object System.Collections.Generic.List[System.IO.FileSystemInfo]',
-  '  $todo = New-Object System.Collections.Generic.Stack[string]',
-  '  $todo.Push($Dir)',
-  '  while ($todo.Count -gt 0) {',
-  '    $here = $todo.Pop()',
-  '    try { $entries = (New-Object System.IO.DirectoryInfo $here).GetFileSystemInfos() } catch { continue }',
-  '    foreach ($one in $entries) {',
-  "      if ($one.Name -eq '.git' -or ($one.Attributes -band $skip) -ne 0) { continue }",
-  '      if ($one -is [System.IO.DirectoryInfo]) { $todo.Push($one.FullName) }',
-  '      elseif ($one.LastWriteTimeUtc -gt $after) { $found.Add($one) }',
-  '    }',
-  '  }',
-  '  $out = New-Object System.Text.StringBuilder',
-  '  $shown = 0',
-  '  foreach ($one in @($found | Sort-Object -Property @{ Expression = { $_.LastWriteTimeUtc }; Descending = $true }, @{ Expression = { $_.FullName }; Descending = $false })) {',
-  '    if ($shown -ge [int]$Max) { break }',
-  '    $sec = ($one.LastWriteTimeUtc - $epoch).TotalSeconds.ToString(\'F3\', [System.Globalization.CultureInfo]::InvariantCulture)',
-  '    [void]$out.Append("$sec`t$($one.FullName)`n")',
-  '    $shown++',
-  '  }',
-  '  [void]$out.Append("N`t$($found.Count)`n")',
-  '  [Console]::Out.Write($out.ToString())',
-  '} catch {',
-  '  [Console]::Error.WriteLine($_.Exception.Message)',
-  '  exit 1',
-  '}',
-  'exit 0',
-].join('\r\n')
+import type { HostPort, Platform, ProcTree, StopReport, StopStep, StopTarget, WorkerWant } from './host'
+import { STOP_WAIT_SECONDS, bashLaunchCommand, clockPause, parseStopOutput, statLaunchChecks, treeOf, unstoppable, writeIfAbsent } from './host-shared'
 
 /**
  * How far a sessions file's `startedAt` may sit from its process's creation for the pid to count as that process,
@@ -149,8 +19,9 @@ export const NEWER_PS1 = [
 export const START_MATCH_MS = { before: 2_000, after: 600_000 } as const
 
 /**
- * The process probe for native Windows (Windows PowerShell 5.1), run as a file like FILES_PS1. It prints the lines
- * PROBE_SCRIPT prints, so parseProcFacts and isPidAlive read them unchanged:
+ * The process probe for native Windows (Windows PowerShell 5.1), written to the runs directory and run with -File (never
+ * as -Command text, whose quoting does not survive). It prints the lines the helper's Linux probe prints
+ * (helper/linux.mjs), so parseProcFacts and isPidAlive read them unchanged:
  *   P <pid> claude <elapsedSec> <cwd> <configDir> <cmdline>   per claude.exe (Win32_Process)
  *   A <pid> <name> <creationMs> <fileStart> <fileSessionId>   per asked pid that exists
  *   T <sid> <mtimeEpochSec>                                   newest transcript of an asked session
@@ -161,7 +32,7 @@ export const START_MATCH_MS = { before: 2_000, after: 600_000 } as const
  * else the file's own value, which isPidAlive reads as not alive. No file: no cwd, no config dir, not alive.
  */
 export const PROBE_PS1 = [
-  '# session-control: the process probe for Windows PowerShell 5.1 (the P, A and T lines of PROBE_SCRIPT)',
+  '# session-control: the process probe for Windows PowerShell 5.1 (the P, A and T lines of the Linux probe)',
   '$env:PSModulePath = "$PSHOME\\Modules"',
   "$ErrorActionPreference = 'Stop'",
   '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
@@ -261,7 +132,7 @@ export const PROBE_PS1 = [
 ].join('\r\n')
 
 /**
- * The process tree of a stop and its re-checks, for Windows PowerShell 5.1, run as a file like FILES_PS1; it reads
+ * The process tree of a stop and its re-checks, for Windows PowerShell 5.1, run as a file like PROBE_PS1; it reads
  * Win32_Process (ProcessId, ParentProcessId, CreationDate, Name) as PROBE_PS1 does and signals nothing: the signals are
  * taskkill.exe, run by the adapter itself. A start is the creation time in epoch milliseconds (PROBE_PS1's arithmetic).
  *   list <pid> <start>             R or N for the root, G for each ancestor of this script, D for each descendant
@@ -419,59 +290,22 @@ async function powershell(port: HostPort): Promise<string> {
 }
 
 /** One of the mod's PowerShell scripts in the runs directory, written when it is not there as it should be (which makes the directory). */
-async function ensureScript(port: HostPort, name: string, text: string, isQuiet = false): Promise<string> {
+async function ensureScript(port: HostPort, name: string, text: string): Promise<string> {
   const path = `${await port.runsDir()}/${name}`
-  if ((await port.read(path).catch(() => undefined)) !== text) await port.write(path, text, isQuiet)
+  if ((await port.read(path).catch(() => undefined)) !== text) await port.write(path, text)
   return path
 }
 
 /** Runs one of the mod's PowerShell scripts with -File: its text never crosses a command line. */
-async function runScript(port: HostPort, name: string, text: string, args: readonly string[], timeoutMs = 10_000, isQuiet = false) {
-  const path = await ensureScript(port, name, text, isQuiet)
-  return port.run([await powershell(port), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path, ...args], { timeoutMs }, isQuiet)
-}
-
-/** Removes a file with the file script, best effort. Answers whether it went. */
-async function removeFile(port: HostPort, path: string, isQuiet = false): Promise<boolean> {
-  const ran = await runScript(port, 'files.ps1', FILES_PS1, ['remove', path], 10_000, isQuiet).catch((err: unknown) => {
-    if (!isQuiet) port.traceError('remove', err)
-    return undefined
-  })
-  return ran?.exitCode === 0
-}
-
-/** Removes a regular file with the file script's `removeregular`; a link or a directory stays. */
-async function removeRegularFile(port: HostPort, path: string): Promise<RemoveOutcome> {
-  const ran = await runScript(port, 'files.ps1', FILES_PS1, ['removeregular', path]).catch((err: unknown) => {
-    port.traceError('remove', err)
-    return undefined
-  })
-  return ran === undefined ? 'failed' : removeOutcomeOfExit(ran.exitCode)
-}
-
-/**
- * Puts the temp file in the file's place with the file script; when it cannot run or fails, the text is written over
- * the file directly (the caller has checked it is still the one expected), and that write, which a reader can see
- * half done, is reported once.
- */
-async function renameOver(port: HostPort, tmp: string, path: string, text: string): Promise<void> {
-  const ran = await runScript(port, 'files.ps1', FILES_PS1, ['move', tmp, path]).catch((err: unknown) => {
-    port.traceError('rename', err)
-    return { exitCode: -1, stderr: String(err) }
-  })
-  if (ran.exitCode === 0) return
-  await port.write(path, text)
-  // The script's own remove; when that cannot run either, $.fs (which cannot remove) empties the temp file instead.
-  const isRemoved = await removeFile(port, tmp)
-  if (!isRemoved) await port.write(tmp, '')
-  const leftover = isRemoved ? '' : `; the temp file ${tmp} could not be removed and was emptied`
-  port.noteDirectWrite(`the rename failed (${ran.stderr.trim().slice(0, 100)}); ${path} was written directly, not atomically${leftover}`)
+async function runScript(port: HostPort, name: string, text: string, args: readonly string[], timeoutMs = 10_000) {
+  const path = await ensureScript(port, name, text)
+  return port.run([await powershell(port), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path, ...args], { timeoutMs })
 }
 
 /** On Windows the schema's leading / is Git Bash's /c/...: from here on, and in the registry, the native C:/... form. */
 const native = (path: unknown) => (typeof path === 'string' ? winPath(path) : path) as string
 
-export const windowsHost: Host = {
+export const windowsHost: Platform = {
   platform: 'windows',
 
   /** Git Bash hands on HOME as /c/Users/...; without a usable one the profile folder is home. Native form either way. */
@@ -488,7 +322,7 @@ export const windowsHost: Host = {
 
   /**
    * PROBE_PS1, which also looks for sessions files under `configDirs`. A probe that fails is an error: read as no
-   * process at all it would mark every worker dead.
+   * process at all it would mark every worker dead. The helper's probe is Linux-only, so this one stays the adapter's.
    */
   async probe(port: HostPort, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
     const ran = await runScript(port, 'probe.ps1', PROBE_PS1, [...probeArgs(entries), ...configDirs.map(dir => `c:${dir}`)], 20_000)
@@ -527,67 +361,14 @@ export const windowsHost: Host = {
   launchRefusal: () => undefined,
 
   createFile: writeIfAbsent,
-  /** Writing the file script makes the runs directory; the backups directory comes with the first backup. */
+  /** Writing the probe script (the one the probe runs) makes the runs directory; the backups directory comes with the first backup. */
   async prepareHelperDirs(port: HostPort): Promise<void> {
-    await ensureScript(port, 'files.ps1', FILES_PS1)
+    await ensureScript(port, 'probe.ps1', PROBE_PS1)
   },
-  /** Writing the file script makes the runs directory. */
+  /** Writing the probe script makes the runs directory. */
   async prepareRunsDir(port: HostPort): Promise<void> {
-    await ensureScript(port, 'files.ps1', FILES_PS1)
+    await ensureScript(port, 'probe.ps1', PROBE_PS1)
   },
-  /** The file script's append makes the directory itself: nothing to retry. */
-  makeDir: async () => false,
-  writeAtomic: (port: HostPort, path: string, text: string, expected?: string) => writeAtomicWith(windowsHost, port, path, text, expected),
-  removeFile,
-  removeRegularFile,
-  renameOver,
-  /** The lines go to a file of their own, which the file script appends and removes. */
-  async append(port: HostPort, path: string, lines: readonly string[], isQuiet: boolean, onRan: (exitCode: number) => void) {
-    const added = `${path}.add.${await port.now()}`
-    await port.write(added, lines.map(line => `${line}\n`).join(''), isQuiet)
-    const ran = await runScript(port, 'files.ps1', FILES_PS1, ['append', added, path], 10_000, isQuiet).catch((err: unknown) => ({ exitCode: -1, stderr: String(err) }))
-    onRan(ran.exitCode)
-    if (ran.exitCode === 0) return undefined
-    await removeFile(port, added, isQuiet)
-    return `${path} cannot be appended to (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`
-  },
-  /** A read, or the file script for a transcript over the read cap (an answer the engine cut counts as unread). */
-  async tail(port: HostPort, path: string, shape?: TailShape): Promise<string | undefined> {
-    const { lines, width } = shape ?? PANE_TAIL
-    const text = await readTail(port, path, lines, width)
-    if (text !== undefined) return text
-    const ran = await runScript(port, 'files.ps1', FILES_PS1, ['tail', path, String(lines), String(width)]).catch((err: unknown) => {
-      port.traceError('transcript tail', err)
-      return undefined
-    })
-    return ran?.exitCode === 0 && (shape === undefined || !ran.isStdoutTruncated) ? ran.stdout : undefined
-  },
-  /** NEWER_PS1, its paths taken in the native C:/... form; nothing written but the script itself, as every script here. */
-  async filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined> {
-    const ran = await runScript(port, 'newer.ps1', NEWER_PS1, [dir, String(Math.floor(epochSeconds)), String(NEWER_MAX)], 30_000).catch((err: unknown) => {
-      port.traceError('files newer than', err)
-      return undefined
-    })
-    return ran?.exitCode === 0 && !ran.isStdoutTruncated ? parseNewerListing(ran.stdout, winPath) : undefined
-  },
-  /** Through `$.fs` (list, stat, read): no process (nativeHashTrees). */
-  hashTrees: nativeHashTrees,
+  /** TREE_PS1 lists the tree and re-checks it, taskkill signals: the helper's stop is Linux-only. */
   stopProcessTree,
-  /** Each rename of the plan by the file script, where a file another session moved meanwhile is no failure. */
-  async rotate(port: HostPort, plan: RotatePlan): Promise<void> {
-    for (const [from, to] of plan.moves) {
-      if (!(await port.exists(from).catch(() => false))) continue
-      const ran = await runScript(port, 'files.ps1', FILES_PS1, ['move', from, to], 10_000, true)
-      if (ran.exitCode !== 0 && (await port.exists(from).catch(() => true))) throw new Error(`rotation failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 100)}`)
-    }
-  },
-  rotateAndAppend: (port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan) => rotateAndAppendWith(windowsHost, port, path, lines, rotation),
-  /**
-   * `claude.exe` from the PATH (no shell, so an npm `claude.cmd` shim is not run: NO_CLAUDE), in the root of the home
-   * folder's drive (nativeUsageProbe). Not run on a live Windows host yet.
-   */
-  async probeUsage(port: HostPort, configDir: string, isInherited: boolean) {
-    const drive = /^[A-Z]:\//.exec(await windowsHost.homeDir(port))?.[0]
-    return nativeUsageProbe(port, 'claude.exe', winPath(configDir), isInherited, drive)
-  },
 }

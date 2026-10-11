@@ -1,20 +1,20 @@
-// A machine for tests that drive the whole plugin through the mock engine: files in a map (with symbolic links), the
-// processes of a simulated table (claude workers among them), and every command the Linux adapter runs answered as the
-// system would, the probe included (its P, A and T lines computed from the table, the sessions files and the
-// transcripts in the map). With `isHelper` Node 22 answers and the helper's operations run over the same map and table
-// (fake-helper.ts). Every write to the machine is recorded with how it was made, so a test can see what the plugin
-// wrote. `claude -p /usage` (natively or through the helper's probeUsage) answers from `usage` per config directory.
-// Not a test file itself: stop.test.ts and guard.test.ts use it.
+// A Linux machine for tests that drive the whole plugin through the mock engine: files in a map (with symbolic links),
+// the processes of a simulated table (claude workers among them), Node 24 on the PATH and the Node helper's operations
+// run over the same map and table (fake-helper.ts), its probe included (its P, A and T lines computed from the table,
+// the sessions files and the transcripts in the map); the Linux adapter's own commands (test, mkdir, sleep) answered as
+// the system would. With `isHelper` false Node is not found. Every write to the machine is recorded with how it was
+// made, so a test can see what the plugin wrote. The helper's probeUsage answers from `usage` per config directory.
+// Not a test file itself: stop.test.ts, guard.test.ts and the notice, licence, drift and digest tests use it.
 
 import { mock } from 'claude-code/testing'
 import type { FsStat, On } from 'claude-code'
 
-import { tailLines } from '../hooks/core'
-import { USAGE_ARGS, parseUsage } from '../hooks/usage'
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, STOP_SCRIPT, TAIL_SHAPED_SCRIPT, TREE_SCRIPT } from '../hooks/host-posix'
-import { helperAnswer, newerInMap, removeRegularInMap, stopInTable, throughLinks, treeInTable } from './fake-helper'
+import { helperAnswer, throughLinks, usageAnswerOf } from './fake-helper'
 import type { ProcTable } from './fake-helper'
 import { NOW_MS } from './fixtures'
+
+/** The usage probe's arguments after the executable, as a probe process shows them in the table. */
+const USAGE_ARGS = ['-p', '/usage', '--no-session-persistence']
 
 export const HOME = '/w/home'
 export const ORCH = '/w/orch'
@@ -23,14 +23,13 @@ export const RUNS = `${HOME}/.claude/session-control/runs`
 export const OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: true }
 
 /**
- * What `claude -p /usage` answers for a config directory: its text (and stderr, exit code), or no claude, or no answer in
- * time. On the native route both of the last make the run reject; the test kit turns a hook's throw into its own
- * rejection ("no implementation"), so only the helper route can tell TIMEOUT from NO_CLAUDE here.
+ * What `claude -p /usage` answers for a config directory: its text (and stderr, exit code; the helper's answer is that of
+ * the case of usage-fixtures.ts that holds the text), or no claude, or no answer in time.
  */
 export type UsageFake = { stdout: string; stderr?: string; exitCode?: number } | 'missing' | 'timeout'
 
-/** One usage probe the plugin made: the directory (`inherited` when CLAUDE_CONFIG_DIR was left out) and the route. */
-export type UsageRun = { configDir: string; isInherited: boolean; via: 'native' | 'helper'; argv: string[]; cwd?: string; stdin?: string }
+/** One usage probe the plugin made: the directory (`inherited` when CLAUDE_CONFIG_DIR was left out) and the helper's argv. */
+export type UsageRun = { configDir: string; isInherited: boolean; via: 'helper'; argv: string[] }
 
 /** One write the plugin made: the path and how (`fs.write`, `mv`, `append`, `rm`, `helper:<op>`). */
 export type Written = { path: string; via: string }
@@ -52,8 +51,8 @@ export type World = {
    */
   launch: { cwd: string; sid: string; isFound?: boolean }
   /**
-   * Operations made to fail: `tree` (the listing cannot run), `stop` (the stop script sends nothing and exits 1),
-   * `helper` (node starts but the helper script is not there: exit 1, nothing on stdout).
+   * Operations made to fail: `tree` (the helper's listing answers ok:false IO), `stop` (the helper's stop sends nothing
+   * and answers ok:false IO), `helper` (node starts but the helper script is not there: exit 1, nothing on stdout).
    */
   breaks: Set<'tree' | 'stop' | 'helper'>
   /** Every path $.fs.stat was asked about, in order (with `resolve` marked `+resolve`). */
@@ -86,7 +85,7 @@ export type World = {
 
 const ok = (stdout = '', exitCode = 0) => ({ exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
 
-/** The probe's lines over the table and the map, as PROBE_SCRIPT prints them for its arguments. */
+/** The probe's lines over the table and the map, as the helper's probe prints them for its arguments. */
 function probeLines(world: World, args: readonly string[]): string {
   const lines: string[] = []
   for (const [pid, proc] of world.table.procs) if (proc.claude !== undefined) lines.push(['P', pid, 'claude', proc.claude.elapsedSec ?? 3, proc.claude.cwd, proc.claude.configDir, proc.claude.cmdline].join('\t'))
@@ -152,7 +151,7 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
       world.usageKnobs.onRun?.()
       if (world.usageKnobs.linger === true) {
         const pid = 8100 + world.usageRuns.length
-        world.table.procs.set(pid, { ppid: 1, start: String(pid), state: 'S', comm: 'claude', claude: { cwd: run.cwd ?? '/', configDir: run.isInherited ? '' : run.configDir, cmdline: `claude ${USAGE_ARGS.join(' ')}`, elapsedSec: 1 } })
+        world.table.procs.set(pid, { ppid: 1, start: String(pid), state: 'S', comm: 'claude', claude: { cwd: '/', configDir: run.isInherited ? '' : run.configDir, cmdline: `claude ${USAGE_ARGS.join(' ')}`, elapsedSec: 1 } })
       }
       if (world.usageKnobs.hold !== undefined) await world.usageKnobs.hold
       if (world.usageKnobs.stepMs !== undefined) await world.clock.advance(world.usageKnobs.stepMs)
@@ -208,9 +207,9 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
   on('process.run', ($, e) => {
     const argv = e.argv.map(String)
     world.runs.push(argv)
-    const [cmd, , script] = argv
+    const [cmd] = argv
     if (cmd === 'node' && argv[1] === '--version') {
-      if (opts.isHelper !== true) throw new Error('spawn node ENOENT')
+      if (opts.isHelper === false) throw new Error('spawn node ENOENT')
       return { value: ok('v24.14.0\n') }
     }
     if (cmd === 'node' && argv[1]?.endsWith('/helper/host.mjs')) {
@@ -220,10 +219,12 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
       if (op === 'probeUsage') {
         const isInherited = request.isInherited === true
         return usageProbe({ configDir: String(request.configDir), isInherited, via: 'helper', argv }, fake => {
-          const parsed = fake === 'missing' ? { ok: false, code: 'NO_CLAUDE' } : fake === 'timeout' ? { ok: false, code: 'TIMEOUT' } : parseUsage(fake.stdout, fake.stderr, fake.exitCode)
+          const parsed = fake === 'missing' ? { ok: false, code: 'NO_CLAUDE' } : fake === 'timeout' ? { ok: false, code: 'TIMEOUT' } : usageAnswerOf(fake.stdout, fake.stderr, fake.exitCode)
           return { value: ok(JSON.stringify(parsed), parsed.ok ? 0 : 1) }
         })
       }
+      if (op === 'processTree' && world.breaks.has('tree')) return { value: ok(JSON.stringify({ ok: false, code: 'IO' }), 1) }
+      if (op === 'stopProcesses' && world.breaks.has('stop')) return { value: ok(JSON.stringify({ ok: false, code: 'IO' }), 1) }
       const steps = op === 'batch' ? (request.ops as Record<string, unknown>[]) : [{ op, ...request }]
       for (const step of steps) {
         if (['writeAtomic', 'append', 'rotate'].includes(String(step.op))) record(String(step.path), `helper:${String(step.op)}`)
@@ -232,52 +233,6 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
       }
       const answer = helperAnswer(files, op, request, probeLines(world, (request.args as string[] | undefined) ?? []), real, new Map(), links, world.table)
       return { value: ok(JSON.stringify(answer), answer.ok === true ? 0 : 1) }
-    }
-    if (cmd === 'claude' && argv.slice(1).join(' ') === USAGE_ARGS.join(' ')) {
-      const configDir = e.init?.env?.CLAUDE_CONFIG_DIR
-      const run: UsageRun = { configDir: configDir ?? '', isInherited: configDir === undefined, via: 'native', argv, ...(e.init?.cwd === undefined ? {} : { cwd: e.init.cwd }), ...(e.init?.stdin === undefined ? {} : { stdin: e.init.stdin }) }
-      return usageProbe(run, fake => {
-        if (fake === 'missing') throw new Error('spawn claude ENOENT')
-        if (fake === 'timeout') throw new Error('the command timed out after 15000 ms')
-        return { value: { ...ok(fake.stdout, fake.exitCode ?? 0), stderr: fake.stderr ?? '' } }
-      })
-    }
-    if (cmd === 'sh' && script === PROBE_SCRIPT) return { value: ok(probeLines(world, argv.slice(4))) }
-    if (cmd === 'sh' && script === TREE_SCRIPT) {
-      if (world.breaks.has('tree')) throw new Error('the process tree listing timed out')
-      return { value: ok(treeInTable(world.table, Number(argv[4]), argv[5] ?? '')) }
-    }
-    if (cmd === 'sh' && script === STOP_SCRIPT) return { value: world.breaks.has('stop') ? ok('', 1) : ok(stopInTable(world.table, Number(argv[4]), argv.slice(5))) }
-    if (cmd === 'sh' && script === APPEND_SCRIPT) {
-      const path = argv[5] ?? ''
-      write(path, `${files.get(real(path)) ?? ''}${argv[4]}\n`, 'append')
-      return { value: ok() }
-    }
-    if (cmd === 'sh' && script === REMOVE_REGULAR_SCRIPT) {
-      record(argv[4] ?? '', 'rm')
-      return { value: ok('', removeRegularInMap(files, links, argv[4] ?? '')) }
-    }
-    if (cmd === 'sh' && script === ROTATE_SCRIPT) return { value: ok() }
-    if (cmd === 'sh' && script === NEWER_SCRIPT) {
-      const found = newerInMap(files, new Map(), argv[4] ?? '', Number(argv[5]))
-      if (found === undefined) return { value: ok('', 3) }
-      return { value: ok(`${found.map(one => `${one.mtimeMs / 1000}\t${one.path}\n`).join('')}N\t${found.length}\n`) }
-    }
-    if (cmd === 'sh' && (script?.startsWith('tail -n 600 ') === true || script === TAIL_SHAPED_SCRIPT)) {
-      const text = files.get(real(argv[4] ?? ''))
-      return { value: text === undefined ? ok('', 1) : ok(tailLines(text, 600, 20000)) }
-    }
-    if (cmd === 'mv') {
-      const text = files.get(real(argv[2] ?? ''))
-      if (text === undefined) return { value: ok('', 1) }
-      files.delete(real(argv[2] ?? ''))
-      write(argv[3] ?? '', text, 'mv')
-      return { value: ok() }
-    }
-    if (cmd === 'rm') {
-      record(argv[2] ?? '', 'rm')
-      files.delete(real(argv[2] ?? ''))
-      return { value: ok() }
     }
     if (cmd === 'mkdir' || cmd === 'sleep') return { value: ok() }
     if (cmd === 'test') {

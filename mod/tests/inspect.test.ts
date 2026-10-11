@@ -6,8 +6,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { tailLines, workerName } from '../hooks/core'
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, TAIL_SHAPED_SCRIPT } from '../hooks/host-posix'
+import { workerName } from '../hooks/core'
 import {
   MAX_ANSWER_CHARS,
   assistantMessages,
@@ -26,7 +25,7 @@ import {
   workerTailText,
 } from '../hooks/inspect'
 import { REDACTED, redact } from '../hooks/trace'
-import { newerInMap } from './fake-helper'
+import { helperAnswer } from './fake-helper'
 import { NOW_MS, NOW_SEC } from './fixtures'
 
 const HOME = '/m/home'
@@ -34,7 +33,7 @@ const ORCH = '/m/work/orch'
 const CFG = '/m/cfg'
 const REG = `${HOME}/.claude/headless-sessions.json`
 const RUNS = `${HOME}/.claude/session-control/runs`
-const OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: false, helper: 'off' }
+const OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: false }
 
 const tool = (name: string) => `mcp__session-control__${name}`
 
@@ -133,7 +132,8 @@ const PROBE = [
   .map(cols => cols.join('\t'))
   .join('\n')
 
-type World = { files: Map<string, string>; mtimes: Map<string, number>; writes: string[]; runs: string[][]; unreadable: Set<string> }
+/** The machine: its files and their mtimes, the writes through $.fs, every command, each helper call with its request, the files over the read cap. */
+type World = { files: Map<string, string>; mtimes: Map<string, number>; writes: string[]; runs: string[][]; calls: { op: string; request: Record<string, unknown> }[]; unreadable: Set<string> }
 
 function world(on: On, registry: object[] = REGISTRY): World {
   const files = new Map<string, string>([
@@ -165,7 +165,7 @@ function world(on: On, registry: object[] = REGISTRY): World {
     [`${ORCH}/open-points.json`, (T0 + 10) * 1000],
     [`${ORCH}/task-queue.json.bak`, (T0 + 50) * 1000],
   ])
-  const w: World = { files, mtimes, writes: [], runs: [], unreadable: new Set() }
+  const w: World = { files, mtimes, writes: [], runs: [], calls: [], unreadable: new Set() }
   const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   mock.clock(on, { now: NOW_MS })
   mock.env(on, { HOME })
@@ -193,25 +193,13 @@ function world(on: On, registry: object[] = REGISTRY): World {
   on('process.run', ($, e) => {
     const argv = e.argv.map(String)
     w.runs.push(argv)
-    const [cmd, , script] = argv
-    if (cmd === 'sh' && script === PROBE_SCRIPT) return ok(PROBE)
-    if (cmd === 'sh' && script === 'tail -n 600 "$1" | cut -c1-20000') {
-      const text = files.get(argv[4] ?? '')
-      return text === undefined ? ok('', 1) : ok(tailLines(text, 600, 20000))
-    }
-    if (cmd === 'sh' && script === TAIL_SHAPED_SCRIPT) {
-      const text = files.get(argv[4] ?? '')
-      return text === undefined ? ok('', 1) : ok(tailLines(text, Number(argv[5]), Number(argv[6])).slice(-Number(argv[7])))
-    }
-    if (cmd === 'sh' && script === NEWER_SCRIPT) {
-      const found = newerInMap(files, mtimes, argv[4] ?? '', Number(argv[5]))
-      if (found === undefined) return ok('', 3)
-      return ok(`${found.slice(0, Number(argv[6])).map(one => `${(one.mtimeMs / 1000).toFixed(10)}\t${one.path}\n`).join('')}N\t${found.length}\n`)
-    }
-    // The debug trace's own appends.
-    if (cmd === 'sh' && script === APPEND_SCRIPT) {
-      files.set(argv[5] ?? '', `${files.get(argv[5] ?? '') ?? ''}${argv[4]}\n`)
-      return ok()
+    // Node and its helper over the files: the probe prints PROBE, the listing reads the mtimes, the trace's appends land in the map.
+    if (argv[0] === 'node' && argv[1] === '--version') return ok('v24.14.0\n')
+    if (argv[0] === 'node' && argv[1]?.endsWith('/helper/host.mjs')) {
+      const request = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+      w.calls.push({ op: argv[2] ?? '', request })
+      const answer = helperAnswer(files, argv[2] ?? '', request, PROBE, path => path, mtimes)
+      return ok(JSON.stringify(answer), answer.ok === true ? 0 : 1)
     }
     if (cmd === 'mkdir' || cmd === 'test') return ok()
     throw new Error(`unexpected command ${argv.join(' ')}`)
@@ -224,15 +212,16 @@ async function call($: Parameters<Parameters<typeof test>[2]>[0], w: World, name
   await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
   const writes = w.writes.length
   const runs = w.runs.length
+  const calls = w.calls.length
   const out = (await $.tool.call({ tool: tool(name), ...input } as never)) as { result?: unknown; deny?: unknown }
-  return { out, text: String(out.result ?? ''), deny: out.deny === undefined ? undefined : String(out.deny), writes: w.writes.slice(writes), runs: w.runs.slice(runs) }
+  return { out, text: String(out.result ?? ''), deny: out.deny === undefined ? undefined : String(out.deny), writes: w.writes.slice(writes), runs: w.runs.slice(runs), calls: w.calls.slice(calls) }
 }
 
-/** Every command a tool ran is a read: the probe, a tail, the listing. */
-const READS = new Set([PROBE_SCRIPT, 'tail -n 600 "$1" | cut -c1-20000', TAIL_SHAPED_SCRIPT, NEWER_SCRIPT])
+/** Every command a tool ran is a read: the helper's probe, a tail, the listing. */
+const READS = new Set(['probe', 'tail', 'filesNewerThan'])
 const expectReadOnly = (got: { writes: string[]; runs: string[][] }) => {
   expect(got.writes).toEqual([])
-  expect(got.runs.every(argv => argv[0] === 'sh' && READS.has(argv[2] ?? ''))).toBe(true)
+  expect(got.runs.every(argv => argv[0] === 'node' && argv[1]?.endsWith('/helper/host.mjs') === true && READS.has(argv[2] ?? ''))).toBe(true)
 }
 
 describe('list_sessions', () => {
@@ -450,7 +439,7 @@ describe('read_result', () => {
     const got = await call($, w, 'read_result', { session_id: SID_CHATTER })
     expectReadOnly(got)
     expect(got.text.split('\n')[2]).toStartWith("source: the transcript's tail, its last substantial assistant message")
-    expect(got.runs.some(argv => argv[2] === TAIL_SHAPED_SCRIPT && argv[5] === '400' && argv[6] === '400000')).toBe(true)
+    expect(got.calls.some(one => one.op === 'tail' && one.request.lines === 400 && one.request.width === 400_000)).toBe(true)
   })
 
   test('truncation: the head kept up to max_chars, the cut counted', { options: OPTIONS }, async ($, on) => {
@@ -517,7 +506,7 @@ describe('session_writes', () => {
     const got = await call($, w, 'session_writes', { session_id: SID_WRITER })
     expectReadOnly(got)
     // The start is the transcript's first timestamp with its fraction dropped.
-    expect(got.runs.find(argv => argv[2] === NEWER_SCRIPT)?.slice(4)).toEqual(['/m/work', String(T0), '200'])
+    expect(got.calls.find(one => one.op === 'filesNewerThan')?.request).toEqual({ dir: '/m/work', since: T0, max: 200 })
     const iso = (sec: number) => new Date(sec * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
     expect(got.text.split('\n')).toEqual([
       `session_writes for session ${SID_WRITER} "writer"`,

@@ -214,8 +214,7 @@ export function tail(request) {
 }
 
 /**
- * `{path, adding, maxBytes, moves}`: the trace rotation of ROTATE_SCRIPT in hooks/host-posix.ts. The size is read here,
- * right before the renames, so of several processes sharing the trace only the first to find it too big rotates it.
+ * `{path, adding, maxBytes, moves}`: the rotation of the debug trace. The size is read here, right before the renames, so of several processes sharing the trace only the first to find it too big rotates it.
  * Each move whose source is there is made in order (the oldest file is overwritten); a move another process made
  * first is no failure, and only the last move (the trace itself) failing while its source is still there is one.
  */

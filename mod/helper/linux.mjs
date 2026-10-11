@@ -1,5 +1,5 @@
-// The process probe on Linux: /proc read natively, printed in the line format of PROBE_SCRIPT (hooks/host-posix.ts),
-// so parseProcFacts in hooks/core.ts reads it unchanged:
+// The process probe on Linux: /proc read directly, printed in the line format parseProcFacts in hooks/core.ts reads
+// (PROBE_PS1 of hooks/host-windows.ts prints the same lines on Windows):
 //   P <pid> <comm> <elapsedSec> <cwd> <CLAUDE_CONFIG_DIR> <cmdline>   each process named claude
 //   A <pid> <comm> <statStart> <fileProcStart> <fileSessionId>        each asked pid that exists
 //   T <sid> <mtimeEpochSec>                                            newest transcript of an asked session
@@ -15,7 +15,7 @@ import * as fs from 'node:fs'
 const PROC = (process.env.SC_HELPER_TEST === '1' && process.env.SC_HELPER_PROC_ROOT) || '/proc'
 
 /**
- * Clock ticks per second of /proc/<pid>/stat (getconf CLK_TCK in the shell probe). The kernel reports USER_HZ, which is
+ * Clock ticks per second of /proc/<pid>/stat (what `getconf CLK_TCK` prints). The kernel reports USER_HZ, which is
  * 100 on every Linux architecture Claude Code runs on (x86-64, arm64); Node has no sysconf to ask.
  */
 const CLK_TCK = 100
@@ -53,8 +53,8 @@ function comm(pid) {
 
 /**
  * CLAUDE_CONFIG_DIR of a process: its environ split at NUL and newline, the first piece that starts with the name
- * (the shell probe's `tr "\000" "\n" | sed -n "s/^CLAUDE_CONFIG_DIR=//p" | head -n 1`). Nothing else of the
- * environment leaves this function.
+ * (as `tr "\000" "\n" | sed -n "s/^CLAUDE_CONFIG_DIR=//p" | head -n 1` takes it). Nothing else of the environment
+ * leaves this function.
  */
 function configDir(pid) {
   const environ = readText(`${PROC}/${pid}/environ`)
@@ -83,7 +83,7 @@ function sessionFields(file) {
   }
 }
 
-/** The P lines: each process named claude, in the order the shell's /proc/[0-9]* glob lists them. */
+/** The P lines: each process named claude, in the order a /proc/[0-9]* glob lists them. */
 function claudeLines() {
   const uptime = readText(`${PROC}/uptime`)
   const up = uptime === undefined ? undefined : Number.parseInt(uptime.split('.')[0], 10)
@@ -157,7 +157,7 @@ function transcriptLine(arg) {
   return newest === undefined ? undefined : `T\t${sid}\t${newest / 1_000_000_000n}\n`
 }
 
-/** `{args}`, the arguments probeArgs gives the shell probe: `{out}`, the probe's lines. */
+/** `{args}`, the arguments probeArgs gives the probe: `{out}`, the probe's lines. */
 export function probe(request) {
   const args = Array.isArray(request.args) ? request.args.filter(arg => typeof arg === 'string') : []
   const lines = claudeLines()

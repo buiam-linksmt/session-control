@@ -8,23 +8,24 @@
 // are. THE NATIVE WINDOWS BRANCH IS UNVERIFIED: it has not been run on a Windows host; only the WSL branch has.
 // Without powershell.exe it prints `skipped`.
 //
-// Extracts the Windows PowerShell scripts from hooks/host-windows.ts, writes them to a scratch directory on the Windows
-// side and runs them through powershell.exe, the way the mod runs them on native Windows (absolute path, -File).
+// Extracts the Windows PowerShell scripts the mod runs (PROBE_PS1 and TREE_PS1 of hooks/host-windows.ts), writes them
+// to a scratch directory on the Windows side and runs them through powershell.exe, the way the mod runs them on native
+// Windows (absolute path, -File); it also runs the launch line in Git Bash and the PowerShell launch route's command.
 // It proves the scripts' own behaviour on this host's PowerShell and file system only: not what the Windows engine
-// passes them, nor a real claude.exe. NEWER_PS1 (the listing of the files written after a time) runs over a scratch
-// tree holding a .git folder and a junction out of the tree. The scratch directory is a new folder under SC_WIN_SCRATCH
-// (a Windows path) or under the Windows %TEMP%, and is removed at the end.
+// passes them, nor a real claude.exe. The scratch directory is a new folder under SC_WIN_SCRATCH (a Windows path) or
+// under the Windows %TEMP%, and is removed at the end.
 //
 // Its last parts copy the Node helper (mod/helper/*.mjs) to the scratch directory and run its file operations with the
 // Windows node.exe (SC_WIN_NODE, else C:\Program Files\nodejs\node.exe from WSL and the node.exe running this test on
 // native Windows), as the mod does on native Windows: rename over an existing file (also while another process holds
-// it open), append, remove, the tail of a 3 MB UTF-8 file with CRLF line ends and non-ASCII text, filesNewerThan over
-// the tree NEWER_PS1 listed (the junction neither followed nor listed), hashTree over two copies of a mod folder (the
-// SHA-256 of each file against Node's own, a junction in hooks neither followed nor hashed, the generated
-// .claude-plugin/types and tests left out, the fixed codes), and a batch of 20 operations, with the time per batch;
-// then probeUsage's process shape: claude.exe looked up on a PATH of one scratch folder without a shell (a copy of
-// node.exe stands in, so no claude starts), a claude.cmd alone and an empty PATH answered NO_CLAUDE; then the stop of
-// stop_worker on a throwaway node.exe tree of its own. Without that node.exe those parts print `skipped`.
+// it open), append, remove (a junction and a folder refused with regularOnly), the tail of a 3 MB UTF-8 file with CRLF
+// line ends and non-ASCII text, filesNewerThan over a scratch tree with a .git folder and a junction out of it (the
+// junction neither followed nor listed), hashTree over two copies of a mod folder (the SHA-256 of each file against
+// Node's own, a junction in hooks neither followed nor hashed, the generated .claude-plugin/types and tests left out,
+// the fixed codes), and a batch of 20 operations, with the time per batch; then probeUsage's process shape: claude.exe
+// looked up on a PATH of one scratch folder without a shell (a copy of node.exe stands in, so no claude starts), a
+// claude.cmd alone and an empty PATH answered NO_CLAUDE; then the stop of stop_worker on a throwaway node.exe tree of
+// its own. Without that node.exe those parts print `skipped`.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -41,7 +42,7 @@ const utf8 = new TextDecoder('utf-8', { fatal: true })
 const utf8Lenient = new TextDecoder('utf-8')
 const readFile = path => fs.readFileSync(path, 'utf8')
 const SRC = readFile(join(HERE, '..', 'hooks', 'core.ts'))
-// The scripts the Windows adapter runs (FILES_PS1, PROBE_PS1) live in hooks/host-windows.ts.
+// The scripts the Windows adapter runs (PROBE_PS1, TREE_PS1) live in hooks/host-windows.ts.
 const WIN_SRC = readFile(join(HERE, '..', 'hooks', 'host-windows.ts'))
 
 /** shutil.which: the first file of that name on the PATH (on Windows also with each PATHEXT ending). */
@@ -169,70 +170,18 @@ function makedirs(path) {
 const JUNCTION_PS1 = 'param([string]$L, [string]$T)\r\n$null = New-Item -ItemType Junction -Path $L -Target $T\r\n'
 
 try {
-  const files = constant('FILES_PS1')
-  // move onto a name that is not there yet; spaces and brackets stay literal
-  put('a b [1].tmp', 'one')
-  let [code, out, err] = run('files.ps1', files, 'move', `${win}/a b [1].tmp`, `${win}/reg [x].json`)
-  check(code === 0 && err === '', [code, err])
-  check(get('reg [x].json') === 'one' && get('a b [1].tmp') === null)
-  // move over an existing file: replaced in one step
-  put('reg [x].json.tmp.1', 'two')
-  ;[code, out, err] = run('files.ps1', files, 'move', `${win}/reg [x].json.tmp.1`, `${win}/reg [x].json`)
-  check(code === 0 && get('reg [x].json') === 'two' && get('reg [x].json.tmp.1') === null, [code, err])
-  // backslash paths work the same
-  put('c.tmp', 'three')
-  ;[code, out, err] = run('files.ps1', files, 'move', toWin(join(work, 'c.tmp'), '\\'), toWin(join(work, 'reg [x].json'), '\\'))
-  check(code === 0 && get('reg [x].json') === 'three', [code, err])
-  // a failed move exits 1 with the reason and leaves the target alone
-  ;[code, out, err] = run('files.ps1', files, 'move', `${win}/missing.tmp`, `${win}/reg [x].json`)
-  check(code === 1 && err.trim() !== '' && get('reg [x].json') === 'three', [code, err])
-  // remove: a file goes, a missing one is no error
-  put('gone.tmp', 'x')
-  check(run('files.ps1', files, 'remove', `${win}/gone.tmp`)[0] === 0 && get('gone.tmp') === null)
-  check(run('files.ps1', files, 'remove', `${win}/gone.tmp`)[0] === 0)
-  // tail: the last lines, each cut to the width, as UTF-8
-  const tailLines = Array.from({ length: 700 }, (_, i) => pyJson({ n: i, text: 'caf\u{e9} \u{2615} \u{1F600}' }))
-  tailLines[650] = 'x'.repeat(25000)
-  put('t.jsonl', tailLines.join('\n') + '\n')
-  ;[code, out, err] = run('files.ps1', files, 'tail', `${win}/t.jsonl`, '600', '20000')
-  check(code === 0, err)
-  let want = tailLines.slice(-600).map(line => pySlice(line, 0, 20000) + '\n').join('')
-  check(out === want, [out.length, want.length, out.slice(0, 200)])
-  // append: the text of one file goes to the end of another, which is not read; the first is removed
-  put('log.jsonl', 'old line\n')
-  put('add.tmp', '{"t":"caf\u{e9} \u{2615}"}\n{"t":"b"}\n')
-  ;[code, out, err] = run('files.ps1', files, 'append', `${win}/add.tmp`, `${win}/log.jsonl`)
-  check(code === 0 && err === '', [code, err])
-  check(get('log.jsonl') === 'old line\n{"t":"caf\u{e9} \u{2615}"}\n{"t":"b"}\n' && get('add.tmp') === null)
-  put('add.tmp', 'x\n')
-  ;[code, out, err] = run('files.ps1', files, 'append', `${win}/add.tmp`, `${win}/new dir/fresh.jsonl`)
-  check(code === 0 && get('new dir/fresh.jsonl') === 'x\n', [code, err])
-  ;[code, out, err] = run('files.ps1', files, 'append', `${win}/missing.tmp`, `${win}/log.jsonl`)
-  check(code === 1 && get('log.jsonl').startsWith('old line'), [code, err])
-  ;[code, out, err] = run('files.ps1', files, 'nonsense')
-  check(code === 1 && err.includes('unknown operation'), [code, err])
-  // removeregular: a regular file goes (a name with brackets and blanks is literal); a path that is not there is exit 3
-  // (a missing folder too); a directory is exit 5; a junction (a reparse point, made with New-Item: no admin right
-  // needed) is exit 4, and neither the junction nor the folder it leads to is touched.
-  put('rr [1] x.json', 'x')
-  check(run('files.ps1', files, 'removeregular', `${win}/rr [1] x.json`)[0] === 0 && get('rr [1] x.json') === null)
-  check(run('files.ps1', files, 'removeregular', `${win}/rr [1] x.json`)[0] === 3)
-  check(run('files.ps1', files, 'removeregular', `${win}/no such dir/x.json`)[0] === 3)
+  let code, out, err
+  // The fixtures the helper's removal is checked on: a directory, and a junction (a reparse point, made with New-Item:
+  // no admin right needed) out of the scratch tree.
   makedirs(join(work, 'rr-dir'))
   put('rr-dir/inner.txt', 'inner')
-  check(run('files.ps1', files, 'removeregular', `${win}/rr-dir`)[0] === 5 && get('rr-dir/inner.txt') === 'inner')
   makedirs(join(work, 'rr-out'))
   put('rr-out/secret.txt', 'outside')
   ;[code, out, err] = run('junction.ps1', JUNCTION_PS1, toWin(join(work, 'rr-junction'), '\\'), toWin(join(work, 'rr-out'), '\\'))
   check(code === 0, [code, err])
-  check(run('files.ps1', files, 'removeregular', `${win}/rr-junction`)[0] === 4)
-  check(exists(join(work, 'rr-junction')) && get('rr-out/secret.txt') === 'outside')
-  console.log('windows-files-selftest: ok')
 
-  // --- NEWER_PS1: the files under a folder written after a time. A junction out of the tree (made with New-Item, no
-  // admin right needed) is neither followed nor listed, no .git folder is entered, the newest come first and the
-  // count covers what the cap leaves out.
-  const newer = constant('NEWER_PS1')
+  // The tree the helper's listing of the files written after a time runs over: a junction out of it (made with New-Item,
+  // no admin right needed), a .git folder, files written before and after the time.
   const T = 1_790_000_000
   const stamp = (name, sec, text = 'x') => {
     fs.mkdirSync(dirname(join(work, name)), { recursive: true })
@@ -249,32 +198,6 @@ try {
   check(code === 0, [code, err])
   check(exists(join(work, 'newer', 'j', 'secret.txt')), 'the junction does not lead out of the tree')
   const wantNewer = [['a.txt', (T + 30) * 1000], ['caf\u{e9}.txt', (T + 25) * 1000], ['sub [1]/b b.txt', (T + 20) * 1000]]
-
-  const newerLines = text => {
-    const lines = text.replaceAll('\r\n', '\n').replace(/\n+$/, '').split('\n')
-    const total = lines.pop()
-    check(total.startsWith('N\t'), text)
-    const found = []
-    for (const line of lines) {
-      const [sec, path] = [before(line, '\t'), after(line, '\t')]
-      const [whole, fraction] = sec.includes('.') ? [before(sec, '.'), after(sec, '.')] : [sec, '']
-      found.push([path.replaceAll('\\', '/'), pyInt(whole) * 1000 + pyInt((fraction + '000').slice(0, 3))])
-    }
-    return [found, pyInt(total.slice(2))]
-  }
-
-  ;[code, out, err] = run('newer.ps1', newer, `${win}/newer`, String(T), '200')
-  check(code === 0 && err === '', [code, err])
-  let [found, total] = newerLines(out)
-  const root = toWin(join(work, 'newer')).replace(/\/+$/, '')
-  check(isDeepStrictEqual(found.map(([p, ms]) => [pySlice(p, cpLen(root) + 1), ms]), wantNewer) && total === 3, [found, total])
-  check(!out.includes('outside') && !out.includes('secret'), out)
-  ;[code, out, err] = run('newer.ps1', newer, `${win}/newer`, String(T), '1')
-  ;[found, total] = newerLines(out)
-  check(code === 0 && found.length === 1 && found[0][0].endsWith('/a.txt') && total === 3, [code, out, err])
-  ;[code, out, err] = run('newer.ps1', newer, `${win}/no such folder`, String(T), '200')
-  check(code === 3 && out === '', [code, out, err])
-  console.log('windows-newer-selftest: ok (NEWER_PS1: newest first, the cap and the count, no .git, the junction neither followed nor listed)')
 
   // --- PROBE_PS1, with its process name swapped to powershell.exe: a sleeping powershell.exe of this test's own
   // plays the worker, and fake sessions files under the scratch directory play the engine's. This verifies the
@@ -652,16 +575,13 @@ try {
     check(size >= 3_000_000, size)
     const bigLines = text.split('\n')
     if (bigLines[bigLines.length - 1] === '') bigLines.pop()
-    want = bigLines.slice(-600).map(line => utf16Cut(line, 20000) + '\n').join('')
+    const want = bigLines.slice(-600).map(line => utf16Cut(line, 20000) + '\n').join('')
     let tailMs
     ;[answer, tailMs] = helper('tail', { path: w('big.jsonl'), lines: 600, width: 20000 })
     check(answer.ok === true && answer.dropped === 0, Object.fromEntries(Object.entries(answer).filter(([k]) => k !== 'text')))
     check(answer.text === want, [answer.text?.length, want.length])
-    // the file script's tail of the same file: Get-Content drops the \r, otherwise the same lines
-    ;[code, out, err] = run('files.ps1', files, 'tail', w('big.jsonl'), '600', '20000')
-    check(code === 0 && out === want.replaceAll('\r\n', '\n'), [code, err.slice(0, 200)])
-    // filesNewerThan: the same files as NEWER_PS1 over the same tree, the junction out of it neither followed nor
-    // listed, paths in the stored C:/... form, mtimes in ms; a missing folder is a fixed code
+    // filesNewerThan: the files written after the time, newest first, the .git folder not entered, the junction out of the
+    // tree neither followed nor listed, paths in the stored C:/... form, mtimes in ms; a missing folder is a fixed code
     let newerMs
     ;[answer, newerMs] = helper('filesNewerThan', { dir: w('newer'), since: T, max: 200 })
     check(answer.ok === true && answer.total === 3, answer)
@@ -718,7 +638,7 @@ try {
       check(pyEqual(helper('hashTree', bad)[0], { ok: false, code: 'BAD_REQUEST' }), bad)
     }
     check(get('hmod-out/secret.ts') === 'outside')
-    // a batch of 20 file operations in one process, in order; timed against 20 helper runs and 20 file-script runs
+    // a batch of 20 file operations in one process, in order; timed against 20 helper runs
     const batchOps = n => {
       const ops = []
       for (let k = 0; k < 5; k++) {
@@ -742,15 +662,6 @@ try {
       const [stepAnswer, took] = helper(op, request)
       check(stepAnswer.ok === true, stepAnswer)
       singleMs.push(took)
-    }
-    const psMs = []
-    put('ps.log', '')
-    for (let k = 0; k < 20; k++) {
-      put('ps.add', `{"k":${k}}\n`)
-      const started = performance.now()
-      ;[code, out, err] = run('files.ps1', files, 'append', w('ps.add'), w('ps.log'))
-      psMs.push(performance.now() - started)
-      check(code === 0, err)
     }
     // probeUsage on Windows, its process shape only, with no claude: a launcher run by the same node.exe gives the
     // helper a PATH of one scratch folder. There a copy of node.exe named claude.exe stands in for claude: the
@@ -795,8 +706,7 @@ try {
     const ms = value => value.toFixed(0)
     console.log(`windows-helper-selftest: ok (node ${version}; rename over a held file ${ms(heldMs)} ms; tail of ${(size / 1e6).toFixed(1)} MB ${ms(tailMs)} ms; filesNewerThan ${ms(newerMs)} ms; hashTree of two mod folders ${ms(hashMs)} ms; ` +
       `a batch of 20 operations: median ${ms(median(batchMs))} ms per batch (runs ${batchMs.map(ms).join(', ')}); ` +
-      `the same 20 as single helper runs ${ms(singleMs.reduce((a, b) => a + b, 0))} ms in all (median ${ms(median(singleMs))} ms each); ` +
-      `20 file-script appends ${ms(psMs.reduce((a, b) => a + b, 0))} ms in all (median ${ms(median(psMs))} ms each); ${IS_WINDOWS ? 'timed natively on Windows' : 'timed from WSL through interop'})`)
+      `the same 20 as single helper runs ${ms(singleMs.reduce((a, b) => a + b, 0))} ms in all (median ${ms(median(singleMs))} ms each); ${IS_WINDOWS ? 'timed natively on Windows' : 'timed from WSL through interop'})`)
   }
 
   // --- the stop of stop_worker on Windows: TREE_PS1 lists a throwaway node.exe tree (a parent that started one

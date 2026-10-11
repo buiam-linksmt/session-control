@@ -1,6 +1,6 @@
 // The Node helper (mod/helper/host.mjs) as a process, the way the mod runs it: `node host.mjs <op>`, one JSON request
 // on stdin, one JSON answer on stdout. Run with `node --test mod/tests/helper.test.mjs` (Node 22 or newer). The probe
-// is checked against the shell probe (PROBE_SCRIPT of hooks/host-posix.ts) run over the same fake /proc tree.
+// is checked against the lines recorded over a fake /proc tree.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -10,7 +10,6 @@ import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
-import vm from 'node:vm'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const HOST = join(HERE, '..', 'helper', 'host.mjs')
@@ -206,49 +205,6 @@ test('removeFile with regularOnly: a regular file goes; a symbolic link (to a fi
   }
 })
 
-/** REMOVE_REGULAR_SCRIPT of hooks/host-posix.ts, the adapter's own removal of a regular file, as the mod runs it. */
-function removeRegularScript() {
-  const src = fs.readFileSync(join(HERE, '..', 'hooks', 'host-posix.ts'), 'utf8')
-  const found = /export const REMOVE_REGULAR_SCRIPT = String\.raw`([\s\S]*?)`\n/.exec(src)
-  assert.ok(found, 'REMOVE_REGULAR_SCRIPT not found')
-  return found[1]
-}
-
-test('REMOVE_REGULAR_SCRIPT under sh (the native fallback): the same answers as the helper, by exit code (0 removed, 3 not there, 4 a link, 5 no regular file)', { skip: !IS_LINUX }, () => {
-  const dir = scratch()
-  const outside = scratch()
-  try {
-    const script = removeRegularScript()
-    const run = path => spawnSync('sh', ['-c', script, 'session-remove', path]).status
-    const runs = join(dir, 'runs')
-    fs.mkdirSync(runs)
-    fs.writeFileSync(join(outside, 'secret.txt'), 'outside file')
-    fs.writeFileSync(join(runs, 'plain.json'), 'plain')
-    fs.writeFileSync(join(runs, '-dash [x] \'q\'.json'), 'odd name')
-    fs.mkdirSync(join(runs, 'sub'))
-    fs.symlinkSync(join(outside, 'secret.txt'), join(runs, 'link.json'))
-    fs.symlinkSync(outside, join(runs, 'linkdir'), 'dir')
-    fs.symlinkSync(join(outside, 'missing'), join(runs, 'dangling.json'))
-    assert.equal(run(join(runs, 'plain.json')), 0)
-    assert.equal(fs.existsSync(join(runs, 'plain.json')), false)
-    assert.equal(run(join(runs, '-dash [x] \'q\'.json')), 0)
-    assert.equal(run(join(runs, 'plain.json')), 3)
-    assert.equal(run(join(runs, 'link.json')), 4)
-    assert.equal(run(join(runs, 'linkdir')), 4)
-    assert.equal(run(join(runs, 'dangling.json')), 4)
-    assert.equal(run(join(runs, 'sub')), 5)
-    for (const name of ['link.json', 'linkdir', 'dangling.json']) assert.ok(fs.lstatSync(join(runs, name)).isSymbolicLink(), name)
-    assert.equal(fs.readFileSync(join(outside, 'secret.txt'), 'utf8'), 'outside file')
-    assert.ok(fs.statSync(join(runs, 'sub')).isDirectory())
-    // A relative path that begins with a dash is a file name, not an option.
-    const plainDir = spawnSync('sh', ['-c', `${script}`, 'session-remove', '-x'], { cwd: runs })
-    assert.equal(plainDir.status, 3)
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
-    fs.rmSync(outside, { recursive: true, force: true })
-  }
-})
-
 test('append: added to the end without reading the file, its directory made; many processes at once lose and split nothing', async () => {
   const dir = scratch()
   try {
@@ -401,13 +357,6 @@ test('batch: the operations in order in one process; the first failure stops it 
 
 // ---------------------------------------------------------------- filesNewerThan: the read-only listing
 
-/** NEWER_SCRIPT of hooks/host-posix.ts, as the mod runs it. */
-function newerScript() {
-  const src = fs.readFileSync(join(HERE, '..', 'hooks', 'host-posix.ts'), 'utf8')
-  const found = /export const NEWER_SCRIPT = String\.raw`([\s\S]*?)`\n/.exec(src)
-  assert.ok(found, 'NEWER_SCRIPT not found')
-  return found[1]
-}
 
 /** A file with its mtime set to `sec` (epoch seconds, a fraction allowed). */
 function put(file, sec, text = 'x') {
@@ -504,47 +453,7 @@ test('filesNewerThan: a folder it cannot read is passed over, the rest listed', 
   }
 })
 
-test('filesNewerThan: the same files, order and count as NEWER_SCRIPT under sh over the same tree', { skip: !IS_LINUX || !has('find') || !has('sort') || !has('awk') }, () => {
-  const top = scratch()
-  try {
-    const dir = join(top, 'work tree')
-    put(join(dir, 'a.txt'), T + 30.25)
-    put(join(dir, 'deep', 'er', 'b b.txt'), T + 20)
-    put(join(dir, 'tie2.txt'), T + 25)
-    put(join(dir, 'tie1.txt'), T + 25)
-    put(join(dir, 'old.txt'), T - 5)
-    put(join(dir, '.git', 'x'), T + 60)
-    put(join(top, 'outside.txt'), T + 70)
-    fs.symlinkSync(top, join(dir, 'up'))
-    fs.symlinkSync(join(top, 'outside.txt'), join(dir, 'l.txt'))
-    for (const max of [10, 2]) {
-      const sh = spawnSync('sh', ['-c', newerScript(), 'session-newer', dir, String(T), String(max)], { encoding: 'utf8' })
-      assert.equal(sh.status, 0, sh.stderr)
-      const lines = sh.stdout.trimEnd().split('\n')
-      const total = Number(lines.pop().split('\t')[1])
-      const shFiles = lines.map(line => {
-        const [sec, ...rest] = line.split('\t')
-        const [whole, fraction = ''] = sec.split('.')
-        return { path: rest.join('\t'), mtimeMs: Number(whole) * 1000 + Number(fraction.padEnd(3, '0').slice(0, 3)) }
-      })
-      const run = helper('filesNewerThan', { dir, since: T, max })
-      assert.deepEqual({ files: shFiles, total }, { files: run.answer.files, total: run.answer.total })
-    }
-    assert.equal(spawnSync('sh', ['-c', newerScript(), 'session-newer', join(top, 'none'), String(T), '10']).status, 3)
-  } finally {
-    fs.rmSync(top, { recursive: true, force: true })
-  }
-})
-
 // ---------------------------------------------------------------- the probe over a fake /proc tree
-
-/** PROBE_SCRIPT of hooks/host-posix.ts, as the mod runs it. */
-function probeScript() {
-  const src = fs.readFileSync(join(HERE, '..', 'hooks', 'host-posix.ts'), 'utf8')
-  const found = /export const PROBE_SCRIPT = (\[[\s\S]*?\])\.join\('\\n'\)/.exec(src)
-  assert.ok(found, 'PROBE_SCRIPT not found in host-posix.ts')
-  return vm.runInNewContext(found[1]).join('\n')
-}
 
 const CANARY = ['sk', 'canary-env-0123456789abcdef'].join('-')
 
@@ -592,7 +501,7 @@ function fakeTree() {
   return { root, proc, cfg, args }
 }
 
-/** The lines the fake tree gives, recorded from PROBE_SCRIPT under sh (<cfg> and <root> stand for the tree's paths). */
+/** The lines the fake tree gives, recorded once from the shell probe the mod ran before the helper (<cfg> and <root> stand for the tree's paths). */
 const RECORDED = [
   'P\t100\tclaude\t8765\t<root>/work dir\t<cfg>\tclaude -p --model opus -- hello there next line ',
   'P\t2000\tclaude\t3765\t/\t\tclaude --resume abc ',
@@ -604,21 +513,17 @@ const RECORDED = [
   '',
 ].join('\n')
 
-test('probe: the fake /proc tree gives the recorded PROBE_SCRIPT lines, the same as the shell probe over it', { skip: !IS_LINUX || !has('jq') }, () => {
+test('probe: the fake /proc tree gives the recorded lines', { skip: !IS_LINUX }, () => {
   const tree = fakeTree()
   try {
     const want = RECORDED.replaceAll('<cfg>', tree.cfg).replaceAll('<root>', tree.root)
-    const shell = spawnSync('sh', ['-c', probeScript().replaceAll('/proc', tree.proc), 'session-probe', ...tree.args]).stdout.toString('utf8')
-    assert.equal(shell, want)
     const run = helper('probe', { args: tree.args }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: tree.proc })
     assert.equal(run.code, 0)
     assert.deepEqual(Object.keys(run.answer), ['ok', 'out'])
     assert.equal(run.answer.out, want)
-    // One difference on purpose: a pid that is no number (the registry never holds one: probeArgs takes numbers only)
-    // is never looked up, where the shell would print a line for /proc/self.
+    // A pid that is no number (the registry never holds one: probeArgs takes numbers only) is never looked up, not even
+    // one that names an entry of /proc (self).
     fs.mkdirSync(join(tree.proc, 'self'))
-    const shellSelf = spawnSync('sh', ['-c', probeScript().replaceAll('/proc', tree.proc), 'session-probe', 'pid:self|~']).stdout.toString('utf8')
-    assert.ok(shellSelf.includes('A\tself\t'))
     assert.ok(!helper('probe', { args: ['pid:self|~', 'pid:..|~', 'pid:|~'] }, { SC_HELPER_TEST: '1', SC_HELPER_PROC_ROOT: tree.proc }).answer.out.includes('\nA\t'))
   } finally {
     fs.rmSync(tree.root, { recursive: true, force: true })
@@ -662,26 +567,7 @@ test('probe: SC_HELPER_PROC_ROOT alone, or with SC_HELPER_TEST other than 1, is 
   }
 })
 
-test('probe: the live /proc gives the shell probe\'s lines, elapsed seconds aside', { skip: !IS_LINUX || !has('jq') }, () => {
-  const shell = spawnSync('sh', ['-c', probeScript(), 'session-probe']).stdout.toString('utf8')
-  const node = helper('probe', { args: [] }).answer.out
-  const strip = text => text.split('\n').map(line => line.split('\t').filter((_, at) => at !== 3).join('\t')).join('\n')
-  // A claude process may start or end between the two runs: the lines both saw are the same.
-  const shellLines = new Set(strip(shell).split('\n'))
-  const nodeLines = strip(node).split('\n')
-  const common = nodeLines.filter(line => shellLines.has(line))
-  assert.ok(common.length >= Math.min(shellLines.size, nodeLines.length) - 2, `${shell}\n---\n${node}`)
-})
-
 // ---------------------------------------------------------------- the stop of stop_worker, on real processes
-
-/** A `[...].join('\n')` script of hooks/host-posix.ts, as the mod runs it. */
-function posixScript(name) {
-  const src = fs.readFileSync(join(HERE, '..', 'hooks', 'host-posix.ts'), 'utf8')
-  const found = new RegExp(`export const ${name} = (\\[[\\s\\S]*?\\])\\.join\\('\\\\n'\\)`).exec(src)
-  assert.ok(found, `${name} not found in host-posix.ts`)
-  return vm.runInNewContext(found[1]).join('\n')
-}
 
 /** Field 22 of /proc/<pid>/stat, or '' when the pid is gone. */
 function startOf(pid) {
@@ -714,16 +600,13 @@ function cleanup(tree, starts) {
 
 const lines = out => out.replace(/\n$/, '').split('\n').map(line => line.split('\t'))
 
-for (const via of ['helper', 'sh']) {
-  test(`stop (${via}): the tree is listed first, the root and every descendant stopped (KILL where TERM is ignored), the bystander untouched`, { skip: !IS_LINUX || !has('pgrep') }, async () => {
+{
+  test(`stop (helper): the tree is listed first, the root and every descendant stopped (KILL where TERM is ignored), the bystander untouched`, { skip: !IS_LINUX || !has('pgrep') }, async () => {
     const tree = await throwawayTree()
     const starts = new Map([...tree.all, tree.bystander.pid].map(pid => [pid, startOf(pid)]))
     try {
       const rootStart = starts.get(tree.root.pid)
-      const listed =
-        via === 'helper'
-          ? helper('processTree', { pid: tree.root.pid, start: rootStart }).answer.out
-          : spawnSync('sh', ['-c', posixScript('TREE_SCRIPT'), 'session-tree', String(tree.root.pid), rootStart], { encoding: 'utf8' }).stdout
+      const listed = helper('processTree', { pid: tree.root.pid, start: rootStart }).answer.out
       const got = lines(listed)
       assert.deepEqual(got[0].slice(0, 4), ['R', String(tree.root.pid), String(process.pid), rootStart])
       assert.equal(got[0][5].trim(), 'sh')
@@ -734,10 +617,7 @@ for (const via of ['helper', 'sh']) {
       const ancestors = got.filter(cols => cols[0] === 'G').map(cols => Number(cols[1]))
       assert.ok(ancestors.includes(process.pid), listed)
       const targets = [tree.root.pid, ...descendants.map(cols => Number(cols[1]))].map(pid => `${pid}:${starts.get(pid)}`)
-      const stopped =
-        via === 'helper'
-          ? helper('stopProcesses', { wait: 2, targets }).answer.out
-          : spawnSync('sh', ['-c', posixScript('STOP_SCRIPT'), 'session-stop', '2', ...targets], { encoding: 'utf8' }).stdout
+      const stopped = helper('stopProcesses', { wait: 2, targets }).answer.out
       const steps = lines(stopped)
       const sent = steps.filter(cols => cols[0] === 'S')
       assert.deepEqual(sent[0].slice(0, 3), ['S', String(tree.root.pid), 'TERM'])
@@ -765,19 +645,18 @@ for (const via of ['helper', 'sh']) {
     }
   })
 
-  test(`stop (${via}): a pid with another start is never signalled; this runner (an ancestor of the stop) is never signalled`, { skip: !IS_LINUX }, async () => {
+  test(`stop (helper): a pid with another start is never signalled; this runner (an ancestor of the stop) is never signalled`, { skip: !IS_LINUX }, async () => {
     const sleeper = spawn('sleep', ['300'], { stdio: 'ignore' })
     await new Promise(done => setTimeout(done, 100))
     const start = startOf(sleeper.pid)
     try {
       const wrong = `${sleeper.pid}:${Number(start) + 1}`
       const own = `${process.pid}:${startOf(process.pid)}`
-      const run = targets =>
-        via === 'helper' ? helper('stopProcesses', { wait: 1, targets }).answer.out : spawnSync('sh', ['-c', posixScript('STOP_SCRIPT'), 'session-stop', '1', ...targets], { encoding: 'utf8' }).stdout
+      const run = targets => helper('stopProcesses', { wait: 1, targets }).answer.out
       assert.deepEqual(lines(run([wrong])), [['X', String(sleeper.pid), 'gone'], ['F', String(sleeper.pid), 'gone', '']])
       assert.deepEqual(lines(run([own])).map(cols => cols.slice(0, 3)), [['X', String(process.pid), 'own'], ['F', String(process.pid), 'alive']])
       assert.equal(startOf(sleeper.pid), start)
-      const listed = via === 'helper' ? helper('processTree', { pid: sleeper.pid, start: String(Number(start) + 1) }).answer.out : spawnSync('sh', ['-c', posixScript('TREE_SCRIPT'), 'session-tree', String(sleeper.pid), String(Number(start) + 1)], { encoding: 'utf8' }).stdout
+      const listed = helper('processTree', { pid: sleeper.pid, start: String(Number(start) + 1) }).answer.out
       assert.deepEqual(lines(listed)[0], ['N', String(sleeper.pid), start])
       assert.equal(lines(listed).filter(cols => cols[0] === 'D').length, 0)
     } finally {
@@ -968,33 +847,26 @@ test('hashTree: a root that is not there or is a file, a bad request, over 500 f
 
 // ---------------------------------------------------------------- probeUsage (usage.mjs)
 
-/** Node strips the types of a .ts file by itself (Node 23.6 or newer, or 22 with the flag): the parser twin and the fixtures load as they are. */
+/** Node strips the types of a .ts file by itself (Node 23.6 or newer, or 22 with the flag): the fixtures load as they are. */
 const HAS_TS = Boolean(process.features?.typescript)
 
-test('probeUsage parser: the helper and the native fallback (hooks/usage.ts) give each recorded and written case its answer, and the same answer on mixed texts', { skip: !HAS_TS }, async () => {
+test('probeUsage parser: the helper gives each recorded and written case its answer', { skip: !HAS_TS }, async () => {
   const { parseUsage } = await import('../helper/usage.mjs')
-  const twin = await import('../hooks/usage.ts')
   const { USAGE_CASES } = await import('./usage-fixtures.ts')
   assert.ok(USAGE_CASES.length >= 20)
-  for (const one of USAGE_CASES) {
-    const args = [one.stdout, one.stderr ?? '', one.exitCode ?? 0]
-    assert.deepEqual(parseUsage(...args), one.expect, one.name)
-    assert.deepEqual(twin.parseUsage(...args), one.expect, one.name)
-  }
-  // Lines of every case shuffled together, with a fixed seed: both parsers agree on each mix.
-  const pool = USAGE_CASES.flatMap(one => one.stdout.split('\n').slice(0, 30))
-  let seed = 7
-  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648)
-  for (let round = 0; round < 300; round++) {
-    const text = Array.from({ length: 1 + (next() % 12) }, () => pool[next() % pool.length]).join(next() % 2 === 0 ? '\n' : '\r\n')
-    const exitCode = next() % 3 === 0 ? 1 : 0
-    assert.deepEqual(parseUsage(text, '', exitCode), twin.parseUsage(text, '', exitCode), JSON.stringify(text).slice(0, 200))
-  }
+  for (const one of USAGE_CASES) assert.deepEqual(parseUsage(one.stdout, one.stderr ?? '', one.exitCode ?? 0), one.expect, one.name)
 })
 
-test('probeUsage parser: an ambiguous or out-of-range percent, or one off its label line, is PARSE in both parsers wherever it stands; the good forms keep their figure', { skip: !HAS_TS }, async () => {
+test('probeUsage parser: an answer holds the two windows and nothing else of the text', { skip: !HAS_TS }, async () => {
   const { parseUsage } = await import('../helper/usage.mjs')
-  const twin = await import('../hooks/usage.ts')
+  const { USAGE_FIXTURES } = await import('./usage-fixtures.ts')
+  const answer = JSON.stringify(parseUsage(USAGE_FIXTURES.recordedMain ?? ''))
+  for (const word of ['subscription', 'Fable', 'contributing', 'requests', 'sessions', 'context', 'plugin-authoring', 'playwright']) assert.ok(!answer.includes(word), word)
+  assert.deepEqual(Object.keys(JSON.parse(answer)).sort(), ['five', 'ok', 'seven'])
+})
+
+test('probeUsage parser: an ambiguous or out-of-range percent, or one off its label line, is PARSE wherever it stands; the good forms keep their figure', async () => {
+  const { parseUsage } = await import('../helper/usage.mjs')
   const session = 'Current session: 12% used · resets 6pm (UTC)'
   const week = 'Current week (all models): 41% used · resets Oct 16, 1pm (UTC)'
   const bad = ['104%', '100.5%', '-5%', '\u22125%', '1,234%', '12,5%', '104,5 %', '12345%', '99999%', '>99%', '> 99%', '.5%', '1.2.3%']
@@ -1007,7 +879,6 @@ test('probeUsage parser: an ambiguous or out-of-range percent, or one off its la
   for (const token of bad) {
     for (const text of shapes(token)) {
       assert.deepEqual(parseUsage(text), { ok: false, code: 'PARSE' }, JSON.stringify(text))
-      assert.deepEqual(twin.parseUsage(text), { ok: false, code: 'PARSE' }, JSON.stringify(text))
     }
   }
   const off = [
@@ -1019,23 +890,13 @@ test('probeUsage parser: an ambiguous or out-of-range percent, or one off its la
   ]
   for (const text of off) {
     assert.deepEqual(parseUsage(text), { ok: false, code: 'PARSE' }, JSON.stringify(text))
-    assert.deepEqual(twin.parseUsage(text), { ok: false, code: 'PARSE' }, JSON.stringify(text))
   }
   for (const [token, percent] of [['0%', 0], ['<1%', 0], ['< 1%', 0], ['<5%', 4], ['7%', 7], ['07%', 7], ['99.9%', 99], ['100%', 100], ['100.0%', 100]]) {
     for (const text of shapes(token)) {
       const one = parseUsage(text)
       assert.equal(one.ok, true, JSON.stringify(text))
       assert.ok(one.five?.percent === percent || one.seven?.percent === percent, JSON.stringify(text))
-      assert.deepEqual(twin.parseUsage(text), one, JSON.stringify(text))
     }
-  }
-  // Lines of the good and the refused forms shuffled together, with a fixed seed: both parsers agree on each mix.
-  const pool = [...bad, '12%', '<1%', '100%'].flatMap(shapes).flatMap(text => text.split('\n')).concat(off.flatMap(text => text.split('\n')))
-  let seed = 11
-  const next = () => (seed = (seed * 1103515245 + 12345) % 2147483648)
-  for (let round = 0; round < 500; round++) {
-    const text = Array.from({ length: 1 + (next() % 10) }, () => pool[next() % pool.length]).join('\n')
-    assert.deepEqual(parseUsage(text), twin.parseUsage(text), JSON.stringify(text).slice(0, 200))
   }
 })
 

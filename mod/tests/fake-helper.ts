@@ -1,8 +1,36 @@
 // The Node helper simulated over a map of files, as mod/helper/host.mjs does its operations on disk: shared by the
-// host contract (host.test.ts) and the helper's own tests on the mock engine (helper.test.ts). Not a test file itself.
+// host contract (host.test.ts), the helper layer's tests on the mock engine (helper.test.ts) and the mock machines of
+// the plugin's tests. Not a test file itself.
 
 import { tailLines } from '../hooks/core'
-import { cyrb53, driftText } from '../hooks/host-shared'
+import { USAGE_CASES } from './usage-fixtures'
+import type { UsageExpect } from './usage-fixtures'
+
+/**
+ * A stand-in for the helper's SHA-256 of a file: 64 hex digits that change with the text, line ends folded as the
+ * helper folds them (CRLF as LF, unless the text holds a NUL byte). Two FNV-1a lanes, each 32 bits, repeated.
+ */
+export function standInDigest(text: string): string {
+  const folded = text.includes('\0') ? text : text.replace(/\r\n/g, '\n')
+  let a = 2166136261
+  let b = 3735928559
+  for (let at = 0; at < folded.length; at++) {
+    a = Math.imul(a ^ folded.charCodeAt(at), 16777619) >>> 0
+    b = Math.imul(b ^ folded.charCodeAt(at), 2246822519) >>> 0
+  }
+  return `${a.toString(16).padStart(8, '0')}${b.toString(16).padStart(8, '0')}`.repeat(4)
+}
+
+/**
+ * What the helper's probeUsage answers for a text `claude -p /usage` printed: the answer the recorded and written cases
+ * of usage-fixtures.ts give it (helper.test.mjs proves the helper's reader gives each case that answer). A text no case
+ * holds is an error of the test.
+ */
+export function usageAnswerOf(stdout: string, stderr = '', exitCode = 0): UsageExpect {
+  const found = USAGE_CASES.find(one => one.stdout === stdout && (one.stderr ?? '') === stderr && (one.exitCode ?? 0) === exitCode)
+  if (found === undefined) throw new Error(`no case of usage-fixtures.ts holds this text: ${JSON.stringify(stdout).slice(0, 80)}`)
+  return found.expect
+}
 
 type Request = Record<string, unknown>
 
@@ -29,7 +57,7 @@ export function throughLinks(links: ReadonlyMap<string, string>, key: string): s
   return key
 }
 
-/** What a regular-file-only removal does over the map: the exit code the native scripts give (0 removed, 3 not there, 4 a link, 5 no regular file). A path through a linked directory is not looked at: it reaches the target, as the system's does. */
+/** What the helper's regular-file-only removal does over the map, as a code: 0 removed, 3 not there, 4 a link, 5 no regular file. A path through a linked directory is not looked at: it reaches the target, as the system's does. */
 export function removeRegularInMap(files: Map<string, string>, links: ReadonlyMap<string, string>, key: string): number {
   if (links.has(key)) return 4
   const real = throughLinks(links, key)
@@ -65,7 +93,7 @@ export type SimProc = {
 }
 export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number }
 
-/** TREE_SCRIPT's (and the helper's processTree) lines over the table: R or N, the G lines, the D lines breadth first. */
+/** The helper's processTree lines over the table (TREE_PS1's list prints the same): R or N, the G lines, the D lines breadth first. */
 export function treeInTable(table: ProcTable, pid: number, start: string): string {
   const root = table.procs.get(pid)
   const isRoot = root !== undefined && root.start === start && start !== ''
@@ -95,7 +123,7 @@ export function signalInTable(table: ProcTable, pid: number, signal: 'TERM' | 'K
   return 0
 }
 
-/** STOP_SCRIPT's (and the helper's stopProcesses) lines over the table: the root, then the descendants still there; then F lines. */
+/** The helper's stopProcesses lines over the table: the root, then the descendants still there; then F lines. */
 export function stopInTable(table: ProcTable, wait: number, targets: readonly string[]): string {
   const parsed = targets.map(one => ({ pid: Number(one.split(':')[0]), start: one.split(':')[1] ?? '' }))
   const lines: string[] = []
@@ -206,8 +234,8 @@ export function helperAnswer(
 
 /**
  * The helper's hashTree over the map: the direct files of each folder of `dirs` and each file of `files` under `root`,
- * a link (in `links`) passed over, sorted by path; a 64-digit stand-in digest (cyrb53 of the text, padded), which only
- * has to change with the text; NOT_FOUND for a root with nothing under it.
+ * a link (in `links`) passed over, sorted by path; a stand-in digest (standInDigest), which only has to change with the
+ * text; NOT_FOUND for a root with nothing under it.
  */
 export function treeInMap(files: Map<string, string>, links: ReadonlyMap<string, string>, root: string, dirs: readonly string[], names: readonly string[]): { path: string; sha256: string }[] | string {
   const top = root.replace(/\/+$/, '')
@@ -221,7 +249,7 @@ export function treeInMap(files: Map<string, string>, links: ReadonlyMap<string,
     }
   }
   for (const name of names) if (files.has(`${top}/${name}`) && !links.has(`${top}/${name}`)) found.add(name)
-  return [...found].sort().map(rel => ({ path: rel, sha256: cyrb53(driftText(files.get(`${top}/${rel}`) ?? '')).padStart(64, '0') }))
+  return [...found].sort().map(rel => ({ path: rel, sha256: standInDigest(files.get(`${top}/${rel}`) ?? '') }))
 }
 
 /** `$.fs.list` over the map: the direct entries of `dir`, a file or a folder each, an entry in `links` as a link (`other`). */
@@ -234,4 +262,17 @@ export function listInMap(files: ReadonlyMap<string, string>, links: ReadonlyMap
     const text = files.get(full)
     return text === undefined ? { name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false } : { name, kind: 'file' as const, size: text.length, mtimeMs: 1, isLink: false }
   })
+}
+
+/**
+ * A small machine's answer to Node: `node --version` (v24.14.0) and one helper call over its map of files (the probe
+ * prints `probeOut`); undefined for any other command, which the machine answers itself.
+ */
+export function nodeAnswer(argv: readonly string[], stdin: string | undefined, files: Map<string, string>, keyOf: KeyOf, probeOut = ''): { exitCode: number; stdout: string; stderr: string; isStdoutTruncated: boolean; isStderrTruncated: boolean } | undefined {
+  const done = (stdout: string, exitCode = 0) => ({ exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false })
+  if (argv[0] !== 'node') return undefined
+  if (argv[1] === '--version') return done('v24.14.0\n')
+  if (!String(argv[1]).endsWith('/helper/host.mjs')) return undefined
+  const answer = helperAnswer(files, String(argv[2]), JSON.parse(stdin ?? '{}') as Request, probeOut, keyOf)
+  return done(JSON.stringify(answer), answer.ok === true ? 0 : 1)
 }

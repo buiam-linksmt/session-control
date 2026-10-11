@@ -4,7 +4,7 @@ import type { EngineInterface, ProcessRunInit, ProcessRunResult, Register } from
 import type { SessionEntry, SessionOutcome } from '../types'
 import { ARCHIVE_SCHEMA, ARCHIVED_HEADING, DECISIONS_ARCHIVE, DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, archiveDecisions, editOpenPoints, editQueue, findDecisionSection } from './bookkeeping'
 import type { Edit } from './bookkeeping'
-import { backupName, dirOf, freshText, localDate } from './store'
+import { backupName, freshText, localDate } from './store'
 import {
   TRACE_FILE,
   TRACE_KEEP,
@@ -15,7 +15,6 @@ import {
   messageFields,
   needsRotation,
   rotationMoves,
-  shownArgv,
   shownPicker,
   traceLine,
   traceMessage,
@@ -23,7 +22,7 @@ import {
 } from './trace'
 import { selectHost } from './host'
 import type { Host, HostEnvName, HostPort, RemoveOutcome, TailShape } from './host'
-import { HELPER_SCRIPT, fallbackFields, fallbackToast, withHelper } from './host-helper'
+import { HELPER_SCRIPT, NODE_REFUSAL, NODE_WARNING, isNodeMissing, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
 import { AUDIT_SCHEMA, auditText, retiredIds } from './audit'
@@ -221,9 +220,7 @@ type Config = {
   runsDir: string
   licencePickCommand: string
   debug: boolean
-  /** `auto`: the Node helper runs the host's file operations (and the Linux probe) when Node 22+ is found; `off`: the adapters' own. */
-  helper: 'auto' | 'off'
-  /** The node executable; empty: `node` from the PATH. */
+  /** The node executable the helper runs with; empty: `node` from the PATH. */
   nodePath: string
   /** `bash`: workers start through the Bash tool; `powershell`: on native Windows through the PowerShell tool (host-powershell.ts). */
   launchRoute: 'bash' | 'powershell'
@@ -246,7 +243,6 @@ let config: Config = {
   runsDir: '~/.claude/session-control/runs',
   licencePickCommand: '',
   debug: false,
-  helper: 'auto',
   nodePath: '',
   launchRoute: 'bash',
   notices: 'on',
@@ -266,10 +262,12 @@ let displayTick: { cancel: () => void } | undefined
 /** The display tick's period: it only moves the `now` atom on, so the pane redraws its elapsed column. */
 const DISPLAY_TICK_MS = 1000
 let lastError: string | undefined
-let isDirectWriteNoted = false
-let isHelperFallbackNoted = false
-/** The operations whose untraced fallback has been traced this load: once each, as each later line would be written by the write that failed. */
-const quietFallbacksTraced = new Set<string>()
+/** The operations whose untraced helper call failed and was traced this load: once each, as each later line would be written by the write that failed. */
+const quietFailuresTraced = new Set<string>()
+/** Whether the toast that no usable Node is found was shown since Node was last found (or since the load). */
+let isNodeWarned = false
+/** The most trace lines held in memory while no usable Node is found to write them. */
+const TRACE_HELD_MAX = 2000
 /** The host adapter of this load (hostOf); a hot reload, or a test's fresh register, chooses again. */
 let host: Promise<Host> | undefined
 const harvested = new Set<string>()
@@ -380,12 +378,12 @@ function startTrace($: EngineInterface): void {
 }
 
 /**
- * `$.process.run`; with the trace on also a line: the command as `shown` gives it (else the argv as shownArgv shows
- * it), the exit code, the time taken and the size of stderr, never its text.
+ * `$.process.run`; with the trace on also a line: the command as `shown` gives it (else its argv), the exit code, the
+ * time taken and the size of stderr, never its text.
  */
 async function run($: EngineInterface, argv: readonly string[], init?: ProcessRunInit, isQuiet = false, shown?: Record<string, unknown>): Promise<ProcessRunResult> {
   if (!isTracing || isQuiet) return $.process.run(argv, init)
-  const command = shown ?? { argv: shownArgv(argv) }
+  const command = shown ?? { argv: [...argv] }
   const now = () => $.clock.now().catch(() => 0)
   const startedAt = await now()
   try {
@@ -419,6 +417,11 @@ async function flushTrace($: EngineInterface): Promise<void> {
   if (!isTracing || isTraceFlushing || traceBuffer.length === 0) return
   isTraceFlushing = true
   try {
+    // Without a usable Node the trace cannot be written: its newest lines wait here until Node is found.
+    if (!(await nodeReady($))) {
+      traceBuffer.splice(0, Math.max(0, traceBuffer.length - TRACE_HELD_MAX))
+      return
+    }
     while (traceBuffer.length > 0) {
       const entries = traceBuffer.splice(0)
       await Promise.all(entries.map(entry => entry.stamp))
@@ -446,11 +449,8 @@ async function writeTrace($: EngineInterface, lines: readonly string[]): Promise
     const adding = utf8Bytes(chunk.join('\n')) + 1
     const isRotationDue = needsRotation((await $.fs.stat(path).catch(() => undefined))?.size ?? 0, adding)
     const rotation = isRotationDue ? { path, adding, keep: TRACE_KEEP, maxBytes: TRACE_MAX_BYTES, moves: rotationMoves(path) } : undefined
-    let problem = await (await hostOf($)).rotateAndAppend(portOf($), path, chunk, rotation)
-    // Outside the orchestrator directory nothing may have made the runs directory yet (Windows' append makes it).
-    if (problem !== undefined && (await (await hostOf($)).makeDir(portOf($), dirOf(path)))) {
-      problem = await appendLog($, path, chunk, true)
-    }
+    // The helper's append makes the runs directory when nothing has made it yet (outside the orchestrator directory).
+    const problem = await (await hostOf($)).rotateAndAppend(portOf($), path, chunk, rotation)
     if (problem !== undefined) return problem
   }
   return undefined
@@ -471,8 +471,8 @@ async function traced<T>($: EngineInterface, work: () => Promise<T>): Promise<T>
 /**
  * The adapter of this load, chosen once by selectHost from OS and USERPROFILE at the first hook that needs it
  * (session.start); on native Windows with the launchRoute option `powershell` workers start through the PowerShell
- * tool (host-powershell.ts); with the helper option `auto` its file operations go through the Node helper
- * (host-helper.ts), which looks for Node at its first operation.
+ * tool (host-powershell.ts). withHelper (host-helper.ts) makes the Host of it: its file operations, the usage probe and
+ * on Linux the process probe and the stop go through the Node helper, which is looked for at the first operation.
  */
 async function hostOf($: EngineInterface): Promise<Host> {
   // A choice that failed (the environment unreadable) is made again by the next hook.
@@ -487,7 +487,6 @@ async function chooseHost($: EngineInterface): Promise<Host> {
   const selected = selectHost({ OS: await $.env.get('OS'), USERPROFILE: await $.env.get('USERPROFILE') })
   // The PowerShell route is Windows' own: on Linux and WSL the option changes nothing.
   const base = config.launchRoute === 'powershell' && selected.platform === 'windows' ? withPowerShellLaunch(selected) : selected
-  if (config.helper === 'off') return base
   const node = config.nodePath.trim() === '' ? 'node' : expandHome(config.nodePath.trim(), await base.homeDir(portOf($)))
   return withHelper(base, { node, script: `${$.plugin.root.replace(/[\\/]+$/, '')}/${HELPER_SCRIPT}` })
 }
@@ -497,17 +496,13 @@ function portOf($: EngineInterface): HostPort {
   return {
     run: (argv, init, isQuiet, shown) => run($, argv, init, isQuiet, shown),
     read: path => $.fs.read(path),
-    readBytes: path => $.fs.read(path, { as: 'bytes' }),
     write: (path, text, isQuiet) => write($, path, text, isQuiet),
     exists: path => $.fs.exists(path),
     stat: path => $.fs.stat(path),
-    list: path => $.fs.list(path),
     now: () => $.clock.now(),
     sleep: ms => $.clock.sleep(ms),
     env: name => hostEnv($, name),
     runsDir: () => runsPath($),
-    traceError: (where, err) => traceError($, where, err),
-    noteDirectWrite: text => noteDirectWrite($, text),
     noteHelper: note => noteHelper($, note),
   }
 }
@@ -519,18 +514,10 @@ async function hostEnv($: EngineInterface, name: HostEnvName): Promise<string | 
   return $.env.get('SystemRoot')
 }
 
-/** A file was written over directly, not through a rename (Windows, when its rename fails): said once per load. */
-function noteDirectWrite($: EngineInterface, text: string): void {
-  if (isDirectWriteNoted) return
-  isDirectWriteNoted = true
-  $.ui.toast(toastText(TOAST_TITLES.directWrite, text), { timeoutMs: 10000 })
-}
-
 /**
- * The Node helper's word: its detection is one trace line; a fallback is a trace line with the operation and the code
- * (and `isRepeated` false for an append that timed out and was not made again) and, once per load, a toast. The
- * fallback of an untraced operation (the trace's own write) is traced once per operation: a line for each would be
- * written by the write that failed, and the flush would never end.
+ * The Node helper's word: its detection is one trace line per change; a helper call that failed is a trace line with the
+ * operation and the code. The failure of an untraced operation (the trace's own write) is traced once per operation: a
+ * line for each would be written by the write that failed, and the flush would never end.
  */
 function noteHelper($: EngineInterface, note: HelperNote): void {
   if (note.kind === 'node') {
@@ -538,11 +525,14 @@ function noteHelper($: EngineInterface, note: HelperNote): void {
     trace($, 'helper', fields)
     return
   }
-  if (!note.isQuiet || !quietFallbacksTraced.has(note.op)) trace($, 'helper.fallback', fallbackFields(note))
-  if (note.isQuiet) quietFallbacksTraced.add(note.op)
-  if (isHelperFallbackNoted) return
-  isHelperFallbackNoted = true
-  $.ui.toast(toastText(TOAST_TITLES.helper, fallbackToast(note)), { timeoutMs: 10000 })
+  if (note.isQuiet && quietFailuresTraced.has(note.op)) return
+  if (note.isQuiet) quietFailuresTraced.add(note.op)
+  trace($, 'helper.failed', { op: note.op, code: note.code })
+}
+
+/** Whether a usable Node is found (host.nodeReady): without it the host's machine operations refuse. */
+async function nodeReady($: EngineInterface): Promise<boolean> {
+  return (await hostOf($)).nodeReady(portOf($))
 }
 
 async function homeDir($: EngineInterface): Promise<string> {
@@ -1052,6 +1042,12 @@ async function loadPoints($: EngineInterface): Promise<{ problem?: string; queue
 
 async function gather($: EngineInterface, taskStatus: string | undefined, isTick = false): Promise<void> {
   const files = await loadPoints($)
+  // Without a usable Node nothing is tracked: no probe, completion, notice or drift check runs.
+  if (!(await nodeReady($))) {
+    await showNodeMissing($, await $.clock.now())
+    return
+  }
+  isNodeWarned = false
   const problem = files.problem
   const registryText = await readRegistryFile($)
   const parsed = parseRegistry(registryText ?? '')
@@ -1094,6 +1090,19 @@ function noteError($: EngineInterface, error: string | undefined): void {
 async function showError($: EngineInterface, error: string, now: number): Promise<void> {
   noteError($, error)
   await update($, snapshot, prev => ({ at: now, rows: prev?.rows ?? [], error }))
+}
+
+/**
+ * No usable Node: the panel's warning above the last rows it had (the queued work and the open points are read as
+ * ever), and a Node helper toast once, until Node is found again.
+ */
+async function showNodeMissing($: EngineInterface, now: number): Promise<void> {
+  const prev = await read($, snapshot)
+  const next = { at: now, rows: prev?.rows ?? [], error: NODE_WARNING }
+  if (!isSame(prev, next, 'at')) await update($, snapshot, () => next)
+  if (isNodeWarned) return
+  isNodeWarned = true
+  $.ui.toast(toastText(TOAST_TITLES.helper, `session-control ${NODE_WARNING}`), { timeoutMs: 10000 })
 }
 
 async function refresh($: EngineInterface, taskStatus?: string, isTick = false): Promise<void> {
@@ -1140,6 +1149,8 @@ async function showWatch($: EngineInterface, sid: string, view: { title: string;
 async function refreshWatch($: EngineInterface): Promise<void> {
   const sid = await read($, selected)
   if (!isActive || sid === null) return
+  // Without a usable Node the log stays as it is: its tail is the helper's.
+  if (!(await nodeReady($))) return
   // A registry that cannot be read or parsed leaves the view as it is: a read error must not close the user's log.
   // Empty or whitespace-only text counts as unreadable (parseRegistry takes it for an empty registry): it is what a
   // read of a file being rewritten can return. The mod writes the registry as a JSON array, so a registry that
@@ -2044,8 +2055,9 @@ async function probeEach($: EngineInterface, targets: readonly Licence[], isOwnU
 async function activate($: EngineInterface): Promise<void> {
   isActive = true
   startTrace($)
-  // A failure here (a read-only home, say) must not stop the board: the panel then shows what it can read.
-  await ensureHelperFiles($).catch(err => noteError($, `helper files: ${String(err).slice(0, 120)}`))
+  // A failure here (a read-only home, say) must not stop the board: the panel then shows what it can read. Without a
+  // usable Node nothing is made: the first gather shows the warning, and the tools make a missing file when they write it.
+  if (await nodeReady($).catch(() => false)) await ensureHelperFiles($).catch(err => noteError($, `helper files: ${String(err).slice(0, 120)}`))
   if (!isArmed) {
     isArmed = true
     await $.tool.register({
@@ -2233,10 +2245,10 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
  * the mod's own result text, as traceMessage keeps them; with `isResultText` only its length: an inspection tool's
  * answer quotes files and transcripts, which the trace never holds), then the lines written.
  */
-async function tracedTool<T extends object>($: EngineInterface, tool: string, e: unknown, fields: readonly string[], work: () => Promise<T>, isResultText = false): Promise<T> {
+async function tracedTool<T extends object>($: EngineInterface, tool: string, e: unknown, fields: readonly string[], work: () => Promise<T>, isResultText = false): Promise<T | { deny: string }> {
   if (isTracing) trace($, 'tool.call', { tool, ...pickFields(e, fields) })
   return traced($, async () => {
-    const answer = await work()
+    const answer = await nodeGuarded($, tool, work)
     if (isTracing) {
       const shown = (result: string) => (isResultText ? { resultChars: result.length } : { result: traceMessage(result, TRACE_MAX_STRING) })
       const text = 'deny' in answer ? messageFields(String(answer.deny), 'deny') : 'result' in answer ? shown(String(answer.result)) : {}
@@ -2244,6 +2256,23 @@ async function tracedTool<T extends object>($: EngineInterface, tool: string, e:
     }
     return answer
   })
+}
+
+/** The tools that run no machine operation and answer without Node too: panel_snapshot reads the panel's own state. */
+const NODE_FREE_TOOLS: ReadonlySet<string> = new Set(['panel_snapshot'])
+
+/**
+ * A tool's work; while no usable Node is found, NODE_REFUSAL before anything is done (every tool but those of
+ * NODE_FREE_TOOLS). An operation that finds Node gone meanwhile rejects, and the tool answers the same.
+ */
+async function nodeGuarded<T>($: EngineInterface, tool: string, work: () => Promise<T>): Promise<T | { deny: string }> {
+  if (!NODE_FREE_TOOLS.has(tool) && !(await nodeReady($))) return { deny: NODE_REFUSAL }
+  try {
+    return await work()
+  } catch (err) {
+    if (isNodeMissing(err)) return { deny: NODE_REFUSAL }
+    throw err
+  }
 }
 
 /** The orchestrator's own CLAUDE_CONFIG_DIR, which a worker launched without one inherits; undefined when unset or unreadable. */
@@ -2284,9 +2313,8 @@ function pickFields(e: unknown, names: readonly string[]): Record<string, unknow
 }
 
 export const register: Register = (on, options) => {
-  isDirectWriteNoted = false
-  isHelperFallbackNoted = false
-  quietFallbacksTraced.clear()
+  quietFailuresTraced.clear()
+  isNodeWarned = false
   host = undefined
   isGuarded = false
   noticeState = undefined
@@ -2313,7 +2341,6 @@ export const register: Register = (on, options) => {
     runsDir: String(options.runsDir ?? config.runsDir),
     licencePickCommand: String(options.licencePickCommand ?? ''),
     debug: options.debug === true,
-    helper: options.helper === 'off' ? 'off' : 'auto',
     nodePath: String(options.nodePath ?? ''),
     launchRoute: options.launchRoute === 'powershell' ? 'powershell' : 'bash',
     notices: options.notices === 'off' ? 'off' : 'on',

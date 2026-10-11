@@ -4,7 +4,7 @@
 // object, `{"ok":true,...}` or `{"ok":false,"code":"<CODE>"}`, and exits 0 or 1. The codes are fixed (protocol.mjs):
 // no error message, path or file content is ever part of an answer.
 //
-//   probe         {args}                              -> {out}       Linux only: the lines of PROBE_SCRIPT
+//   probe         {args}                              -> {out}       Linux only: the P, A and T lines (linux.mjs)
 //   writeAtomic   {path, text, expected?}             -> {written}
 //   renameOver    {from, to}                          -> {}
 //   removeFile    {path, regularOnly?}                -> {removed}   regularOnly: a symbolic link is refused (IS_LINK), so is
@@ -14,8 +14,8 @@
 //   rotate        {path, adding, maxBytes, moves}     -> {rotated}
 //   filesNewerThan {dir, since, max}                  -> {files: [{path, mtimeMs}], total}   read-only
 //   hashTree      {root, dirs, files}                 -> {files: [{path, sha256}], total}    read-only, links not followed
-//   processTree   {pid, start}                        -> {out}       Linux only: the lines of TREE_SCRIPT (read-only)
-//   stopProcesses {wait, targets: ['<pid>:<start>']}  -> {out}       Linux only: the lines of STOP_SCRIPT (signals sent)
+//   processTree   {pid, start}                        -> {out}       Linux only: the tree lines (stop.mjs; read-only)
+//   stopProcesses {wait, targets: ['<pid>:<start>']}  -> {out}       Linux only: the stop's lines (stop.mjs; signals sent)
 //   probeUsage    {configDir, isInherited?}           -> {five, seven}  `claude -p /usage` for that config directory: each
 //                                                                    window {percent, resets} or null; codes NO_CLAUDE,
 //                                                                    TIMEOUT, NOT_LOGGED_IN, PARSE, FAILED (usage.mjs)

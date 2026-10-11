@@ -80,8 +80,7 @@ import {
   isDefaultConfigDir,
 } from '../hooks/core'
 import type { LaunchArgs, LaunchFacts } from '../hooks/core'
-import { PROBE_SCRIPT } from '../hooks/host-posix'
-import { FILES_PS1, PROBE_PS1, START_MATCH_MS } from '../hooks/host-windows'
+import { PROBE_PS1, START_MATCH_MS } from '../hooks/host-windows'
 import { freshText } from '../hooks/store'
 import {
   DAEMON_RESUME,
@@ -321,7 +320,7 @@ describe('completion classifier', () => {
   test('every outcome has a toast title, and the toast is the title, a separator, then the message', () => {
     const titles = (['clean', 'limit', 'login', 'killed', 'error', 'chatter'] as const).map(kind => TOAST_TITLES[kind])
     expect(titles).toEqual(['Session finished', 'Usage limit reached', 'Login needed', 'Session killed', 'Session failed', 'Session ended without a report'])
-    expect([TOAST_TITLES.tracking, TOAST_TITLES.directWrite, TOAST_TITLES.trace]).toEqual(['Tracking problem', 'Write not atomic', 'Debug trace failed'])
+    expect([TOAST_TITLES.tracking, TOAST_TITLES.trace, TOAST_TITLES.helper]).toEqual(['Tracking problem', 'Debug trace failed', 'Node helper'])
     expect(toastText(TOAST_TITLES[classifyResult(RESULTS.oom).kind], 'w: killed (memory)')).toBe('Session killed \u00B7 w: killed (memory)')
   })
   test('task notification parse', () => {
@@ -416,17 +415,6 @@ describe('launch guard', () => {
   test('expandHome', () => {
     expect(expandHome('~/.claude/x.json', HOME)).toBe('/fixture/home/.claude/x.json')
     expect(expandHome('/abs', HOME)).toBe('/abs')
-  })
-})
-
-describe('probe script text', () => {
-  // The script is shell inside a JS string: a nested double quote that lost its backslash breaks `sh`
-  // (it did once, and the pid proof and the transcript lookup silently returned nothing).
-  // The syntax and behaviour under a real `sh` are checked by tests/probe-selftest.mjs.
-  test('reads the sessions file with jq and keeps no sed pattern with bare nested quotes', () => {
-    expect(PROBE_SCRIPT).toContain('jq -r ".procStart // empty"')
-    expect(PROBE_SCRIPT).toContain('jq -r ".sessionId // empty"')
-    expect(PROBE_SCRIPT).not.toMatch(/sed -n "s\/\.\*"/)
   })
 })
 
@@ -914,15 +902,6 @@ describe('Windows file script', () => {
     expect(tailLines('abcdef\n', 1, 3)).toBe('abc\n')
     expect(tailLines('', 600, 20000)).toBe('')
   })
-
-  test('the script takes its own modules, replaces in one step and is run as a file', () => {
-    expect(FILES_PS1).toContain('$env:PSModulePath = "$PSHOME\\Modules"')
-    expect(FILES_PS1).toContain('[System.IO.File]::Replace($A, $B, [NullString]::Value)')
-    expect(FILES_PS1).toContain("Get-Content -LiteralPath $A -Tail ([int]$B) -Encoding UTF8")
-    expect(FILES_PS1).toContain('exit 1')
-    // Windows line ends throughout.
-    expect(FILES_PS1.replace(/\r\n/g, '').includes('\n')).toBe(false)
-  })
 })
 
 /** The tool fingerprint's checksum, over any text. */
@@ -936,14 +915,10 @@ describe('Windows probe', () => {
   const win = parseProcFacts(WIN_PROBE_STDOUT)
   const byPid = (pid: number) => REGISTRY.find(e => e.pid === pid)!
 
-  test('the Linux probe text is the one it always was', () => {
-    // Moved on purpose (T3b, the lock-holder follow-up): each A line now ends with the process state letter of
-    // /proc/<pid>/stat, so a zombie lock holder is told as dead; it was '1260:2204f4bb'.
-    expect(fingerprint(PROBE_SCRIPT)).toBe('1336:8aef2985')
-  })
-
   test('the Windows probe text is pinned: a change to it is a change of this test too', () => {
-    expect(fingerprint(PROBE_PS1)).toBe('4738:13e4e8cf')
+    // Its first comment line names the Linux probe's P, A and T lines; the script's code is the code the earlier pin
+    // '4738:13e4e8cf' held.
+    expect(fingerprint(PROBE_PS1)).toBe('4741:23cab84a')
   })
 
   test('its lines read as the Linux ones: alive, a reused pid, no sessions file', () => {
@@ -1136,7 +1111,7 @@ describe('session name and inbox of a launch', () => {
   })
   test('the worker matcher still finds the launched worker with the extra flags, on Linux and on Windows', () => {
     const want = { dir: '/work/new', configDir: '/fixture/lic/a', model: 'opus' }
-    // /proc/<pid>/cmdline with its NULs turned to blanks, as PROBE_SCRIPT prints it.
+    // /proc/<pid>/cmdline with its NULs turned to blanks, as the probe prints it.
     const linuxCmd = `claude -p --model opus -n ${N} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- Goal: x`
     const linuxResume = `claude -p --model opus --resume ${SID_DEAD} -n ${N} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- Goal: x`
     for (const cmd of [linuxCmd, linuxResume]) {

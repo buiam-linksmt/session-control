@@ -5,9 +5,8 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { REGISTER_SCRIPT, RULES_BLOCK, missingPromptItems, probeArgs } from '../hooks/core'
-import { APPEND_SCRIPT, PROBE_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
-import { FILES_PS1, PROBE_PS1 } from '../hooks/host-windows'
+import { RULES_BLOCK, missingPromptItems, probeArgs } from '../hooks/core'
+import { PROBE_PS1 } from '../hooks/host-windows'
 import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
 
 import {
@@ -55,6 +54,8 @@ type World = {
   reads: string[]
   toasts: string[]
   runs: string[][]
+  /** Each call of the Node helper, its operation and its request, in order. */
+  calls: { op: string; request: Record<string, unknown> }[]
   registered: string[]
   tools: { name: string; description: unknown; inputSchema: unknown }[]
   clock: ReturnType<typeof mock.clock>
@@ -74,9 +75,10 @@ const HELD: { tail: Promise<unknown> | undefined } = { tail: undefined }
 const WORKER = { linuxConfigDir: '/fixture/lic/a', isBashMissing: false, isPowerShellMissing: false, isInboxless: false, sid: 'abcdabcd-0000-4000-8000-000000000001' }
 /** The inbox fields of the Linux worker's sessions file. */
 const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320', messagingSocketPath: '/run/user/1000/cc-socks/7001.sock' })
-// Knobs of the Windows fixture: a failing move or probe; the config dir the probe finds the new worker's sessions
-// file in, or none (unplaced); what the PowerShell route's pid file holds (undefined: there is none).
-const WINDOWS = { isMoveBroken: false, isScriptBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined }
+// Knobs of the Windows fixture: a failing registry write (the helper's writeAtomic) or probe; the config dir the probe
+// finds the new worker's sessions file in, or none (unplaced); what the PowerShell route's pid file holds (undefined:
+// there is none).
+const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
 const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0 }
@@ -107,7 +109,7 @@ const given = (path: string, isWin: boolean) => {
 }
 
 function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText: string | (() => string | Promise<string>) = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
-  const w: World = { bash: [], powershell: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
+  const w: World = { bash: [], powershell: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], calls: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
   // A test that answers env.get itself says so.
   if (!isEnvOwn) mock.env(on, env)
   // The engine keeps a plugin's own store (the notices' state, notices.ts): an empty one in memory.
@@ -124,36 +126,86 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     w.tools.push({ name: e.name, description: e.description, inputSchema: e.inputSchema })
     return { value: { tool: `mcp__session-control__${e.name}` } }
   })
-  on('fs.read', ($, e) => {
-    const path = fixture(seen(e.path))
-    w.reads.push(seen(e.path))
-    if (MISSING.has(path) || LATE.has(path)) throw new Error(`ENOENT ${e.path}`)
-    if (UNREADABLE.has(path)) throw new Error(`EFBIG ${e.path}`)
-    if (path === REGISTRY_PATH) {
-      // A test may hold the read (a promise) while something else happens.
-      const text = typeof registryText === 'function' ? registryText() : registryText
-      return typeof text === 'string' ? { value: text } : text.then(value => ({ value }))
-    }
-    if (path === '/work/orch/CLAUDE.md') return { value: '# Role: Session Orchestrator\n' }
-    if (path === '/work/new/thin.md') return { value: 'Just do the work.' }
-    if (path === `${ORCH_DIR}/task-queue.json`) return { value: QUEUE.text }
-    if (path === `${ORCH_DIR}/open-points.json`) return { value: OPEN_POINTS_TEXT }
-    if (path === `${ORCH_DIR}/agreed-decisions.md` && DECISIONS.text !== undefined) return { value: DECISIONS.text }
+  /** The fixture's text at a path the plugin gave, as fs.read answers it: undefined when missing; EFBIG thrown for one over the cap. */
+  const fixtureText = (given: string): string | Promise<string> | undefined => {
+    const path = fixture(seen(given))
+    if (MISSING.has(path) || LATE.has(path)) return undefined
+    if (UNREADABLE.has(path)) throw new Error(`EFBIG ${given}`)
+    // A test may hold the registry read (a promise) while something else happens.
+    if (path === REGISTRY_PATH) return typeof registryText === 'function' ? registryText() : registryText
+    if (path === '/work/orch/CLAUDE.md') return '# Role: Session Orchestrator\n'
+    if (path === '/work/new/thin.md') return 'Just do the work.'
+    if (path === `${ORCH_DIR}/task-queue.json`) return QUEUE.text
+    if (path === `${ORCH_DIR}/open-points.json`) return OPEN_POINTS_TEXT
+    if (path === `${ORCH_DIR}/agreed-decisions.md` && DECISIONS.text !== undefined) return DECISIONS.text
     const result = /^\/fixture\/results\/(\w+)\.json$/.exec(path)?.[1]
-    if (result !== undefined && result in RESULTS) return { value: RESULTS[result as keyof typeof RESULTS] }
-    if (result !== undefined && result in REAL_RESULTS) return { value: REAL_RESULTS[result as keyof typeof REAL_RESULTS] }
-    if (path === '/fixture/results/login.err') return { value: 'Error: Invalid API key · Please run /login\n' }
-    if (['/fixture/home/.claude/sessions/7001.json', '/fixture/lic/own/sessions/7001.json'].includes(path) && !isWin) return { value: JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123', ...inboxFields() }) }
-    if (path === '/fixture/lic/a/sessions/7001.json') return { value: JSON.stringify({ sessionId: WORKER.sid, procStart: '123', ...inboxFields() }) }
-    if (seen(e.path) === 'C:/fixture/home/.claude/sessions/7001.json') return { value: JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS }) }
-    if (path === '/work/new/big.md') return { value: BIG_PROMPT }
+    if (result !== undefined && result in RESULTS) return RESULTS[result as keyof typeof RESULTS]
+    if (result !== undefined && result in REAL_RESULTS) return REAL_RESULTS[result as keyof typeof REAL_RESULTS]
+    if (path === '/fixture/results/login.err') return 'Error: Invalid API key · Please run /login\n'
+    if (['/fixture/home/.claude/sessions/7001.json', '/fixture/lic/own/sessions/7001.json'].includes(path) && !isWin) return JSON.stringify({ sessionId: 'abcdabcd-0000-4000-8000-000000000001', procStart: '123', ...inboxFields() })
+    if (path === '/fixture/lic/a/sessions/7001.json') return JSON.stringify({ sessionId: WORKER.sid, procStart: '123', ...inboxFields() })
+    if (seen(given) === 'C:/fixture/home/.claude/sessions/7001.json') return JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS })
+    if (path === '/work/new/big.md') return BIG_PROMPT
     // The pid file a PowerShell launch writes beside its result file.
-    if (isWin && path.endsWith('.pid') && WINDOWS.pidFileText !== undefined) return { value: WINDOWS.pidFileText }
+    if (isWin && path.endsWith('.pid') && WINDOWS.pidFileText !== undefined) return WINDOWS.pidFileText
     // The mod's own scripts read back as written.
-    const written = w.writes.filter(one => one.path === seen(e.path) && one.path.endsWith('.ps1')).at(-1)
-    if (written !== undefined) return { value: written.text }
-    throw new Error(`ENOENT ${e.path}`)
+    return w.writes.filter(one => one.path === seen(given) && one.path.endsWith('.ps1')).at(-1)?.text
+  }
+  on('fs.read', ($, e) => {
+    w.reads.push(seen(e.path))
+    const text = fixtureText(e.path)
+    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
+    return typeof text === 'string' ? { value: text } : text.then(value => ({ value }))
   })
+  /** The transcript rows the tail answers: the alive worker's may be held by a test. */
+  const tailRows = (path: string) => {
+    const held = HELD.tail !== undefined && path.includes(SID_ALIVE) ? HELD.tail : undefined
+    const rows = [
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the suite files.' }, { type: 'tool_use', name: 'Bash', input: { command: 'git status -sb' } }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', content: '## develop...origin/develop' }] } },
+    ]
+    const text = rows.map(r => JSON.stringify(r)).join('\n')
+    return held === undefined ? text : held.then(() => text)
+  }
+  /** One operation of the Node helper over the fixture: its answer's fields, or the fixed code it fails with. */
+  const helperStep = async (op: string, request: Record<string, unknown>): Promise<Record<string, unknown> | string> => {
+    const path = String(request.path ?? '')
+    if (op === 'probe') {
+      if (LINUX_FIXTURE.isProbeBroken) return 'IO'
+      const worker = w.spawned
+        ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
+        : ''
+      return { out: PROBE_STDOUT + worker }
+    }
+    // A write is recorded as what it puts in place; with `expected`, only while the fixture still holds that text.
+    if (op === 'writeAtomic') {
+      if (WINDOWS.isMoveBroken && isWin) return 'ACCESS'
+      if (request.expected !== undefined && (await fixtureText(path)) !== request.expected) return { written: false }
+      w.writes.push({ path: seen(path), text: String(request.text) })
+      return { written: true }
+    }
+    if (op === 'renameOver') {
+      const text = w.writes.filter(one => one.path === seen(String(request.from))).at(-1)?.text
+      if (text !== undefined) w.writes.push({ path: seen(String(request.to)), text })
+      return {}
+    }
+    if (op === 'removeFile') return { removed: true }
+    // An append is recorded as a write of what it adds.
+    if (op === 'append') {
+      if (LINUX_FIXTURE.isAppendBroken) return 'READ_ONLY'
+      w.writes.push({ path: seen(path), text: String(request.text) })
+      return { bytes: String(request.text).length }
+    }
+    // A rotation moves the trace away: it is empty from then on.
+    if (op === 'rotate') {
+      LINUX_FIXTURE.traceSize = 0
+      return { rotated: true }
+    }
+    if (op === 'tail') return { text: await tailRows(path), dropped: 0 }
+    if (op === 'filesNewerThan') return { files: [], total: 0 }
+    if (op === 'hashTree') return 'NOT_FOUND'
+    return 'BAD_OP'
+  }
   on('fs.write', ($, e) => {
     w.writes.push({ path: seen(e.path), text: e.text })
     return { value: undefined }
@@ -168,48 +220,31 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (['/work/new', '/work/orch', ORCH_DIR].includes(path)) return { value: { ...stat, kind: 'dir' } }
     throw new Error(`ENOENT ${e.path}`)
   })
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     w.runs.push([...e.argv])
     const ok = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-    // The fixture machine has no Node: the helper's lookup cannot start, and the adapters' own operations run.
-    if (e.argv[0] === 'node' && e.argv[1] === '--version') throw new Error('spawn node ENOENT')
-    if (e.argv[0] === 'sh' && String(e.argv[2]).startsWith('tail ')) {
-      const held = HELD.tail !== undefined && String(e.argv[4]).includes(SID_ALIVE) ? HELD.tail : undefined
-      const rows = [
-        { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the suite files.' }, { type: 'tool_use', name: 'Bash', input: { command: 'git status -sb' } }] } },
-        { type: 'user', message: { content: [{ type: 'tool_result', content: '## develop...origin/develop' }] } },
-      ]
-      const done = { value: { ...ok, stdout: rows.map(r => JSON.stringify(r)).join('\n') } }
-      return held === undefined ? done : held.then(() => done)
+    // Node 24 and its helper, one operation per call (a batch: its steps in order, the first failure ends it).
+    if (e.argv[0] === 'node' && e.argv[1] === '--version') return { value: { ...ok, stdout: 'v24.14.0\n' } }
+    if (e.argv[0] === 'node' && String(e.argv[1]).endsWith('/helper/host.mjs')) {
+      const op = String(e.argv[2])
+      const request = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+      w.calls.push({ op, request })
+      const answer = (fields: Record<string, unknown>) => ({ value: { ...ok, stdout: JSON.stringify({ ok: true, ...fields }) } })
+      const refuse = (fields: Record<string, unknown>) => ({ value: { ...ok, exitCode: 1, stdout: JSON.stringify({ ok: false, ...fields }) } })
+      if (op !== 'batch') {
+        const done = await helperStep(op, request)
+        return typeof done === 'string' ? refuse({ code: done }) : answer(done)
+      }
+      const results: Record<string, unknown>[] = []
+      for (const [at, one] of (request.ops as Record<string, unknown>[]).entries()) {
+        const done = await helperStep(String(one.op), one)
+        if (typeof done === 'string') return refuse({ code: done, at, results })
+        results.push({ ok: true, ...done })
+      }
+      return answer({ results })
     }
-    if (e.argv[0] === 'sh' && e.argv[2] === REGISTER_SCRIPT) return { value: { ...ok, stdout: '' } }
-    // An append is recorded as a write of what it adds.
-    if (e.argv[0] === 'sh' && e.argv[2] === APPEND_SCRIPT) {
-      if (LINUX_FIXTURE.isAppendBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'sh: cannot create: Read-only file system' } }
-      w.writes.push({ path: String(e.argv[5]), text: `${e.argv[4]}\n` })
-      return { value: { ...ok, stdout: '' } }
-    }
-    // A rotation moves the trace away: it is empty from then on.
-    if (e.argv[0] === 'sh' && e.argv[2] === ROTATE_SCRIPT) {
-      LINUX_FIXTURE.traceSize = 0
-      return { value: { ...ok, stdout: '' } }
-    }
-    if (e.argv[0] === 'sh' && e.argv[2] === PROBE_SCRIPT) {
-      if (LINUX_FIXTURE.isProbeBroken) throw new Error('the probe timed out')
-      const worker = w.spawned
-        ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
-        : ''
-      return { value: { ...ok, stdout: PROBE_STDOUT + worker } }
-    }
-    if (e.argv[0] === 'sh') return { value: { ...ok, stdout: PROBE_STDOUT } }
     if (e.argv[0] === 'sleep') LATE.clear()
-    if (e.argv[0] === 'mkdir' || e.argv[0] === 'sleep' || e.argv[0] === 'rm') return { value: { ...ok, stdout: '' } }
-    if (e.argv[0] === 'mv') {
-      // The newest write of that name: the mocked clock stands still, so temp names repeat.
-      const text = w.writes.filter(one => one.path === e.argv[2]).at(-1)?.text
-      if (text !== undefined) w.writes.push({ path: String(e.argv[3]), text })
-      return { value: { ...ok, stdout: '' } }
-    }
+    if (e.argv[0] === 'mkdir' || e.argv[0] === 'sleep') return { value: { ...ok, stdout: '' } }
     if (e.argv[0] === 'test' && e.argv[1] === '-e') return { value: { ...ok, stdout: '', exitCode: 1 } }
     if (e.argv[0] === 'test') return { value: { ...ok, stdout: '', exitCode: promptFileExists ? 0 : 1 } }
     if (e.argv[0] === '/fixture/bin/pick') return { value: { ...ok, stdout: pickStdout, exitCode: pickStdout ? 0 : 3 } }
@@ -221,15 +256,6 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
         : ''
       // PowerShell's own line ends.
       return { value: { ...ok, stdout: (WIN_PROBE_STDOUT + worker).replace(/\n/g, '\r\n') } }
-    }
-    if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/files.ps1')) {
-      const [op, from, to] = e.argv.slice(7).map(String)
-      if (WINDOWS.isScriptBroken || (op === 'move' && WINDOWS.isMoveBroken)) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Access denied.' } }
-      if (op === 'move' || op === 'append') {
-        const text = w.writes.filter(one => fixture(one.path) === fixture(String(from))).at(-1)?.text
-        if (text !== undefined) w.writes.push({ path: String(to), text })
-      }
-      return { value: { ...ok, stdout: op === 'tail' ? TAIL : '' } }
     }
     if (e.argv[0] === 'C:/fixture/bin/pick.exe') {
       return { value: { ...ok, stdout: pickStdout.replace(/^\/fixture/, 'C:\\fixture').replace(/\//g, '\\').replace(/\n$/, '\r\n'), exitCode: pickStdout ? 0 : 3 } }
@@ -283,9 +309,10 @@ const bare = (lines: TraceLine[]): TraceLine[] => {
 }
 /** The lines from the first one of an event on. */
 const from = (lines: TraceLine[], event: string) => lines.slice(lines.findIndex(line => line.event === event))
-/** A trace append or rotation: the commands the trace adds to what the mod runs. */
-const isTraceRun = (argv: readonly string[]) =>
-  (argv[2] === APPEND_SCRIPT && String(argv[5]).endsWith('/trace.log')) || argv[2] === ROTATE_SCRIPT || (argv[7] === 'append' && String(argv[9]).endsWith('/trace.log'))
+/** A write of the trace (the helper's batch of a rotation and an append, or the append alone): what the trace adds to what the mod runs. */
+const isTraceRun = (argv: readonly string[]) => argv[0] === 'node' && (String(argv[1]).endsWith('/helper/host.mjs') || argv[1] === '<helper>') && argv[2] === 'batch'
+/** A command as the pins below write it: the helper in the plugin's folder as `<helper>`. */
+const pinned = (argv: readonly string[]) => argv.map(one => (one.endsWith('/helper/host.mjs') ? '<helper>' : one))
 
 describe('scope', () => {
   test('a no-op outside the orchestrator dir', { options: OPTIONS }, async ($, on) => {
@@ -469,9 +496,9 @@ describe('session-control board', () => {
     // The command and the first six tools, as before feature/inspect-tools; the read-only tools registered after them
     // are pinned by 'tool surface > the registered tool names, in order'.
     expect(w.registered.slice(0, 7)).toEqual(['/session-control', 'launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
-    const probes = w.runs.filter(argv => argv[0] === 'sh')
+    const probes = w.calls.filter(one => one.op === 'probe')
     expect(probes.length).toBe(1)
-    expect(probes[0]).toContain(`pid:4101|/fixture/lic/a`)
+    expect(probes[0]?.request.args).toContain(`pid:4101|/fixture/lic/a`)
   })
 
   test('/session-control side opens one panel: sessions, queued work, open points, in that order', { options: OPTIONS }, async ($, on) => {
@@ -1313,27 +1340,31 @@ describe('row hover', () => {
 
 describe('platform', () => {
   const args = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
-  /** A launch, an acknowledgement and a retirement, the probe text shown as <probe>. */
+  /** A launch, an acknowledgement and a retirement, the helper shown as <helper>. */
   const flow = async ($: Parameters<Parameters<typeof test>[2]>[0], w: World) => {
     await $.session.start(start(ORCH_DIR))
     expect(String((await $.tool.call({ tool: TOOL, ...args } as never)).result)).toContain('Launched pid 7001')
     expect(String((await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['cccccccc'] } as never)).result)).toContain('Acknowledged: cccccccc.')
     expect(String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['dddddddd'] } as never)).result)).toContain('Retired: dddddddd.')
-    return w.runs.map(argv => argv.map(one => (one === PROBE_SCRIPT ? '<probe>' : one)))
+    return w.runs.map(pinned)
   }
-  const probe = ['sh', '-c', '<probe>', 'session-probe', ...probeArgs(JSON.parse(REGISTRY_TEXT))]
-  const rename = ['mv', '-f', `${REGISTRY_PATH}.tmp.${NOW_MS}`, REGISTRY_PATH]
-  /** The Node helper's one lookup, at the first operation it would take (the fixture machine has no Node). */
+  // The helper's operations, each one process: the probe, the registry's atomic write, the cleared log's append.
+  const probe = ['node', '<helper>', 'probe']
+  const rename = ['node', '<helper>', 'writeAtomic']
+  /** The Node helper's one lookup, made when the board goes on, before anything that needs it. */
   const NODE_LOOKUP = ['node', '--version']
   const RUNS = `${HOME}/.claude/session-control/runs`
-  /** The commands the Linux flow runs, as recorded before the Windows branches existed (the jq calls aside). */
+  /**
+   * The commands the Linux flow runs: as recorded before the Windows branches existed (the jq calls aside), with the
+   * probe, the registry's rename and the cleared log's append now the helper's, and the lookup of Node first.
+   */
   const LINUX = [
+    NODE_LOOKUP,
     ['test', '-e', `${ORCH_DIR}/agreed-decisions.md`],
     ['mkdir', '-p', ORCH_DIR],
     ['test', '-e', `${ORCH_DIR}/open-points-archive.md`],
     ['mkdir', '-p', ORCH_DIR],
     ['mkdir', '-p', `${ORCH_DIR}/backups`, RUNS],
-    NODE_LOOKUP,
     probe,
     rename,
     probe,
@@ -1349,7 +1380,7 @@ describe('platform', () => {
     rename,
     probe,
     probe,
-    ['sh', '-c', APPEND_SCRIPT, 'session-log', JSON.stringify(JSON.parse(REGISTRY_TEXT).find((one: { session_id?: string }) => one.session_id === SID_DONE)), `${RUNS}/cleared.jsonl`],
+    ['node', '<helper>', 'append'],
     rename,
     probe,
   ]
@@ -1408,14 +1439,13 @@ describe('platform', () => {
   const WIN_REGISTRY = `C:${REGISTRY_PATH}`
   const WIN_RUNS = `C:${RUNS}`
 
-  test('Windows: home is the profile folder in native form, and a rename runs the file script', { options: WIN_OPTIONS }, async ($, on) => {
+  test('Windows: home is the profile folder in native form, and the registry write goes through the helper in that form', { options: WIN_OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
     await $.session.start(start(`C:${ORCH_DIR}`))
-    expect(w.runs).toContainEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'move', `${WIN_REGISTRY}.tmp.${NOW_MS}`, WIN_REGISTRY])
-    expect(w.writes.find(one => one.path.endsWith(`${WIN_RUNS}/files.ps1`))?.text).toBe(FILES_PS1)
+    expect(w.calls.filter(one => one.op === 'writeAtomic').map(one => one.request.path)).toContain(WIN_REGISTRY)
     expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
-    // No POSIX tool is started for the files: they are written through $.fs, which makes their directories.
-    expect(w.runs.filter(argv => ['mv', 'rm', 'test', 'mkdir'].includes(String(argv[0])))).toEqual([])
+    // No POSIX tool is started for the files: the missing ones are written through $.fs, which makes their directories.
+    expect(w.runs.filter(argv => ['mv', 'rm', 'test', 'mkdir', 'sh'].includes(String(argv[0])))).toEqual([])
     expect(w.writes.some(one => one.path.endsWith(`C:${ORCH_DIR}/agreed-decisions.md`))).toBe(true)
   })
 
@@ -1423,7 +1453,9 @@ describe('platform', () => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
     stubPanel(on)
     await $.session.start(start(`C:${ORCH_DIR}`))
-    expect(w.runs[0]).toEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT))])
+    // Node first (the probe runs only once it is found), then the probe.
+    expect(w.runs[0]).toEqual(['node', '--version'])
+    expect(w.runs[1]).toEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT))])
     expect(w.writes.find(one => one.path.endsWith(`${WIN_RUNS}/probe.ps1`))?.text).toBe(PROBE_PS1)
     expect(w.runs.filter(argv => argv[0] === 'sh')).toEqual([])
     // The dead worker is harvested, the live one shows as running with its elapsed time.
@@ -1433,7 +1465,7 @@ describe('platform', () => {
     expect(all).toMatch(/alive worker\s+aaaaaaaa\s+running\s+opus\s+high\s+2m/)
   })
 
-  test('Windows, the trace on: a poll tick with a failing probe writes its lines through the file script', { options: { ...WIN_OPTIONS, debug: true } }, async ($, on) => {
+  test('Windows, the trace on: a poll tick with a failing probe writes its lines through the helper', { options: { ...WIN_OPTIONS, debug: true } }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
     await $.session.start(start(`C:${ORCH_DIR}`))
     const trace = `${WIN_RUNS}/trace.log`
@@ -1452,8 +1484,10 @@ describe('platform', () => {
         { event: 'error', where: 'panel', kind: 'exit-1', message: `Error: ${message}` },
       ])
       expect(w.writes.filter(one => one.path === trace).some(one => one.text.includes('Invalid class'))).toBe(false)
-      // Each flush is one append of the file script, from a file of its own.
-      expect(w.runs.filter(isTraceRun).every(argv => String(argv[8]).startsWith(`${trace}.add.`))).toBe(true)
+      // Each flush is one helper batch, its append to the trace in the stored C:/ form.
+      const flushes = w.calls.filter(one => one.op === 'batch')
+      expect(flushes.length).toBeGreaterThan(1)
+      expect(flushes.every(one => (one.request.ops as { op: string; path: string }[]).every(step => step.op === 'append' && step.path === trace))).toBe(true)
     } finally {
       WINDOWS.isProbeBroken = false
     }
@@ -1512,10 +1546,10 @@ describe('platform', () => {
       err_file: `${WIN_RUNS}/20260921141320-new.err`,
       started_at: NOW_MS / 1000,
     })
-    // Every command is Windows PowerShell running one of the mod's scripts, but for the Node helper's one lookup; the
-    // launch's probes also search its config dir.
-    expect(w.runs.filter(argv => argv[0] === 'node')).toEqual([NODE_LOOKUP])
-    expect(w.runs.every(argv => argv === w.runs.find(one => one[0] === 'node') || (argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6]))))).toBe(true)
+    // Every command is Node (its one lookup, then the helper's file operations) or Windows PowerShell running the probe;
+    // the launch's probes also search its config dir.
+    expect(w.runs.filter(argv => argv[0] === 'node' && argv[1] === '--version')).toEqual([NODE_LOOKUP])
+    expect(w.runs.every(argv => argv[0] === 'node' || (argv[0] === POWERSHELL && /\/probe\.ps1$/.test(String(argv[6]))))).toBe(true)
     expect(w.runs.some(argv => String(argv[6]).endsWith('/probe.ps1') && argv.at(-1) === `c:${WIN_HOME_CLAUDE}`)).toBe(true)
   })
 
@@ -1814,7 +1848,7 @@ describe('platform', () => {
     expect(w.bash.length).toBe(0)
   })
 
-  test('Windows: a session\'s output box reads its transcript, past the read cap through the file script', { options: WIN_OPTIONS }, async ($, on) => {
+  test('Windows: a session\'s output box reads its transcript through the helper', { options: WIN_OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
     stubPanel(on)
     await $.session.start(start(`C:${ORCH_DIR}`))
@@ -1822,7 +1856,7 @@ describe('platform', () => {
     const ui = await mountPane($)
     await ui.press({ key: `s:${SID_ALIVE}` })
     expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
-    expect(w.runs).toContainEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'tail', `/fixture/lic/a/projects/-work-a/${SID_ALIVE}.jsonl`, '600', '20000'])
+    expect(w.calls).toContainEqual({ op: 'tail', request: { path: `/fixture/lic/a/projects/-work-a/${SID_ALIVE}.jsonl`, lines: 600, width: 20000 } })
   })
 
   const retireDone = async ($: Parameters<Parameters<typeof test>[2]>[0]) =>
@@ -1836,35 +1870,34 @@ describe('platform', () => {
       const w = world(on)
       await $.session.start(start(ORCH_DIR))
       expect(await retireDone($)).toBe('Retired: dddddddd.')
-      expect(w.runs.filter(argv => argv[2] === APPEND_SCRIPT)).toEqual([['sh', '-c', APPEND_SCRIPT, 'session-log', doneLine, log]])
-      expect(APPEND_SCRIPT).toBe(`printf '%s\\n' "$1" >> "$2"`)
+      // One append of the helper, which never reads the log.
+      expect(w.calls.filter(one => one.op === 'append')).toEqual([{ op: 'append', request: { path: log, text: `${doneLine}\n` } }])
       // Logged first, then the registry without the entry.
-      const at = (match: (argv: string[]) => boolean) => w.runs.findIndex(match)
-      expect(at(argv => argv[2] === APPEND_SCRIPT)).toBeLessThan(w.runs.findLastIndex(argv => argv[0] === 'mv'))
+      const at = (op: string) => w.calls.findIndex(one => one.op === op)
+      expect(at('append')).toBeLessThan(w.calls.findLastIndex(one => one.op === 'writeAtomic'))
       expect(lastRegistry(w).some(one => one.session_id === SID_DONE)).toBe(false)
     } finally {
       UNREADABLE.clear()
     }
   })
 
-  test('Windows: a retire appends through the file script, never reading the log, even one over the read cap', { options: WIN_OPTIONS }, async ($, on) => {
+  test('Windows: a retire appends through the helper, never reading the log, even one over the read cap', { options: WIN_OPTIONS }, async ($, on) => {
     const log = `${WIN_RUNS}/cleared.jsonl`
     UNREADABLE.add(fixture(log))
     try {
       const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
       await $.session.start(start(`C:${ORCH_DIR}`))
       expect(await retireDone($)).toBe('Retired: dddddddd.')
-      const added = `${log}.add.${NOW_MS}`
-      expect(w.runs.filter(argv => argv[7] === 'append')).toEqual([[POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'append', added, log]])
-      expect(w.writes.find(one => one.path === added)?.text).toBe(`${doneLine}\n`)
+      expect(w.calls.filter(one => one.op === 'append')).toEqual([{ op: 'append', request: { path: log, text: `${doneLine}\n` } }])
       expect(w.writes.filter(one => one.path === log).map(one => one.text)).toEqual([`${doneLine}\n`])
+      expect(w.reads.includes(log)).toBe(false)
       expect(lastRegistry(w).some(one => one.session_id === SID_DONE)).toBe(false)
     } finally {
       UNREADABLE.clear()
     }
   })
 
-  test('Windows: a reviewed retire logs the original outcome and the reason through the file script', { options: WIN_OPTIONS }, async ($, on) => {
+  test('Windows: a reviewed retire logs the original outcome and the reason through the helper', { options: WIN_OPTIONS }, async ($, on) => {
     const login = { title: 'stuck login', session_id: '57575751-0000-4000-8000-000000000001', config_dir: 'C:/fixture/lic/a', reported: true, outcome: { kind: 'login', summary: 'login: old label' } }
     const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login]), WINDOWS_ENV)
     await $.session.start(start(`C:${ORCH_DIR}`))
@@ -1875,51 +1908,22 @@ describe('platform', () => {
     expect(lastRegistry(w).some(one => one.session_id === login.session_id)).toBe(false)
   })
 
-  test('Windows: after a failed rename the temp file is removed by the script\'s remove', { options: WIN_OPTIONS }, async ($, on) => {
-    WINDOWS.isMoveBroken = true
-    try {
-      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const tmp = `${WIN_REGISTRY}.tmp.${NOW_MS}`
-      expect(w.runs).toContainEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/files.ps1`, 'remove', tmp])
-      expect(w.writes.filter(one => one.path === tmp).map(one => one.text === '')).toEqual([false])
-    } finally {
-      WINDOWS.isMoveBroken = false
-    }
-  })
-
-  test('Windows: when the file script cannot run at all, the registry is written directly and the temp file emptied, and the toast says so', { options: WIN_OPTIONS }, async ($, on) => {
-    WINDOWS.isScriptBroken = true
-    try {
-      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const tmp = `${WIN_REGISTRY}.tmp.${NOW_MS}`
-      expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
-      const order = w.writes.map(one => (one.path === WIN_REGISTRY ? 'registry' : one.path === tmp ? (one.text === '' ? 'emptied' : 'temp') : '')).filter(Boolean)
-      expect(order).toEqual(['temp', 'registry', 'emptied'])
-      expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([
-        `Write not atomic \u00B7 the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically; the temp file ${tmp} could not be removed and was emptied`,
-      ])
-    } finally {
-      WINDOWS.isScriptBroken = false
-    }
-  })
-
   test('Windows: a HOME that Git Bash handed on (/c/...) is home, in native form', { options: WIN_OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { ...WINDOWS_ENV, USERPROFILE: 'C:\\Users\\other', HOME: '/c/fixture/home' })
     await $.session.start(start(`C:${ORCH_DIR}`))
-    expect(w.runs.some(argv => argv[0] === POWERSHELL && argv.at(-1) === WIN_REGISTRY)).toBe(true)
+    expect(w.calls.some(one => one.op === 'writeAtomic' && one.request.path === WIN_REGISTRY)).toBe(true)
   })
 
-  test('Windows: a rename that fails writes the file directly and says so once', { options: WIN_OPTIONS }, async ($, on) => {
+  test('Windows: a registry write the helper fails is said in the answer, and nothing writes the registry another way', { options: WIN_OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    await $.session.start(start(`C:${ORCH_DIR}`))
     WINDOWS.isMoveBroken = true
     try {
-      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      expect(w.writes.some(one => one.path.endsWith(WIN_REGISTRY))).toBe(true)
-      expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
-      await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['cccccccc'] } as never)
-      expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([`Write not atomic \u00B7 the rename failed (Access denied.); ${WIN_REGISTRY} was written directly, not atomically`])
+      const before = w.writes.length
+      const out = await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['cccccccc'] } as never)
+      expect(JSON.stringify(out)).toContain(`${WIN_REGISTRY} could not be written (ACCESS)`)
+      expect(w.writes.slice(before).filter(one => fixture(one.path).startsWith(REGISTRY_PATH))).toEqual([])
+      expect(w.toasts.filter(text => text.includes('not atomically'))).toEqual([])
     } finally {
       WINDOWS.isMoveBroken = false
     }
@@ -1933,10 +1937,11 @@ describe('debug trace', () => {
   const PICK = { event: 'process.run', picker: 'pick', args: 2, exitCode: 0, ms: 0 }
   const TRACED = { ...OPTIONS, debug: true }
   const RUNS = `${HOME}/.claude/session-control/runs`
-  const tmp = `${REGISTRY_PATH}.tmp.${NOW_MS}`
   const ran = (argv: string[], exitCode = 0) => ({ event: 'process.run', argv, exitCode, ms: 0 })
-  const PROBE = ran(['sh', '-c', '<PROBE_SCRIPT>', 'session-probe', ...probeArgs(JSON.parse(REGISTRY_TEXT))])
-  const registryWrite = (w: World) => ({ event: 'fs.write', path: tmp, bytes: w.writes.filter(one => one.path === tmp).at(-1)?.text.length })
+  /** A helper call as the trace shows it: the operation and the fields the call names, never the request. */
+  const helper = (op: string, fields: Record<string, unknown>, exitCode = 0) => ({ event: 'process.run', helper: op, ...fields, exitCode, ms: 0 })
+  const PROBE = helper('probe', { args: probeArgs(JSON.parse(REGISTRY_TEXT)).length })
+  const REGISTRY_WRITE = helper('writeAtomic', { path: REGISTRY_PATH })
 
   test('a launch: the call, the probe, the checks, the verdict, the worker and its registration, the answer', { options: TRACED }, async ($, on) => {
     const w = world(on)
@@ -1956,8 +1961,7 @@ describe('debug trace', () => {
       ran(['sleep', '2']),
       PROBE,
       { event: 'worker.found', pid: 7001, sessionId: sid, isNamed: true, isSocketSeen: true },
-      registryWrite(w),
-      ran(['mv', '-f', tmp, REGISTRY_PATH]),
+      REGISTRY_WRITE,
       { event: 'worker.registered', pid: 7001, sessionId: sid, isRegistered: true },
       PROBE,
       { event: 'tool.result', tool: 'launch_worker', result: String(out.result) },
@@ -2002,7 +2006,6 @@ describe('debug trace', () => {
         runsDir: '~/.claude/session-control/runs',
         licencePickCommand: 'set',
         debug: true,
-        helper: 'auto',
         nodePath: '',
         launchRoute: 'bash',
         notices: 'on',
@@ -2035,10 +2038,9 @@ describe('debug trace', () => {
       { event: 'tool.call', tool: 'retire_workers', session_ids: ['dddddddd'] },
       PROBE,
       { event: 'guard', tool: 'retire_workers', removable: [SID_DONE], refused: [] },
-      ran(['sh', '-c', '<APPEND_SCRIPT>', 'session-log', `<${doneLine.length + 1} bytes>`, `${RUNS}/cleared.jsonl`]),
+      helper('append', { path: `${RUNS}/cleared.jsonl` }),
       { event: 'fs.append', path: `${RUNS}/cleared.jsonl`, bytes: doneLine.length + 1, lines: 1, exitCode: 0 },
-      registryWrite(w),
-      ran(['mv', '-f', tmp, REGISTRY_PATH]),
+      REGISTRY_WRITE,
       PROBE,
       { event: 'tool.result', tool: 'retire_workers', result: 'Retired: dddddddd.' },
     ])
@@ -2093,14 +2095,15 @@ describe('debug trace', () => {
       const before = traceOf(w).length
       await w.clock.advance(5000)
       const tick = bare(traceOf(w)).slice(before)
-      // The kit rejects the run of a fixture hook that throws as having no implementation: that is what the mod sees.
-      const message = 'no implementation for process.run'
+      // The helper's probe answers a fixed code; the mod says the probe failed, never what the system said.
+      const message = 'the process probe failed (IO)'
       expect(tick).toEqual([
         { event: 'ui.render', count: 1 },
         { event: 'poll.tick' },
-        { event: 'process.run', argv: PROBE.argv, ms: 0, error: message },
+        { ...PROBE, exitCode: 1 },
+        { event: 'helper.failed', op: 'probe', code: 'IO' },
         { event: 'error', where: 'refresh', message },
-        { event: 'error', where: 'panel', message: `HooksError: ${message}` },
+        { event: 'error', where: 'panel', message: `Error: ${message}` },
       ])
     } finally {
       LINUX_FIXTURE.isProbeBroken = false
@@ -2170,10 +2173,8 @@ describe('debug trace', () => {
       const out = await $.tool.call({ tool: TOOL, ...args } as never)
       expect(String(out.result)).toContain('Launched pid 7001')
       expect(w.toasts.filter(text => text.includes('debug trace cannot be written'))).toEqual([
-        'Debug trace failed \u00B7 the debug trace cannot be written (/fixture/home/.claude/session-control/runs/trace.log cannot be appended to (exit 1): sh: cannot create: Read-only file system); the mod goes on without it',
+        'Debug trace failed \u00B7 the debug trace cannot be written (/fixture/home/.claude/session-control/runs/trace.log cannot be appended to (READ_ONLY)); the mod goes on without it',
       ])
-      // The runs directory is made once more before the second try of each append.
-      expect(w.runs.filter(argv => argv[0] === 'mkdir' && argv[2] === RUNS).length).toBeGreaterThanOrEqual(2)
     } finally {
       LINUX_FIXTURE.isAppendBroken = false
     }
@@ -2185,11 +2186,15 @@ describe('debug trace', () => {
       const w = world(on)
       await $.session.start(start(ORCH_DIR))
       await $.tool.call({ tool: TOOL, ...args } as never)
-      const rotations = w.runs.filter(argv => argv[2] === ROTATE_SCRIPT)
-      // The script reads the size again itself: it gets the limit and the bytes about to go in.
-      expect(rotations.map(argv => argv.slice(0, 7))).toEqual([['sh', '-c', ROTATE_SCRIPT, 'session-trace', TRACE, '2', String(TRACE_MAX_BYTES)]])
-      expect(Number(rotations[0]?.[7])).toBeGreaterThan(10)
-      expect(w.runs.findIndex(argv => argv[2] === ROTATE_SCRIPT)).toBeLessThan(w.runs.findIndex(argv => argv[2] === APPEND_SCRIPT))
+      const steps = (one: { request: Record<string, unknown> }) => one.request.ops as Record<string, unknown>[]
+      const rotations = w.calls.filter(one => one.op === 'batch' && steps(one).some(step => step.op === 'rotate'))
+      // The helper reads the size again itself: it gets the limit and the bytes about to go in, then the append follows
+      // in the same batch.
+      expect(rotations.length).toBe(1)
+      const [rotate, append] = steps(rotations[0] ?? { request: {} })
+      expect(rotate).toMatchObject({ op: 'rotate', path: TRACE, maxBytes: TRACE_MAX_BYTES, moves: [[`${TRACE}.1`, `${TRACE}.2`], [TRACE, `${TRACE}.1`]] })
+      expect(Number(rotate?.adding)).toBeGreaterThan(10)
+      expect(append).toMatchObject({ op: 'append', path: TRACE })
     } finally {
       LINUX_FIXTURE.traceSize = 0
     }

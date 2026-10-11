@@ -322,7 +322,6 @@ export const TOAST_TITLES = {
   error: 'Session failed',
   chatter: 'Session ended without a report',
   tracking: 'Tracking problem',
-  directWrite: 'Write not atomic',
   trace: 'Debug trace failed',
   helper: 'Node helper',
   // The poll-based notices (notices.ts), one title per kind.
@@ -343,7 +342,6 @@ export const TOAST_TITLES = {
 } as const satisfies Record<
   | SessionOutcomeKind
   | 'tracking'
-  | 'directWrite'
   | 'trace'
   | 'helper'
   | 'orphan'

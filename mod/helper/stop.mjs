@@ -1,6 +1,6 @@
 // The stop of stop_worker on Linux: the process tree read from /proc and the signals sent with process.kill, printed in
-// the line format of TREE_SCRIPT and STOP_SCRIPT (hooks/host-posix.ts), so parseStopOutput in hooks/host-shared.ts
-// reads it unchanged:
+// the line format parseStopOutput in hooks/host-shared.ts reads (TREE_PS1 of hooks/host-windows.ts prints the same
+// tree lines on Windows):
 //   R <pid> <ppid> <start> <state> <name>   N <pid> <start now>   D <pid> <ppid> <start> <state> <name>   G <pid>
 //   S <pid> <signal> <epoch ms> <exit code>   C <pid> <epoch ms> <gone|exited|alive> <seconds waited>
 //   X <pid> <gone|own>   F <pid> <gone|exited|alive> <state>
@@ -45,12 +45,12 @@ function statOf(pid) {
   return { state: fields[0] ?? '', ppid: Number(fields[1]), start: fields[19] ?? '' }
 }
 
-/** The name of a pid as TREE_SCRIPT prints it: /proc/<pid>/comm with tabs and line breaks as blanks. */
+/** The name of a pid as the tree lines show it: /proc/<pid>/comm with tabs and line breaks as blanks. */
 function nameOf(pid) {
   return (readText(`/proc/${pid}/comm`) ?? '').replace(/[\t\n]/g, ' ').trim()
 }
 
-/** Every process: pid to state, parent pid and start, in the order the shell's /proc/[0-9]* glob lists them. */
+/** Every process: pid to state, parent pid and start, in the order a /proc/[0-9]* glob lists them. */
 function snapshot() {
   const all = new Map()
   let names = []
@@ -81,7 +81,7 @@ function rootOf(request) {
   return { pid, start }
 }
 
-/** `{pid, start}`: the tree before the first signal, as TREE_SCRIPT prints it. `{out}`. */
+/** `{pid, start}`: the tree before the first signal, as R or N, G and D lines. `{out}`. */
 export function processTree(request) {
   if (process.platform !== 'linux') throw new HelperError('UNSUPPORTED')
   const { pid, start } = rootOf(request)
@@ -148,7 +148,7 @@ function waitGone(targets, seconds) {
   return waited
 }
 
-/** One group of targets, as STOP_SCRIPT's `group`: TERM, the re-checks, KILL to those left, the re-checks. */
+/** One group of targets: TERM, the re-checks, KILL to those left, the re-checks. */
 function group(targets, wait, own, lines) {
   const live = []
   for (const target of targets) {
@@ -178,8 +178,8 @@ function group(targets, wait, own, lines) {
 }
 
 /**
- * `{wait, targets}`: the stop, as STOP_SCRIPT runs it: the root (the first target), then every descendant still alive
- * after it, together; then the end state of each. `{out}`.
+ * `{wait, targets}`: the stop: the root (the first target), then every descendant still alive after it, together; then
+ * the end state of each. `{out}`.
  */
 export function stopProcesses(request) {
   if (process.platform !== 'linux') throw new HelperError('UNSUPPORTED')

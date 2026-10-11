@@ -43,6 +43,7 @@ import {
 } from '../hooks/notices'
 import type { Notice, NoticeKind } from '../hooks/notices'
 import { localDate } from '../hooks/store'
+import { nodeAnswer } from './fake-helper'
 import { NOW_MS, RESULTS } from './fixtures'
 import { HOME, OPTIONS, ORCH, REGISTRY, RUNS, mockWorld, seedLiveWorker } from './mock-world'
 import type { World } from './mock-world'
@@ -123,28 +124,26 @@ const seedTranscript = (world: World, sid: string) => world.files.set(`${HOME}/.
 const ORPHAN_TEXT = `pid 5555 is a live headless claude no registry entry claims (cwd /w/other, config dir ${HOME}/.claude, age 10m00s, unclaimed 30s, session ${OTHER_SID}); raise an open point naming it`
 
 describe('orphan', () => {
-  for (const isHelper of [false, true]) {
-    test(`${isHelper ? 'through the helper' : 'through sh'}: told once, 30 s after it is first seen unclaimed, as a toast titled by its kind and one line on the next prompt`, { options: OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper })
-      const store = storeOf(on)
-      ownSession(on)
-      echoPrompt(on)
-      seed(world)
-      seedOrphan(world)
-      await start($)
-      await poll(world, ORPHAN_GRACE_SEC - 5)
-      expect(noticeToasts(world)).toEqual([])
-      await poll(world, 5)
-      expect(noticeToasts(world)).toEqual([`Unregistered session \u00B7 ${ORPHAN_TEXT}`])
-      const sent = await userPrompt($)
-      expect(noticeLines(sent)).toEqual([`session-control notice: orphan: ${ORPHAN_TEXT}`])
-      // Never again for that pid; the next prompt carries nothing.
-      await poll(world, 120)
-      expect(noticeToasts(world).length).toBe(1)
-      expect(noticeLines(await userPrompt($))).toEqual([])
-      expect(parseNoticeState(store.get(KEY)).orphans['5555']).toEqual({ since: NOW_MS, isTold: true })
-    })
-  }
+  test(`through the helper: told once, 30 s after it is first seen unclaimed, as a toast titled by its kind and one line on the next prompt`, { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    ownSession(on)
+    echoPrompt(on)
+    seed(world)
+    seedOrphan(world)
+    await start($)
+    await poll(world, ORPHAN_GRACE_SEC - 5)
+    expect(noticeToasts(world)).toEqual([])
+    await poll(world, 5)
+    expect(noticeToasts(world)).toEqual([`Unregistered session \u00B7 ${ORPHAN_TEXT}`])
+    const sent = await userPrompt($)
+    expect(noticeLines(sent)).toEqual([`session-control notice: orphan: ${ORPHAN_TEXT}`])
+    // Never again for that pid; the next prompt carries nothing.
+    await poll(world, 120)
+    expect(noticeToasts(world).length).toBe(1)
+    expect(noticeLines(await userPrompt($))).toEqual([])
+    expect(parseNoticeState(store.get(KEY)).orphans['5555']).toEqual({ since: NOW_MS, isTold: true })
+  })
 
   test('never for the orchestrator\'s own process (its sessions file names this session), a licence probe or a registered worker', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
@@ -772,6 +771,9 @@ function winWorld(on: On, probe: string[]): WinWorld {
   on('fs.list', () => ({ value: [] as never }))
   on('process.run', ($, e) => {
     const ok = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
+    // Node and its helper's file operations over the map (the probe on Windows is PROBE_PS1's).
+    const node = nodeAnswer(e.argv, e.init?.stdin, w.files, given)
+    if (node !== undefined) return { value: node }
     if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/probe.ps1')) return { value: { ...ok, stdout: `${w.probe.join('\r\n')}\r\n` } }
     if (e.argv[0] === POWERSHELL) return { value: { ...ok, stdout: '' } }
     if (e.argv[0] === 'git') return { value: { ...ok, exitCode: 128, stdout: '' } }

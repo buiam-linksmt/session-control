@@ -1,7 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT } from '../hooks/host-posix'
-import { FILES_PS1, NEWER_PS1 } from '../hooks/host-windows'
 import {
   REDACTED,
   TRACE_CHUNK_BYTES,
@@ -18,7 +16,6 @@ import {
   redact,
   redactValue,
   rotationMoves,
-  shownArgv,
   shownPicker,
   traceLine,
   traceMessage,
@@ -322,21 +319,6 @@ describe('trace lines', () => {
   test('SESSION_CONTROL_DEBUG switches the trace on with 1 (or true, yes, on)', () => {
     for (const value of ['1', 'true', 'TRUE', ' on ', 'yes']) expect(isTraceSwitch(value)).toBe(true)
     for (const value of [undefined, '', '0', 'false', 'no', '2']) expect(isTraceSwitch(value)).toBe(false)
-  })
-
-  test('a command line shows the mod\'s scripts by name and an append\'s text as its byte count', () => {
-    expect(shownArgv(['sh', '-c', PROBE_SCRIPT, 'session-probe', 'pid:1|/c'])).toEqual(['sh', '-c', '<PROBE_SCRIPT>', 'session-probe', 'pid:1|/c'])
-    expect(shownArgv(['sh', '-c', APPEND_SCRIPT, 'session-log', '{"a":"\u00e9"}', '/r/cleared.jsonl'])).toEqual(['sh', '-c', '<APPEND_SCRIPT>', 'session-log', '<11 bytes>', '/r/cleared.jsonl'])
-    expect(shownArgv(['sh', '-c', ROTATE_SCRIPT, 'session-trace', '/r/trace.log', '2'])).toEqual(['sh', '-c', '<ROTATE_SCRIPT>', 'session-trace', '/r/trace.log', '2'])
-    expect(shownArgv(['sh', '-c', REMOVE_REGULAR_SCRIPT, 'session-remove', '/r/a.json'])).toEqual(['sh', '-c', '<REMOVE_REGULAR_SCRIPT>', 'session-remove', '/r/a.json'])
-    expect(shownArgv(['powershell.exe', '-File', 'C:/r/files.ps1', 'append', 'C:/r/a', 'C:/r/b'])).toEqual(['powershell.exe', '-File', 'C:/r/files.ps1', 'append', 'C:/r/a', 'C:/r/b'])
-    expect(shownArgv([FILES_PS1])).toEqual(['<FILES_PS1>'])
-    expect(shownArgv(['test', '-s', '/work/new/prompt.md'])).toEqual(['test', '-s', '/work/new/prompt.md'])
-  })
-
-  test('the listing of the files written after a time shows by name, its directory and arguments as they are', () => {
-    expect(shownArgv(['sh', '-c', NEWER_SCRIPT, 'session-newer', '/work/a', '1790000000', '200'])).toEqual(['sh', '-c', '<NEWER_SCRIPT>', 'session-newer', '/work/a', '1790000000', '200'])
-    expect(shownArgv([NEWER_PS1])).toEqual(['<NEWER_PS1>'])
   })
 
   test('UTF-8 byte counts', () => {

@@ -1,5 +1,6 @@
-// The text `claude -p /usage --no-session-persistence` prints, as test fixtures of the usage parser (hooks/usage.ts and
-// helper/usage.mjs, compared by helper.test.mjs). The recorded ones are real outputs of Claude Code 2.1.296 on Linux,
+// The text `claude -p /usage --no-session-persistence` prints, as test fixtures of the usage reader of the helper
+// (helper/usage.mjs: helper.test.mjs requires it to give each case its answer, and the plugin's tests answer for the
+// simulated helper with the answer of the case that holds the text). The recorded ones are real outputs of Claude Code 2.1.296 on Linux,
 // byte for byte (non-ASCII characters escaped): a subscription licence in the default config directory, a secondary one
 // through CLAUDE_CONFIG_DIR, and a config directory with no login. They hold no account identity (no email, name or
 // organisation appears in the text). The others are written by hand for the forms the parser must also read. Data only,
@@ -123,5 +124,10 @@ export const USAGE_CASES: UsageCase[] = [
     name: 'an account identity in the text never reaches the answer; a reset drops an email-shaped word and keeps plain characters only',
     stdout: `Logged in as ${FAKE_MAIL} (${FAKE_ORG})\nCurrent session: 12% used · resets <b>6pm</b> ${FAKE_MAIL}\nCurrent week (all models): 41% used · resets Oct 16, 1pm (Europe/Budapest)\n`,
     expect: { ok: true, five: { percent: 12, resets: 'b 6pm /b' }, seven: MAIN.seven },
+  },
+  {
+    name: 'written: both windows over 90 percent, one line each',
+    stdout: 'Current session: 95% used \u00b7 resets 6pm (Europe/Rome)\nCurrent week (all models): 91% used \u00b7 resets Oct 14, 9am (Europe/Rome)\n',
+    expect: { ok: true, five: { percent: 95, resets: '6pm (Europe/Rome)' }, seven: { percent: 91, resets: 'Oct 14, 9am (Europe/Rome)' } },
   },
 ]

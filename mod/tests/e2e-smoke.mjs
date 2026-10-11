@@ -10,21 +10,21 @@
 // directory are never touched, and the licence picker option is empty: the worker gets no CLAUDE_CONFIG_DIR and
 // inherits the default configuration (this process's CLAUDE_CONFIG_DIR, else ~/.claude), which the registry records.
 // A few cents of haiku (the orchestrator is capped at USD 0.25). One line per check; exit 1 on a failure.
-// KEEP_TRACE=<file> copies the trace there before the scratch directory goes. The mod runs with its default helper
-// option (auto): where Node 22 or newer is on the PATH the trace must show the Node helper in use and no
-// helper.fallback line. HIDE_NODE=1 starts both claude sessions with every PATH directory that holds node left out:
-// the mod must find no Node, keep its built-in operations, and the run must pass all the same. The orchestrator's
-// foreground wait runs a node script of this test by the absolute path of the node running it, so it needs no node
-// on that PATH. The launch line and the socket are read from /proc (Linux); elsewhere those checks print `skip`.
-// The interactive part needs tmux; without it it prints `skip`.
+// KEEP_TRACE=<file> copies the trace there before the scratch directory goes. Where Node 22 or newer is on the PATH the
+// trace must show the Node helper in use and no helper.failed line. HIDE_NODE=1 starts both claude sessions with every
+// PATH directory that holds node left out: the mod needs Node, so launch_worker must answer its fixed refusal, nothing
+// may be launched, registered or traced, and the interactive panel must show the warning that Node is missing. The
+// orchestrator's foreground wait runs a node script of this test by the absolute path of the node running it, so it
+// needs no node on that PATH. The launch line and the socket are read from /proc (Linux); elsewhere those checks print
+// `skip`. The interactive part needs tmux; without it it prints `skip`.
 
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import { delimiter } from 'node:path'
 import {
-  CFG_DEFAULT, HAS_PROC, IS_WINDOWS, MOD, awaitOrchestrator, basename, cmdline, comm, finish, firstMatch, grepF, isExecutable, join, jsonValues, kit,
+  CFG_DEFAULT, HAS_PROC, IS_WINDOWS, MOD, awaitOrchestrator, basename, cmdline, comm, entriesOf, finish, firstMatch, grepF, isExecutable, join, jsonValues, kit,
   linesOf, msys, native, nodeCommand, ours, pidExists, ppid, procCwd, procPids, processesNaming, readOr, removeTree, requireClaude,
-  sanitized, scratch, signal, sleep, startClaude, which, writeLines,
+  resultText, sanitized, scratch, signal, sleep, startClaude, toolUses, transcriptOf, which, writeLines,
 } from './lib/e2e.mjs'
 
 const { pass, fail, skip, info } = kit
@@ -69,7 +69,10 @@ if (NODE_FOUND) {
   NODE_MAJOR = firstMatch(ran.stdout ?? '', /^v(\d+)\./)
 }
 const HELPER_WANTED = NODE_MAJOR !== '' && Number(NODE_MAJOR) >= 22
-info(`node for the sessions: ${NODE_FOUND || 'none'} (major ${NODE_MAJOR || 'none'}); the helper is expected ${HELPER_WANTED ? 'active' : 'inactive'}`)
+info(`node for the sessions: ${NODE_FOUND || 'none'} (major ${NODE_MAJOR || 'none'}); ${HELPER_WANTED ? 'the helper is expected active' : 'the mod is expected to refuse and warn'}`)
+// What the mod answers, and what its panel says, while it finds no usable Node (hooks/host-helper.ts).
+const NODE_REFUSAL = 'session-control needs Node.js 22 or newer on the PATH (or the nodePath option); nothing was done'
+const NODE_WARNING = '! session-control: needs Node.js 22'
 // Windows: the claude.exe offers its Bash tool only when it finds Git Bash: point it at the bash.exe of the Git on the
 // PATH when nothing names one.
 if (IS_WINDOWS && !process.env.CLAUDE_CODE_GIT_BASH_PATH) {
@@ -117,11 +120,17 @@ fs.writeFileSync(join(S, 'wait-outcome.mjs'),
   'let n = 0\n' +
   'while (!holds()) { n++; if (n > 100) process.exit(1); pause(3000) }\n')
 const SETTINGS = JSON.stringify({ pluginConfigs: { 'session-control@inline': { options: { orchestratorDir: native(ORCH), registryPath: native(REG), runsDir: native(RUNS), licencePickCommand: '', completionWrites: true, pollSeconds: 2, debug: false } } } })
+const LAUNCH_STEP = `Call the tool mcp__session-control__launch_worker once, with dir "${msys(WORK)}", prompt_file "${msys(PROMPT)}", model "haiku", effort "low", title "e2e smoke worker" and timeout_minutes 5.`
 fs.writeFileSync(join(S, 'instruction.txt'),
-  "This is an automated smoke test of the session-control mod. Do exactly these three steps and nothing else:\n" +
-  `1. Call the tool mcp__session-control__launch_worker once, with dir "${msys(WORK)}", prompt_file "${msys(PROMPT)}", model "haiku", effort "low", title "e2e smoke worker" and timeout_minutes 5.\n` +
-  `2. Run this one Bash command in the foreground, with a timeout of 600000 ms, and wait for it to finish: ${nodeCommand(join(S, 'wait-outcome.mjs'), REG)}\n` +
-  '3. Answer with one line: the text the launch tool returned.\n')
+  HELPER_WANTED
+    ? "This is an automated smoke test of the session-control mod. Do exactly these three steps and nothing else:\n" +
+        `1. ${LAUNCH_STEP}\n` +
+        `2. Run this one Bash command in the foreground, with a timeout of 600000 ms, and wait for it to finish: ${nodeCommand(join(S, 'wait-outcome.mjs'), REG)}\n` +
+        '3. Answer with one line: the text the launch tool returned.\n'
+    : // Without Node the launch is refused: there is no worker to wait for.
+      "This is an automated smoke test of the session-control mod. Do exactly these two steps and nothing else:\n" +
+        `1. ${LAUNCH_STEP} If the tool refuses, do not call it again.\n` +
+        '2. Answer with one line: the text the launch tool returned.\n')
 
 // ---------------------------------------------------------------- (a) headless orchestrator and worker
 orch = startClaude({
@@ -187,145 +196,155 @@ info(`orchestrator cost USD ${firstMatch(ojson, /"total_cost_usd": *([0-9.e-]*)/
 info(`orchestrator session ${firstMatch(ojson, /"session_id": *"([^"]*)"/)} (config dir ${CFG_DEFAULT}, cwd ${ORCH})`)
 
 const field = name => firstMatch(readOr(REG), new RegExp(`"${name}": *"([^"]*)"`))
-const SID = field('session_id')
-// Whether the registry entry had the worker's pid while it ran. A haiku worker can live about a second, and the
-// completion drops the pid from the entry, so the registry sampled every 0.2 s above can still miss it: the trace
-// proves the same thing on its own. Its worker.found line records the pid the probe found for the new worker, and its
-// worker.registered line the pid of the entry just written, with isRegistered true and the entry's session id; the two
-// pids equal and that session id the registry's own mean the entry held that live pid. At least one of the two proofs
-// is required; neither found fails the check.
 const traceText = () => readOr(TRACE)
 const traceLines = () => linesOf(traceText())
-const TRACE_FOUND = firstMatch(traceText(), /"event":"worker\.found","pid":([0-9]*)/)
-const TRACE_REG = firstMatch(
-  traceLines().filter(l => l.includes('"event":"worker.registered"') && l.includes('"isRegistered":true') && l.includes(`"sessionId":"${SID}"`)).join('\n'),
-  /"pid":([0-9]*)/,
-)
-if (SEEN_PID || (SID && TRACE_FOUND && TRACE_FOUND === TRACE_REG)) {
-  pass(`registry entry had a pid while the worker ran (registry sampled: ${SEEN_PID || 'missed'}; trace: worker.found pid ${TRACE_FOUND || 'none'}, registered pid ${TRACE_REG || 'none'})`)
-} else {
-  fail(`registry entry had a pid while the worker ran (registry sampled: missed; trace: worker.found pid ${TRACE_FOUND || 'none'}, registered pid ${TRACE_REG || 'none'})`)
-}
-if (/^[0-9a-f-]{36}$/.test(SID)) pass(`registry entry has a session_id (${SID})`)
-else fail(`registry entry has a session_id (got '${SID}')`)
-const KIND = firstMatch(readOr(REG), /"kind": *"([a-z]*)"/)
-if (KIND === 'clean') pass('registry entry has the outcome clean')
-else fail(`registry entry has the outcome clean (got '${KIND}')`)
-const RESULT_FILE = field('result_file')
-const ERR_FILE = field('err_file')
-const sizeOf = path => {
-  try {
-    return fs.statSync(path).size
-  } catch {
-    return 0
-  }
-}
-if (RESULT_FILE && sizeOf(RESULT_FILE) > 0) pass('worker result file exists')
-else fail(`worker result file exists ('${RESULT_FILE}')`)
-if (ERR_FILE && fs.existsSync(ERR_FILE)) pass('worker error file exists')
-else fail(`worker error file exists ('${ERR_FILE}')`)
-// No picker: the registry records the configuration the worker inherited.
-const WANT_CFG = native(CFG_DEFAULT)
-const CFG = field('config_dir')
-if (CFG === WANT_CFG) pass(`registry entry has the inherited config_dir (${CFG})`)
-else fail(`registry entry has the inherited config_dir ${WANT_CFG} (got '${CFG}')`)
-if (WLINE) {
-  if (WLINE.includes('claude -p') && !WLINE.includes('CLAUDE_CONFIG_DIR=')) pass("worker's launch line sets no CLAUDE_CONFIG_DIR")
-  else fail(`worker's launch line sets no CLAUDE_CONFIG_DIR: ${WLINE.slice(0, 300)}`)
-  // The Bash tool runs the launch line inside a quoted command of its own: its quotes show as '"'"' there.
-  if (/claude -p --model 'haiku' -n 'w-e2e-smoke-worker-[0-9]{12}' --settings '\{"crossSessionInbound":"accept"\}' --dangerously-skip-permissions/.test(WLINE.replaceAll(`'"'"'`, "'"))) {
-    pass("worker's launch line carries -n <unique name> and --settings with crossSessionInbound accept")
-  } else {
-    fail(`worker's launch line carries -n <unique name> and --settings with crossSessionInbound accept: ${firstMatch(WLINE, /(claude -p.*--output-format)/).slice(0, 300)}`)
-  }
-  if (/-p --model haiku -n w-e2e-smoke-worker-[0-9]{12} --settings \{"crossSessionInbound":"accept"\} --dangerously-skip-permissions/.test(WCMD)) {
-    pass("worker's own argv has the name and the settings JSON as single arguments")
-  } else {
-    fail(`worker's own argv has the name and the settings JSON as single arguments: ${firstMatch(WCMD, /(-p.*--output-format)/).slice(0, 300)}`)
-  }
-} else {
-  skip("worker's launch line (its shell not seen in /proc)")
-}
-const NAME = field('name')
-const SOCKET = field('socket_path')
-if (/^w-e2e-smoke-worker-[0-9]{12}$/.test(NAME)) pass(`registry entry has the session name (${NAME})`)
-else fail(`registry entry has the session name w-e2e-smoke-worker-<yyMMddHHmmss> (got '${NAME}')`)
-if (SOCKET) pass(`registry entry has the socket_path (${SOCKET})`)
-else fail('registry entry has the socket_path')
-if (HAS_PROC) {
-  if (SOCK_LIVE && SOCK_LIVE === SOCKET) pass('the socket existed while the worker lived, at the path the registry records')
-  else fail(`the socket existed while the worker lived, at the path the registry records (seen '${SOCK_LIVE}')`)
-  if (SOCKET && !fs.existsSync(SOCKET)) pass('the socket is gone after the worker exited')
-  else info(`socket after the exit: ${SOCKET ? (fs.existsSync(SOCKET) ? `${SOCKET} is still there` : `${SOCKET} is gone`) : 'no socket path recorded'}`)
-} else {
-  skip('the socket while the worker lived (no /proc listing of the worker)')
-}
-if (RESULT_FILE) info(`worker cost USD ${firstMatch(readOr(RESULT_FILE), /"total_cost_usd": *([0-9.e-]*)/)}`)
-
 const has = text => grepF(traceText(), text)
-if (has('"event":"tool.call","tool":"launch_worker"')) pass('trace has the launch tool.call line')
-else fail('trace has the launch tool.call line')
-if (has('"event":"process.run","argv":["sh","-c","<PROBE_SCRIPT>"') || has('"event":"process.run","helper":"probe"') || traceLines().some(l => l.includes('"event":"process.run"') && l.includes('probe.ps1'))) {
-  pass('trace has the process.run line of the probe')
-} else {
-  fail('trace has the process.run line of the probe')
-}
 const REGN = native(REG)
+if (!HELPER_WANTED) {
+  // ---------------------------------------------------------------- (a) without Node: the fixed refusal, nothing else
+  const OSID = firstMatch(ojson, /"session_id": *"([^"]*)"/)
+  const entries = entriesOf(transcriptOf(CFG_DEFAULT, OSID))
+  const launches = toolUses(entries).filter(c => c.name === 'mcp__session-control__launch_worker')
+  const answer = launches[0]?.id ? resultText(entries, launches[0].id, true) : ''
+  if (launches.length > 0 && answer.includes(NODE_REFUSAL)) pass(`launch_worker answered the fixed refusal (${launches.length} call${launches.length === 1 ? '' : 's'})`)
+  else fail(`launch_worker answered the fixed refusal (${launches.length} calls; answer: ${answer.slice(0, 300)})`)
+  if (!fs.existsSync(REG)) pass('no registry was written')
+  else fail(`no registry was written: ${readOr(REG).slice(0, 300)}`)
+  if (HAS_PROC) {
+    if (!WPROC) pass('no worker was started (no claude in the work folder seen in /proc)')
+    else fail(`no worker was started: pid ${WPROC}`)
+  } else skip('no worker was started (no /proc)')
+  if (!fs.existsSync(TRACE)) pass('trace: not written (its lines wait in memory until Node is found)')
+  else fail(`trace: not written: ${traceText().slice(0, 300)}`)
+  const madeHelperFiles = ['open-points.json', 'task-queue.json', 'agreed-decisions.md'].filter(name => fs.existsSync(join(ORCH, name)))
+  if (madeHelperFiles.length === 0) pass('no helper file was made')
+  else fail(`no helper file was made: ${madeHelperFiles.join(' ')}`)
+}
+const SID = HELPER_WANTED ? field('session_id') : ''
 if (HELPER_WANTED) {
+  // Whether the registry entry had the worker's pid while it ran. A haiku worker can live about a second, and the
+  // completion drops the pid from the entry, so the registry sampled every 0.2 s above can still miss it: the trace
+  // proves the same thing on its own. Its worker.found line records the pid the probe found for the new worker, and its
+  // worker.registered line the pid of the entry just written, with isRegistered true and the entry's session id; the two
+  // pids equal and that session id the registry's own mean the entry held that live pid. At least one of the two proofs
+  // is required; neither found fails the check.
+  const TRACE_FOUND = firstMatch(traceText(), /"event":"worker\.found","pid":([0-9]*)/)
+  const TRACE_REG = firstMatch(
+    traceLines().filter(l => l.includes('"event":"worker.registered"') && l.includes('"isRegistered":true') && l.includes(`"sessionId":"${SID}"`)).join('\n'),
+    /"pid":([0-9]*)/,
+  )
+  if (SEEN_PID || (SID && TRACE_FOUND && TRACE_FOUND === TRACE_REG)) {
+    pass(`registry entry had a pid while the worker ran (registry sampled: ${SEEN_PID || 'missed'}; trace: worker.found pid ${TRACE_FOUND || 'none'}, registered pid ${TRACE_REG || 'none'})`)
+  } else {
+    fail(`registry entry had a pid while the worker ran (registry sampled: missed; trace: worker.found pid ${TRACE_FOUND || 'none'}, registered pid ${TRACE_REG || 'none'})`)
+  }
+  if (/^[0-9a-f-]{36}$/.test(SID)) pass(`registry entry has a session_id (${SID})`)
+  else fail(`registry entry has a session_id (got '${SID}')`)
+  const KIND = firstMatch(readOr(REG), /"kind": *"([a-z]*)"/)
+  if (KIND === 'clean') pass('registry entry has the outcome clean')
+  else fail(`registry entry has the outcome clean (got '${KIND}')`)
+  const RESULT_FILE = field('result_file')
+  const ERR_FILE = field('err_file')
+  const sizeOf = path => {
+    try {
+      return fs.statSync(path).size
+    } catch {
+      return 0
+    }
+  }
+  if (RESULT_FILE && sizeOf(RESULT_FILE) > 0) pass('worker result file exists')
+  else fail(`worker result file exists ('${RESULT_FILE}')`)
+  if (ERR_FILE && fs.existsSync(ERR_FILE)) pass('worker error file exists')
+  else fail(`worker error file exists ('${ERR_FILE}')`)
+  // No picker: the registry records the configuration the worker inherited.
+  const WANT_CFG = native(CFG_DEFAULT)
+  const CFG = field('config_dir')
+  if (CFG === WANT_CFG) pass(`registry entry has the inherited config_dir (${CFG})`)
+  else fail(`registry entry has the inherited config_dir ${WANT_CFG} (got '${CFG}')`)
+  if (WLINE) {
+    if (WLINE.includes('claude -p') && !WLINE.includes('CLAUDE_CONFIG_DIR=')) pass("worker's launch line sets no CLAUDE_CONFIG_DIR")
+    else fail(`worker's launch line sets no CLAUDE_CONFIG_DIR: ${WLINE.slice(0, 300)}`)
+    // The Bash tool runs the launch line inside a quoted command of its own: its quotes show as '"'"' there.
+    if (/claude -p --model 'haiku' -n 'w-e2e-smoke-worker-[0-9]{12}' --settings '\{"crossSessionInbound":"accept"\}' --dangerously-skip-permissions/.test(WLINE.replaceAll(`'"'"'`, "'"))) {
+      pass("worker's launch line carries -n <unique name> and --settings with crossSessionInbound accept")
+    } else {
+      fail(`worker's launch line carries -n <unique name> and --settings with crossSessionInbound accept: ${firstMatch(WLINE, /(claude -p.*--output-format)/).slice(0, 300)}`)
+    }
+    if (/-p --model haiku -n w-e2e-smoke-worker-[0-9]{12} --settings \{"crossSessionInbound":"accept"\} --dangerously-skip-permissions/.test(WCMD)) {
+      pass("worker's own argv has the name and the settings JSON as single arguments")
+    } else {
+      fail(`worker's own argv has the name and the settings JSON as single arguments: ${firstMatch(WCMD, /(-p.*--output-format)/).slice(0, 300)}`)
+    }
+  } else {
+    skip("worker's launch line (its shell not seen in /proc)")
+  }
+  const NAME = field('name')
+  const SOCKET = field('socket_path')
+  if (/^w-e2e-smoke-worker-[0-9]{12}$/.test(NAME)) pass(`registry entry has the session name (${NAME})`)
+  else fail(`registry entry has the session name w-e2e-smoke-worker-<yyMMddHHmmss> (got '${NAME}')`)
+  if (SOCKET) pass(`registry entry has the socket_path (${SOCKET})`)
+  else fail('registry entry has the socket_path')
+  if (HAS_PROC) {
+    if (SOCK_LIVE && SOCK_LIVE === SOCKET) pass('the socket existed while the worker lived, at the path the registry records')
+    else fail(`the socket existed while the worker lived, at the path the registry records (seen '${SOCK_LIVE}')`)
+    if (SOCKET && !fs.existsSync(SOCKET)) pass('the socket is gone after the worker exited')
+    else info(`socket after the exit: ${SOCKET ? (fs.existsSync(SOCKET) ? `${SOCKET} is still there` : `${SOCKET} is gone`) : 'no socket path recorded'}`)
+  } else {
+    skip('the socket while the worker lived (no /proc listing of the worker)')
+  }
+  if (RESULT_FILE) info(`worker cost USD ${firstMatch(readOr(RESULT_FILE), /"total_cost_usd": *([0-9.e-]*)/)}`)
+
+  if (has('"event":"tool.call","tool":"launch_worker"')) pass('trace has the launch tool.call line')
+  else fail('trace has the launch tool.call line')
+  if (has('"event":"process.run","helper":"probe"') || traceLines().some(l => l.includes('"event":"process.run"') && l.includes('probe.ps1'))) {
+    pass('trace has the process.run line of the probe')
+  } else {
+    fail('trace has the process.run line of the probe')
+  }
   // The Node helper writes the registry in one process: its temp file never goes through $.fs.
   if (has(`"event":"process.run","helper":"writeAtomic","path":"${REGN}","exitCode":0`) && has('"event":"worker.registered"')) {
     pass('trace has the register write: the helper writeAtomic of the registry, exit 0')
   } else {
     fail('trace has the register write: the helper writeAtomic of the registry, exit 0')
   }
-} else if (has(`"event":"fs.write","path":"${REGN}.tmp.`) && traceLines().some(l => l.includes('"event":"process.run"') && l.includes(`${REGN}.tmp.`)) && has('"event":"worker.registered"')) {
-  pass('trace has the register write: its temp file and the process.run of the rename')
-} else {
-  fail('trace has the register write: its temp file and the process.run of the rename')
-}
-// The Node helper: in use with no fallback where Node 22+ is on the sessions' PATH, else not found and never run.
-const FALLBACKS = traceLines().filter(l => l.includes('"event":"helper.fallback"')).length
-const HELPER_RUNS = traceLines().filter(l => l.includes('"event":"process.run","helper":"')).length
-if (HELPER_WANTED) {
-  if (has('"event":"helper","isActive":true') && HELPER_RUNS > 0 && FALLBACKS === 0) {
-    pass(`trace: the Node helper in use (${firstMatch(traceText(), /"event":"helper","isActive":true,"version":"([^"]*)"/)}, ${HELPER_RUNS} helper runs), no helper.fallback line`)
+  // The Node helper in use, with no call that failed.
+  const FAILED = traceLines().filter(l => l.includes('"event":"helper.failed"')).length
+  const HELPER_RUNS = traceLines().filter(l => l.includes('"event":"process.run","helper":"')).length
+  if (has('"event":"helper","isActive":true') && HELPER_RUNS > 0 && FAILED === 0) {
+    pass(`trace: the Node helper in use (${firstMatch(traceText(), /"event":"helper","isActive":true,"version":"([^"]*)"/)}, ${HELPER_RUNS} helper runs), no helper.failed line`)
   } else {
     const kinds = new Map()
     for (const m of traceText().matchAll(/"event":"helper[^}]*/g)) kinds.set(m[0], (kinds.get(m[0]) ?? 0) + 1)
     const listed = [...kinds].sort(([a], [b]) => (a < b ? -1 : 1)).slice(0, 5).map(([k, n]) => `${String(n).padStart(7)} ${k}`).join(' ')
-    fail(`trace: the Node helper in use, no helper.fallback line (${HELPER_RUNS} helper runs, ${FALLBACKS} fallbacks: ${listed} )`)
+    fail(`trace: the Node helper in use, no helper.failed line (${HELPER_RUNS} helper runs, ${FAILED} failed: ${listed} )`)
   }
-} else if (has('"event":"helper","isActive":false') && HELPER_RUNS === 0 && FALLBACKS === 0) {
-  pass(`trace: no Node found (${firstMatch(traceText(), /"event":"helper","isActive":false[^}]*/).replace(/.*"isActive":false,/, '')}), the built-in operations only, no helper run`)
-} else {
-  fail(`trace: no Node found, the built-in operations only (${HELPER_RUNS} helper runs, ${FALLBACKS} fallbacks)`)
-}
-if (has('"event":"worker.found"') && has('"isNamed":true,"isSocketSeen":true')) pass('trace: the worker.found line saw the name and the socket in the sessions file')
-else fail('trace: the worker.found line saw the name and the socket in the sessions file')
-if (has('"event":"completion"') && has('"outcome":"clean"')) pass(`trace: the completion line has the outcome clean (report check noted: ${firstMatch(traceText(), /"isReportNoted":([a-z]*)/)})`)
-else fail('trace: the completion line has the outcome clean')
-if (/sk-ant-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}|"(accessToken|refreshToken|apiKey)"/.test(traceText())) fail('trace: no token-like text (sk-ant-, a JWT, a token field)')
-else pass('trace: no token-like text (sk-ant-, a JWT, a token field)')
-if (has('"event":"worker.start"') && has('"isConfigDirSet":false')) pass('trace: the worker.start line sets no CLAUDE_CONFIG_DIR')
-else fail('trace: the worker.start line sets no CLAUDE_CONFIG_DIR')
-if (has('"licencePickCommand":"empty"') && has(`"registryPath":"${REGN}"`)) pass('trace shows the scratch options (scratch registry, no licence picker)')
-else fail('trace shows the scratch options (scratch registry, no licence picker)')
-const SN = native(S)
-const OUTSIDE = traceLines()
-  .flatMap(l => [...l.matchAll(/"event":"(?:fs\.(?:write|append)|process\.run","helper":"[A-Za-z]*)","path":"([^"]*)"/g)].map(m => m[1]))
-  .filter(path => !path.includes(`${SN}/`))
-  .slice(0, 3)
-  .join('\n')
-if (has('"event":"fs.write"') && !OUTSIDE) pass('trace: every file write is inside the scratch directory')
-else fail(`trace: every file write is inside the scratch directory (outside: ${OUTSIDE})`)
-if (has('work-[redacted]') && !has(CANARY)) pass('trace: the key-like canary in the worker directory is [redacted]')
-else fail('trace: the key-like canary in the worker directory is [redacted]')
-{
-  // jq -e . over the trace: the whole file JSON values, at least one (a trace that is empty or blank gives jq no value,
-  // exit 4), the last neither null nor false. A missing trace is jq's error.
-  const values = fs.existsSync(TRACE) ? jsonValues(traceText()) : undefined
-  if (values !== undefined && values.length > 0 && values.at(-1) !== null && values.at(-1) !== false) pass(`trace: all ${traceText().split('\n').length - 1} lines are JSON`)
-  else fail('trace: all lines are JSON')
+  if (has('"event":"worker.found"') && has('"isNamed":true,"isSocketSeen":true')) pass('trace: the worker.found line saw the name and the socket in the sessions file')
+  else fail('trace: the worker.found line saw the name and the socket in the sessions file')
+  if (has('"event":"completion"') && has('"outcome":"clean"')) pass(`trace: the completion line has the outcome clean (report check noted: ${firstMatch(traceText(), /"isReportNoted":([a-z]*)/)})`)
+  else fail('trace: the completion line has the outcome clean')
+  if (/sk-ant-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{8,}|"(accessToken|refreshToken|apiKey)"/.test(traceText())) fail('trace: no token-like text (sk-ant-, a JWT, a token field)')
+  else pass('trace: no token-like text (sk-ant-, a JWT, a token field)')
+  if (has('"event":"worker.start"') && has('"isConfigDirSet":false')) pass('trace: the worker.start line sets no CLAUDE_CONFIG_DIR')
+  else fail('trace: the worker.start line sets no CLAUDE_CONFIG_DIR')
+  if (has('"licencePickCommand":"empty"') && has(`"registryPath":"${REGN}"`)) pass('trace shows the scratch options (scratch registry, no licence picker)')
+  else fail('trace shows the scratch options (scratch registry, no licence picker)')
+  const SN = native(S)
+  const OUTSIDE = traceLines()
+    .flatMap(l => [...l.matchAll(/"event":"(?:fs\.(?:write|append)|process\.run","helper":"[A-Za-z]*)","path":"([^"]*)"/g)].map(m => m[1]))
+    .filter(path => !path.includes(`${SN}/`))
+    .slice(0, 3)
+    .join('\n')
+  if (has('"event":"fs.write"') && !OUTSIDE) pass('trace: every file write is inside the scratch directory')
+  else fail(`trace: every file write is inside the scratch directory (outside: ${OUTSIDE})`)
+  if (has('work-[redacted]') && !has(CANARY)) pass('trace: the key-like canary in the worker directory is [redacted]')
+  else fail('trace: the key-like canary in the worker directory is [redacted]')
+  {
+    // jq -e . over the trace: the whole file JSON values, at least one (a trace that is empty or blank gives jq no value,
+    // exit 4), the last neither null nor false. A missing trace is jq's error.
+    const values = fs.existsSync(TRACE) ? jsonValues(traceText()) : undefined
+    if (values !== undefined && values.length > 0 && values.at(-1) !== null && values.at(-1) !== false) pass(`trace: all ${traceText().split('\n').length - 1} lines are JSON`)
+    else fail('trace: all lines are JSON')
+  }
 }
 
 // ---------------------------------------------------------------- (b) interactive panel in tmux
@@ -399,8 +418,17 @@ if (which('tmux')) {
     fail(`interactive panel shows SESSIONS, QUEUED WORK and OPEN POINTS (missing: ${missing.join(' ')}); the pane:`)
     showPane(paneText, 50)
   }
-  if (traceLines().filter(l => l.includes('"event":"session.start"')).length >= 2 && has('"event":"command.run","command":"session-control"')) pass('trace has the interactive session start and its /session-control line')
-  else fail('trace has the interactive session start and its /session-control line')
+  if (HELPER_WANTED) {
+    if (traceLines().filter(l => l.includes('"event":"session.start"')).length >= 2 && has('"event":"command.run","command":"session-control"')) pass('trace has the interactive session start and its /session-control line')
+    else fail('trace has the interactive session start and its /session-control line')
+    if (!paneText.includes(NODE_WARNING)) pass('interactive panel shows no Node warning')
+    else fail('interactive panel shows no Node warning')
+  } else if (paneText.includes(NODE_WARNING)) {
+    pass(`interactive panel shows the warning: ${firstMatch(paneText, /(! session-control: needs Node\.js[^\n│]*)/).trim()}`)
+  } else {
+    fail(`interactive panel shows the warning ${NODE_WARNING}; the pane:`)
+    showPane(paneText, 50)
+  }
   // /exit is the engine's own command (no model call); two ctrl+c are the fallback.
   tmux('send-keys', '-t', 'e2e', 'C-u')
   tmux('send-keys', '-t', 'e2e', '-l', '/exit')
@@ -427,7 +455,10 @@ if (which('tmux')) {
 // In any capitalisation; a check that cannot run is a failure, never a pass.
 const p1 = holdsCi(PROMPT_PHRASE, TRACE)
 const p2 = holdsCi('nothing to wait for in the foreground', TRACE)
-if (!(fs.existsSync(TRACE) && fs.statSync(TRACE).size > 0)) fail('trace: no line contains the prompt text (no trace)')
+if (!HELPER_WANTED) {
+  if (!fs.existsSync(TRACE)) pass('trace: no line contains the prompt text (without Node no trace is written)')
+  else fail('trace: no trace is written without Node')
+} else if (!(fs.existsSync(TRACE) && fs.statSync(TRACE).size > 0)) fail('trace: no line contains the prompt text (no trace)')
 else if (p1 === 2 || p2 === 2) fail('trace: no line contains the prompt text (the check could not run)')
 else if (p1 === 0 || p2 === 0) fail('trace: no line contains the prompt text')
 else pass('trace: no line contains the prompt text')

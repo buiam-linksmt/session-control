@@ -1,19 +1,16 @@
 // Pure parts of the debug trace: the line format, the redaction, what of a message and of a command line is shown and
 // the rotation. The writing itself lives in register.tsx, where `$` is available.
 
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, STOP_SCRIPT, TREE_SCRIPT } from './host-posix'
-import { FILES_PS1, NEWER_PS1, PROBE_PS1, TREE_PS1 } from './host-windows'
-
 /** The trace file's name inside the runs directory. */
 export const TRACE_FILE = 'trace.log'
 
-/** The trace is rotated before an append would take it past about this size (several processes share it, see ROTATE_SCRIPT in host-posix.ts). */
+/** The trace is rotated before an append would take it past about this size (several processes share it: the helper's rotate checks the size again itself). */
 export const TRACE_MAX_BYTES = 2 * 1024 * 1024
 
 /** Files kept in all: trace.log, trace.log.1 and trace.log.2. */
 export const TRACE_KEEP = 3
 
-/** The most one append carries on its command line (Linux caps one argument at 128 KiB). */
+/** The most one write of the trace carries (one helper request). */
 export const TRACE_CHUNK_BYTES = 64 * 1024
 
 /** A logged string longer than this is cut. */
@@ -276,27 +273,4 @@ export function chunkLines(lines: readonly string[], maxBytes = TRACE_CHUNK_BYTE
   }
   if (current.length > 0) chunks.push(current)
   return chunks
-}
-
-const SCRIPTS: readonly [string, string][] = [
-  [PROBE_SCRIPT, '<PROBE_SCRIPT>'],
-  [APPEND_SCRIPT, '<APPEND_SCRIPT>'],
-  [ROTATE_SCRIPT, '<ROTATE_SCRIPT>'],
-  [REMOVE_REGULAR_SCRIPT, '<REMOVE_REGULAR_SCRIPT>'],
-  [NEWER_SCRIPT, '<NEWER_SCRIPT>'],
-  [TREE_SCRIPT, '<TREE_SCRIPT>'],
-  [STOP_SCRIPT, '<STOP_SCRIPT>'],
-  [FILES_PS1, '<FILES_PS1>'],
-  [PROBE_PS1, '<PROBE_PS1>'],
-  [NEWER_PS1, '<NEWER_PS1>'],
-  [TREE_PS1, '<TREE_PS1>'],
-]
-
-/** A command line as the trace shows it: the mod's scripts by name, the text an append adds as its byte count. */
-export function shownArgv(argv: readonly string[]): string[] {
-  const isAppend = argv[0] === 'sh' && argv[2] === APPEND_SCRIPT
-  return argv.map((arg, at) => {
-    if (isAppend && at === 4) return `<${utf8Bytes(arg) + 1} bytes>`
-    return SCRIPTS.find(([text]) => text === arg)?.[1] ?? arg
-  })
 }

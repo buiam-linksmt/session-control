@@ -1,24 +1,23 @@
-// The host interface: one contract run against both adapters, and the one platform choice.
+// The host interface: one contract run against the Host withHelper makes of each adapter, and the one platform choice.
 //
-// The machine is simulated once (files in a map, the commands each adapter runs answered as that system would) and
-// stands beneath the plugins as the mock engine's fs, process and env hooks. The contract calls the adapters over a
-// HostPort on that same machine: the kit's test `$` has no fs or process noun, and an inline plugin runs in a realm
+// The machine is simulated once (files in a map, Node and its helper over them, the commands the adapters still run
+// answered as that system would) and stands beneath the plugins as the mock engine's fs, process and env hooks. The
+// contract calls the hosts over a HostPort on that same machine: the kit's test `$` has no fs or process noun, and an inline plugin runs in a realm
 // of its own, so a port over a plugin's `$` cannot be handed to the test. The selection tests go through the plugin
 // itself, on the mock engine.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { FsStat, On } from 'claude-code'
 
-import { tailLines } from '../hooks/core'
 import { HOST_MEMBERS, selectHost } from '../hooks/host'
-import type { Host, HostPort, StopReport } from '../hooks/host'
+import type { Host, HostPort, Platform, StopReport } from '../hooks/host'
 import { withHelper } from '../hooks/host-helper'
 import { withPowerShellLaunch } from '../hooks/host-powershell'
 import { NEWER_MAX } from '../hooks/host-shared'
-import { APPEND_SCRIPT, NEWER_SCRIPT, PROBE_SCRIPT, REMOVE_REGULAR_SCRIPT, ROTATE_SCRIPT, STOP_SCRIPT, TAIL_SHAPED_SCRIPT, TREE_SCRIPT, posixHost } from '../hooks/host-posix'
-import { FILES_PS1, NEWER_PS1, PROBE_PS1, TREE_PS1, windowsHost } from '../hooks/host-windows'
+import { posixHost } from '../hooks/host-posix'
+import { PROBE_PS1, TREE_PS1, windowsHost } from '../hooks/host-windows'
 import { localDate } from '../hooks/store'
-import { checkInTable, helperAnswer, listInMap, newerInMap, removeRegularInMap, stopInTable, taskkillInTable, throughLinks, treeInTable } from './fake-helper'
+import { checkInTable, helperAnswer, taskkillInTable, treeInTable } from './fake-helper'
 import type { ProcTable } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
@@ -40,24 +39,20 @@ type Machine = {
   mtimes: Map<string, number>
   /** The symbolic links: a link's key to its target's key (a file, or a directory the paths under the link go through). */
   links: Map<string, string>
-  /** Whether the plugin's process runs hand their stdin to the machine (the helper needs it; the older tests never gave it). */
-  isStdinPassed?: boolean
-  /** The path (key) of every removal any command or helper call was asked for: rm, the removal scripts, the helper's removeFile. */
+  /** The path (key) of every removal the helper's removeFile was asked for. */
   removals: string[]
   runs: string[][]
   /** Milliseconds waited on the engine's clock. */
   sleeps: number[]
   /** The processes the stop of stop_worker sees, and every signal sent to one. */
   table: ProcTable
-  /** A helper call that fails this way (stopProcesses only): the stop's fallback. */
-  helperStopFails?: string
   read(path: string): string
   exists(path: string): boolean
   stat(path: string): FsStat
   run(argv: readonly string[], stdin?: string): Ran
 }
 
-/** The simulated machine: its files and the commands both adapters run, answered as the system would. */
+/** The simulated machine: its files, Node and its helper, and the commands the adapters run, answered as the system would. */
 function machine(env: Record<string, string>): Machine {
   const files = new Map<string, string>()
   const mtimes = new Map<string, number>()
@@ -66,13 +61,6 @@ function machine(env: Record<string, string>): Machine {
   const runs: string[][] = []
   const table: ProcTable = { procs: new Map(), own: [900, 1], signals: [], nowMs: NOW_MS }
   const isDir = (path: string) => [...files.keys()].some(file => file.startsWith(`${keyOf(path).replace(/\/+$/, '')}/`))
-  const move = (from: string, to: string) => {
-    const text = files.get(keyOf(from))
-    if (text === undefined) return false
-    files.set(keyOf(to), text)
-    files.delete(keyOf(from))
-    return true
-  }
   const read = (path: string) => {
     const text = files.get(keyOf(path))
     if (text === undefined) throw new Error(`ENOENT ${path}`)
@@ -88,105 +76,29 @@ function machine(env: Record<string, string>): Machine {
   const run = (given: readonly string[], stdin?: string): Ran => {
     const argv = given.map(String)
     runs.push(argv)
-    const [cmd, , script] = argv
-    // Node 24 and the helper (tests/fake-helper.ts), whose probe prints what the system's own probe prints.
+    const [cmd] = argv
+    // Node 24 and the helper (tests/fake-helper.ts), whose probe prints what /proc shows.
     if (cmd === NODE && argv[1] === '--version') return ran('v24.14.0\n')
     if (cmd === NODE && (argv[1] === HELPER || argv[1]?.endsWith('/helper/host.mjs'))) {
       const isWin = env.OS === 'Windows_NT'
       const out = isWin ? '' : probeOutput('/m/work', '/m/cfg', 'claude -p --model opus --output-format json -- Goal: x')
       const request = JSON.parse(stdin ?? '') as Record<string, unknown>
       if (argv[2] === 'removeFile') removals.push(keyOf(String(request.path)))
-      if (argv[2] === 'stopProcesses' && result.helperStopFails !== undefined) {
-        if (result.helperStopFails === 'TIMEOUT') throw new Error('the process timed out')
-        return ran(JSON.stringify({ ok: false, code: result.helperStopFails }), 1)
-      }
       const answer = helperAnswer(files, String(argv[2]), request, out, keyOf, mtimes, links, isWin ? undefined : table)
       return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
     }
-    // rm -f follows a link met on the way to the file, as the system's does: a path through a linked directory reaches the target.
-    if (cmd === 'rm') {
-      const key = keyOf(argv[2] ?? '')
-      removals.push(key)
-      if (links.has(key)) links.delete(key)
-      else files.delete(throughLinks(links, key))
-      return ran()
-    }
-    if (cmd === 'sh' && script === REMOVE_REGULAR_SCRIPT) {
-      removals.push(keyOf(argv[4] ?? ''))
-      return ran('', removeRegularInMap(files, links, keyOf(argv[4] ?? '')))
-    }
-    if (cmd === 'mv') return move(argv[2] ?? '', argv[3] ?? '') ? ran() : ran('', 1, 'mv: cannot stat')
     if (cmd === 'mkdir' || cmd === 'sleep') return ran()
     if (cmd === 'test') {
       const path = argv[2] ?? ''
       const isThere = argv[1] === '-d' ? isDir(path) : argv[1] === '-s' ? (files.get(keyOf(path)) ?? '').length > 0 : files.has(keyOf(path)) || isDir(path)
       return ran('', isThere ? 0 : 1)
     }
-    if (cmd === 'sh' && script === APPEND_SCRIPT) {
-      const path = keyOf(argv[5] ?? '')
-      files.set(path, `${files.get(path) ?? ''}${argv[4]}\n`)
-      return ran()
-    }
-    // The listing as find, sort and awk print it: seconds with a fraction, the count last; exit 3 without the directory.
-    if (cmd === 'sh' && script === NEWER_SCRIPT) {
-      const found = newerInMap(files, mtimes, keyOf(argv[4] ?? ''), Number(argv[5]))
-      if (found === undefined) return ran('', 3)
-      return ran(`${found.slice(0, Number(argv[6])).map(one => `${(one.mtimeMs / 1000).toFixed(10)}\t${one.path}\n`).join('')}N\t${found.length}\n`)
-    }
-    if (cmd === 'sh' && script === TREE_SCRIPT) return ran(treeInTable(table, Number(argv[4]), argv[5] ?? ''))
-    if (cmd === 'sh' && script === STOP_SCRIPT) return ran(stopInTable(table, Number(argv[4]), argv.slice(5)))
     if (cmd?.endsWith('\\taskkill.exe')) return ran('', taskkillInTable(table, Number(argv[2]), argv.includes('/F')))
     if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/tree.ps1')) {
       expect(files.get(keyOf(argv[6]))).toBe(TREE_PS1)
       const [op, a = '', b = ''] = argv.slice(7)
       const out = op === 'list' ? treeInTable(table, Number(a), b) : checkInTable(table, argv.slice(9))
       return ran(out.replace(/\n/g, '\r\n'))
-    }
-    if (cmd === 'sh' && script === PROBE_SCRIPT) return ran(probeOutput('/m/work', '/m/cfg', 'claude -p --model opus --output-format json -- Goal: x'))
-    if (cmd === 'sh' && script?.startsWith('tail -n 600 ')) {
-      const text = files.get(keyOf(argv[4] ?? ''))
-      return text === undefined ? ran('', 1) : ran(tailLines(text, 600, 20000))
-    }
-    if (cmd === 'sh' && script === TAIL_SHAPED_SCRIPT) {
-      const text = files.get(keyOf(argv[4] ?? ''))
-      return text === undefined ? ran('', 1) : ran(tailLines(text, Number(argv[5]), Number(argv[6])).slice(-Number(argv[7])))
-    }
-    if (cmd === 'sh' && script === ROTATE_SCRIPT) {
-      const path = argv[4] ?? ''
-      move(`${path}.1`, `${path}.2`)
-      move(path, `${path}.1`)
-      return ran()
-    }
-    if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/files.ps1')) {
-      expect(files.get(keyOf(argv[6]))).toBe(FILES_PS1)
-      const [op, a = '', b = '', c = ''] = argv.slice(7)
-      if (op === 'move') return move(a, b) ? ran() : ran('', 1, 'not found')
-      if (op === 'remove') {
-        removals.push(keyOf(a))
-        files.delete(keyOf(a))
-        return ran()
-      }
-      if (op === 'removeregular') {
-        removals.push(keyOf(a))
-        return ran('', removeRegularInMap(files, links, keyOf(a)))
-      }
-      if (op === 'append') {
-        files.set(keyOf(b), `${files.get(keyOf(b)) ?? ''}${files.get(keyOf(a)) ?? ''}`)
-        files.delete(keyOf(a))
-        return ran()
-      }
-      if (op === 'tail') {
-        const text = files.get(keyOf(a))
-        return text === undefined ? ran('', 1, 'not found') : ran(tailLines(text, Number(b), Number(c)))
-      }
-    }
-    // NEWER_PS1 prints full names with backslashes and three decimals, with PowerShell's own line ends.
-    if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/newer.ps1')) {
-      expect(files.get(keyOf(argv[6]))).toBe(NEWER_PS1)
-      const found = newerInMap(files, mtimes, keyOf(argv[7] ?? ''), Number(argv[8]))
-      if (found === undefined) return ran('', 3)
-      const lines = found.slice(0, Number(argv[9])).map(one => `${(one.mtimeMs / 1000).toFixed(3)}\t${one.path.replace(/\//g, '\\')}`)
-      return ran([...lines, `N\t${found.length}`, ''].join('\r\n'))
     }
     if (cmd?.endsWith('\\powershell.exe') && argv[6]?.endsWith('/probe.ps1')) {
       expect(files.get(keyOf(argv[6]))).toBe(PROBE_PS1)
@@ -210,7 +122,7 @@ function mount(on: On, m: Machine): void {
   })
   on('fs.exists', ($, e) => ({ value: m.exists(e.path) }))
   on('fs.stat', ($, e) => ({ value: m.stat(e.path) }))
-  on('process.run', ($, e) => ({ value: m.run(e.argv, m.isStdinPassed ? e.init?.stdin : undefined) }))
+  on('process.run', ($, e) => ({ value: m.run(e.argv, e.init?.stdin) }))
 }
 
 /** A HostPort on the machine, as register.tsx's port is on the engine (untraced). */
@@ -223,19 +135,14 @@ function portOf(m: Machine, runsDir: string, notes: string[] = []): HostPort {
     },
     exists: async path => m.exists(path),
     stat: async path => m.stat(path),
-    list: async path => listInMap(m.files, new Map(), keyOf(path)) as never,
     now: async () => NOW_MS,
     sleep: async ms => {
       m.sleeps.push(ms)
     },
     env: async name => m.env[name],
     runsDir: async () => runsDir,
-    traceError: () => undefined,
-    noteDirectWrite: text => {
-      notes.push(text)
-    },
     noteHelper: note => {
-      if (note.kind === 'fallback') notes.push(`helper fallback: ${note.op} ${note.code}`)
+      if (note.kind === 'failed') notes.push(`helper failed: ${note.op} ${note.code}`)
     },
   }
 }
@@ -250,13 +157,10 @@ const LINUX_ENV = { HOME: '/m/home' }
 // Git Bash's HOME in its /c/... form; the adapter stores C:/...
 const WINDOWS_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\m\\home', HOME: '/c/m/home', SystemRoot: 'C:\\Windows' }
 const CASES: Case[] = [
-  { host: posixHost, name: 'linux', platform: 'linux', env: LINUX_ENV, root: '/m', home: '/m/home' },
-  { host: windowsHost, name: 'windows', platform: 'windows', env: WINDOWS_ENV, root: 'C:/m', home: 'C:/m/home' },
-  // The same contract with the Node helper in front of each adapter.
+  // The Host of each adapter, the Node helper in front of it.
   { host: withHelper(posixHost, { node: NODE, script: HELPER }), name: 'linux with the helper', platform: 'linux', env: LINUX_ENV, root: '/m', home: '/m/home' },
   { host: withHelper(windowsHost, { node: NODE, script: HELPER }), name: 'windows with the helper', platform: 'windows', env: WINDOWS_ENV, root: 'C:/m', home: 'C:/m/home' },
-  // The Windows adapter on the PowerShell launch route (the launchRoute option at powershell), alone and behind the helper.
-  { host: withPowerShellLaunch(windowsHost), name: 'windows, PowerShell route', platform: 'windows', env: WINDOWS_ENV, root: 'C:/m', home: 'C:/m/home', isPowerShellRoute: true },
+  // The Windows adapter on the PowerShell launch route (the launchRoute option at powershell), behind the helper.
   {
     host: withHelper(withPowerShellLaunch(windowsHost), { node: NODE, script: HELPER }),
     name: 'windows, PowerShell route, with the helper',
@@ -318,7 +222,7 @@ describe('host contract', () => {
       m.files.set(keyOf(`${root}/b.tmp.1`), 'B')
       expect(await host.removeFile(port, `${root}/a`)).toBe(true)
       expect(at(m, `${root}/a`)).toBeUndefined()
-      await host.renameOver(port, `${root}/b.tmp.1`, `${root}/b`, 'B')
+      await host.renameOver(port, `${root}/b.tmp.1`, `${root}/b`)
       expect(at(m, `${root}/b`)).toBe('B')
       expect(at(m, `${root}/b.tmp.1`)).toBeUndefined()
       expect(notes).toEqual([])
@@ -382,7 +286,6 @@ describe('host contract', () => {
       expect(at(m, `${root}/orch/task-queue.json`)).toBe('{"tasks":[]}\n')
       await host.prepareHelperDirs(port, `${root}/orch/backups`)
       await host.prepareRunsDir(port, runs)
-      expect(typeof (await host.makeDir(port, runs))).toBe('boolean')
     })
 
     test(`${one.name}: probe, then findNewWorker finds the new headless worker and not a known one`, async () => {
@@ -516,8 +419,8 @@ describe('host contract', () => {
       ])
       expect(report.tree.ancestors).toEqual([900, 1])
       // The listing ran before any signal: the first signal is recorded after it.
-      const listedAt = m.runs.findIndex(argv => argv.includes(TREE_SCRIPT) || argv.some(arg => arg.endsWith('/tree.ps1')) || argv.includes('processTree'))
-      const firstSignal = m.runs.findIndex(argv => argv.includes(STOP_SCRIPT) || argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))
+      const listedAt = m.runs.findIndex(argv => argv.some(arg => arg.endsWith('/tree.ps1')) || argv.includes('processTree'))
+      const firstSignal = m.runs.findIndex(argv => argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))
       expect(listedAt).toBeGreaterThanOrEqual(0)
       expect(firstSignal).toBeGreaterThan(listedAt)
       expect(signalsOf(report.steps)).toEqual(one.platform === 'linux' ? ['5000 TERM', '5001 TERM', '5002 TERM', '5002 KILL'] : ['5000 taskkill /T', '5002 taskkill /T', '5002 taskkill /T /F'])
@@ -545,7 +448,7 @@ describe('host contract', () => {
       expect(own.steps).toEqual([{ kind: 'skip', pid: 5000, reason: 'own' }])
       expect(m.table.signals).toEqual([])
       expect(m.table.procs.size).toBe(4)
-      expect(m.runs.some(argv => argv.includes(STOP_SCRIPT) || argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))).toBe(false)
+      expect(m.runs.some(argv => argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))).toBe(false)
     })
 
     test(`${one.name}: no operation falls back (the helper, where there is one, answers every call)`, async () => {
@@ -561,29 +464,7 @@ describe('host contract', () => {
       seedTree(m)
       await host.stopProcessTree(port, { pid: 5000, start: '100' })
       expect(notes).toEqual([])
-      const isHelped = one.name.endsWith('with the helper')
-      expect(m.runs.some(argv => argv[0] === NODE && argv[1] === HELPER)).toBe(isHelped)
-    })
-  }
-})
-
-describe('the stop through the helper falls back over the same listing', () => {
-  for (const code of ['TIMEOUT', 'IO']) {
-    test(`linux with the helper: a stop the helper fails (${code}) is made by STOP_SCRIPT over the listing the helper made, and the report says so`, async () => {
-      const m = machine(LINUX_ENV)
-      m.isStdinPassed = true
-      m.table.procs.set(5000, { ppid: 1, start: '100', state: 'S', comm: 'claude' })
-      m.table.procs.set(5001, { ppid: 5000, start: '101', state: 'S', comm: 'sleep' })
-      m.helperStopFails = code
-      const notes: string[] = []
-      const report = await withHelper(posixHost, { node: NODE, script: HELPER }).stopProcessTree(portOf(m, '/m/runs', notes), { pid: 5000, start: '100' })
-      expect(notes).toEqual([`helper fallback: stopProcesses ${code}`])
-      expect(m.runs.some(argv => argv[1] === HELPER && argv[2] === 'processTree')).toBe(true)
-      expect(m.runs.some(argv => argv.includes(TREE_SCRIPT))).toBe(false)
-      expect(m.runs.filter(argv => argv.includes(STOP_SCRIPT)).map(argv => argv.slice(4))).toEqual([['10', '5000:100', '5001:101']])
-      expect(report.final.every(one => one.status === 'gone')).toBe(true)
-      expect(report.notes[0]).toContain(`the helper's stop failed (${code})`)
-      expect(report.notes[0]?.includes('signals it sent before that are not in this record')).toBe(code === 'TIMEOUT')
+      expect(m.runs.some(argv => argv[0] === NODE && argv[1] === HELPER)).toBe(true)
     })
   }
 })
@@ -620,9 +501,10 @@ describe('host selection', () => {
       on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
       on('ui.toast', () => ({ value: undefined }))
       await $.session.start({ cwd: orch, surface: null, isInteractive: true })
-      const probes = m.runs.filter(argv => argv[2] === PROBE_SCRIPT || String(argv[6]).endsWith('/probe.ps1'))
+      // Linux: the helper's probe; Windows: PROBE_PS1 (the helper probes Linux only).
+      const probes = m.runs.filter(argv => (argv[0] === NODE && argv[2] === 'probe') || String(argv[6]).endsWith('/probe.ps1'))
       expect(probes.length).toBeGreaterThan(0)
-      expect(probes.every(argv => (adapter === 'Linux' ? argv[0] === 'sh' : argv[0]?.endsWith('\\powershell.exe')))).toBe(true)
+      expect(probes.every(argv => (adapter === 'Linux' ? argv[0] === NODE : argv[0]?.endsWith('\\powershell.exe')))).toBe(true)
     })
   }
 })
@@ -647,7 +529,7 @@ describe('write-side tools through the plugin, on both platforms', () => {
     const runs = `${home}/.claude/session-control/runs`
     const reg = `${home}/.claude/headless-sessions.json`
     const cfg = `${home}/.claude`
-    const options = { orchestratorDir: orch, registryPath: '~/.claude/headless-sessions.json', helper: 'off', completionWrites: false }
+    const options = { orchestratorDir: orch, registryPath: '~/.claude/headless-sessions.json', completionWrites: false }
     const boot = (on: On, m: Machine) => {
       mount(on, m)
       on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -747,83 +629,80 @@ describe('write-side tools through the plugin, on both platforms', () => {
       expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([{ ...entries[1], reported: true, keep: true }])
     })
 
-    for (const mode of ['off', 'auto'] as const) {
-      test(`${p.name}, helper ${mode}: a retire deletes only regular files directly in the runs folder: a .. path, an absolute outside path, a symlinked folder, a symlinked file, a subfolder, a directory, a shared file and a non-clean outcome leave every file where it is, and are named`, { options: { ...options, helper: mode } }, async ($, on) => {
-        const m = machine(p.env)
-        m.isStdinPassed = true
-        boot(on, m)
-        const out = `${p.root}/outside`
-        const sid = (n: number) => `${n.toString(16).padStart(4, '0')}0${n}00-aaaa-4aaa-8aaa-aaaaaaaaaaaa`
-        const [NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED, LOGIN, KEEPER] = [1, 2, 3, 4, 5, 6, 7, 8].map(sid)
-        const clean = (n: string) => ({ kind: 'clean', summary: `clean: ${n}` })
-        const base = { config_dir: cfg, cwd: `${p.root}/work`, reported: true }
-        const entries = [
-          { ...base, title: 'normal', session_id: NORMAL, outcome: clean('n'), result_file: `${runs}/n.json`, err_file: `${runs}/n.err`, prompt_file: `${runs}/n.prompt.md` },
-          { ...base, title: 'dots', session_id: DOTS, outcome: clean('d'), result_file: `${runs}/../outside/x.json`, err_file: `${out}/abs.err`, prompt_file: `${runs}/./p.md` },
-          { ...base, title: 'folder', session_id: FOLDER, outcome: clean('f'), result_file: `${runs}/linkdir/c.json`, err_file: `${runs}/linkdir/c.err` },
-          { ...base, title: 'link', session_id: LINK, outcome: clean('l'), result_file: `${runs}/l.json`, err_file: `${runs}/ldir`, prompt_file: `${runs}/l.prompt.md` },
-          { ...base, title: 'nested', session_id: NESTED, outcome: clean('s'), result_file: `${runs}/sub/s.json`, err_file: `${runs}/s.err` },
-          { ...base, title: 'shared', session_id: SHARED, outcome: clean('h'), result_file: `${runs}/h.json`, prompt_file: `${runs}/adir` },
-          { ...base, title: 'login', session_id: LOGIN, outcome: { kind: 'login', summary: 'login: x' }, result_file: `${runs}/g.json`, err_file: `${runs}/g.err` },
-          { ...base, title: 'keeper', session_id: KEEPER, keep: true, outcome: clean('k'), result_file: `${runs}/h.json` },
-        ]
-        put(m, reg, `${JSON.stringify(entries, null, 2)}\n`)
-        const content = new Map<string, string>()
-        const file = (path: string, text = path) => {
-          put(m, path, text)
-          content.set(keyOf(path), text)
-        }
-        for (const name of ['n.json', 'n.err', 'n.pid', 'n.prompt.md']) file(`${runs}/${name}`)
-        file(`${out}/x.json`)
-        file(`${out}/abs.err`)
-        file(`${runs}/p.md`)
-        // A folder inside the runs folder that is a symbolic link out of it: the files under it are the outside folder's.
-        m.links.set(keyOf(`${runs}/linkdir`), keyOf(`${p.root}/outside2`))
-        file(`${p.root}/outside2/c.json`)
-        file(`${p.root}/outside2/c.err`)
-        // A symbolic link to a file outside, one to a folder outside, and a plain file the entry names beside them.
-        m.links.set(keyOf(`${runs}/l.json`), keyOf(`${out}/target.json`))
-        m.links.set(keyOf(`${runs}/ldir`), keyOf(`${p.root}/outside3`))
-        file(`${out}/target.json`)
-        file(`${p.root}/outside3/inner`)
-        file(`${runs}/l.prompt.md`)
-        file(`${runs}/sub/s.json`)
-        file(`${runs}/s.err`)
-        file(`${runs}/h.json`)
-        file(`${runs}/adir/inner`)
-        file(`${runs}/g.json`)
-        file(`${runs}/g.err`)
-        await $.session.start({ cwd: orch, surface: null, isInteractive: true })
-        const outcome = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED, LOGIN] } as never)) as { result?: unknown }
-        const answer = String(outcome.result)
-        const short = (id: string) => id.slice(0, 8)
-        expect(answer.startsWith(`Retired: ${[NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED].map(short).join(', ')}.`)).toBe(true)
-        expect(answer).toContain(`Refused: ${short(LOGIN)} (`)
-        expect(answer).toContain(` Run files deleted from ${runs}: ${short(NORMAL)} (n.json, n.err, n.pid, n.prompt.md); ${short(LINK)} (l.prompt.md); ${short(NESTED)} (s.err).`)
-        expect(answer.endsWith(
-          ' (not deleted: x.json: the path has . or .. segments; not deleted: p.md: the path has . or .. segments; ' +
-            'not deleted: c.json: not directly in the runs folder; not deleted: c.err: not directly in the runs folder; ' +
-            'not deleted: l.json: is a symbolic link; not deleted: ldir: is a symbolic link; ' +
-            'not deleted: s.json: not directly in the runs folder; not deleted: adir: is not a regular file)',
-        )).toBe(true)
-        // Only the plain files directly in the runs folder went; every other file holds what it held and links stay links.
-        const gone = ['n.json', 'n.err', 'n.pid', 'n.prompt.md', 'l.prompt.md', 's.err']
-        for (const name of gone) expect(get(m, `${runs}/${name}`)).toBeUndefined()
-        for (const [key, text] of content) if (!gone.some(name => key === keyOf(`${runs}/${name}`))) expect(m.files.get(key)).toBe(text)
-        expect([...m.links.keys()].sort()).toEqual([`${runs}/l.json`, `${runs}/ldir`, `${runs}/linkdir`].map(keyOf).sort())
-        // The host was asked to remove only paths directly in the runs folder: nothing with a .. or a . segment, nothing
-        // outside, nothing through the linked folder, nothing in a subfolder, nothing of the entry that was refused.
-        expect(m.removals.map(path => path.slice(keyOf(runs).length + 1)).sort()).toEqual(['adir', 'h.pid', 'l.json', 'l.pid', 'l.prompt.md', 'ldir', 'n.err', 'n.json', 'n.pid', 'n.prompt.md', 's.err'])
-        expect(m.removals.every(path => path.startsWith(`${keyOf(runs)}/`) && !path.slice(keyOf(runs).length + 1).includes('/'))).toBe(true)
-        // The removals went through the helper in auto mode, through the adapter's own script in off mode.
-        expect(m.runs.some(argv => argv[0] === NODE && argv[2] === 'removeFile')).toBe(mode === 'auto')
-        expect(m.runs.some(argv => argv[2] === REMOVE_REGULAR_SCRIPT || argv[7] === 'removeregular')).toBe(mode === 'off')
-        // The retired entries are gone from the registry whatever happened to their files; the kept and the refused stay.
-        expect((JSON.parse(get(m, reg) ?? '[]') as { session_id: string }[]).map(one => one.session_id)).toEqual([LOGIN, KEEPER])
-        const cleared = (get(m, `${runs}/cleared.jsonl`) ?? '').trimEnd().split('\n').map(line => (JSON.parse(line) as { session_id: string }).session_id)
-        expect(cleared).toEqual([NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED])
-      })
-    }
+    test(`${p.name}, helper auto: a retire deletes only regular files directly in the runs folder: a .. path, an absolute outside path, a symlinked folder, a symlinked file, a subfolder, a directory, a shared file and a non-clean outcome leave every file where it is, and are named`, { options }, async ($, on) => {
+      const m = machine(p.env)
+      boot(on, m)
+      const out = `${p.root}/outside`
+      const sid = (n: number) => `${n.toString(16).padStart(4, '0')}0${n}00-aaaa-4aaa-8aaa-aaaaaaaaaaaa`
+      const [NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED, LOGIN, KEEPER] = [1, 2, 3, 4, 5, 6, 7, 8].map(sid)
+      const clean = (n: string) => ({ kind: 'clean', summary: `clean: ${n}` })
+      const base = { config_dir: cfg, cwd: `${p.root}/work`, reported: true }
+      const entries = [
+        { ...base, title: 'normal', session_id: NORMAL, outcome: clean('n'), result_file: `${runs}/n.json`, err_file: `${runs}/n.err`, prompt_file: `${runs}/n.prompt.md` },
+        { ...base, title: 'dots', session_id: DOTS, outcome: clean('d'), result_file: `${runs}/../outside/x.json`, err_file: `${out}/abs.err`, prompt_file: `${runs}/./p.md` },
+        { ...base, title: 'folder', session_id: FOLDER, outcome: clean('f'), result_file: `${runs}/linkdir/c.json`, err_file: `${runs}/linkdir/c.err` },
+        { ...base, title: 'link', session_id: LINK, outcome: clean('l'), result_file: `${runs}/l.json`, err_file: `${runs}/ldir`, prompt_file: `${runs}/l.prompt.md` },
+        { ...base, title: 'nested', session_id: NESTED, outcome: clean('s'), result_file: `${runs}/sub/s.json`, err_file: `${runs}/s.err` },
+        { ...base, title: 'shared', session_id: SHARED, outcome: clean('h'), result_file: `${runs}/h.json`, prompt_file: `${runs}/adir` },
+        { ...base, title: 'login', session_id: LOGIN, outcome: { kind: 'login', summary: 'login: x' }, result_file: `${runs}/g.json`, err_file: `${runs}/g.err` },
+        { ...base, title: 'keeper', session_id: KEEPER, keep: true, outcome: clean('k'), result_file: `${runs}/h.json` },
+      ]
+      put(m, reg, `${JSON.stringify(entries, null, 2)}\n`)
+      const content = new Map<string, string>()
+      const file = (path: string, text = path) => {
+        put(m, path, text)
+        content.set(keyOf(path), text)
+      }
+      for (const name of ['n.json', 'n.err', 'n.pid', 'n.prompt.md']) file(`${runs}/${name}`)
+      file(`${out}/x.json`)
+      file(`${out}/abs.err`)
+      file(`${runs}/p.md`)
+      // A folder inside the runs folder that is a symbolic link out of it: the files under it are the outside folder's.
+      m.links.set(keyOf(`${runs}/linkdir`), keyOf(`${p.root}/outside2`))
+      file(`${p.root}/outside2/c.json`)
+      file(`${p.root}/outside2/c.err`)
+      // A symbolic link to a file outside, one to a folder outside, and a plain file the entry names beside them.
+      m.links.set(keyOf(`${runs}/l.json`), keyOf(`${out}/target.json`))
+      m.links.set(keyOf(`${runs}/ldir`), keyOf(`${p.root}/outside3`))
+      file(`${out}/target.json`)
+      file(`${p.root}/outside3/inner`)
+      file(`${runs}/l.prompt.md`)
+      file(`${runs}/sub/s.json`)
+      file(`${runs}/s.err`)
+      file(`${runs}/h.json`)
+      file(`${runs}/adir/inner`)
+      file(`${runs}/g.json`)
+      file(`${runs}/g.err`)
+      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      const outcome = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED, LOGIN] } as never)) as { result?: unknown }
+      const answer = String(outcome.result)
+      const short = (id: string) => id.slice(0, 8)
+      expect(answer.startsWith(`Retired: ${[NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED].map(short).join(', ')}.`)).toBe(true)
+      expect(answer).toContain(`Refused: ${short(LOGIN)} (`)
+      expect(answer).toContain(` Run files deleted from ${runs}: ${short(NORMAL)} (n.json, n.err, n.pid, n.prompt.md); ${short(LINK)} (l.prompt.md); ${short(NESTED)} (s.err).`)
+      expect(answer.endsWith(
+        ' (not deleted: x.json: the path has . or .. segments; not deleted: p.md: the path has . or .. segments; ' +
+          'not deleted: c.json: not directly in the runs folder; not deleted: c.err: not directly in the runs folder; ' +
+          'not deleted: l.json: is a symbolic link; not deleted: ldir: is a symbolic link; ' +
+          'not deleted: s.json: not directly in the runs folder; not deleted: adir: is not a regular file)',
+      )).toBe(true)
+      // Only the plain files directly in the runs folder went; every other file holds what it held and links stay links.
+      const gone = ['n.json', 'n.err', 'n.pid', 'n.prompt.md', 'l.prompt.md', 's.err']
+      for (const name of gone) expect(get(m, `${runs}/${name}`)).toBeUndefined()
+      for (const [key, text] of content) if (!gone.some(name => key === keyOf(`${runs}/${name}`))) expect(m.files.get(key)).toBe(text)
+      expect([...m.links.keys()].sort()).toEqual([`${runs}/l.json`, `${runs}/ldir`, `${runs}/linkdir`].map(keyOf).sort())
+      // The host was asked to remove only paths directly in the runs folder: nothing with a .. or a . segment, nothing
+      // outside, nothing through the linked folder, nothing in a subfolder, nothing of the entry that was refused.
+      expect(m.removals.map(path => path.slice(keyOf(runs).length + 1)).sort()).toEqual(['adir', 'h.pid', 'l.json', 'l.pid', 'l.prompt.md', 'ldir', 'n.err', 'n.json', 'n.pid', 'n.prompt.md', 's.err'])
+      expect(m.removals.every(path => path.startsWith(`${keyOf(runs)}/`) && !path.slice(keyOf(runs).length + 1).includes('/'))).toBe(true)
+      // The removals went through the helper, and nothing else removed a file.
+      expect(m.runs.some(argv => argv[0] === NODE && argv[2] === 'removeFile')).toBe(true)
+      expect(m.runs.every(argv => argv[0] === NODE || ['mkdir', 'test', 'git'].includes(String(argv[0])) || String(argv[0]).endsWith('\\powershell.exe'))).toBe(true)
+      // The retired entries are gone from the registry whatever happened to their files; the kept and the refused stay.
+      expect((JSON.parse(get(m, reg) ?? '[]') as { session_id: string }[]).map(one => one.session_id)).toEqual([LOGIN, KEEPER])
+      const cleared = (get(m, `${runs}/cleared.jsonl`) ?? '').trimEnd().split('\n').map(line => (JSON.parse(line) as { session_id: string }).session_id)
+      expect(cleared).toEqual([NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED])
+    })
 
     test(`${p.name}: archive_decisions moves a free section byte for byte under a dated header, leaves one summary line, backs the file up; refuses a named, a Standing and an unknown section`, { options }, async ($, on) => {
       const m = machine(p.env)
@@ -886,6 +765,6 @@ describe('write-side tools through the plugin, on both platforms', () => {
 })
 
 /** The adapter of a platform's name, for the paths the tests place files at. */
-function posixOrWindows(name: string): Host {
+function posixOrWindows(name: string): Platform {
   return name === 'Windows' ? windowsHost : posixHost
 }

@@ -1,38 +1,12 @@
-// The host operations both adapters do alike: pure TypeScript and `$.fs` (through the HostPort), which work the same
-// on Linux and on Windows. No `$` here, and no import of trace.ts (trace.ts names the adapters' scripts).
+// What both adapters and the helper layer share: pure TypeScript and `$.fs` (through the HostPort), which work the same
+// on Linux and on Windows: the launch command, the launch checks and file creation through `$.fs`, the engine's clock,
+// the constants of the helper's requests, and the reading of a process tree and a stop. No `$` here.
 
 import type { FsStat } from 'claude-code'
 
 import type { LaunchArgs } from './core'
-import { buildLaunchArgv, tailLines } from './core'
-import type { Host, HostPort, LaunchTarget, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopStatus, StopStep, StopTarget, TailShape, TreeHashes, TreeProc, TreeSpec } from './host'
-import { tmpPath } from './store'
-import { USAGE_ARGS, USAGE_TIMEOUT_MS, parseUsage } from './usage'
-import type { UsageProbe } from './usage'
-
-/**
- * Write a file through a temporary sibling and a rename, so a reader never sees half a file. When `expected` is
- * given the file is read again just before the rename: if another writer changed it meanwhile nothing is
- * written and false is returned.
- */
-export async function writeAtomicWith(host: Pick<Host, 'removeFile' | 'renameOver'>, port: HostPort, path: string, text: string, expected?: string): Promise<boolean> {
-  const tmp = tmpPath(path, await port.now())
-  await port.write(tmp, text)
-  if (expected !== undefined && (await port.read(path).catch(() => undefined)) !== expected) {
-    await host.removeFile(port, tmp)
-    return false
-  }
-  await host.renameOver(port, tmp, path, text)
-  return true
-}
-
-/**
- * What the native scripts that remove a regular file (REMOVE_REGULAR_SCRIPT, the `removeregular` operation of
- * FILES_PS1) exit with: 0 removed, 3 not there, 4 a link, 5 no regular file; anything else is a failure.
- */
-export function removeOutcomeOfExit(exitCode: number): RemoveOutcome {
-  return exitCode === 0 ? 'removed' : exitCode === 3 ? 'absent' : exitCode === 4 ? 'symlink' : exitCode === 5 ? 'not-file' : 'failed'
-}
+import { buildLaunchArgv } from './core'
+import type { HostPort, LaunchTarget, ProcTree, StopReport, StopStatus, StopStep, StopTarget, TailShape, TreeProc } from './host'
 
 /** Writes a file that is not there ($.fs.write makes the directories); a file that is there but cannot be read is left alone. */
 export async function writeIfAbsent(port: HostPort, path: string, text: string): Promise<void> {
@@ -44,18 +18,6 @@ export async function statLaunchChecks(port: HostPort, args: LaunchArgs): Promis
   const prompt: FsStat | undefined = await port.stat(args.prompt_file).catch(() => undefined)
   const dir: FsStat | undefined = await port.stat(args.dir).catch(() => undefined)
   return { promptFileOk: prompt?.kind === 'file' && prompt.size > 0, dirOk: dir?.kind === 'dir' }
-}
-
-/** The last lines of a file $.fs can read whole, as `tail -n <count> | cut -c1-<width>` prints them; undefined when it cannot. */
-export async function readTail(port: HostPort, path: string, count: number, width: number): Promise<string | undefined> {
-  const text = await port.read(path).catch(() => undefined)
-  return text === undefined ? undefined : tailLines(text, count, width)
-}
-
-/** The trace's write: the rotation when one is given, then a quiet append. */
-export async function rotateAndAppendWith(host: Pick<Host, 'rotate' | 'append'>, port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan): Promise<string | undefined> {
-  if (rotation !== undefined) await host.rotate(port, rotation)
-  return host.append(port, path, lines, true, () => undefined)
 }
 
 /** Waits on the engine's clock. */
@@ -71,36 +33,11 @@ export function bashLaunchCommand(args: LaunchArgs, target: LaunchTarget, result
 /** The transcript tail of the log pane: its last 600 lines, each cut to 20000 characters. */
 export const PANE_TAIL: TailShape = { lines: 600, width: 20000 }
 
-/** A tail with a shape of its own keeps at most this many bytes, the newest, under the engine's 4 MiB output cap. */
+/** A tail with a shape of its own keeps at most this many bytes, the newest, under the engine's 4 MiB output cap (the helper's maxBytes). */
 export const TAIL_SHAPED_MAX_BYTES = 3 * 1024 * 1024
 
 /** The most paths filesNewerThan answers; `total` counts them all. */
 export const NEWER_MAX = 200
-
-/** `1791667060.8924861740` as whole milliseconds, read from the digits (no floating-point rounding). */
-const secondsToMs = (text: string) => {
-  const [whole = '0', fraction = ''] = text.split('.')
-  return Number(whole) * 1000 + Number(fraction.padEnd(3, '0').slice(0, 3))
-}
-
-/**
- * What NEWER_SCRIPT (Linux) and NEWER_PS1 (Windows) print, read back: one `<mtime in seconds, with a fraction>\t<path>`
- * line per file, newest first, then `N\t<count of all>`. Undefined without that last line (the listing did not end).
- * `toPath` turns a printed path into the stored form.
- */
-export function parseNewerListing(stdout: string, toPath: (path: string) => string = path => path): NewerFiles | undefined {
-  const files: NewerFiles['files'] = []
-  let total: number | undefined
-  for (const line of stdout.split(/\r?\n/)) {
-    const tab = line.indexOf('\t')
-    if (tab < 0) continue
-    const head = line.slice(0, tab)
-    const rest = line.slice(tab + 1)
-    if (head === 'N' && /^\d+$/.test(rest)) total = Number(rest)
-    else if (/^\d+(\.\d+)?$/.test(head) && rest !== '') files.push({ path: toPath(rest), mtimeMs: secondsToMs(head) })
-  }
-  return total === undefined ? undefined : { files, total: Math.max(total, files.length) }
-}
 
 /** How long a stop waits after the first signal, in one-second re-checks, before the second (KILL, taskkill /F). */
 export const STOP_WAIT_SECONDS = 10
@@ -109,8 +46,8 @@ export const STOP_WAIT_SECONDS = 10
 export const STOP_TIMEOUT_MS = 45_000
 
 /**
- * What the tree listing and the stop print (TREE_SCRIPT and STOP_SCRIPT on Linux, the helper's processTree and
- * stopProcesses, TREE_PS1 on Windows), one tab-separated line each:
+ * What the tree listing and the stop print (the helper's processTree and stopProcesses on Linux, TREE_PS1 on Windows),
+ * one tab-separated line each:
  *   R <pid> <ppid> <start> <state> <name>   the root, still the process asked for
  *   N <pid> <start now>                     the root is not (gone: no start; or another start: a reused pid)
  *   D <pid> <ppid> <start> <state> <name>   a descendant
@@ -166,14 +103,14 @@ export function parseStopOutput(stdout: string, report?: Pick<StopReport, 'tree'
   return out
 }
 
-/** The listing of a tree as TREE_SCRIPT reads it: the tree, or an error when no R or N line came (the listing failed). */
+/** The listing of a tree as TREE_PS1 prints it: the tree, or an error when no R or N line came (the listing failed). */
 export function treeOf(stdout: string): ProcTree {
   const parsed = parseStopOutput(stdout)
   if (!parsed.isListed) throw new Error('the process tree could not be listed')
   return parsed.tree
 }
 
-/** The stop's targets as the scripts and the helper take them, `<pid>:<start>`: the root first, then its descendants. */
+/** The stop's targets as the helper's stopProcesses takes them, `<pid>:<start>`: the root first, then its descendants. */
 export function stopTargets(tree: ProcTree): string[] {
   return [...(tree.root === undefined ? [] : [tree.root]), ...tree.descendants].map(one => `${one.pid}:${one.start}`)
 }
@@ -187,150 +124,4 @@ export function unstoppable(tree: ProcTree, target: StopTarget): StopReport | un
   if (tree.root === undefined || tree.root.pid !== target.pid || tree.root.start !== target.start) return { tree, steps: [step('gone')], final: [{ pid: target.pid, status: 'gone', state: '' }], notes: [] }
   if (tree.ancestors.includes(target.pid)) return { tree, steps: [step('own')], final: [{ pid: target.pid, status: 'alive', state: tree.root.state }], notes: [] }
   return undefined
-}
-
-// ---------------------------------------------------------------- hashTrees, natively
-
-/** The most files hashTrees hashes under one root (the helper's TREE_MAX_FILES). */
-export const TREE_MAX_FILES = 500
-
-/**
- * cyrb53, a 53-bit string hash (two 32-bit multiply-xor lanes folded together), over a text's UTF-16 code units, as 14
- * hex digits: the native fallback's digest. Stable across runs and machines; not cryptographic, which a check of
- * whether two copies of the mod differ does not need.
- */
-export function cyrb53(text: string): string {
-  let h1 = 0xdeadbeef
-  let h2 = 0x41c6ce57
-  for (let at = 0; at < text.length; at++) {
-    const code = text.charCodeAt(at)
-    h1 = Math.imul(h1 ^ code, 2654435761)
-    h2 = Math.imul(h2 ^ code, 1597334677)
-  }
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
-  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, '0')
-}
-
-/** cyrb53 over bytes, each byte one unit: the native digest of a file read as bytes. */
-export function cyrb53Bytes(bytes: Uint8Array): string {
-  let text = ''
-  for (let at = 0; at < bytes.length; at += 8192) text += String.fromCharCode(...bytes.subarray(at, at + 8192))
-  return cyrb53(text)
-}
-
-const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
-
-/** Standard padded base64 to bytes, in plain TypeScript (the plugin's runtime may lack Uint8Array.fromBase64). */
-export function base64Bytes(base64: string): Uint8Array {
-  const clean = base64.replace(/[^A-Za-z0-9+/]/g, '')
-  const out = new Uint8Array(Math.floor((clean.length * 3) / 4))
-  let size = 0
-  for (let at = 0; at + 1 < clean.length; at += 4) {
-    const n = [0, 1, 2, 3].map(i => BASE64.indexOf(clean[at + i] ?? 'A'))
-    const word = ((n[0] ?? 0) << 18) | ((n[1] ?? 0) << 12) | ((n[2] ?? 0) << 6) | (n[3] ?? 0)
-    out[size++] = (word >> 16) & 255
-    if (at + 2 < clean.length) out[size++] = (word >> 8) & 255
-    if (at + 3 < clean.length) out[size++] = word & 255
-  }
-  return out.subarray(0, size)
-}
-
-/** The bytes a drift digest is taken over: each CRLF folded to LF; a file that holds a NUL byte (binary-looking) as it is. */
-export function driftBytes(bytes: Uint8Array): Uint8Array {
-  if (bytes.includes(0)) return bytes
-  const out = new Uint8Array(bytes.length)
-  let size = 0
-  for (let at = 0; at < bytes.length; at++) {
-    if (bytes[at] === 0x0d && bytes[at + 1] === 0x0a) continue
-    out[size++] = bytes[at] ?? 0
-  }
-  return out.subarray(0, size)
-}
-
-/** The text a drift digest is taken over when only the text can be read: each CRLF folded to LF; a text with a NUL as it is. */
-export const driftText = (text: string): string => (text.includes('\0') ? text : text.replace(/\r\n/g, '\n'))
-
-/**
- * The native digest of one file: cyrb53 over its bytes (driftBytes) when the port reads bytes, so two files that differ
- * in bytes that do not decode as UTF-8 (0xff and 0xfe both read as U+FFFD) still differ; cyrb53 over its text
- * (driftText) when the port answers text. Undefined when the file cannot be read.
- */
-async function nativeDigest(port: HostPort, path: string): Promise<string | undefined> {
-  const raw = port.readBytes === undefined ? undefined : await port.readBytes(path).catch(() => undefined)
-  if (raw !== undefined && typeof raw === 'object' && typeof raw.base64 === 'string') return cyrb53Bytes(driftBytes(base64Bytes(raw.base64)))
-  const text = typeof raw === 'string' ? raw : await port.read(path).catch(() => undefined)
-  return text === undefined ? undefined : cyrb53(driftText(text))
-}
-
-const joinRel = (root: string, rel: string) => `${root.replace(/[\\/]+$/, '')}/${rel}`
-
-/** Whether a folder on the way from `root` to `rel` (not `rel` itself) is a link, or cannot be looked at. */
-async function isLinkOnTheWay(port: HostPort, root: string, rel: string): Promise<boolean> {
-  const parts = rel.split('/')
-  for (let at = 1; at < parts.length; at++) {
-    const own = await port.stat(joinRel(root, parts.slice(0, at).join('/'))).catch(() => undefined)
-    if (own === undefined || own.isLink) return true
-  }
-  return false
-}
-
-/**
- * One root, natively: undefined when it is no directory, holds too many files or a file cannot be read. No link is
- * followed inside the root: an entry that is a link, or has one among the folders on its way, is passed over.
- */
-async function nativeTree(port: HostPort, root: string, spec: TreeSpec): Promise<Record<string, string> | undefined> {
-  const top = await port.stat(root).catch(() => undefined)
-  if (top?.kind !== 'dir') return undefined
-  const found: string[] = []
-  for (const dir of spec.dirs) {
-    // The folder itself is looked at without following a link: a linked folder is passed over, and so is one below a link.
-    const own = (await isLinkOnTheWay(port, root, dir)) ? undefined : await port.stat(joinRel(root, dir)).catch(() => undefined)
-    if (own === undefined || own.isLink || own.kind !== 'dir') continue
-    const entries = await port.list(joinRel(root, dir)).catch(() => undefined)
-    if (entries === undefined) return undefined
-    for (const entry of entries) if (entry.kind === 'file' && !entry.isLink) found.push(`${dir}/${entry.name}`)
-  }
-  for (const file of spec.files) {
-    const own = (await isLinkOnTheWay(port, root, file)) ? undefined : await port.stat(joinRel(root, file)).catch(() => undefined)
-    if (own !== undefined && !own.isLink && own.kind === 'file') found.push(file)
-  }
-  const unique = [...new Set(found)].sort()
-  if (unique.length > TREE_MAX_FILES) return undefined
-  const files: Record<string, string> = {}
-  for (const rel of unique) {
-    const digest = await nativeDigest(port, joinRel(root, rel))
-    if (digest === undefined) return undefined
-    files[rel] = digest
-  }
-  return files
-}
-
-/** hashTrees through `$.fs` alone (list, stat, read), on both systems: cyrb53 over each file's bytes, line ends folded (nativeDigest). */
-export async function nativeHashTrees(port: HostPort, roots: readonly string[], spec: TreeSpec): Promise<TreeHashes[] | undefined> {
-  const trees: TreeHashes[] = []
-  for (const root of roots) {
-    const files = await nativeTree(port, root, spec)
-    if (files === undefined) return undefined
-    trees.push({ method: 'cyrb53', files })
-  }
-  return trees
-}
-
-/**
- * The usage probe without the helper (both adapters): `claude -p /usage --no-session-persistence` through the port's
- * run, CLAUDE_CONFIG_DIR set over the session's own environment (left out when `isInherited`), stdin closed at once,
- * the cwd `cwd`, at most USAGE_TIMEOUT_MS; the text parsed here (usage.ts) and dropped. The trace shows only that a
- * probe ran, for which directory, its exit code and the size of stderr: never the text.
- */
-export async function nativeUsageProbe(port: HostPort, claude: string, configDir: string, isInherited: boolean, cwd: string | undefined): Promise<UsageProbe> {
-  const init = { stdin: '', timeoutMs: USAGE_TIMEOUT_MS, ...(cwd === undefined ? {} : { cwd }), ...(isInherited ? {} : { env: { CLAUDE_CONFIG_DIR: configDir } }) }
-  let ran: Awaited<ReturnType<HostPort['run']>>
-  try {
-    ran = await port.run([claude, ...USAGE_ARGS], init, false, { usage: 'probe', configDir, isInherited })
-  } catch (err) {
-    // The run rejects when claude cannot start or is still running at the timeout (it is killed then).
-    return { ok: false, code: /timed? ?out|timeout/i.test(err instanceof Error ? err.message : String(err)) ? 'TIMEOUT' : 'NO_CLAUDE' }
-  }
-  return parseUsage(ran.stdout, ran.stderr, ran.exitCode)
 }

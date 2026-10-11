@@ -1,19 +1,17 @@
-// The usage probe of probe_licence_usage below the tools: the parser (hooks/usage.ts) over the recorded and the written
-// outputs of tests/usage-fixtures.ts, the native probe of both adapters through a recording port (what runs, in which
-// directory, with which environment, and what a failure comes to), and the Node helper's route (host-helper.ts): the
-// probe's own codes are the answer, a failure of the helper itself falls back to the native probe. The helper process
-// itself is tested by helper.test.mjs, which also requires its parser to answer every case as this one does.
+// The usage probe of probe_licence_usage below the tools: the helper's answer as hooks/usage.ts reads it, and the Node
+// helper's route (host-helper.ts) through a recording port: one helper process per probe, the probe's own codes are the
+// answer, a failure of the helper itself is FAILED, and without Node the probe refuses. The helper process itself, its
+// reader of claude's text among it, is tested by helper.test.mjs over the cases of tests/usage-fixtures.ts.
 
 import { describe, expect, test } from 'claude-code/testing'
 import type { ProcessRunInit, ProcessRunResult } from 'claude-code'
 
 import type { HostPort } from '../hooks/host'
-import { USAGE_CALL_TIMEOUT_MS, usageOfCall, withHelper } from '../hooks/host-helper'
+import { NODE_REFUSAL, USAGE_CALL_TIMEOUT_MS, usageOfCall, withHelper } from '../hooks/host-helper'
 import type { HelperNote } from '../hooks/host-helper'
 import { posixHost } from '../hooks/host-posix'
 import { windowsHost } from '../hooks/host-windows'
-import { USAGE_ARGS, USAGE_CODES, USAGE_TIMEOUT_MS, isUsageCode, parseUsage, usageAnswer } from '../hooks/usage'
-import { USAGE_CASES, USAGE_FIXTURES } from './usage-fixtures'
+import { USAGE_CODES, isUsageCode, usageAnswer } from '../hooks/usage'
 
 const ran = (stdout = '', exitCode = 0, stderr = ''): ProcessRunResult => ({ exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false })
 
@@ -36,31 +34,16 @@ function recordingPort(answer: (argv: readonly string[], init?: ProcessRunInit) 
     stat: async () => {
       throw new Error('ENOENT')
     },
-    list: async () => [],
     now: async () => 1_700_000_000_000,
     sleep: async () => undefined,
     env: async name => env[name],
     runsDir: async () => '/m/runs',
-    traceError: () => undefined,
-    noteDirectWrite: () => undefined,
     noteHelper: note => notes.push(note),
   }
   return { port, runs, notes }
 }
 
 describe('the usage parser', () => {
-  for (const one of USAGE_CASES) {
-    test(`parses: ${one.name}`, () => {
-      expect(parseUsage(one.stdout, one.stderr ?? '', one.exitCode ?? 0)).toEqual(one.expect)
-    })
-  }
-
-  test('an answer holds the two windows and nothing else of the text', () => {
-    const answer = JSON.stringify(parseUsage(USAGE_FIXTURES.recordedMain ?? ''))
-    for (const word of ['subscription', 'Fable', 'contributing', 'requests', 'sessions', 'context', 'plugin-authoring', 'playwright']) expect(answer.includes(word)).toBe(false)
-    expect(Object.keys(JSON.parse(answer) as object).sort()).toEqual(['five', 'ok', 'seven'])
-  })
-
   test('the fixed codes, and what counts as one', () => {
     expect([...USAGE_CODES]).toEqual(['NO_CLAUDE', 'TIMEOUT', 'NOT_LOGGED_IN', 'PARSE', 'FAILED'])
     for (const code of USAGE_CODES) expect(isUsageCode(code)).toBe(true)
@@ -80,84 +63,19 @@ describe('the usage parser', () => {
   })
 })
 
-describe('the native probe', () => {
-  test('Linux: claude from the PATH with the three arguments, in /, stdin closed, CLAUDE_CONFIG_DIR over the environment, 15 s', async () => {
-    const { port, runs } = recordingPort(() => ran(USAGE_FIXTURES.recordedSecondary ?? ''))
-    const got = await posixHost.probeUsage(port, '/home/u/.claude/second', false)
-    expect(got).toEqual({ ok: true, five: { percent: 42, resets: 'Oct 11, 11:30am (Europe/Budapest)' }, seven: { percent: 5, resets: 'Oct 18, 6am (Europe/Budapest)' } })
-    expect(runs).toEqual([
-      {
-        argv: ['claude', '-p', '/usage', '--no-session-persistence'],
-        init: { stdin: '', timeoutMs: USAGE_TIMEOUT_MS, cwd: '/', env: { CLAUDE_CONFIG_DIR: '/home/u/.claude/second' } },
-        isQuiet: false,
-        shown: { usage: 'probe', configDir: '/home/u/.claude/second', isInherited: false },
-      },
-    ])
-    expect([...USAGE_ARGS]).toEqual(['-p', '/usage', '--no-session-persistence'])
-    // The trace's fields name the run; the text is in none of them.
-    expect(JSON.stringify(runs[0]?.shown)).not.toContain('used')
-  })
-
-  test('the default directory a launch inherits: no CLAUDE_CONFIG_DIR is set', async () => {
-    const { port, runs } = recordingPort(() => ran(USAGE_FIXTURES.recordedMain ?? ''))
-    expect((await posixHost.probeUsage(port, '/home/u/.claude', true)).ok).toBe(true)
-    expect(runs[0]?.init).toEqual({ stdin: '', timeoutMs: USAGE_TIMEOUT_MS, cwd: '/' })
-  })
-
-  test('a run that cannot start is NO_CLAUDE, one still running at the timeout is TIMEOUT; a login prompt, an error and nothing are their codes', async () => {
-    const answers: [() => ProcessRunResult, string][] = [
-      [
-        () => {
-          throw new Error('spawn claude ENOENT')
-        },
-        'NO_CLAUDE',
-      ],
-      [
-        () => {
-          throw new Error('the command timed out after 15000 ms')
-        },
-        'TIMEOUT',
-      ],
-      [() => ran('Not logged in · Please run /login\n', 1), 'NOT_LOGGED_IN'],
-      [() => ran('', 1, 'Invalid API key · Please run /login'), 'NOT_LOGGED_IN'],
-      [() => ran('API Error: 500\n', 1), 'FAILED'],
-      [() => ran(''), 'PARSE'],
-    ]
-    for (const [answer, code] of answers) {
-      const { port } = recordingPort(answer)
-      expect(await posixHost.probeUsage(port, '/home/u/.claude', false)).toEqual({ ok: false, code })
-    }
-  })
-
-  test('Windows: claude.exe, in the root of the home folder\'s drive, the directory in the native form', async () => {
-    const { port, runs } = recordingPort(() => ran((USAGE_FIXTURES.recordedMain ?? '').replace(/\n/g, '\r\n')), { USERPROFILE: 'C:\\Users\\u' })
-    const got = await windowsHost.probeUsage(port, 'C:\\Users\\u\\.claude\\second', false)
-    expect(got.ok).toBe(true)
-    expect(runs[0]?.argv).toEqual(['claude.exe', '-p', '/usage', '--no-session-persistence'])
-    expect(runs[0]?.init).toEqual({ stdin: '', timeoutMs: USAGE_TIMEOUT_MS, cwd: 'C:/', env: { CLAUDE_CONFIG_DIR: 'C:/Users/u/.claude/second' } })
-  })
-
-  test('Windows with no home folder: the session\'s own directory, nothing else changed', async () => {
-    const { port, runs } = recordingPort(() => ran(USAGE_FIXTURES.recordedMain ?? ''))
-    await windowsHost.probeUsage(port, 'C:/Users/u/.claude', true)
-    expect(runs[0]?.init).toEqual({ stdin: '', timeoutMs: USAGE_TIMEOUT_MS })
-  })
-})
-
 describe('the helper route', () => {
   const NODE = '/m/node'
   const SCRIPT = '/m/mod/helper/host.mjs'
   const setup = { node: NODE, script: SCRIPT }
 
-  /** A machine where node answers `helper` for probeUsage, and claude (the native probe) answers `native`. */
-  function machine(helper: (request: Record<string, unknown>) => ProcessRunResult, native: () => ProcessRunResult = () => ran(USAGE_FIXTURES.recordedMain ?? ''), hasNode = true) {
+  /** A machine where node answers `helper` for probeUsage (with `hasNode` false node cannot start); claude never runs from the mod. */
+  function machine(helper: (request: Record<string, unknown>) => ProcessRunResult, hasNode = true) {
     return recordingPort((argv, init) => {
       if (argv[0] === NODE && argv[1] === '--version') {
         if (!hasNode) throw new Error('spawn node ENOENT')
         return ran('v24.14.0\n')
       }
       if (argv[0] === NODE && argv[1] === SCRIPT && argv[2] === 'probeUsage') return helper(JSON.parse(init?.stdin ?? '{}') as Record<string, unknown>)
-      if (argv[0] === 'claude' || argv[0] === 'claude.exe') return native()
       throw new Error(`unexpected ${argv.join(' ')}`)
     })
   }
@@ -170,7 +88,7 @@ describe('the helper route', () => {
     const calls = sim.runs.filter(one => one.argv[1] === SCRIPT)
     expect(calls.map(one => [one.argv[2], one.init?.stdin, one.init?.timeoutMs, one.shown])).toEqual([['probeUsage', '{"configDir":"/home/u/.claude/second"}', USAGE_CALL_TIMEOUT_MS, { helper: 'probeUsage', configDir: '/home/u/.claude/second', isInherited: false }]])
     expect(sim.runs.some(one => one.argv[0] === 'claude')).toBe(false)
-    expect(sim.notes.filter(one => one.kind === 'fallback')).toEqual([])
+    expect(sim.notes.filter(one => one.kind === 'failed')).toEqual([])
   })
 
   test('the default directory goes as isInherited', async () => {
@@ -184,7 +102,7 @@ describe('the helper route', () => {
       const sim = machine(() => ran(JSON.stringify({ ok: false, code }), 1))
       expect(await withHelper(posixHost, setup).probeUsage(sim.port, '/home/u/.claude', false)).toEqual({ ok: false, code })
       expect(sim.runs.some(one => one.argv[0] === 'claude')).toBe(false)
-      expect(sim.notes.filter(one => one.kind === 'fallback')).toEqual([])
+      expect(sim.notes.filter(one => one.kind === 'failed')).toEqual([])
     }
     const slow = machine(() => {
       throw new Error('the command timed out after 20000 ms')
@@ -193,7 +111,7 @@ describe('the helper route', () => {
     expect(slow.runs.some(one => one.argv[0] === 'claude')).toBe(false)
   })
 
-  test('a failure of the helper itself falls back to the native probe, told to the port with its code', async () => {
+  test('a failure of the helper itself is FAILED, told to the port with its code; nothing else runs', async () => {
     const failures: [() => ProcessRunResult, string][] = [
       [() => ran('not json', 1), 'BAD_JSON'],
       [() => ran(JSON.stringify({ ok: false, code: 'INTERNAL' }), 1), 'INTERNAL'],
@@ -207,16 +125,16 @@ describe('the helper route', () => {
     ]
     for (const [helper, code] of failures) {
       const sim = machine(helper)
-      expect(await withHelper(posixHost, setup).probeUsage(sim.port, '/home/u/.claude', false)).toEqual(windows)
-      expect(sim.notes.filter(one => one.kind === 'fallback')).toEqual([{ kind: 'fallback', op: 'probeUsage', code, isQuiet: false }])
-      expect(sim.runs.filter(one => one.argv[0] === 'claude').length).toBe(1)
+      expect(await withHelper(posixHost, setup).probeUsage(sim.port, '/home/u/.claude', false)).toEqual({ ok: false, code: 'FAILED' })
+      expect(sim.notes.filter(one => one.kind === 'failed')).toEqual([{ kind: 'failed', op: 'probeUsage', code, isQuiet: false }])
+      expect(sim.runs.map(one => one.argv[0])).toEqual([NODE, NODE])
     }
   })
 
-  test('without Node the native probe runs, as with the helper option off', async () => {
-    const sim = machine(() => ran('{}'), undefined, false)
-    expect(await withHelper(posixHost, setup).probeUsage(sim.port, '/home/u/.claude', false)).toEqual(windows)
-    expect(sim.runs.map(one => one.argv[0])).toEqual([NODE, 'claude'])
+  test('without Node the probe refuses with the fixed text, and no helper call is made', async () => {
+    const sim = machine(() => ran('{}'), false)
+    await expect(withHelper(posixHost, setup).probeUsage(sim.port, '/home/u/.claude', false)).rejects.toThrow(NODE_REFUSAL)
+    expect(sim.runs.map(one => one.argv.join(' '))).toEqual([`${NODE} --version`])
   })
 
   test('Windows goes through the same helper operation', async () => {

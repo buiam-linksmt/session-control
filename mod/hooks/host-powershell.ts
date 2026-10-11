@@ -8,7 +8,7 @@
 
 import { WORKER_SETTINGS } from './core'
 import type { LaunchArgs } from './core'
-import type { Host, LaunchTarget } from './host'
+import type { LaunchTarget, Platform } from './host'
 
 /**
  * One argument as a Windows program reads it back from its command line (the C runtime's rules, which claude.exe and
@@ -124,7 +124,7 @@ export const POWERSHELL_TOOL_HINT =
   ' On Windows Claude Code offers the PowerShell tool by default only when it does not find Git Bash: start the orchestrator with CLAUDE_CODE_USE_POWERSHELL_TOOL=1, or set the launchRoute option to bash.'
 
 /** The Windows adapter with its launch through the PowerShell tool; every other member is the adapter's own. */
-export function withPowerShellLaunch(base: Host): Host {
+export function withPowerShellLaunch(base: Platform): Platform {
   return {
     ...base,
     launchTool: 'PowerShell',

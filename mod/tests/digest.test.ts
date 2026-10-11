@@ -50,34 +50,32 @@ function seedEverything(world: World): void {
 const digest = async ($: { tool: { call: (e: never) => Promise<unknown> } }) => String(((await $.tool.call({ tool: DIGEST_TOOL } as never)) as { result?: unknown }).result ?? '')
 
 describe('turn_digest', () => {
-  for (const isHelper of [false, true]) {
-    test(`${isHelper ? 'through the helper' : 'through sh'}: the first call reports from the mod's load; the second has nothing new; the call writes no file`, { options: OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper })
-      const store = storeOf(on)
-      seedEverything(world)
-      await startOrch($)
-      await poll(world, ORPHAN_GRACE_SEC + 5)
-      const written = world.written.length
-      const first = await digest($)
-      const lines = first.split('\n')
-      expect(lines[0]).toBe(`turn_digest: since the mod's load at ${new Date(NOW_MS).toISOString().slice(0, 19).replace('T', ' ')} UTC (35s ago; first call)`)
-      expect(first).toContain('worker completions harvested: 1\n- done worker: clean')
-      expect(first).toContain(`sessions that became orphans (unregistered): 1\n- pid 5555 is a live headless claude no registry entry claims (cwd /w/other`)
-      expect(first).toContain('sessions that stalled: 1\n- worker "live worker" (session w-live-worker-261011090000) is alive but its transcript has not been written for 16 min')
-      expect(first).toContain('queue tasks that became ready: 1\n- queued task q-next waited for w-done-worker-261011090000, which finished')
-      expect(first).toContain('open points that aged past 24 h: 1\n- open point op-old')
-      expect(first).toContain('notices fired: ')
-      for (const kind of ['orphan 1', 'stall 1', 'queue-ready 1', 'open-point-age 1']) expect(first).toContain(kind)
-      expect(lines[lines.length - 1]).toBe('state: 1 alive, 1 finished; queue 1 queued, 1 running; 1 open point')
-      expect(lines.length).toBeLessThanOrEqual(DIGEST_MAX_LINES)
-      // The call wrote no file; its time is in the store.
-      expect(world.written.slice(written).filter(one => !one.path.endsWith('/trace.log'))).toEqual([])
-      expect(lastCallOf(store.get(digestStoreKey(ORCH)))).toBe(NOW_MS + 35_000)
-      await poll(world, 60)
-      const second = await digest($)
-      expect(second).toBe(['turn_digest: since the last call at 2026-09-21 16:00:35 UTC (1m00s ago)'.replace('2026-09-21 16:00:35', new Date(NOW_MS + 35_000).toISOString().slice(0, 19).replace('T', ' ')), 'nothing new', 'state: 1 alive, 1 finished; queue 1 queued, 1 running; 1 open point'].join('\n'))
-    })
-  }
+  test(`through the helper: the first call reports from the mod's load; the second has nothing new; the call writes no file`, { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    seedEverything(world)
+    await startOrch($)
+    await poll(world, ORPHAN_GRACE_SEC + 5)
+    const written = world.written.length
+    const first = await digest($)
+    const lines = first.split('\n')
+    expect(lines[0]).toBe(`turn_digest: since the mod's load at ${new Date(NOW_MS).toISOString().slice(0, 19).replace('T', ' ')} UTC (35s ago; first call)`)
+    expect(first).toContain('worker completions harvested: 1\n- done worker: clean')
+    expect(first).toContain(`sessions that became orphans (unregistered): 1\n- pid 5555 is a live headless claude no registry entry claims (cwd /w/other`)
+    expect(first).toContain('sessions that stalled: 1\n- worker "live worker" (session w-live-worker-261011090000) is alive but its transcript has not been written for 16 min')
+    expect(first).toContain('queue tasks that became ready: 1\n- queued task q-next waited for w-done-worker-261011090000, which finished')
+    expect(first).toContain('open points that aged past 24 h: 1\n- open point op-old')
+    expect(first).toContain('notices fired: ')
+    for (const kind of ['orphan 1', 'stall 1', 'queue-ready 1', 'open-point-age 1']) expect(first).toContain(kind)
+    expect(lines[lines.length - 1]).toBe('state: 1 alive, 1 finished; queue 1 queued, 1 running; 1 open point')
+    expect(lines.length).toBeLessThanOrEqual(DIGEST_MAX_LINES)
+    // The call wrote no file; its time is in the store.
+    expect(world.written.slice(written).filter(one => !one.path.endsWith('/trace.log'))).toEqual([])
+    expect(lastCallOf(store.get(digestStoreKey(ORCH)))).toBe(NOW_MS + 35_000)
+    await poll(world, 60)
+    const second = await digest($)
+    expect(second).toBe(['turn_digest: since the last call at 2026-09-21 16:00:35 UTC (1m00s ago)'.replace('2026-09-21 16:00:35', new Date(NOW_MS + 35_000).toISOString().slice(0, 19).replace('T', ' ')), 'nothing new', 'state: 1 alive, 1 finished; queue 1 queued, 1 running; 1 open point'].join('\n'))
+  })
 
   test('an unacknowledged peer message is reported until its reply arrives; one sent after the last call is new', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)

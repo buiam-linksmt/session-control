@@ -8,7 +8,7 @@ import type { On } from 'claude-code'
 import { MAX_FINDINGS, auditFindings, auditText, backupKind, decisionSections, licenceWait } from '../hooks/audit'
 import type { AuditInput, Finding } from '../hooks/audit'
 import { parseProcFacts } from '../hooks/core'
-import { PROBE_SCRIPT } from '../hooks/host-posix'
+import { nodeAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
 
 const SID_LIVE = 'a1a1a1a1-1111-4111-8111-111111111111'
@@ -385,7 +385,9 @@ function world(on: On, git: Git) {
   on('process.run', ($, e) => {
     const argv = e.argv.map(String)
     w.runs.push(argv)
-    if (argv[0] === 'sh' && argv[2] === PROBE_SCRIPT) return ok('')
+    // Node and the helper over the files; its probe finds no process.
+    const node = nodeAnswer(argv, e.init?.stdin, files, path => path)
+    if (node !== undefined) return { value: node }
     if (argv[0] === 'mkdir') return ok()
     if (argv[0] === 'git') {
       if (git === 'missing') throw new Error('spawn git ENOENT')
@@ -411,7 +413,7 @@ describe('audit_state through the plugin', () => {
     const text = String(out.result)
     expect(w.writes.slice(writes)).toEqual([])
     const ran = w.runs.slice(runs)
-    expect(ran.filter(argv => argv[0] !== 'git').map(argv => argv[2])).toEqual([PROBE_SCRIPT])
+    expect(ran.filter(argv => argv[0] !== 'git').map(argv => `${argv[0]} ${argv[2]}`)).toEqual(['node probe'])
     // Every git command carries --no-optional-locks (no index refresh) and is a read.
     const gits = ran.filter(argv => argv[0] === 'git')
     expect(gits.map(argv => argv.slice(1, 4).join(' '))).toEqual(Array(5).fill(`--no-optional-locks -C ${ORCH}`))

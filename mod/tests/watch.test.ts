@@ -11,6 +11,7 @@ import { TOAST_TITLES, parseProcFacts } from '../hooks/core'
 import { LOCK_EVERY_SEC, holderState, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from '../hooks/locks'
 import { REGISTRY_UNREADABLE_SEC, freshNoticeState, lockStep, noticeStoreKey, parseNoticeState, registryStep } from '../hooks/notices'
 import type { LockSeen, RegistryWatch } from '../hooks/notices'
+import { nodeAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
 import { HOME, OPTIONS, ORCH, REGISTRY, mockWorld } from './mock-world'
 import type { World } from './mock-world'
@@ -46,26 +47,24 @@ const touched = (world: World) => [
 ]
 
 describe('lock-holder', () => {
-  for (const isHelper of [false, true]) {
-    test(`${isHelper ? 'through the helper' : 'through sh'}: a folder lock whose pid file names a dead pid is told once, as a toast and one line; the lock is never touched`, { options: LOCK_OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper })
-      const store = storeOf(on)
-      echoPrompt(on)
-      seedOrch(world)
-      world.files.set(`${LOCKS}/stack/pid`, '12345\n')
-      world.files.set(`${LOCKS}/stack/info`, 'taken by a worker\n')
-      await startOrch($)
-      await poll(world, 10)
-      const text = deadText(`${LOCKS}/stack`, 12345)
-      expect(toastsOf(world.toasts, 'lock-holder')).toEqual([`${TOAST_TITLES['lock-holder']} \u00B7 ${text}`])
-      expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: lock-holder: ${text}`])
-      await poll(world, 3 * LOCK_EVERY_SEC)
-      expect(toastsOf(world.toasts, 'lock-holder').length).toBe(1)
-      expect(parseNoticeState(store.get(noticeStoreKey(ORCH))).locks).toEqual({ [`${LOCKS}/stack`]: lockFingerprint('12345\n') })
-      expect(touched(world)).toEqual([])
-      expect(world.files.get(`${LOCKS}/stack/pid`)).toBe('12345\n')
-    })
-  }
+  test(`through the helper: a folder lock whose pid file names a dead pid is told once, as a toast and one line; the lock is never touched`, { options: LOCK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    echoPrompt(on)
+    seedOrch(world)
+    world.files.set(`${LOCKS}/stack/pid`, '12345\n')
+    world.files.set(`${LOCKS}/stack/info`, 'taken by a worker\n')
+    await startOrch($)
+    await poll(world, 10)
+    const text = deadText(`${LOCKS}/stack`, 12345)
+    expect(toastsOf(world.toasts, 'lock-holder')).toEqual([`${TOAST_TITLES['lock-holder']} \u00B7 ${text}`])
+    expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: lock-holder: ${text}`])
+    await poll(world, 3 * LOCK_EVERY_SEC)
+    expect(toastsOf(world.toasts, 'lock-holder').length).toBe(1)
+    expect(parseNoticeState(store.get(noticeStoreKey(ORCH))).locks).toEqual({ [`${LOCKS}/stack`]: lockFingerprint('12345\n') })
+    expect(touched(world)).toEqual([])
+    expect(world.files.get(`${LOCKS}/stack/pid`)).toBe('12345\n')
+  })
 
   test('an alive holder is never told; the same lock re-taken by a pid that dies is told; a changed content re-arms it', { options: LOCK_OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
@@ -345,6 +344,9 @@ function winWorld(on: On, alive: number[]) {
   })
   on('process.run', ($, e) => {
     const ok = { exitCode: 0, stderr: '', stdout: '', isStdoutTruncated: false, isStderrTruncated: false }
+    // Node and its helper's file operations over the map (the probe on Windows is PROBE_PS1's).
+    const node = nodeAnswer(e.argv, e.init?.stdin, w.files, given)
+    if (node !== undefined) return { value: node }
     if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/probe.ps1')) {
       const args = e.argv.slice(7).map(String)
       w.probes.push(args)

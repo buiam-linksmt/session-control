@@ -1,7 +1,7 @@
 // The loaded-mod drift band (decision win-35, drift.ts) through the plugin on the mock world: the loaded plugin's
-// folder against the source mod folder, by the Node helper's hashTree and by the native hash, the band above the prompt,
-// its one toast and notice line, the 5-minute rhythm, what is never compared, the source missing, the helper and Node
-// missing, the notices option, modSource off, and a small Windows machine. The kit loads the plugin from the real mod
+// folder against the source mod folder, by the Node helper's hashTree, the band above the prompt, its one toast and
+// notice line, the 5-minute rhythm, what is never compared, the source missing, the helper and Node missing, the notices
+// option, modSource off, and a small Windows machine. The kit loads the plugin from the real mod
 // folder ($.plugin.root): its first check finds that folder, which each test then links to /w/loaded on the mock world
 // (or C:/w/loaded on the Windows one) and fills with the loaded copy.
 
@@ -9,10 +9,10 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { TOAST_TITLES } from '../hooks/core'
+import { NODE_WARNING } from '../hooks/host-helper'
 import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from '../hooks/drift'
-import { base64Bytes, cyrb53, driftBytes, driftText, nativeHashTrees } from '../hooks/host-shared'
 import { driftStep, freshNoticeState, noticeStoreKey, parseNoticeState } from '../hooks/notices'
-import { listInMap } from './fake-helper'
+import { listInMap, nodeAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
 import { OPTIONS, ORCH, mockWorld } from './mock-world'
 import type { World } from './mock-world'
@@ -94,82 +94,78 @@ const BAND_ONE = `session-control: the loaded mod differs from ${SOURCE} (1 file
 const TOAST_ONE = `${TOAST_TITLES['mod-drift']} \u00B7 the loaded mod differs from ${SOURCE} (1 file changed: hooks/core.ts); the band above the prompt says how to reload it`
 
 describe('the drift band on the mock world', () => {
-  for (const isHelper of [false, true]) {
-    const how = isHelper ? 'by the helper' : 'natively'
+  test(`by the helper: the two folders match: no band, no toast, no notice line`, { options: SOURCE_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: FAST })
+    storeOf(on)
+    echoPrompt(on)
+    engineBand(on)
+    await started($, world)
+    await poll(world, EVERY)
+    expect(checks(world)).toBe(2)
+    expect(await bandOf($)).toBe('engine band')
+    expect(toastsOf(world.toasts, 'mod-drift')).toEqual([])
+    expect(noticeLines(await userPrompt($))).toEqual([])
+    // The helper's hashTree did the comparing (one batch for both folders).
+    const batches = world.runs.filter(argv => argv[0] === 'node' && argv[2] === 'batch')
+    expect(batches.length).toBe(2)
+  })
 
-    test(`${how}: the two folders match: no band, no toast, no notice line`, { options: SOURCE_OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper, env: FAST })
-      storeOf(on)
-      echoPrompt(on)
-      engineBand(on)
-      await started($, world)
-      await poll(world, EVERY)
-      expect(checks(world)).toBe(2)
-      expect(await bandOf($)).toBe('engine band')
-      expect(toastsOf(world.toasts, 'mod-drift')).toEqual([])
-      expect(noticeLines(await userPrompt($))).toEqual([])
-      // The helper's hashTree did the comparing (one batch for both folders), or no process at all.
-      const batches = world.runs.filter(argv => argv[0] === 'node' && argv[2] === 'batch')
-      expect(batches.length).toBe(isHelper ? 2 : 0)
-    })
+  test(`by the helper: one changed file: the band, one toast and one notice line; the next checks tell nothing again`, { options: SOURCE_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: FAST })
+    const store = storeOf(on)
+    echoPrompt(on)
+    engineBand(on)
+    await started($, world, changedOne)
+    await poll(world, EVERY)
+    expect(await bandOf($)).toBe(BAND_ONE)
+    expect(toastsOf(world.toasts, 'mod-drift')).toEqual([TOAST_ONE])
+    expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: mod-drift: the loaded mod differs from ${SOURCE} (1 file changed: hooks/core.ts); the band above the prompt says how to reload it`])
+    expect(parseNoticeState(store.get(noticeStoreKey(ORCH))).drift).toBe('hooks/core.ts')
+    await poll(world, 2 * EVERY)
+    expect(checks(world)).toBe(4)
+    expect(await bandOf($)).toBe(BAND_ONE)
+    expect(toastsOf(world.toasts, 'mod-drift').length).toBe(1)
+    expect(noticeLines(await userPrompt($))).toEqual([])
+  })
 
-    test(`${how}: one changed file: the band, one toast and one notice line; the next checks tell nothing again`, { options: SOURCE_OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper, env: FAST })
-      const store = storeOf(on)
-      echoPrompt(on)
-      engineBand(on)
-      await started($, world, changedOne)
-      await poll(world, EVERY)
-      expect(await bandOf($)).toBe(BAND_ONE)
-      expect(toastsOf(world.toasts, 'mod-drift')).toEqual([TOAST_ONE])
-      expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: mod-drift: the loaded mod differs from ${SOURCE} (1 file changed: hooks/core.ts); the band above the prompt says how to reload it`])
-      expect(parseNoticeState(store.get(noticeStoreKey(ORCH))).drift).toBe('hooks/core.ts')
-      await poll(world, 2 * EVERY)
-      expect(checks(world)).toBe(4)
-      expect(await bandOf($)).toBe(BAND_ONE)
-      expect(toastsOf(world.toasts, 'mod-drift').length).toBe(1)
-      expect(noticeLines(await userPrompt($))).toEqual([])
-    })
+  test(`by the helper: an added file and a removed file count; past three names the band ends with ...`, { options: SOURCE_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: FAST })
+    storeOf(on)
+    engineBand(on)
+    const loaded: Record<string, string> = { ...MOD_FILES, 'hooks/added.ts': 'new\n' }
+    delete loaded['helper/host.mjs']
+    await started($, world, loaded)
+    await poll(world, EVERY)
+    expect(await bandOf($)).toContain(`(2 files changed: helper/host.mjs, hooks/added.ts). Reload it:`)
+    world.files.set(`${LOADED}/types/index.d.ts`, 'export type X = 2\n')
+    world.files.set(`${LOADED}/.claude-plugin/plugin.json`, '{"name":"session-control","version":"2"}\n')
+    await poll(world, EVERY)
+    expect(await bandOf($)).toContain(`(4 files changed: .claude-plugin/plugin.json, helper/host.mjs, hooks/added.ts, ...). Reload it:`)
+    // A new set of changed files is told again.
+    expect(toastsOf(world.toasts, 'mod-drift').length).toBe(2)
+  })
 
-    test(`${how}: an added file and a removed file count; past three names the band ends with ...`, { options: SOURCE_OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper, env: FAST })
-      storeOf(on)
-      engineBand(on)
-      const loaded: Record<string, string> = { ...MOD_FILES, 'hooks/added.ts': 'new\n' }
-      delete loaded['helper/host.mjs']
-      await started($, world, loaded)
-      await poll(world, EVERY)
-      expect(await bandOf($)).toContain(`(2 files changed: helper/host.mjs, hooks/added.ts). Reload it:`)
-      world.files.set(`${LOADED}/types/index.d.ts`, 'export type X = 2\n')
-      world.files.set(`${LOADED}/.claude-plugin/plugin.json`, '{"name":"session-control","version":"2"}\n')
-      await poll(world, EVERY)
-      expect(await bandOf($)).toContain(`(4 files changed: .claude-plugin/plugin.json, helper/host.mjs, hooks/added.ts, ...). Reload it:`)
-      // A new set of changed files is told again.
-      expect(toastsOf(world.toasts, 'mod-drift').length).toBe(2)
-    })
+  test(`by the helper: the engine's generated .claude-plugin/types, tests/ and a folder inside hooks/ are never compared`, { options: SOURCE_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: FAST })
+    storeOf(on)
+    engineBand(on)
+    await started($, world, { ...MOD_FILES, '.claude-plugin/types/claude-code.d.ts': '// generated again\n', 'tests/core.test.ts': '// changed\n', 'tests/new.test.ts': 'x', 'hooks/deeper/x.ts': 'x', 'node_modules/a/index.js': 'x' })
+    await poll(world, EVERY)
+    expect(await bandOf($)).toBe('engine band')
+    expect(toastsOf(world.toasts, 'mod-drift')).toEqual([])
+  })
 
-    test(`${how}: the engine's generated .claude-plugin/types, tests/ and a folder inside hooks/ are never compared`, { options: SOURCE_OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper, env: FAST })
-      storeOf(on)
-      engineBand(on)
-      await started($, world, { ...MOD_FILES, '.claude-plugin/types/claude-code.d.ts': '// generated again\n', 'tests/core.test.ts': '// changed\n', 'tests/new.test.ts': 'x', 'hooks/deeper/x.ts': 'x', 'node_modules/a/index.js': 'x' })
-      await poll(world, EVERY)
-      expect(await bandOf($)).toBe('engine band')
-      expect(toastsOf(world.toasts, 'mod-drift')).toEqual([])
-    })
-
-    test(`${how}: a symbolic link in hooks/ is neither followed nor hashed`, { options: SOURCE_OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper, env: FAST })
-      storeOf(on)
-      engineBand(on)
-      await started($, world)
-      // In the loaded copy hooks/linked.ts is a link to a file outside: not compared, so the folders still match.
-      world.files.set('/w/outside/secret.ts', 'outside\n')
-      world.links.set(`${LOADED}/hooks/linked.ts`, '/w/outside/secret.ts')
-      await poll(world, EVERY)
-      expect(await bandOf($)).toBe('engine band')
-    })
-  }
+  test(`by the helper: a symbolic link in hooks/ is neither followed nor hashed`, { options: SOURCE_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: FAST })
+    storeOf(on)
+    engineBand(on)
+    await started($, world)
+    // In the loaded copy hooks/linked.ts is a link to a file outside: not compared, so the folders still match.
+    world.files.set('/w/outside/secret.ts', 'outside\n')
+    world.links.set(`${LOADED}/hooks/linked.ts`, '/w/outside/secret.ts')
+    await poll(world, EVERY)
+    expect(await bandOf($)).toBe('engine band')
+  })
 
   test('the source folder is not there: no band, nothing hashed, nothing told', { options: { ...SOURCE_OPTIONS, modSource: '/w/nowhere/mod' } }, async ($, on) => {
     const world = mockWorld(on, { isHelper: true, env: FAST })
@@ -209,28 +205,28 @@ describe('the drift band on the mock world', () => {
     expect(world.statted.some(one => one.endsWith('+resolve'))).toBe(false)
   })
 
-  test('the helper missing (node starts, the script does not answer): the native hash shows the band; one fallback toast in all', { options: SOURCE_OPTIONS }, async ($, on) => {
-    const world = mockWorld(on, { isHelper: true, env: FAST })
+  test('the helper not answering (node starts, the script is not there): nothing is compared, no band, no drift toast', { options: SOURCE_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: FAST })
     storeOf(on)
     engineBand(on)
     world.breaks.add('helper')
     await started($, world, changedOne)
     await poll(world, EVERY)
-    expect(await bandOf($)).toBe(BAND_ONE)
-    // The helper was asked (one batch for both folders) and failed; the native hash answered. The fallback toast is said
-    // once per load, here by the first operation that fell back (the probe's).
+    // The helper was asked (one batch for both folders) and failed: nothing else hashes, so nothing is told.
     expect(world.runs.some(argv => argv[0] === 'node' && argv[2] === 'batch')).toBe(true)
-    expect(world.toasts.filter(text => text.startsWith(`${TOAST_TITLES.helper} \u00B7 `)).length).toBe(1)
+    expect(await bandOf($)).toBe('engine band')
+    expect(toastsOf(world.toasts, 'mod-drift')).toEqual([])
   })
 
-  test('Node missing: the native hash shows the band, no helper call', { options: SOURCE_OPTIONS }, async ($, on) => {
+  test('Node missing: nothing is compared or hashed, no band; the panel warning stands in its place', { options: SOURCE_OPTIONS }, async ($, on) => {
     const world = mockWorld(on, { isHelper: false, env: FAST })
     storeOf(on)
     engineBand(on)
     await started($, world, changedOne)
     await poll(world, EVERY)
-    expect(await bandOf($)).toBe(BAND_ONE)
+    expect(await bandOf($)).toBe('engine band')
     expect(world.runs.filter(argv => argv[0] === 'node' && argv[1] !== '--version')).toEqual([])
+    expect(world.toasts.filter(text => text.startsWith(`${TOAST_TITLES.helper} \u00B7 `))).toEqual([`${TOAST_TITLES.helper} \u00B7 session-control ${NODE_WARNING}`])
   })
 
   test('the 5-minute rule: a change is seen at the next check, never before; the band goes after a match and a new drift is told again', { options: SOURCE_OPTIONS, ...LONG }, async ($, on) => {
@@ -336,7 +332,7 @@ const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.e
 /** A path as the plugin gave it: on a Linux host the kit takes C:/x for a relative path after the session's directory. */
 const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
 
-/** A small Windows machine: files by their C:/ path, folders by what is under them, the plugin's folder linked to C:/w/loaded once known, the probe empty. */
+/** A small Windows machine: files by their C:/ path, folders by what is under them, the plugin's folder linked to C:/w/loaded once known, Node and its helper, the probe empty. */
 function winWorld(on: On) {
   const w = { files: new Map<string, string>(), toasts: [] as string[], root: undefined as string | undefined, clock: mock.clock(on, { now: NOW_MS }) }
   const key = (path: string) => {
@@ -368,6 +364,9 @@ function winWorld(on: On) {
   on('fs.list', ($, e) => ({ value: listInMap(w.files, new Map(), key(e.path)) as never }))
   on('process.run', ($, e) => {
     const ok = { exitCode: 0, stderr: '', stdout: '', isStdoutTruncated: false, isStderrTruncated: false }
+    // Node and its helper over the files, the plugin's folder reaching C:/w/loaded as $.fs reaches it.
+    const node = nodeAnswer(e.argv, e.init?.stdin, w.files, key)
+    if (node !== undefined) return { value: node }
     if (e.argv[0] === POWERSHELL) return { value: ok }
     if (e.argv[0] === 'git') return { value: { ...ok, exitCode: 128 } }
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
@@ -381,7 +380,7 @@ function winWorld(on: On) {
 }
 
 describe('the drift band on a Windows machine', () => {
-  test('natively over C:/ paths: one changed file shows the band and one toast; a match takes it away', { options: { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', helper: 'off', modSource: WIN_SOURCE, pollSeconds: 10 }, ...LONG }, async ($, on) => {
+  test('through the helper over C:/ paths: one changed file shows the band and one toast; a match takes it away', { options: { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', modSource: WIN_SOURCE, pollSeconds: 10 }, ...LONG }, async ($, on) => {
     const w = winWorld(on)
     storeOf(on)
     engineBand(on)
@@ -455,85 +454,5 @@ describe('drift.ts', () => {
     // The stored state keeps it, and a fresh one has none (the stored notice state of a mod in step is as before).
     expect(parseNoticeState(JSON.parse(JSON.stringify(state))).drift).toBe('a\nb')
     expect('drift' in freshNoticeState()).toBe(false)
-  })
-
-  test('cyrb53: stable, 14 hex digits, different for a one-character change', () => {
-    expect(cyrb53('')).toMatch(/^[0-9a-f]{14}$/)
-    expect(cyrb53('export const core = 1\n')).toBe(cyrb53('export const core = 1\n'))
-    expect(cyrb53('export const core = 1\n')).not.toBe(cyrb53('export const core = 2\n'))
-    expect(cyrb53('abc')).toBe('11f9f91ac18c8d')
-  })
-
-  test('nativeHashTrees by bytes: CRLF and LF alike, one changed byte counts, 0xff against 0xfe counts (they decode alike), a file with a NUL byte as it is; a port that answers text: line ends folded', async () => {
-    const raw = new Map<string, number[]>([
-      ['/r/a/hooks/x.ts', [...'a\nb\n'].map(one => one.charCodeAt(0))],
-      ['/r/b/hooks/x.ts', [...'a\r\nb\r\n'].map(one => one.charCodeAt(0))],
-      ['/r/a/hooks/y.ts', [0x61, 0xff, 0x0a]],
-      ['/r/b/hooks/y.ts', [0x61, 0xfe, 0x0a]],
-      ['/r/a/hooks/z.bin', [0x00, 0x0d, 0x0a]],
-      ['/r/b/hooks/z.bin', [0x00, 0x0a]],
-      ['/r/a/hooks/w.ts', [...'one\r\n'].map(one => one.charCodeAt(0))],
-      ['/r/b/hooks/w.ts', [...'onE\n'].map(one => one.charCodeAt(0))],
-    ])
-    const toBase64 = (bytes: readonly number[]) => btoa(String.fromCharCode(...bytes))
-    const port = {
-      stat: async (path: string) => {
-        if (raw.has(path)) return { kind: 'file', size: 1, mtimeMs: 0, isLink: false }
-        if ([...raw.keys()].some(one => one.startsWith(`${path}/`))) return { kind: 'dir', size: 0, mtimeMs: 0, isLink: false }
-        throw new Error('ENOENT')
-      },
-      list: async (path: string) => listInMap(new Map([...raw.keys()].map(key => [key, 'x'])), new Map(), path),
-      // The text as the engine decodes it: a byte that is no UTF-8 becomes U+FFFD, so y.ts reads alike in both.
-      read: async (path: string) => String.fromCharCode(...(raw.get(path) ?? []).map(one => (one > 0x7f ? 0xfffd : one))),
-      readBytes: async (path: string) => ({ base64: toBase64(raw.get(path) ?? []) }),
-    }
-    const trees = await nativeHashTrees(port as never, ['/r/a', '/r/b'], DRIFT_SPEC)
-    expect(changedFiles(trees?.[0] as never, trees?.[1] as never)).toEqual(['hooks/w.ts', 'hooks/y.ts', 'hooks/z.bin'])
-    // Read as text only (an engine without bytes): 0xff and 0xfe are lost to the decoding, the line ends still fold.
-    const textOnly = { ...port, readBytes: async (path: string) => port.read(path) }
-    const asText = await nativeHashTrees(textOnly as never, ['/r/a', '/r/b'], DRIFT_SPEC)
-    expect(changedFiles(asText?.[0] as never, asText?.[1] as never)).toEqual(['hooks/w.ts', 'hooks/z.bin'])
-    expect(driftText('a\r\nb')).toBe('a\nb')
-    expect(driftText('a\0\r\n')).toBe('a\0\r\n')
-    expect([...driftBytes(new Uint8Array([0x61, 0x0d, 0x0a, 0x0d]))]).toEqual([0x61, 0x0a, 0x0d])
-    for (const bytes of [[], [0x66], [0x66, 0x6f], [0x66, 0x6f, 0x6f], [0, 255, 254, 13, 10, 128]]) expect([...base64Bytes(toBase64(bytes))]).toEqual(bytes)
-  })
-
-  test('nativeHashTrees: a link among the folders on the way is not followed: plugin.json under a linked .claude-plugin is passed over', async () => {
-    const files = new Map(Object.entries({ '/r/a/hooks/x.ts': 'x', '/r/a/.claude-plugin/plugin.json': '{}' }))
-    const port = {
-      stat: async (path: string) => {
-        if (path === '/r/a/.claude-plugin') return { kind: 'dir', size: 0, mtimeMs: 0, isLink: true }
-        if (files.has(path)) return { kind: 'file', size: 1, mtimeMs: 0, isLink: false }
-        if ([...files.keys()].some(one => one.startsWith(`${path}/`))) return { kind: 'dir', size: 0, mtimeMs: 0, isLink: false }
-        throw new Error('ENOENT')
-      },
-      list: async (path: string) => listInMap(files, new Map(), path),
-      read: async (path: string) => files.get(path) ?? '',
-    }
-    const trees = await nativeHashTrees(port as never, ['/r/a'], DRIFT_SPEC)
-    expect(Object.keys(trees?.[0]?.files ?? {})).toEqual(['hooks/x.ts'])
-  })
-
-  test('nativeHashTrees: a root that is no folder answers nothing; a file over the read cap answers nothing', async () => {
-    const files = new Map(Object.entries({ '/r/a/hooks/x.ts': 'x', '/r/b/hooks/x.ts': 'y', '/r/c/hooks/big.ts': 'z'.repeat(50) }))
-    const port = {
-      stat: async (path: string) => {
-        if (files.has(path)) return { kind: 'file', size: 1, mtimeMs: 0, isLink: false }
-        if ([...files.keys()].some(one => one.startsWith(`${path}/`))) return { kind: 'dir', size: 0, mtimeMs: 0, isLink: false }
-        throw new Error('ENOENT')
-      },
-      list: async (path: string) => listInMap(files, new Map(), path),
-      read: async (path: string) => {
-        const text = files.get(path)
-        if (text === undefined || text.length > 40) throw new Error('EFBIG')
-        return text
-      },
-    }
-    const trees = await nativeHashTrees(port as never, ['/r/a', '/r/b'], DRIFT_SPEC)
-    expect(trees?.map(one => one.method)).toEqual(['cyrb53', 'cyrb53'])
-    expect(changedFiles(trees?.[0] as never, trees?.[1] as never)).toEqual(['hooks/x.ts'])
-    expect(await nativeHashTrees(port as never, ['/r/a', '/r/none'], DRIFT_SPEC)).toBeUndefined()
-    expect(await nativeHashTrees(port as never, ['/r/a', '/r/c'], DRIFT_SPEC)).toBeUndefined()
   })
 })

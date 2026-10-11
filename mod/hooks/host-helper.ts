@@ -1,21 +1,23 @@
-// The Node.js helper behind the host interface: withHelper wraps an adapter so that its file operations (and on Linux
-// the process probe) run in one `node mod/helper/host.mjs <op>` process each, with the request as JSON on stdin. Node
-// is looked for at the first operation that needs it: none, or one older than HELPER_MIN_NODE, leaves the adapter's
-// own operations in place, and the first operation HELPER_REDETECT_MS or more after that lookup looks again, so
-// installing Node needs no reload; once found it stays for the load. A call that fails (Node cannot start, times out,
-// answers what is not one JSON object or answers ok:false) falls back to the adapter's own operation for that call,
-// and the port is told the operation and a fixed code, never a message or content; an append that timed out is the
-// exception (appendNotRepeated).
+// The host layer: withHelper makes the Host of a platform adapter (host-posix.ts, host-windows.ts). Every file
+// operation, the usage probe and, on Linux, the process probe and the stop of stop_worker run in one
+// `node mod/helper/host.mjs <op>` process each, with the request as JSON on stdin. Node is looked for at the first
+// operation that needs it: while none is found, or one older than HELPER_MIN_NODE, the first operation
+// HELPER_REDETECT_MS or more after that lookup looks again, so installing Node needs no reload; once found it stays for
+// the load. Without a usable Node every operation that reads or writes the machine rejects with NodeMissingError, whose
+// message is NODE_REFUSAL: the helper's, and the adapter's own too (the launch checks, the files and directories it
+// makes, and on Windows the process probe and the stop). A helper call that fails (Node cannot start, times out,
+// answers what is not one JSON object, or answers ok:false) answers what the operation answers for a failure, and the
+// port is told the operation and a fixed code, never a message or content. Nothing falls back to another way of doing it.
 
 import type { ProcessRunResult } from 'claude-code'
 
 import type { SessionEntry } from '../types'
 import { parseProcFacts, probeArgs } from './core'
 import type { ProcFacts } from './core'
-import type { Host, HostPort, NewerFiles, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopTarget, TailShape, TreeHashes, TreeSpec } from './host'
+import type { Host, HostPort, NewerFiles, Platform, ProcTree, RemoveOutcome, RotatePlan, StopReport, StopTarget, TailShape, TreeHashes, TreeSpec } from './host'
 import { isUsageCode, usageAnswer } from './usage'
 import type { UsageProbe } from './usage'
-import { NEWER_MAX, PANE_TAIL, STOP_TIMEOUT_MS, STOP_WAIT_SECONDS, TAIL_SHAPED_MAX_BYTES, parseStopOutput, readTail, stopTargets, unstoppable } from './host-shared'
+import { NEWER_MAX, PANE_TAIL, STOP_TIMEOUT_MS, STOP_WAIT_SECONDS, TAIL_SHAPED_MAX_BYTES, parseStopOutput, stopTargets, unstoppable } from './host-shared'
 
 /** The helper's entry point under the plugin's directory. */
 export const HELPER_SCRIPT = 'helper/host.mjs'
@@ -23,8 +25,25 @@ export const HELPER_SCRIPT = 'helper/host.mjs'
 /** The oldest Node major version the helper runs on. */
 export const HELPER_MIN_NODE = 22
 
-/** How long after a lookup that found no usable Node the next helper operation looks again. */
+/** How long after a lookup that found no usable Node the next operation looks again. */
 export const HELPER_REDETECT_MS = 10 * 60_000
+
+/** What an operation that needs Node rejects with, and a tool answers, while no usable Node is found: one fixed text. */
+export const NODE_REFUSAL = 'session-control needs Node.js 22 or newer on the PATH (or the nodePath option); nothing was done'
+
+/** The panel's warning while no usable Node is found (its line reads `! session-control: ` and this). */
+export const NODE_WARNING = 'needs Node.js 22 or newer on the PATH (or the nodePath option); nothing is tracked'
+
+/** The rejection of an operation that needs Node while none is usable; its message is NODE_REFUSAL. */
+export class NodeMissingError extends Error {
+  constructor() {
+    super(NODE_REFUSAL)
+    this.name = 'NodeMissingError'
+  }
+}
+
+/** Whether an error is the rejection for a missing Node, by its fixed message. */
+export const isNodeMissing = (err: unknown): boolean => err instanceof Error && err.message === NODE_REFUSAL
 
 /** How the helper is started: the node executable and the helper's absolute path. */
 export type HelperSetup = { node: string; script: string }
@@ -39,12 +58,10 @@ export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'processTree' | 'stop
 export type HelperAnswer = { ok: true; fields: Record<string, unknown> } | { ok: false; code: string; at?: number }
 
 /**
- * What the port is told: Node's detection, each time its outcome changes; and each fallback (`isQuiet`: of an untraced
- * operation, the trace's own write among them; `isRepeated` false: an append that timed out, not made again).
+ * What the port is told: Node's detection, each time its outcome changes; and each helper call that failed, with the
+ * operation and the code (`isQuiet`: of an untraced operation, the trace's own write among them).
  */
-export type HelperNote =
-  | { kind: 'node'; isActive: boolean; version?: string; reason?: string }
-  | { kind: 'fallback'; op: HelperOp; code: string; isQuiet: boolean; isRepeated?: false }
+export type HelperNote = { kind: 'node'; isActive: boolean; version?: string; reason?: string } | { kind: 'failed'; op: HelperOp; code: string; isQuiet: boolean }
 
 /** The codes this side gives a failed call; the helper's own codes (protocol.mjs) pass through when well formed. */
 export const CALL_CODES = ['SPAWN', 'TIMEOUT', 'BAD_JSON', 'TRUNCATED', 'BAD_ANSWER'] as const
@@ -52,7 +69,7 @@ export const CALL_CODES = ['SPAWN', 'TIMEOUT', 'BAD_JSON', 'TRUNCATED', 'BAD_ANS
 /** How long one helper call may take: a probe or a file operation. */
 const CALL_TIMEOUT_MS = 10_000
 
-/** How long the walk of filesNewerThan may take, as the adapters' own listing. */
+/** How long the walk of filesNewerThan and the hashing of hashTrees may take. */
 const LISTING_TIMEOUT_MS = 30_000
 
 /** How long `node --version` may take. */
@@ -92,26 +109,8 @@ export function readAnswer(ran: ProcessRunResult): HelperAnswer {
   return typeof parsed.at === 'number' ? { ok: false, code: passCode(parsed.code), at: parsed.at } : { ok: false, code: passCode(parsed.code) }
 }
 
-/** The text an append adds: each line and a newline (APPEND_SCRIPT's `printf '%s\n'` of the lines joined by newlines). */
+/** The text an append adds: each line and a newline. */
 export const appendText = (lines: readonly string[]) => lines.map(line => `${line}\n`).join('')
-
-/**
- * Whether a failed call that appended (an append, or the trace's batch) is left as it is: after a TIMEOUT the helper
- * may have written the lines already, and the adapter's own append would write them a second time. Every other
- * failure (Node did not start, an exit code with no answer, an answer that is not JSON, ok:false) means nothing was
- * written, and the adapter appends. The lines may then be missing from the log; they are never in it twice.
- */
-export const appendNotRepeated = (failed: { code: string }) => failed.code === 'TIMEOUT'
-
-/** A fallback's trace fields: the operation and the code, and `isRepeated` false for an append that was not made again. */
-export function fallbackFields(note: HelperNote & { kind: 'fallback' }): Record<string, unknown> {
-  return note.isRepeated === false ? { op: note.op, code: note.code, isRepeated: false } : { op: note.op, code: note.code }
-}
-
-/** A fallback's toast text. */
-export function fallbackToast(note: HelperNote & { kind: 'fallback' }): string {
-  return `helper fallback: ${note.op}${note.isRepeated === false ? ' (timed out, not repeated)' : ''}`
-}
 
 /** A helper's filesNewerThan answer as NewerFiles: an array of `{path, mtimeMs}` and a count, or undefined. */
 export function newerAnswer(fields: Record<string, unknown>): NewerFiles | undefined {
@@ -120,13 +119,6 @@ export function newerAnswer(fields: Record<string, unknown>): NewerFiles | undef
   const isFile = (one: unknown): one is { path: string; mtimeMs: number } => isRecord(one) && typeof one.path === 'string' && typeof one.mtimeMs === 'number'
   return files.every(isFile) ? { files: files.map(one => ({ path: one.path, mtimeMs: one.mtimeMs })), total } : undefined
 }
-
-/**
- * The codes of a hashTree step that answer for the trees themselves (a root that is not there or no directory, too
- * many or too large files, a file that cannot be read): nothing is compared, and the native operation is not asked,
- * since it would find the same. Any other failure (Node, the helper itself) falls back to it.
- */
-export const TREE_ANSWER_CODES: readonly string[] = ['NOT_FOUND', 'NOT_DIR', 'TOO_LARGE', 'ACCESS', 'IO']
 
 /** A helper hashTree answer as TreeHashes: an array of `{path, sha256}` (64 hex digits each), or undefined. */
 export function treeAnswer(fields: unknown): TreeHashes | undefined {
@@ -141,10 +133,9 @@ export function treeAnswer(fields: unknown): TreeHashes | undefined {
 
 /**
  * What a probeUsage call answers for: the windows of an `ok` answer, or one of the probe's own codes (NO_CLAUDE,
- * TIMEOUT, NOT_LOGGED_IN, PARSE, FAILED), which are the answer and no fallback. A call that timed out is TIMEOUT too:
- * claude may have run its whole time already, and a native probe after it would run it again. Undefined: the helper
- * itself failed (Node did not start, an answer that is not JSON or not the answer expected, any other code), and the
- * native probe runs in its place.
+ * TIMEOUT, NOT_LOGGED_IN, PARSE, FAILED). A call that timed out is TIMEOUT too: claude may have run its whole time
+ * already. Undefined: the helper itself failed (Node did not start, an answer that is not JSON or not the answer
+ * expected, any other code).
  */
 export function usageOfCall(answer: HelperAnswer): UsageProbe | undefined {
   if (answer.ok) return usageAnswer(answer.fields)
@@ -155,12 +146,14 @@ export function usageOfCall(answer: HelperAnswer): UsageProbe | undefined {
 const rotateRequest = (plan: RotatePlan) => ({ path: plan.path, adding: plan.adding, maxBytes: plan.maxBytes, moves: plan.moves.map(([from, to]) => [from, to]) })
 
 /**
- * The adapter with its listed operations run by the helper: probe and stopProcessTree (Linux only: on Windows the
- * process rows stay on PROBE_PS1, and the stop on TREE_PS1 and taskkill), writeAtomic, renameOver, removeFile,
- * removeRegularFile (the same helper operation with `regularOnly`), append, tail, rotate, filesNewerThan,
- * rotateAndAppend (one batch) and probeUsage (on both platforms). Every other member is the adapter's own.
+ * The Host of a platform adapter: nodeReady, writeAtomic, renameOver, removeFile, removeRegularFile (the helper's
+ * removeFile with `regularOnly`), append, tail, rotate, rotateAndAppend (one batch), filesNewerThan, hashTrees (one
+ * batch) and probeUsage by the helper on both platforms; probe and stopProcessTree by the helper on Linux and by the
+ * adapter's own PowerShell scripts on Windows; launchChecks, createFile, prepareHelperDirs and prepareRunsDir the
+ * adapter's own. Each of those runs only once Node is found. Every other member (the paths, the launch's text, the
+ * worker match, the wait) is the adapter's own and needs no Node.
  */
-export function withHelper(base: Host, setup: HelperSetup): Host {
+export function withHelper(base: Platform, setup: HelperSetup): Host {
   let ready: Promise<boolean> | undefined
   /** When the last lookup started (the port's clock), and what the port was last told of Node. */
   let checkedAt = 0
@@ -196,8 +189,8 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
   }
 
   /**
-   * Whether the helper is there: the first operation looks for Node; while none (or an old one) was found, the first
-   * operation HELPER_REDETECT_MS after the last lookup looks again. Operations at the same time share one lookup.
+   * Whether Node is there: the first operation looks for it; while none (or an old one) was found, the first operation
+   * HELPER_REDETECT_MS after the last lookup looks again. Operations at the same time share one lookup.
    */
   async function isReady(port: HostPort): Promise<boolean> {
     const current = ready
@@ -206,6 +199,11 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
     const now = await port.now()
     if (ready === current && now - checkedAt >= HELPER_REDETECT_MS) ready = detect(port)
     return ready ?? current
+  }
+
+  /** Rejects with NodeMissingError while no usable Node is found. */
+  async function requireNode(port: HostPort): Promise<void> {
+    if (!(await isReady(port))) throw new NodeMissingError()
   }
 
   /** One helper call; the trace shows the operation and the given fields, never the request. */
@@ -218,11 +216,17 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
     }
   }
 
+  /** A call that failed, told to the port with its operation and code (an answer that was not the one expected: BAD_ANSWER); answers the code. */
+  function failed(port: HostPort, op: HelperOp, answer: HelperAnswer, isQuiet = false): string {
+    const code = answer.ok ? 'BAD_ANSWER' : answer.code
+    port.noteHelper({ kind: 'failed', op, code, isQuiet })
+    return code
+  }
+
   /**
-   * An operation through the helper: `use` reads the answer's fields (undefined: not the answer expected), `fallback`
-   * is the adapter's own operation, run when Node is missing or the call fails; a failed call is told to the port.
-   * `unrepeated`, for a call that appends, is what a failure appendNotRepeated leaves in place of the fallback.
-   * `timeoutMs` bounds the call (CALL_TIMEOUT_MS unless given).
+   * An operation through the helper: Node first (NodeMissingError without it), then one call. `use` reads the answer's
+   * fields (undefined: not the answer expected); a call that failed is told to the port and answered by `onFailure`
+   * with its code. `timeoutMs` bounds the call (CALL_TIMEOUT_MS unless given).
    */
   async function through<T>(
     port: HostPort,
@@ -231,41 +235,76 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
     isQuiet: boolean,
     shown: Record<string, unknown>,
     use: (fields: Record<string, unknown>) => T | undefined,
-    fallback: (failed: HelperAnswer & { ok: false }) => Promise<T>,
-    unrepeated?: T,
+    onFailure: (code: string) => T,
     timeoutMs = CALL_TIMEOUT_MS,
   ): Promise<T> {
-    if (!(await isReady(port))) return fallback({ ok: false, code: 'NO_NODE' })
+    await requireNode(port)
     const answer = await call(port, op, request, isQuiet, shown, timeoutMs)
     const value = answer.ok ? use(answer.fields) : undefined
-    if (value !== undefined) return value
-    const failed = answer.ok ? ({ ok: false, code: 'BAD_ANSWER' } as const) : answer
-    if (unrepeated !== undefined && appendNotRepeated(failed)) {
-      port.noteHelper({ kind: 'fallback', op, code: failed.code, isQuiet, isRepeated: false })
-      return unrepeated
-    }
-    port.noteHelper({ kind: 'fallback', op, code: failed.code, isQuiet })
-    return fallback(failed)
+    return value !== undefined ? value : onFailure(failed(port, op, answer, isQuiet))
   }
 
-  const isProbed = base.platform === 'linux'
+  /** One of the adapter's own operations, run only once Node is found. */
+  const gated =
+    <A extends unknown[], R>(work: (port: HostPort, ...args: A) => Promise<R>) =>
+    async (port: HostPort, ...args: A): Promise<R> => {
+      await requireNode(port)
+      return work(port, ...args)
+    }
+
+  /** Linux: the helper's probe of /proc. A call that failed is an error: read as no process at all it would mark every worker dead. */
+  async function helperProbe(port: HostPort, entries: readonly SessionEntry[]): Promise<ProcFacts> {
+    const args = probeArgs(entries)
+    return through(
+      port,
+      'probe',
+      { args },
+      false,
+      { args: args.length },
+      fields => (typeof fields.out === 'string' ? parseProcFacts(fields.out) : undefined),
+      code => {
+        throw new Error(`the process probe failed (${code})`)
+      },
+    )
+  }
+
+  /**
+   * Linux: the tree by the helper's processTree (unless `tree` is given), then the stop by its stopProcesses over that
+   * listing. A listing that fails rejects: nothing was signalled. A stop that fails rejects too, and what it signalled
+   * before it failed is not in any record; the caller's Abort check afterwards says what is true.
+   */
+  async function helperStop(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport> {
+    await requireNode(port)
+    let listing = tree
+    if (listing === undefined) {
+      const answer = await call(port, 'processTree', { pid: target.pid, start: target.start }, false, { pid: target.pid }, CALL_TIMEOUT_MS)
+      const parsed = answer.ok && typeof answer.fields.out === 'string' ? parseStopOutput(answer.fields.out) : undefined
+      if (parsed === undefined || !parsed.isListed) throw new Error(`the process tree could not be listed (${failed(port, 'processTree', answer)}); nothing was signalled`)
+      listing = parsed.tree
+    }
+    const early = unstoppable(listing, target)
+    if (early !== undefined) return early
+    const targets = stopTargets(listing)
+    const answer = await call(port, 'stopProcesses', { wait: STOP_WAIT_SECONDS, targets }, false, { pid: target.pid, targets: targets.length }, STOP_TIMEOUT_MS)
+    if (answer.ok && typeof answer.fields.out === 'string') {
+      const { isListed, ...done } = parseStopOutput(answer.fields.out, { tree: listing })
+      return done
+    }
+    throw new Error(`the helper's stop failed (${failed(port, 'stopProcesses', answer)}); what it signalled before that is not known`)
+  }
+
+  const { probe: ownProbe, stopProcessTree: ownStop, ...own } = base
 
   return {
-    ...base,
+    ...own,
 
-    async probe(port: HostPort, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
-      if (!isProbed) return base.probe(port, entries, configDirs)
-      const args = probeArgs(entries)
-      return through(
-        port,
-        'probe',
-        { args },
-        false,
-        { args: args.length },
-        fields => (typeof fields.out === 'string' ? parseProcFacts(fields.out) : undefined),
-        () => base.probe(port, entries, configDirs),
-      )
-    },
+    nodeReady: (port: HostPort) => isReady(port),
+    launchChecks: gated(base.launchChecks),
+    createFile: gated(base.createFile),
+    prepareHelperDirs: gated(base.prepareHelperDirs),
+    prepareRunsDir: gated(base.prepareRunsDir),
+    probe: ownProbe === undefined ? helperProbe : gated(ownProbe),
+    stopProcessTree: ownStop === undefined ? helperStop : gated(ownStop),
 
     async writeAtomic(port: HostPort, path: string, text: string, expected?: string): Promise<boolean> {
       const request = expected === undefined ? { path, text } : { path, text, expected }
@@ -276,22 +315,27 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         false,
         { path },
         fields => (typeof fields.written === 'boolean' ? fields.written : undefined),
-        () => base.writeAtomic(port, path, text, expected),
+        code => {
+          throw new Error(`${path} could not be written (${code})`)
+        },
       )
     },
 
-    async renameOver(port: HostPort, tmp: string, path: string, text: string): Promise<void> {
-      return through(
+    async renameOver(port: HostPort, tmp: string, path: string): Promise<void> {
+      await through(
         port,
         'renameOver',
         { from: tmp, to: path },
         false,
         { path },
         () => true as const,
-        () => base.renameOver(port, tmp, path, text),
-      ).then(() => undefined)
+        code => {
+          throw new Error(`${path} could not be replaced (${code})`)
+        },
+      )
     },
 
+    /** A file that is not there counts as gone; a call that failed answers false. */
     async removeFile(port: HostPort, path: string, isQuiet = false): Promise<boolean> {
       return through(
         port,
@@ -300,67 +344,54 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
         isQuiet,
         { path },
         fields => (typeof fields.removed === 'boolean' ? true : undefined),
-        () => base.removeFile(port, path, isQuiet),
+        () => false,
       )
     },
 
-    /**
-     * A regular file only: the helper refuses a link and a non-file with a fixed code (IS_LINK, NOT_FILE), which is the
-     * answer here and no fallback. Any other failure falls back to the adapter's own operation, which makes the same
-     * checks.
-     */
+    /** A regular file only: the helper refuses a link and a non-file with a fixed code (IS_LINK, NOT_FILE), which is the answer. */
     async removeRegularFile(port: HostPort, path: string): Promise<RemoveOutcome> {
-      if (!(await isReady(port))) return base.removeRegularFile(port, path)
+      await requireNode(port)
       const answer = await call(port, 'removeFile', { path, regularOnly: true }, false, { path, regularOnly: true }, CALL_TIMEOUT_MS)
       if (answer.ok && typeof answer.fields.removed === 'boolean') return answer.fields.removed ? 'removed' : 'absent'
       if (!answer.ok && answer.code === 'IS_LINK') return 'symlink'
       if (!answer.ok && answer.code === 'NOT_FILE') return 'not-file'
-      port.noteHelper({ kind: 'fallback', op: 'removeFile', code: answer.ok ? 'BAD_ANSWER' : answer.code, isQuiet: false })
-      return base.removeRegularFile(port, path)
+      failed(port, 'removeFile', answer)
+      return 'failed'
     },
 
     async append(port: HostPort, path: string, lines: readonly string[], isQuiet: boolean, onRan: (exitCode: number) => void): Promise<string | undefined> {
-      const appended = await through(
+      const done = await through<{ problem: string | undefined }>(
         port,
         'append',
         { path, text: appendText(lines) },
         isQuiet,
         { path },
-        fields => (typeof fields.bytes === 'number' ? { problem: undefined, isFallback: false } : undefined),
-        async () => ({ problem: await base.append(port, path, lines, isQuiet, onRan), isFallback: true }),
-        // Timed out: the lines may be in the log already. Not repeated, no exit code to give, nothing for the caller
-        // to retry.
-        { problem: undefined, isFallback: true },
+        fields => (typeof fields.bytes === 'number' ? { problem: undefined } : undefined),
+        code => ({ problem: `${path} cannot be appended to (${code})` }),
       )
-      if (!appended.isFallback) onRan(0)
-      return appended.problem
+      if (done.problem === undefined) onRan(0)
+      return done.problem
     },
 
-    /**
-     * On Windows a transcript under the read cap is read and cut in the engine first, as the adapter does: no process.
-     * A shaped tail asks the helper to keep TAIL_SHAPED_MAX_BYTES at most, the newest lines.
-     */
+    /** A shaped tail asks the helper to keep TAIL_SHAPED_MAX_BYTES at most, the newest lines. */
     async tail(port: HostPort, path: string, shape?: TailShape): Promise<string | undefined> {
       const { lines, width } = shape ?? PANE_TAIL
-      if (base.platform === 'windows') {
-        const read = await readTail(port, path, lines, width)
-        if (read !== undefined) return read
-      }
       const request = shape === undefined ? { path, lines, width } : { path, lines, width, maxBytes: TAIL_SHAPED_MAX_BYTES }
-      return through(
+      const found = await through<{ text: string | undefined }>(
         port,
         'tail',
         request,
         false,
         { path },
         fields => (typeof fields.text === 'string' ? { text: fields.text } : undefined),
-        async () => ({ text: await base.tail(port, path, shape) }),
-      ).then(found => found.text)
+        () => ({ text: undefined }),
+      )
+      return found.text
     },
 
-    /** The walk in one Node process; a failure (a directory that is not there among them) asks the adapter's own listing. */
+    /** The walk in one Node process. */
     async filesNewerThan(port: HostPort, dir: string, epochSeconds: number): Promise<NewerFiles | undefined> {
-      return through(
+      const done = await through<{ found: NewerFiles | undefined }>(
         port,
         'filesNewerThan',
         { dir, since: Math.floor(epochSeconds), max: NEWER_MAX },
@@ -370,108 +401,66 @@ export function withHelper(base: Host, setup: HelperSetup): Host {
           const found = newerAnswer(fields)
           return found === undefined ? undefined : { found }
         },
-        async () => ({ found: await base.filesNewerThan(port, dir, epochSeconds) }),
-        undefined,
+        () => ({ found: undefined }),
         LISTING_TIMEOUT_MS,
-      ).then(done => done.found)
+      )
+      return done.found
     },
 
-    /**
-     * Every root hashed by the helper's hashTree in one batch (one process, SHA-256 over the bytes, so both trees share
-     * the method). A step that fails on the trees themselves (TREE_ANSWER_CODES) answers undefined with no fallback and no
-     * note; any other failure falls back to the native operation for every root, which hashes them all its own way.
-     */
+    /** Every root hashed by the helper's hashTree in one batch (one process, SHA-256 over the bytes). */
     async hashTrees(port: HostPort, roots: readonly string[], spec: TreeSpec): Promise<TreeHashes[] | undefined> {
-      if (!(await isReady(port))) return base.hashTrees(port, roots, spec)
+      await requireNode(port)
       const steps = roots.map(root => ({ op: 'hashTree', root, dirs: [...spec.dirs], files: [...spec.files] }))
       const answer = await call(port, 'batch', { ops: steps }, false, { ops: steps.map(step => step.op), roots: roots.length }, LISTING_TIMEOUT_MS)
-      if (!answer.ok && TREE_ANSWER_CODES.includes(answer.code)) return undefined
       const trees = answer.ok && Array.isArray(answer.fields.results) && answer.fields.results.length === roots.length ? answer.fields.results.map(treeAnswer) : undefined
       if (trees !== undefined && trees.every((one): one is TreeHashes => one !== undefined)) return trees
-      port.noteHelper({ kind: 'fallback', op: 'hashTree', code: answer.ok ? 'BAD_ANSWER' : answer.code, isQuiet: false })
-      return base.hashTrees(port, roots, spec)
+      failed(port, 'hashTree', answer)
+      return undefined
     },
 
     /**
-     * Linux: the tree by the helper's processTree, then the stop by its stopProcesses over that listing. A listing that
-     * fails leaves the whole stop to the adapter (it lists itself). A stop that fails (Node cannot start, times out, its
-     * answer is cut or not one) falls back to the adapter's stop over the same listing, which signals only a process that
-     * still has its listed start; a timed-out helper may have sent signals before it was cut, which this record cannot
-     * show, and the note says so. The caller's Abort check afterwards says what is true.
-     */
-    async stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport> {
-      if (!isProbed || !(await isReady(port))) return base.stopProcessTree(port, target, tree)
-      let listing = tree
-      if (listing === undefined) {
-        const answer = await call(port, 'processTree', { pid: target.pid, start: target.start }, false, { pid: target.pid }, CALL_TIMEOUT_MS)
-        const parsed = answer.ok && typeof answer.fields.out === 'string' ? parseStopOutput(answer.fields.out) : undefined
-        if (parsed === undefined || !parsed.isListed) {
-          port.noteHelper({ kind: 'fallback', op: 'processTree', code: answer.ok ? 'BAD_ANSWER' : answer.code, isQuiet: false })
-          return base.stopProcessTree(port, target)
-        }
-        listing = parsed.tree
-      }
-      const early = unstoppable(listing, target)
-      if (early !== undefined) return early
-      const targets = stopTargets(listing)
-      const answer = await call(port, 'stopProcesses', { wait: STOP_WAIT_SECONDS, targets }, false, { pid: target.pid, targets: targets.length }, STOP_TIMEOUT_MS)
-      if (answer.ok && typeof answer.fields.out === 'string') {
-        const { isListed, ...done } = parseStopOutput(answer.fields.out, { tree: listing })
-        return done
-      }
-      const code = answer.ok ? 'BAD_ANSWER' : answer.code
-      port.noteHelper({ kind: 'fallback', op: 'stopProcesses', code, isQuiet: false })
-      const done = await base.stopProcessTree(port, target, listing)
-      const cut = code === 'TIMEOUT' ? '; it was cut off after it started, so signals it sent before that are not in this record' : ''
-      return { ...done, notes: [`the helper's stop failed (${code})${cut}; the native stop ran over the same listing and signalled only processes that still had their listed start`, ...done.notes] }
-    },
-
-    /**
-     * The usage probe in one helper process (both platforms: claude.exe from the PATH on Windows, without a shell). The
-     * probe's own codes are the answer (usageOfCall); a failure of the helper itself falls back to the native probe.
+     * The usage probe in one helper process (claude.exe from the PATH on Windows, without a shell). The probe's own codes
+     * are the answer (usageOfCall); a failure of the helper itself is FAILED.
      */
     async probeUsage(port: HostPort, configDir: string, isInherited: boolean): Promise<UsageProbe> {
-      if (!(await isReady(port))) return base.probeUsage(port, configDir, isInherited)
+      await requireNode(port)
       const request = isInherited ? { configDir, isInherited: true } : { configDir }
       const answer = await call(port, 'probeUsage', request, false, { configDir, isInherited }, USAGE_CALL_TIMEOUT_MS)
       const probed = usageOfCall(answer)
       if (probed !== undefined) return probed
-      port.noteHelper({ kind: 'fallback', op: 'probeUsage', code: answer.ok ? 'BAD_ANSWER' : answer.code, isQuiet: false })
-      return base.probeUsage(port, configDir, isInherited)
+      failed(port, 'probeUsage', answer)
+      return { ok: false, code: 'FAILED' }
     },
 
+    /** The helper's rotation, which checks the size again itself; untraced (the trace is what it rotates). */
     async rotate(port: HostPort, plan: RotatePlan): Promise<void> {
-      return through(
+      await through(
         port,
         'rotate',
         rotateRequest(plan),
         true,
         { path: plan.path },
         fields => (typeof fields.rotated === 'boolean' ? true : undefined),
-        () => base.rotate(port, plan).then(() => true),
-      ).then(() => undefined)
+        code => {
+          throw new Error(`the trace could not be rotated (${code})`)
+        },
+      )
     },
 
-    /**
-     * The trace's write: with a rotation, one batch (the rotation, then the append) in one process. A batch that failed
-     * after its rotation went through falls back to the append alone, so the rotation is never made twice.
-     */
+    /** The trace's write: with a rotation, one batch (the rotation, then the append) in one process; untraced. */
     async rotateAndAppend(port: HostPort, path: string, lines: readonly string[], rotation?: RotatePlan): Promise<string | undefined> {
       const appendStep = { op: 'append', path, text: appendText(lines) } as const
       const steps: HelperStep[] = rotation === undefined ? [appendStep] : [{ op: 'rotate', ...rotateRequest(rotation) }, appendStep]
-      return through(
+      const done = await through<{ problem: string | undefined }>(
         port,
         'batch',
         { ops: steps },
         true,
         { ops: steps.map(step => step.op), path },
         fields => (Array.isArray(fields.results) && fields.results.length === steps.length ? { problem: undefined } : undefined),
-        async failed => ({
-          problem: await (rotation !== undefined && failed.at !== undefined && failed.at >= 1 ? base.rotateAndAppend(port, path, lines) : base.rotateAndAppend(port, path, lines, rotation)),
-        }),
-        // A batch that timed out may have rotated and appended already: neither is made again (appendNotRepeated).
-        { problem: undefined },
-      ).then(done => done.problem)
+        code => ({ problem: `${path} cannot be appended to (${code})` }),
+      )
+      return done.problem
     },
   }
 }

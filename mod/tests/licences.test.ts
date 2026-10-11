@@ -30,6 +30,7 @@ import {
 } from '../hooks/licences'
 import type { Licence } from '../hooks/licences'
 import { NOTICE_PREFIX } from '../hooks/notices'
+import { nodeAnswer, usageAnswerOf } from './fake-helper'
 import { NOW_MS } from './fixtures'
 import { HOME, OPTIONS, ORCH, REGISTRY, RUNS, mockWorld, seedLiveWorker } from './mock-world'
 import type { World } from './mock-world'
@@ -314,10 +315,11 @@ describe('probe_licence_usage', () => {
       `- .claude-work (config_dir ${HOME}/.claude-work) | error NOT_LOGGED_IN | age_seconds 0 | cached no`,
       STALE,
     ])
-    expect(world.usageRuns.map(run => [run.configDir, run.isInherited, run.via, run.argv.join(' '), run.cwd, run.stdin])).toEqual([
-      ['', true, 'native', 'claude -p /usage --no-session-persistence', '/', ''],
-      [`${CLAUDE}/second`, false, 'native', 'claude -p /usage --no-session-persistence', '/', ''],
-      [`${HOME}/.claude-work`, false, 'native', 'claude -p /usage --no-session-persistence', '/', ''],
+    // One helper probeUsage each; the default a launch inherits goes with isInherited (the helper leaves CLAUDE_CONFIG_DIR out).
+    expect(world.usageRuns.map(run => [run.configDir, run.isInherited, run.via, run.argv[0], run.argv[2]])).toEqual([
+      [CLAUDE, true, 'helper', 'node', 'probeUsage'],
+      [`${CLAUDE}/second`, false, 'helper', 'node', 'probeUsage'],
+      [`${HOME}/.claude-work`, false, 'helper', 'node', 'probeUsage'],
     ])
     expect(world.usageMaxInFlight).toBe(1)
     expectNoIdentity(text)
@@ -433,16 +435,6 @@ describe('probe_licence_usage', () => {
     ])
   })
 
-  test('no claude on the machine: NO_CLAUDE (native probe; its run rejects)', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    seedUsage(world)
-    world.usage.delete('inherited')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
-    const lines = (await answerOf($, 'probe_licence_usage')).split('\n')
-    expect(lines[1]).toBe(`- default (config_dir ${CLAUDE}) | error NO_CLAUDE | age_seconds 0 | cached no`)
-    expect(lines[0]).toBe('Usage of 3 licences (3 probed now, 0 from the cache): highest five_hour 42% (second), highest seven_day 5% (second).')
-  })
-
   test('through the helper: no claude is NO_CLAUDE, none in time is TIMEOUT (a native timeout is a rejection the test kit cannot make: usage.test.ts covers it)', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on, { isHelper: true })
     seedUsage(world)
@@ -463,10 +455,10 @@ describe('probe_licence_usage', () => {
     await answerOf($, 'probe_licence_usage', { config_dir: 'second' })
     const trace = world.files.get(`${RUNS}/trace.log`) ?? ''
     const lines = trace.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
-    const mine = lines.filter(line => line.tool === 'probe_licence_usage' || line.event === 'licences.usage' || line.usage === 'probe').map(({ ts: _t, seq: _s, ms: _m, ...rest }) => rest)
+    const mine = lines.filter(line => line.tool === 'probe_licence_usage' || line.event === 'licences.usage' || line.helper === 'probeUsage').map(({ ts: _t, seq: _s, ms: _m, ...rest }) => rest)
     expect(mine).toEqual([
       { event: 'tool.call', tool: 'probe_licence_usage', config_dir: 'second' },
-      { event: 'process.run', usage: 'probe', configDir: `${CLAUDE}/second`, isInherited: false, exitCode: 0 },
+      { event: 'process.run', helper: 'probeUsage', configDir: `${CLAUDE}/second`, isInherited: false, exitCode: 0 },
       { event: 'licences.usage', configDir: `${CLAUDE}/second`, isCached: false },
       { event: 'tool.result', tool: 'probe_licence_usage', resultChars: expect.any(Number) },
     ])
@@ -615,9 +607,12 @@ const WIN_REGISTRY = 'C:/w/home/.claude/headless-sessions.json'
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
 
-/** A small Windows machine: files by their C:/ path (case kept as given), folders listed by what is under them, no process. */
+/**
+ * A small Windows machine: files by their C:/ path (case kept as given), folders listed by what is under them, Node and
+ * its helper (whose probeUsage answers the recorded text's answer, and records each request), an empty process probe.
+ */
 function winWorld(on: On) {
-  const w = { files: new Map<string, string>(), links: new Map<string, string>(), runs: [] as string[][], usageInits: [] as unknown[], clock: mock.clock(on, { now: NOW_MS }) }
+  const w = { files: new Map<string, string>(), links: new Map<string, string>(), runs: [] as string[][], usageRequests: [] as Record<string, unknown>[], clock: mock.clock(on, { now: NOW_MS }) }
   mock.env(on, WIN_ENV)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -658,11 +653,13 @@ function winWorld(on: On) {
     const ok = { exitCode: 0, stderr: '', stdout: '', isStdoutTruncated: false, isStderrTruncated: false }
     if (e.argv[0] === POWERSHELL) return { value: ok }
     if (e.argv[0] === 'git') return { value: { ...ok, exitCode: 128 } }
-    // The usage probe: claude.exe answers the recorded text with Windows line ends.
-    if (e.argv[0] === 'claude.exe') {
-      w.usageInits.push(e.init)
-      return { value: { ...ok, stdout: (USAGE_FIXTURES.recordedMain ?? '').replace(/\n/g, '\r\n') } }
+    // The helper's usage probe: each licence answers what the recorded main text gives.
+    if (e.argv[0] === 'node' && e.argv[2] === 'probeUsage') {
+      w.usageRequests.push(JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>)
+      return { value: { ...ok, stdout: JSON.stringify(usageAnswerOf(USAGE_FIXTURES.recordedMain ?? '')) } }
     }
+    const node = nodeAnswer(e.argv, e.init?.stdin, w.files, given)
+    if (node !== undefined) return { value: node }
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
   })
   on('ui.toast', () => ({ value: undefined }))
@@ -670,7 +667,7 @@ function winWorld(on: On) {
   return w
 }
 
-const WIN_OPTIONS = { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', helper: 'off', licenceDirs: 'D:\\Lic\\Extra, d:/lic/extra/, C:\\w\\home\\.claude\\Second' }
+const WIN_OPTIONS = { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', licenceDirs: 'D:\\Lic\\Extra, d:/lic/extra/, C:\\w\\home\\.claude\\Second' }
 
 describe('list_licences on Windows', () => {
   test('%USERPROFILE%\\.claude forms: the default, a child, a dash folder and an explicit one on another drive, each once with paths compared without case', { options: WIN_OPTIONS }, async ($, on) => {
@@ -692,8 +689,8 @@ describe('list_licences on Windows', () => {
       '- Extra | config_dir D:/Lic/Extra | source explicit | logged_in yes | sessions 0 live, 0 in all',
     ])
     expectNoIdentity(text)
-    // No process but the mod's own PowerShell scripts: the discovery is listings and presence only.
-    expect(w.runs.every(argv => argv[0] === POWERSHELL || argv[0] === 'git')).toBe(true)
+    // No process but the PowerShell probe, Node's lookup and the helper's writes: the discovery is listings and presence only.
+    expect(w.runs.every(argv => argv[0] === POWERSHELL || argv[0] === 'git' || (argv[0] === 'node' && (argv[1] === '--version' || ['writeAtomic', 'append', 'batch'].includes(String(argv[2])))))).toBe(true)
   })
 
   test('a licence holds both files as regular files: directories, a link to a folder and a broken link are no licence; a link to a regular file counts', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {
@@ -744,7 +741,7 @@ describe('list_licences on Windows', () => {
     ])
   })
 
-  test('probe_licence_usage: claude.exe with the three arguments, in the drive root, CLAUDE_CONFIG_DIR in the native form (none for the inherited default)', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {
+  test('probe_licence_usage on Windows: one helper probeUsage per licence, the config_dir in the native C:/ form, the default a launch inherits with isInherited', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {
     const w = winWorld(on)
     w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
     w.files.set(WIN_REGISTRY, '[]\n')
@@ -755,14 +752,8 @@ describe('list_licences on Windows', () => {
     await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
     const text = await answerOf($, 'probe_licence_usage')
     expect(text.split('\n').slice(1, 3)).toEqual([`- default (config_dir C:/w/home/.claude) | ${MAIN_ROW} | age_seconds 0 | cached no`, `- Second (config_dir C:/w/home/.claude/Second) | ${MAIN_ROW} | age_seconds 0 | cached no`])
-    expect(w.runs.filter(argv => argv[0] === 'claude.exe')).toEqual([
-      ['claude.exe', '-p', '/usage', '--no-session-persistence'],
-      ['claude.exe', '-p', '/usage', '--no-session-persistence'],
-    ])
-    expect(w.usageInits).toEqual([
-      { stdin: '', timeoutMs: 15_000, cwd: 'C:/' },
-      { stdin: '', timeoutMs: 15_000, cwd: 'C:/', env: { CLAUDE_CONFIG_DIR: 'C:/w/home/.claude/Second' } },
-    ])
+    expect(w.usageRequests).toEqual([{ configDir: 'C:/w/home/.claude', isInherited: true }, { configDir: 'C:/w/home/.claude/Second' }])
+    expect(w.runs.some(argv => argv[0] === 'claude.exe')).toBe(false)
   })
 })
 

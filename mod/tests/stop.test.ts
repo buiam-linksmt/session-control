@@ -1,6 +1,6 @@
 // stop_worker through the plugin, on the mock world (mock-world.ts): a registered worker with a child and a grandchild
-// in a simulated process table, the probe computed from that table and the sessions files. What the tool refuses,
-// what it signals (never anything outside the worker's tree), and the proof it answers.
+// in a simulated process table, the helper's probe computed from that table and the sessions files, and its stop over
+// the table. What the tool refuses, what it signals (never anything outside the worker's tree), and the proof it answers.
 
 import { describe, expect, test } from 'claude-code/testing'
 
@@ -25,34 +25,32 @@ const answerOf = (answer: unknown) => {
 }
 
 describe('stop_worker', () => {
-  for (const isHelper of [false, true]) {
-    test(`${isHelper ? 'through the helper' : 'through sh'}: a live registered worker is stopped and proved dead, its descendants listed first and stopped; nothing else is signalled and the registry is not written`, { options: OPTIONS }, async ($, on) => {
-      const world = mockWorld(on, { isHelper })
-      seed(world, [seedLiveWorker(world, SID)])
-      const registryBefore = world.files.get(REGISTRY)
-      await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
-      const writesBefore = world.written.length
-      const { text, isRefused } = answerOf(await $.tool.call({ tool: STOP, session_id: SID.slice(0, 8), reason: 'stuck on a prompt' } as never))
-      expect(isRefused).toBe(false)
-      expect(text).toContain(`stop_worker: session ${SID} "live worker", pid 4101.`)
-      expect(text).toContain('Reason given: stuck on a prompt')
-      expect(text).toContain(`Abort check before: alive: ${HOME}/.claude/sessions/4101.json names session ${SID} with procStart 5000, and /proc/4101/stat field 22 is 5000.`)
-      expect(text).toContain('Descendants listed before the first signal (2): 4102 (bash), parent 4101; 4103 (sleep), parent 4102.')
-      expect(text).toMatch(/- \d{4}-\d\d-\d\dT[\d:.]+Z SIGTERM to 4101 \(claude\): exit code 0/)
-      expect(text).toMatch(/re-check of 4101 after \d+ s: gone/)
-      expect(text).toContain('Descendants at the end: 4102 (bash) gone; 4103 (sleep) gone.')
-      expect(text).toContain('Abort check after: dead: pid 4101 is gone (no /proc/4101).')
-      expect(text).toContain('Result: pid 4101 is dead')
-      expect(text).toContain('Surviving descendants: none.')
-      expect(text).toContain('The registry is unchanged')
-      expect(world.table.signals.map(one => one.pid).every(pid => [4101, 4102, 4103].includes(pid))).toBe(true)
-      expect([...world.table.procs.keys()]).toEqual([5555])
-      expect(world.files.get(REGISTRY)).toBe(registryBefore)
-      expect(world.written.slice(writesBefore).filter(one => one.path === REGISTRY)).toEqual([])
-      const helped = world.runs.some(argv => argv[0] === 'node' && argv[2] === 'stopProcesses')
-      expect(helped).toBe(isHelper)
-    })
-  }
+  test('through the helper: a live registered worker is stopped and proved dead, its descendants listed first and stopped; nothing else is signalled and the registry is not written', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seed(world, [seedLiveWorker(world, SID)])
+    const registryBefore = world.files.get(REGISTRY)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const writesBefore = world.written.length
+    const { text, isRefused } = answerOf(await $.tool.call({ tool: STOP, session_id: SID.slice(0, 8), reason: 'stuck on a prompt' } as never))
+    expect(isRefused).toBe(false)
+    expect(text).toContain(`stop_worker: session ${SID} "live worker", pid 4101.`)
+    expect(text).toContain('Reason given: stuck on a prompt')
+    expect(text).toContain(`Abort check before: alive: ${HOME}/.claude/sessions/4101.json names session ${SID} with procStart 5000, and /proc/4101/stat field 22 is 5000.`)
+    expect(text).toContain('Descendants listed before the first signal (2): 4102 (bash), parent 4101; 4103 (sleep), parent 4102.')
+    expect(text).toMatch(/- \d{4}-\d\d-\d\dT[\d:.]+Z SIGTERM to 4101 \(claude\): exit code 0/)
+    expect(text).toMatch(/re-check of 4101 after \d+ s: gone/)
+    expect(text).toContain('Descendants at the end: 4102 (bash) gone; 4103 (sleep) gone.')
+    expect(text).toContain('Abort check after: dead: pid 4101 is gone (no /proc/4101).')
+    expect(text).toContain('Result: pid 4101 is dead')
+    expect(text).toContain('Surviving descendants: none.')
+    expect(text).toContain('The registry is unchanged')
+    expect(world.table.signals.map(one => one.pid).every(pid => [4101, 4102, 4103].includes(pid))).toBe(true)
+    expect([...world.table.procs.keys()]).toEqual([5555])
+    expect(world.files.get(REGISTRY)).toBe(registryBefore)
+    expect(world.written.slice(writesBefore).filter(one => one.path === REGISTRY)).toEqual([])
+    expect(world.runs.some(argv => argv[0] === 'node' && argv[2] === 'processTree')).toBe(true)
+    expect(world.runs.some(argv => argv[0] === 'node' && argv[2] === 'stopProcesses')).toBe(true)
+  })
 
   test('a descendant that ignores SIGTERM gets SIGKILL, and the proof says so', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
@@ -116,20 +114,19 @@ describe('stop_worker', () => {
     const world = mockWorld(on)
     seed(world, [seedLiveWorker(world, SID)])
     await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    // The helper's stop sends nothing and fails: nothing falls back, and the proof says the stop did not complete.
     world.breaks.add('stop')
     const quiet = answerOf(await $.tool.call({ tool: STOP, session_id: SID } as never))
     expect(quiet.isRefused).toBe(false)
-    expect(quiet.text).toContain('Signals: none were sent.')
-    expect(quiet.text).toContain('Note: the stop script exited 1.')
+    expect(quiet.text).toContain("The stop did not complete: the helper's stop failed (IO); what it signalled before that is not known. What follows is what the checks found afterwards.")
     expect(quiet.text).toContain('Abort check after: alive: ')
     expect(quiet.text).toContain('Result: pid 4101 is STILL ALIVE after the stop: it is a live worker; report it as running, never as stopped.')
-    expect(quiet.text).toContain('Descendants at the end: 4102 (bash) unknown (the stop did not report it); 4103 (sleep) unknown (the stop did not report it).')
+    expect(world.table.signals).toEqual([])
     world.breaks.delete('stop')
     world.breaks.add('tree')
     const failed = answerOf(await $.tool.call({ tool: STOP, session_id: SID } as never))
     expect(failed.text).toContain('Descendants listed before the first signal: unknown (the tree could not be listed).')
-    // The machine's own error text reaches the answer (the kit's, where a test hook throws).
-    expect(failed.text).toMatch(/The stop did not complete: [^\n]+\. What follows is what the checks found afterwards\./)
+    expect(failed.text).toContain('The stop did not complete: the process tree could not be listed (IO); nothing was signalled. What follows is what the checks found afterwards.')
     expect(failed.text).toContain('Result: pid 4101 is STILL ALIVE')
     expect(world.table.signals).toEqual([])
   })
@@ -146,6 +143,6 @@ describe('stop_worker', () => {
     expect(typeof lines.find(line => line.event === 'tool.result' && line.tool === 'stop_worker')?.resultChars).toBe('number')
     expect(trace).not.toContain('private reason')
     expect(trace).not.toContain('secret title')
-    expect(lines.some(line => Array.isArray(line.argv) && (line.argv as string[]).includes('<STOP_SCRIPT>'))).toBe(true)
+    expect(lines.some(line => line.event === 'process.run' && line.helper === 'stopProcesses' && line.pid === 4101 && line.targets === 3)).toBe(true)
   })
 })

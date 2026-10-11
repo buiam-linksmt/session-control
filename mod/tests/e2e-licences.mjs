@@ -231,8 +231,8 @@ if (trace.includes('"event":"licences.usage"')) pass('the trace has a line per p
 else fail('the trace has a line per probe')
 const { major } = nodeMajor()
 if (major !== undefined && major >= 22) {
-  if (trace.includes('"helper":"probeUsage"') && !trace.includes('"op":"probeUsage"')) pass('the probes ran through the Node helper, no fallback')
-  else fail('the probes ran through the Node helper, no fallback')
+  if (trace.includes('"helper":"probeUsage"') && !trace.includes('"op":"probeUsage"')) pass('the probes ran through the Node helper, no failed call')
+  else fail('the probes ran through the Node helper, no failed call')
 }
 
 if (process.env.KEEP_OUT) {

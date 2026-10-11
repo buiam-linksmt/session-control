@@ -2,12 +2,13 @@
 // Run with `node mod/tests/probe-selftest.mjs` (Node 22 or newer), from any directory; it prints one `ok` line per part
 // and stops with exit 1 at the first failed check.
 //
-// Extracts PROBE_SCRIPT from hooks/host-posix.ts, checks it parses under `sh -n` and runs it against a fixture config
-// dir: a transcript with a known mtime and a sessions file whose procStart matches this process. Then REGISTER_SCRIPT,
-// CLEAR_SCRIPT and ACK_SCRIPT of hooks/core.ts on scratch registries and against the differential cases of
-// REGISTRY_GOLDEN in tests/fixtures.ts, the <Button> shape of hooks/register.tsx, APPEND_SCRIPT and ROTATE_SCRIPT.
-// The scripts under test are sh scripts that call jq and /proc: this runs on Linux and WSL. It removes every scratch
-// directory it made. Only the Node standard library is used.
+// Runs the Node helper's probe (`node mod/helper/host.mjs probe`, as the mod runs it) on the live /proc against a
+// fixture config dir: a transcript with a known mtime and a sessions file whose procStart matches this process. Then
+// REGISTER_SCRIPT, CLEAR_SCRIPT and ACK_SCRIPT of hooks/core.ts (the jq reference of the registry edits) on scratch
+// registries and against the differential cases of REGISTRY_GOLDEN in tests/fixtures.ts, the <Button> shape of
+// hooks/register.tsx, and the helper's append and rotate of a log. The registry scripts are sh scripts that call jq,
+// and the probe reads /proc: this runs on Linux and WSL. It removes every scratch directory it made. Only the Node
+// standard library is used.
 
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -15,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
-import { after, before, pyEqual, pyJson, pyLiteral, pyTruthy } from './lib/selftest.mjs'
+import { after, before, pyEqual, pyJson, pyTruthy } from './lib/selftest.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const made = []
@@ -43,16 +44,16 @@ function run(argv, timeoutSec) {
 }
 /** json.dump(value, file): the Python default layout (", " and ": "; jq reads it either way). */
 const dumpPy = (value, path) => write(path, pyJson(value))
+const HELPER = join(HERE, '..', 'helper', 'host.mjs')
+/** One helper call as the mod makes it: the request as JSON on stdin; its answer, exit code and stderr. */
+function helper(op, request) {
+  const ran = spawnSync(process.execPath, [HELPER, op], { input: JSON.stringify(request), encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, timeout: 60_000 })
+  if (ran.error) throw new Error(`the helper did not run to its end: ${ran.error.message}`)
+  return { answer: JSON.parse(ran.stdout), returncode: ran.status, stderr: ran.stderr }
+}
 
 try {
   const src = fs.readFileSync(join(HERE, '..', 'hooks', 'core.ts'), 'utf8')
-  // The scripts the Linux adapter runs (PROBE_SCRIPT, APPEND_SCRIPT, ROTATE_SCRIPT) live in hooks/host-posix.ts.
-  const posixSrc = fs.readFileSync(join(HERE, '..', 'hooks', 'host-posix.ts'), 'utf8')
-  const body = before(after(posixSrc, 'export const PROBE_SCRIPT = ['), "].join('\\n')")
-  const script = body.trim().split(/\r?\n/).filter(l => l.trim()).map(l => pyLiteral(l.trim().replace(/,+$/, ''))).join('\n')
-
-  const syntax = run(['sh', '-n', '-c', script])
-  check(syntax.returncode === 0, `sh -n failed: ${syntax.stderr}`)
 
   const cfg = mkdtemp('session-probe-')
   const sid = '11111111-2222-4333-8444-555555555555'
@@ -66,18 +67,19 @@ try {
   const procStart = stat.slice(stat.lastIndexOf(') ') + 2).split(' ')[19]
   dumpPy({ sessionId: sid, procStart }, `${cfg}/sessions/${pid}.json`)
 
-  const probe = run(['sh', '-c', script, 'session-probe', `t:${sid}|${cfg}`, `pid:${pid}|${cfg}`], 60)
-  check(probe.returncode === 0 && probe.stderr === '', `probe failed: ${probe.returncode} ${JSON.stringify(probe.stderr)}`)
-  check(probe.stdout.includes(`T\t${sid}\t1700000000`), probe.stdout)
-  const proof = probe.stdout.split('\n').filter(l => l.startsWith(`A\t${pid}\t`))
-  check(proof.length > 0, probe.stdout)
+  const probe = helper('probe', { args: [`t:${sid}|${cfg}`, `pid:${pid}|${cfg}`] })
+  check(probe.returncode === 0 && probe.answer.ok === true && probe.stderr === '', `probe failed: ${probe.returncode} ${JSON.stringify(probe.answer)} ${JSON.stringify(probe.stderr)}`)
+  const out = String(probe.answer.out)
+  check(out.includes(`T\t${sid}\t1700000000`), out)
+  const proof = out.split('\n').filter(l => l.startsWith(`A\t${pid}\t`))
+  check(proof.length > 0, out)
   const cols = proof[0].split('\t')
   check(cols[3] === procStart && cols[4] === procStart && cols[5] === sid, cols)
   console.log('probe-selftest: ok')
 
   // --- the P lines carry elapsed seconds without `ps`
-  const elapsedRun = run(['sh', '-c', script, 'session-probe'], 60)
-  const plines = elapsedRun.stdout.split('\n').filter(l => l.startsWith('P\t')).map(l => l.split('\t'))
+  const elapsedRun = helper('probe', { args: [] })
+  const plines = String(elapsedRun.answer.out).split('\n').filter(l => l.startsWith('P\t')).map(l => l.split('\t'))
   check(plines.length > 0, 'no claude process seen')
   check(plines.every(c => /^\d+$/.test(c[3] ?? '')), plines)
 
@@ -184,28 +186,30 @@ try {
   }
   console.log(`registry-golden-selftest: ok (${golden.length} cases)`)
 
-  // --- APPEND_SCRIPT adds lines to the cleared log without reading it, whatever its size
-  const append = before(after(posixSrc, 'export const APPEND_SCRIPT = `'), '`\n').replaceAll('\\\\', '\\')
+  // --- the helper's append adds lines to the cleared log without reading it, whatever its size
   const appendDir = fs.mkdtempSync(join(tmpdir(), 'session-append-'))
   try {
     log = `${appendDir}/cleared.jsonl`
     const big = '{"x":"' + 'y'.repeat(5 * 1024 * 1024) + '"}\n'
     write(log, big)
     const lines = '{"session_id":"a","t":"caf\u{e9}"}\n{"session_id":"b"}'
-    r = run(['sh', '-c', append, 'session-log', lines, log], 30)
-    check(r.returncode === 0 && r.stderr === '', r)
+    const appended = helper('append', { path: log, text: `${lines}\n` })
+    check(appended.returncode === 0 && appended.answer.ok === true && appended.stderr === '', appended)
     check(read(log) === big + lines + '\n')
   } finally {
     fs.rmSync(appendDir, { recursive: true, force: true })
   }
   console.log('append-selftest: ok')
 
-  // --- ROTATE_SCRIPT keeps three trace files: .1 moves to .2 (the oldest goes), the trace becomes .1. It reads the size
-  // itself, so of several processes that found the trace too big only the first rotates; a missing trace is no failure.
-  const rotate = before(after(posixSrc, 'export const ROTATE_SCRIPT = String.raw`'), '`')
-  check(run(['sh', '-n', '-c', rotate]).returncode === 0)
+  // --- the helper's rotate keeps three trace files: .1 moves to .2 (the oldest goes), the trace becomes .1. It reads the
+  // size itself, so of several processes that found the trace too big only the first rotates; a missing trace is no
+  // failure.
   const rotateDir = fs.mkdtempSync(join(tmpdir(), 'session-rotate-'))
-  const rotateRun = (trace, maxBytes, adding) => run(['sh', '-c', rotate, 'session-trace', trace, '2', String(maxBytes), String(adding)], 30)
+  const rotateRequest = (trace, maxBytes, adding) => ({ path: trace, adding, maxBytes, moves: [[`${trace}.1`, `${trace}.2`], [trace, `${trace}.1`]] })
+  const rotateRun = (trace, maxBytes, adding) => {
+    const ran = helper('rotate', rotateRequest(trace, maxBytes, adding))
+    return { returncode: ran.answer.ok === true ? ran.returncode : 1, stderr: ran.stderr, answer: ran.answer }
+  }
   const listed = () => fs.readdirSync(rotateDir).sort()
   try {
     const trace = `${rotateDir}/trace.log`
@@ -249,23 +253,25 @@ try {
     const big = 'x'.repeat(5000) + '\n'
     const racer = () =>
       new Promise((resolve, reject) => {
-        const child = spawn('sh', ['-c', rotate, 'session-trace', trace, '2', '4096', '10'])
+        const child = spawn(process.execPath, [HELPER, 'rotate'])
         let err = ''
-        child.stdout.resume()
+        let answer = ''
+        child.stdout.on('data', chunk => (answer += chunk))
         child.stderr.on('data', chunk => (err += chunk))
         const timer = setTimeout(() => child.kill('SIGKILL'), 30_000)
         child.on('error', reject)
         child.on('close', code => {
           clearTimeout(timer)
-          resolve({ code, err })
+          resolve({ code, err, answer })
         })
+        child.stdin.end(JSON.stringify(rotateRequest(trace, 4096, 10)))
       })
     for (let round = 0; round < 20; round++) {
       for (const name of fs.readdirSync(rotateDir)) fs.rmSync(`${rotateDir}/${name}`)
       write(trace, big)
       write(`${trace}.1`, 'mid\n')
       const racers = await Promise.all(Array.from({ length: 8 }, racer))
-      for (const one of racers) check(one.code === 0 && one.err === '', [one.code, one.err])
+      for (const one of racers) check(one.code === 0 && one.err === '' && JSON.parse(one.answer).ok === true, [one.code, one.err, one.answer])
       const remaining = listed()
       check(remaining.every(name => ['trace.log', 'trace.log.1', 'trace.log.2'].includes(name)) && !remaining.includes('trace.log'), remaining)
       check(remaining.map(name => read(`${rotateDir}/${name}`)).includes(big), remaining)
