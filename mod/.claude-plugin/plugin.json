@@ -88,7 +88,7 @@
     "licenceDirs": {
       "type": "string",
       "title": "Licence folders",
-      "description": "Comma separated absolute config directories the licence tools (list_licences, probe_licence_usage, launch_worker's config_dir) count as licences besides the ones they find (the default directory, ~/.claude, ~/.claude/<name>, ~/.claude-<name>). A leading ~ is the home directory. Each counts only when it holds both .credentials.json and .claude.json, a test of presence only: neither file is opened. Empty: none.",
+      "description": "Comma separated absolute config directories the licence tools (list_licences, probe_licence_usage, launch_worker's config_dir) count as licences besides the ones they find (the default directory, ~/.claude, ~/.claude/<name>, ~/.claude-<name>). A leading ~ is the home directory. Each counts only when it holds both .credentials.json and .claude.json as regular files (an entry that is a symbolic link to such a folder counts), a test of presence and kind only: neither file is opened. Empty: none.",
       "default": ""
     }
   }

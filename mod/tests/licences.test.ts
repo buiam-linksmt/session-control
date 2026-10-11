@@ -209,6 +209,23 @@ describe('list_licences', () => {
     expect(world.statted).toContain(`${HOME}/.claude-broken/.credentials.json`)
   })
 
+  test('a licenceDirs entry that is a symbolic link to a licence folder counts; a linked child or dash folder found by the scan does not', { options: { ...OPTIONS, licenceDirs: '/w/lic/linked' } }, async ($, on) => {
+    const world = mockWorld(on)
+    seed(world)
+    licence(world, CLAUDE)
+    licence(world, '/w/elsewhere/real')
+    world.links.set('/w/lic/linked', '/w/elsewhere/real')
+    world.links.set(`${CLAUDE}/linkedchild`, '/w/elsewhere/real')
+    world.links.set(`${HOME}/.claude-linked`, '/w/elsewhere/real')
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const lines = (await answerOf($, 'list_licences')).split('\n')
+    expect(lines.slice(0, 3)).toEqual([
+      '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
+      `- default | config_dir ${CLAUDE} | source default | logged_in yes | sessions 1 live, 1 in all`,
+      '- linked | config_dir /w/lic/linked | source explicit | logged_in yes | sessions 0 live, 0 in all',
+    ])
+  })
+
   test('registry config_dir paths are matched normalised (// and /./ collapsed, a trailing / stripped), never through a symbolic link', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seed(world)
