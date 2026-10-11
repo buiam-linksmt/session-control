@@ -118,6 +118,24 @@ test('writeAtomic: a new file and its directory, a replaced file, a changed file
   }
 })
 
+test('writeAtomic: a rename that fails (the path is a directory) is IS_DIR and leaves no temp file beside it; the directory is untouched', () => {
+  const dir = scratch()
+  try {
+    const target = join(dir, 'headless-sessions.json')
+    fs.mkdirSync(target)
+    fs.writeFileSync(join(target, 'inside.txt'), 'inside')
+    assertFailure(helper('writeAtomic', { path: target, text: '[]\n' }), 'IS_DIR', dir)
+    assert.deepEqual(fs.readdirSync(dir), ['headless-sessions.json'])
+    // With `expected` the read right before the rename fails the same way, and the temp file goes too.
+    assertFailure(helper('writeAtomic', { path: target, text: '[]\n', expected: '' }), 'IS_DIR', dir)
+    assert.deepEqual(fs.readdirSync(dir), ['headless-sessions.json'])
+    assert.deepEqual(fs.readdirSync(target), ['inside.txt'])
+    assert.equal(fs.readFileSync(join(target, 'inside.txt'), 'utf8'), 'inside')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('writeAtomic: a reader never finds the file missing or half written while it is replaced', async () => {
   const dir = scratch()
   try {
