@@ -349,7 +349,9 @@ describe('tool surface', () => {
     // archive_decisions (11909:ac870414) are registered after audit_state, then launch_worker's schema and description
     // grow (prompt, section, rules; dir, model, effort and title optional for a resume). Every other tool is
     // unchanged: the next test pins each.
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('13443:c93b222a')
+    // Changed on purpose again by feature/stop-guard (13443:c93b222a before): stop_worker (1129:9b87c2b9) is registered
+    // after archive_decisions; every tool before it keeps its own pin (the next test), record_decision included.
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('14573:6cee2b74')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
@@ -370,6 +372,8 @@ describe('tool surface', () => {
       'audit_state',
       'close_worker',
       'archive_decisions',
+      // Added on purpose by feature/stop-guard, after archive_decisions: every tool before it is unchanged.
+      'stop_worker',
     ])
     // Each tool's own pin. Unchanged since before feature/write-tools, byte for byte: the five of the first six after
     // launch_worker (together 4689:d2b85bc0) and the six inspection tools (together 3428:1484e7b6). The first six
@@ -391,6 +395,7 @@ describe('tool surface', () => {
       audit_state: '562:67cf260d',
       close_worker: '1529:9741bcb0',
       archive_decisions: '879:39a97972',
+      stop_worker: '1129:9b87c2b9',
     })
     expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4689:d2b85bc0')
     expect(fingerprint(JSON.stringify(w.tools.slice(6, 12)))).toBe('3428:1484e7b6')

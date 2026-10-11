@@ -27,6 +27,8 @@ import { HELPER_SCRIPT, fallbackFields, fallbackToast, withHelper } from './host
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
 import { AUDIT_SCHEMA, auditText } from './audit'
+import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
+import type { StopReport } from './host'
 import type { GitState, ListedFile } from './audit'
 import {
   LIST_SESSIONS_SCHEMA,
@@ -127,6 +129,7 @@ const SNAPSHOT_TOOL = 'mcp__session-control__panel_snapshot'
 const AUDIT_TOOL = 'mcp__session-control__audit_state'
 const CLOSE_TOOL = 'mcp__session-control__close_worker'
 const ARCHIVE_TOOL = 'mcp__session-control__archive_decisions'
+const STOP_TOOL = 'mcp__session-control__stop_worker'
 
 /** How much of a transcript read_result reads when the whole is over the read cap: a final report can be one long row. */
 const REPORT_TAIL: TailShape = { lines: 400, width: 400_000 }
@@ -1120,6 +1123,52 @@ async function spawnWorker(
   }
 }
 
+/**
+ * stop_worker: CLAUDE.md step 6 by tool, for a registered worker only. The entry is the registry's (an orphan or a pid
+ * no entry records is never reached); its pid must pass the Abort check (refused otherwise: a dead or reused pid is
+ * never signalled); the host's stopProcessTree lists the tree, then stops the root and every descendant left, never
+ * this session's own process or an ancestor of it; then the Abort check again, which decides the result whatever the
+ * stop answered or if it failed. No registry field is written here: the exit notification and the probe record it.
+ */
+async function stopWorker($: EngineInterface, id: unknown, reason: unknown) {
+  const asked = await sessionAsked($, id)
+  if ('deny' in asked) return asked
+  const { entry, facts } = asked
+  const machine = await hostOf($)
+  const isWindows = machine.platform === 'windows'
+  const sid = entry.session_id
+  if (typeof entry.pid !== 'number' || !Number.isSafeInteger(entry.pid) || entry.pid <= 1) {
+    trace($, 'guard', { tool: 'stop_worker', isOk: false, reason: 'no-pid' })
+    return { deny: `${PLUGIN}: refused: session ${sid} is not alive: its entry records no pid (a finished session, or one whose pid was dropped); nothing was signalled.` }
+  }
+  const pid = entry.pid
+  const before = abortCheck(entry, facts, isWindows)
+  if (!before.isAlive) {
+    trace($, 'guard', { tool: 'stop_worker', isOk: false, reason: 'abort-check', pid })
+    return { deny: `${PLUGIN}: refused: the Abort check before the stop does not prove pid ${pid} is the live process of session ${sid}: ${before.text}. A dead or reused pid is never signalled; nothing was signalled.` }
+  }
+  const start = facts.pidProof.get(pid)?.startTicks ?? ''
+  let report: StopReport | undefined
+  let failure: string | undefined
+  try {
+    report = await machine.stopProcessTree(portOf($), { pid, start })
+  } catch (err) {
+    traceError($, 'stop_worker', err)
+    failure = errorText(err)
+  }
+  if (report?.steps.some(step => step.kind === 'skip' && step.pid === pid && step.reason === 'own') === true) {
+    trace($, 'guard', { tool: 'stop_worker', isOk: false, reason: 'own', pid })
+    return { deny: `${PLUGIN}: refused: pid ${pid} is this session's own process or one of its ancestors; nothing was signalled.` }
+  }
+  // The Abort check after the stop decides what is said, whatever the stop answered.
+  const after = abortCheck(entry, await probe($, [entry]), isWindows)
+  const signals = report?.steps.filter(step => step.kind === 'signal').length ?? 0
+  const survivors = report?.final.filter(one => one.pid !== pid && one.status === 'alive').length ?? 0
+  trace($, 'guard', { tool: 'stop_worker', isOk: true, pid, signals, isDeadAfter: !after.isAlive, survivors, ...(failure === undefined ? {} : { isFailed: true }) })
+  const given = typeof reason === 'string' ? reason : undefined
+  return { result: stopProofText({ entry, ...(given === undefined ? {} : { reason: given }), before, ...(report === undefined ? {} : { report }), ...(failure === undefined ? {} : { failure }), after, isWindows }) }
+}
+
 // ---------------------------------------------------------------- the read-only inspection tools (inspect.ts)
 // They read the registry, the probe, run files, transcripts and directory listings; they write nothing, start no
 // process but the probe, the transcript tail and the listing, and answer plain text that inspect.ts redacts and bounds.
@@ -1405,6 +1454,11 @@ async function activate($: EngineInterface): Promise<void> {
         'Move whole sections of agreed-decisions.md into agreed-decisions-archive.md (created when missing; appended, the text byte for byte under a dated header line) and leave one summary line each (heading, id range, date, archived) under "## Archived sections". Refuses a Standing section, an unknown heading and a section that a queue task not done, a running session or an open point still names (by its heading, a decision id or a branch or T-number of its heading), saying which; then nothing is archived. The file is backed up first.',
         ARCHIVE_SCHEMA,
       ],
+      [
+        'stop_worker',
+        "Stop a registered worker that is alive and prove it dead (CLAUDE.md step 6, Abort, by tool). Only a registry entry with a recorded pid that passes the Abort check (its sessions file names the session and its start is the process's own); never an orphan, an unregistered pid or this session's own process. Lists the worker's descendants first, then SIGTERM, re-checks every second for up to 10 s, SIGKILL (Windows: taskkill /T, then /T /F), then each descendant still alive the same way. Answers the proof: the Abort check before and after, each signal with its time, the descendants found and stopped, and any survivor. Changes no registry field.",
+        STOP_SCHEMA,
+      ],
     ] as const) {
       await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
     }
@@ -1665,6 +1719,12 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: ARCHIVE_TOOL }, ($, e) => tracedTool($, 'archive_decisions', e, [], () => archiveSections($, plain(e).sections), true)).catch(($, e, next) => {
     traceError($, 'archive_decisions', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: archive_decisions failed` }
+  })
+
+  // The reason is free text: the trace keeps the session id and the answer's length only.
+  on('tool.call', { tool: STOP_TOOL }, ($, e) => tracedTool($, 'stop_worker', e, ['session_id'], () => stopWorker($, plain(e).session_id, plain(e).reason), true)).catch(($, e, next) => {
+    traceError($, 'stop_worker', next.error?.message ?? next.error?.kind)
+    return next.called ? next(e) : { deny: `${PLUGIN}: stop_worker failed` }
   })
 
   // The inspection tools: read-only; their answers reach the trace as a length only.

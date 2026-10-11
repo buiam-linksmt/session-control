@@ -53,7 +53,15 @@ export function newerInMap(files: Map<string, string>, mtimes: ReadonlyMap<strin
  * ignores TERM (and taskkill without /F); every signal it gets is recorded in `signals`, so a test can prove which pids
  * were touched. `own` are the pids above the listing process (the session's own chain).
  */
-export type SimProc = { ppid: number; start: string; state: string; comm: string; isStubborn?: boolean }
+export type SimProc = {
+  ppid: number
+  start: string
+  state: string
+  comm: string
+  isStubborn?: boolean
+  /** A claude process as the probe reads it: its cwd, CLAUDE_CONFIG_DIR and command line. */
+  claude?: { cwd: string; configDir: string; cmdline: string }
+}
 export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number }
 
 /** TREE_SCRIPT's (and the helper's processTree) lines over the table: R or N, the G lines, the D lines breadth first. */
