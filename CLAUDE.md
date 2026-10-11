@@ -53,8 +53,8 @@ commits at the end, no cadence changes to make a run cheaper or safer, no reorde
 - A stop condition must name observable drift, never the absence of a convention. Verify a convention
   actually holds before treating its absence as a blocker.
 - Never tell a skill run to change its own steps, cadence or checkpoints.
-- A skill-test prompt names itself "skill test" (the only phrase `launch_worker` exempts from its prompt
-  checks) and carries only the goal, the premises and the report format (Worker prompt, items 1, 2 and 11).
+- A skill-test prompt names itself "skill test" (the only phrase that exempts a prompt from `launch_worker`'s
+  item, size and branch checks; its secret and sign-off refusals still apply) and carries only the goal, the premises and the report format (Worker prompt, items 1, 2 and 11).
 - If the skill's procedure looks like it will cause a problem, let it happen and record it as a
   rework item.
 
@@ -72,8 +72,8 @@ These are orchestration and the management of your own configuration, not the wo
 - Manage orchestration state: change the helper files through the session-control tools (see Helper files)
   and read them, `backups/` and `reports/`; read your
   own workers' transcripts and session metadata (`<config_dir>/projects/...`,
-  `<config_dir>/sessions/...`, with the `config_dir` of the registry entry); check their processes
-  in `/proc`; read the licence state as the user-level instructions describe; carry out the launch steps this file prescribes
+  `<config_dir>/sessions/...`, with the `config_dir` of the registry entry); check their processes;
+  read the licence state as the user-level instructions describe; carry out the launch steps this file prescribes
   (the matrix, the prompt file, the launch directory, `git worktree list`/`add`/`remove`,
   `git submodule update --init` in a new worktree).
 - Summarize, compare, and relay worker output to the user.
@@ -117,7 +117,8 @@ remote branch, tag or PR; `reset --hard`, `checkout --`, `clean`, `branch -D` or
 `worktree remove` over uncommitted or unpushed work; stopping, resetting or reconfiguring a shared live
 stack or anything the user set up by hand; sending, sharing or deleting anything outside the repo. A
 non-protected branch the worker created or the user named is pushed, fast-forward only, right after
-each commit, with no gate (Worker prompt, item 3).
+each commit, with no gate (Worker prompt, item 3). The mod refuses a force, delete, mirror or pruning push,
+`reset --hard`, a forced `clean` and `branch -D` as the orchestrator's own command.
 
 **Push policy per project.** The user decides per project whether a push to a protected branch needs a
 go-ahead. The policy is a decision recorded with `record_decision` in a `Standing` section (id
@@ -222,17 +223,26 @@ independently. Set effort only through the `effort` parameter of `launch_worker`
 Launch Anthropic models only; a missing matrix file is a question to the user.** A diagnosis is `opus` at
 `xhigh` or `max`; a conclusion that decides what happens next is a consequential claim (see Scope).
 
-Write the prompt to a file in the scratchpad first, with a quoted heredoc (`<<'PROMPT_EOF'`), and check
-the file is non-empty (`test -s`); its absolute path is the `prompt_file` of the launch.
+Pass the prompt inline as `prompt`, or as `prompt_file`: a file in the scratchpad, outside the target
+repo's tree, written with a quoted heredoc (`<<'PROMPT_EOF'`) and checked non-empty (`test -s`).
 
-Launch every worker with `launch_worker`. Required: `dir` (launch directory), `prompt_file`, `model`,
-`effort`, `title` (the session's purpose). Optional: `need` (percent of licence headroom the run requires,
-default 40), `timeout_minutes` (default 180, range 5 to 600; size it to the run) and `resume_sid`. The tool
-picks the licence for a fresh launch (the default config directory when no picker is configured), starts the
-worker in the background, finds its pid and registers the entry. A resume passes `resume_sid`: the tool
-reuses the entry's `config_dir`, refuses a live session and takes no fresh pick. A resume passes the entry's own `cwd` as `dir` and the same `model`. `launch_worker` refuses a
-prompt that lacks a foreground wait, the `git status -sb` report line or the no-attribution instruction.
-Keep the prompt file in the scratchpad, outside the target repo's tree.
+Launch every worker with `launch_worker`. Required: `dir` (launch directory), `model`, `effort`, `title`
+(the session's purpose) and exactly one of `prompt` and `prompt_file`. Optional: `need` (percent of licence
+headroom the run requires, default 40), `timeout_minutes` (default 180, range 5 to 600; size it to the run),
+`section` (the unit's `agreed-decisions.md` section, appended as binding), `rules` (appends the standard
+rules block when the prompt lacks a checked item; default on with `prompt` or `section`), `config_dir`
+(Licences) and `resume_sid`. The tool picks the licence for a fresh launch (the default config directory
+when no picker is configured), starts the worker in the background, finds its pid and registers the entry.
+A resume passes `resume_sid`: the tool reuses the entry's `config_dir`, takes `dir`, `model`, `effort` and
+`title` from the entry unless given, refuses a live session and takes no fresh pick.
+
+`launch_worker` refuses a prompt that lacks a foreground wait, the `git status -sb` report line or the
+no-attribution instruction (pass `rules`), holds a likely secret (name where the worker finds it, never the
+value), exceeds 60000 characters (reference long documents by path) or instructs a sign-off step (a force,
+delete, mirror or pruning push, `reset --hard`, a forced `clean`, `branch -D`: raise it as an open point and
+launch without it); rewrite the prompt and launch again. A warning in its answer (a push to `main` or
+`develop`; a commit or push with no branch and no decision section) is checked against the push policy and
+Worker prompt item 1 at once; a run whose prompt breaks them is stopped with `stop_worker` and relaunched.
 
 A task with no natural project directory gets `dir` set to `<workspaces>`; `launch_worker` refuses
 `<control>` and `$HOME`. Every worker starts through `launch_worker`; no worker is started with a
@@ -240,27 +250,27 @@ hand-built `claude -p`.
 
 When `launch_worker` refuses for licence room, launch nothing: read the licence event log (user-level
 instructions), record the launch with `queue_task` as `queued` (`fields`: `waits_for` the licence headroom
-needed, `dir`, `model`, `effort`, `prompt_file`); then, unless one already runs for that reset, start one
+needed, `dir`, `model`, `effort`, `prompt_file`, an inline prompt written to one first); then, unless one already runs for that reset, start one
 `run_in_background` `sleep` until the earliest future reset of a window that keeps a licence below the
 needed headroom (the user-level instructions say where the reset times are read), with a Bash `timeout`
-above the sleep; its notification triggers the next `launch_worker`. Any other refusal is a blocker.
+above the sleep; its notification triggers the next `launch_worker`. A refusal not handled above is a blocker.
 
 `launch_worker` finds the pid and session id and registers the entry. When it returns not registered,
-find the pid through `/proc` (step 4), read `sessionId` from `<config_dir>/sessions/<pid>.json` and raise
-an open point naming the session.
+find the pid among the orphans `list_sessions` lists, read `sessionId` from `<config_dir>/sessions/<pid>.json`
+and raise an open point naming the session.
 
 **On a worker's exit notification** (the only exit signal; pre-empt no session), confirm death with
 the Abort check, take the outcome label (`clean`, `limit`, `login`, `killed`, `error`, `chatter`) from the
-completions line in the next prompt, or from the entry's `outcome`; classify an entry without a label
-from the err file and the last assistant message of its transcript (`killed` also covers a missing or
-truncated result file: the err file tells a time limit from memory), and act:
+`session-control completions: <title>: <summary>` line of the next prompt, or from the entry's `outcome`;
+classify an entry without a label from the err file and `read_result` (`killed` also covers a missing or
+truncated result file: the err file tells a time limit from memory). A `<title>: report check: ...` item is a
+note and never changes the outcome: the work counts as not pushed until a resume supplies what it names. Act:
 - Exit 0 with a report against the prompt's acceptance criteria and no question for the user: retire
   (step 7); with one: Follow up (step 5).
 - Exit 0 ending on a deferral (a background wait, a scheduled wakeup, a promise to report later), with
   no report, or with a `.result` that is not an answer: resume it with a resume prompt telling it to
   finish in the foreground and report.
-- Usage limit (exit 1 with a session-limit message in the result or err file): drop `pid`, keep the
-  entry, resume in the same turn once the entry's own licence has headroom, under its own
+- Usage limit (exit 1 with a session-limit message in the result or err file): keep the entry, resume in the same turn once the entry's own licence has headroom, under its own
   `config_dir`; until then record it with `queue_task` as a `queued` resume behind that licence
   (`fields`: `session_id`, `config_dir`, `waits_for`), and start the same `sleep` for that licence's
   reset. Never restart it or offer a restart.
@@ -269,8 +279,7 @@ truncated result file: the err file tells a time limit from memory), and act:
 - Killed as "low on memory": resume, unless a `dmesg` OOM entry, a nonzero cgroup `oom_kill` or
   sustained PSI pressure shows a real resource problem; then it is a blocker.
 - Exit on a permission refusal: a blocker, never resumed unchanged or under a more permissive mode.
-- Login error: read the events log and raise an open point naming the licence; drop `pid`, and
-  resume after the re-login.
+- Login error: read the events log and raise an open point naming the licence; resume after the re-login.
 - Exit 137 or 143, or "was stopped", from a stop or kill this session issued: step 6 only.
 - Anything else: read the err file and report the session `failed` with its output.
 
@@ -316,19 +325,20 @@ In a new worktree of a repo with submodules, run `git submodule update --init` b
 ### 3. Register
 
 `launch_worker` registers each session it starts in `~/.claude/headless-sessions.json` (title, pid,
-session_id, config_dir, cwd, model, effort). A live `claude` process that no entry holds is raised as an
+session_id, name, config_dir, cwd, model, effort, its run files). A live `claude` process that no entry holds is raised as an
 open point naming its pid and session_id; no tool adopts it.
 
 - `title` is the session's **purpose**, never its state.
 - A killed but unfinished session **keeps** its entry. Only `pid` is dropped, and only after death is
-  confirmed via `/proc` (step 6).
+  confirmed (step 6).
 - Remove an entry only when the session is genuinely finished or deliberately abandoned (step 7).
 
 **Read the licence event log (user-level instructions) when `launch_worker` refuses for licence room,
 when a worker exits with a login or limit error, and before stating licence status to the user.** Act
 only on a line naming a failure.
 
-**Licence headroom comes only from the licence tooling the user-level instructions name.** Never decide
+**Licence headroom comes only from the licence tooling the user-level instructions name, or with none from
+`probe_licence_usage`.** Never decide
 from a cache of one licence, and never call the usage endpoint yourself. Launch what the picker accepts;
 report headroom as state, and size `need` to the run's length.
 
@@ -341,22 +351,19 @@ point naming where, never the value; removal and rotation wait for the user.
 
 - `<config_dir>/projects/<sanitized-cwd>/<session_id>.jsonl` is the worker's transcript. **Its mtime is
   the only direct evidence a worker is still working.** Never take the newest file in the directory.
+  `worker_tail` shows its last lines, the seconds since it was written and whether the pid is alive, and
+  `read_result` the final report; read the transcript by hand only for what they do not show.
 - `<config_dir>/sessions/<pid>.json` gives the session's `sessionId`, `cwd` and `status`; the file
-  outlives its process: check liveness through `/proc` (below).
-- Confirm a pid is the worker with the Abort check (step 6) before treating it as one; never judge by
-  `/proc/<pid>/comm`.
-- Find the worker pid among the processes whose `/proc/<pid>/exe` resolves into the Claude Code
-  install: match the launch's `CLAUDE_CONFIG_DIR` in `/proc/<pid>/environ` and the launch directory in
-  `/proc/<pid>/cwd`, then confirm through the parent shell (`PPid` in `/proc/<pid>/status`), whose
-  `cmdline` holds the prompt-file path, or for a resume through the `--resume <session_id>` in the
-  worker's own `cmdline`.
+  outlives its process: confirm a pid is the worker with the Abort check (step 6) before treating it as
+  one, never by the process name.
+- `list_sessions` lists every registry row as the panel shows it and each live headless `claude -p` no
+  entry claims (an orphan) with its pid, cwd and config dir.
 - Poll on demand or when the user asks — do not busy-loop.
-- At the start of every turn, and first after a compaction or a restart: take the registry rows from the
-  panel and the compaction digest and read `task-queue.json` and `open-points.json` for the ids and
+- At the start of every turn, and first after a compaction or a restart: take the registry rows from
+  `list_sessions` and the compaction digest and read `task-queue.json` and `open-points.json` for the ids and
   the launch fields (`dir`, `model`, `effort`, `prompt_file`) the panel omits; run the Abort check on every registry
   pid without a classified outcome and classify each dead one by the exit list (Launch), from its
-  transcript when scratchpad files are gone; raise an open point for any live `claude` process whose
-  parent cmdline names a prompt file in this session's scratchpad and that no entry holds; launch every
+  transcript when scratchpad files are gone; raise an open point for each orphan (step 3); launch every
   `queued` task whose blocker has cleared, and start the reset `sleep` for one still waiting with none
   running. Report only what this check changed.
 
@@ -390,51 +397,48 @@ answer is sent to the worker by `--resume`.
 
 ### 6. Abort
 
-Aborting a worker is two acts: stop it, then **prove it is dead**. `TaskStop` on a backgrounded
-`claude -p` kills the shell wrapper only; the `claude` child survives. Its "Successfully stopped task"
-message is not proof of death, and neither is any other stop that does not name the pid.
+Aborting a worker is two acts: stop it, then **prove it is dead**. `stop_worker` (`session_id`, `reason`)
+does both for a registered worker: Abort check, descendants listed, worker and surviving descendants
+stopped (a forced kill after the grace period), Abort check again, the proof as its answer. Report it
+stopped only on a `dead` result; check an `exited` zombie again shortly; `STILL ALIVE` is a live worker,
+reported as running. `TaskStop` kills the shell wrapper only and proves nothing. Release a lock it held.
 
-Confirm by pid with **the Abort check**, used wherever a pid must be proved alive or dead:
+**The Abort check**, used wherever a pid must be proved alive or dead: alive = the pid's
+`<config_dir>/sessions/<pid>.json` names the entry's session_id and its start is the process's own; anything
+else = dead or a reused pid, never signalled. On Linux (on native Windows the mod takes the creation time
+from `Win32_Process` and needs `startedAt` between 2 s before and 600 s after it):
 
 ```bash
 jq -r '.sessionId, .procStart' <config_dir>/sessions/<pid>.json; awk '{print $22}' /proc/<pid>/stat
 # alive = sessionId is the entry's session_id (or the pid's cmdline holds --resume <session_id>)
-# and procStart equals the stat value; anything else = dead or a reused pid, never signalled
+# and procStart equals the stat value
 ```
 
-`/proc` shows only this environment's processes; a pid whose session file's `pidDomain` differs from
-that of a pid alive in this `/proc` is unverifiable here: report it as such (an open point), never
-as dead; the mod counts such a pid as finished-unharvested and may merge a `killed` outcome, so check the
-entry's `pidDomain` before accepting that label. Before the first kill, list the worker's descendants (`PPid` in `/proc/*/status`). Escalate
-until the check says dead: `kill <pid>` → re-check → `kill -9 <pid>` → re-check. A pid that still
-passes the check after both is a live worker; report it as running. Once it is dead, stop any
-surviving descendant the same way and release a lock it held.
+The process table shows only this environment's processes; a pid whose sessions file's `pidDomain`
+differs from that of a pid alive here is unverifiable here: report it as such (an open point), never as
+dead; the mod counts such a pid as finished-unharvested and may merge a `killed` outcome, so check the
+sessions file's `pidDomain` before accepting that label.
 
-Once death is confirmed, have a worker re-check what the session actually wrote before declaring the
-outcome:
+Once death is confirmed, and whenever a worker finishes or dies, call `session_writes` before declaring
+the outcome; report each write it flags under `<control>` or to the registry, and undo it only after the
+user has seen it.
 
-```bash
-find <the entry's cwd> -newermt '<first timestamp in the session's transcript, fractional seconds dropped>' -type f -not -path '*/.git/*'
-```
-
-The mod drops `pid` itself once the Abort check fails and the entry has a `result_file`; drop it by hand
-only for any other entry, after death is confirmed. Keep the entry (step 3).
-
-When any worker finishes or dies, read its transcript for writes to the registry or under `<control>`; report each, and undo it only after the user has seen it.
+The mod drops `pid` itself once the Abort check fails and the entry has a `result_file`, as every
+`launch_worker` entry does; an entry without one is raised as an open point. Keep the entry (step 3).
 
 ### 7. Retire
 
 When a session's goal is met, or its work is deliberately abandoned and its pid is confirmed dead,
 tell the user it's closed, with a one-line summary of what it produced.
 
-After reporting a finished session's result, call `acknowledge_workers` with `keep: true` when the
-session is still needed for a resume or as context of new work, and with `keep: false` otherwise; then
-call `retire_workers` in the same turn for every session acknowledged with `keep: false` whose outcome is
-`clean`; a session whose outcome needs a resume is acknowledged with `keep: true`. The tool refuses a live
-session, one whose exit is not yet classified, a kept one, an outcome other than `clean`, a session named
-by a queued or running task (status other than `done`) and an unknown id; any other refusal is raised as
-an open point. A finished entry left in the panel is an unretired session. Nothing is
-removed by itself or because the user wrote a message.
+After reporting a finished session's result, call `close_worker` in the same turn (`acknowledge_workers`
+then `retire_workers` in one call): `keep: true` when the session is still needed for a resume or as context
+of new work, or its outcome needs a resume (it is acknowledged and kept), `keep: false` otherwise. The retire
+refuses a live session, one whose exit is not yet classified, a kept one, an outcome other than `clean`, a
+session named by a queued or running task (status other than `done`) and an unknown id. An outcome label
+the transcript shows wrong, or work deliberately abandoned, is retired with `reviewed` (session id to the
+reason); any other refusal is raised as an open point. A finished entry left in the panel is an unretired
+session. Nothing is removed by itself or because the user wrote a message.
 
 Retire only on those two grounds: the goal is met, or the work is deliberately abandoned. A session
 killed mid-work is not retired — it is a resumable session with no pid, and its entry stays (step 3).
@@ -453,9 +457,12 @@ swapping, no live credential and no shared mutable credential file.
 - Licence handling is optional. Where the user-level instructions describe licence tooling (choosing a
   licence, reading its headroom, a licence daemon and its event log), follow them: a launch refused for
   licence room is a real answer, launch nothing. Where no licence picker is configured (the
-  `licencePickCommand` option is empty, as on a machine without licence tooling), every worker runs under
-  the default config directory, `launch_worker` never refuses for licence room, and the licence steps in
-  this file (event log, headroom, waiting for a reset) do not apply.
+  `licencePickCommand` option is empty), a launch without `config_dir` runs under the default config
+  directory, `launch_worker` never refuses for licence room, and the licence steps in this file (event log,
+  headroom, waiting for a reset) do not apply.
+- `list_licences` lists the machine's licences and `probe_licence_usage` their usage. Pass one as `config_dir`
+  only when no picker is configured or the user names it: the picker is not run, nothing is refused for
+  room, and the answer warns when a probe of the last 60 s showed it over 90 percent.
 
 ## Reporting
 
@@ -491,7 +498,19 @@ the user lifts it; record it with `record_decision` (the unit's section, or a `S
 **Hold while a question is pending.** The general rule is in the user-level instructions ("Waiting for my
 answer"). Here, a held worker keeps its entry unacknowledged so the panel shows it as finished, unblocked
 work (Rule 7) still launches, and a failure or blocker goes to the open points file. After the user's
-next message, deliver the held reports one at a time, each with its own question.
+next message, deliver the held reports one at a time, each with its own question. A notice is held
+exactly as a completion is.
+
+**Notices.** A `session-control notice: <kind>: <message>` line informs and authorises nothing; act on it
+only as these rules allow: `orphan`, `lock-holder`, `registry-unreadable`, `secret-in-result`, `mod-drift`:
+an open point; `stall`: `worker_tail`, then Follow up or Abort; `queue-ready`: Rule 7; `compliance-due`: the
+compliance check; `unit-complete`, `retire-due`, `repo-state`: `audit_state` (Helper files);
+`open-point-age`: nothing beyond the point.
+
+**Numbered items and reminders.** Every item of a message that needs an answer carries a number, so a
+reply can cite it; a number in a reply refers to the numbering of my last message unless the reply says
+"op N", the Nth open point of the panel. A request to remind or explain an item is never a decision on
+it: answer it and keep the item open until the user decides.
 
 **Discuss open points one at a time**, each with the options, the text the decision rests on and a
 recommendation; present the next as soon as the user answers. The same holds for any item-by-item
@@ -539,18 +558,19 @@ the compaction digest show the titles of open, not-held points; read `open-point
 
 ## Helper files
 
-Every helper-file change goes through the session-control tools: `open_point`, `queue_task` and
-`record_decision` for points, queue and decisions; `launch_worker`, `acknowledge_workers` and
-`retire_workers` for the registry. The tools create a missing helper file and write a daily backup into `backups/`; the mod merges worker
+Every helper-file change goes through the session-control tools: `open_point`, `queue_task`,
+`record_decision` and `archive_decisions` for points, queue and decisions; `launch_worker`,
+`acknowledge_workers`, `retire_workers` and `close_worker` for the registry. In this session the mod
+refuses a hand edit of a helper file, through an edit tool or a Bash or PowerShell command. The mod creates a missing helper file and the tools write a daily backup into `backups/`; the mod merges worker
 completions into the registry itself. A helper file that exists and
 does not parse is a blocker raised as an open point. A tool that refuses a legitimate change is fixed in
 the mod. When a tool is unavailable, raise an open point.
 
 The helper files, `backups/` and the saved worker reports belong to this session alone; the user sees only
-the side panel, so whatever the panel hides is mine to keep correct. At the end of every unit audit them
-before reporting: queue tasks carry exactly `queued`, `running` or `done` with the detail in `note`, and
+the side panel, so whatever the panel hides is mine to keep correct. At the end of every unit run
+`audit_state` and act on its findings before reporting: queue tasks carry exactly `queued`, `running` or `done` with the detail in `note`, and
 none stays for finished or dead work; no settled or stale open point stays open; decisions, registry
 entries, `backups/` and `reports/` hold nothing spent. Keep them lean: one line per fact, no duplicated state; remove a closed unit's queue entries
-with `queue_task` `remove` and delete its spent reports. Say what was decided or found in plain words,
+with `queue_task` `remove`, move its decision section with `archive_decisions` and delete its spent reports. Say what was decided or found in plain words,
 with no decision numbers, entry ids or file names unless asked. A deliverable the user sends or owns
 (email drafts, sheet backups) is deleted only after the user has seen it.
