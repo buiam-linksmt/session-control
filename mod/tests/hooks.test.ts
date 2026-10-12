@@ -78,6 +78,8 @@ const PROBES = { inFlight: 0, max: 0 }
 // sid: the session id the Linux worker's sessions file names (a resume keeps the resumed one).
 // isPowerShellMissing: the session offers no PowerShell tool.
 // bashAnswer: what the Bash tool answers the launch instead of running it (a refusal or an error); undefined: it runs it.
+// isAnsweredAfterRun: the Bash tool runs the launch and then answers bashAnswer (another plugin withholding the result,
+// an interruption): the worker runs.
 // resultText: what the launch's result file in the runs directory holds (undefined: there is none).
 const WORKER = {
   linuxConfigDir: '/fixture/lic/a',
@@ -86,6 +88,7 @@ const WORKER = {
   isInboxless: false,
   sid: 'abcdabcd-0000-4000-8000-000000000001',
   bashAnswer: undefined as Record<string, unknown> | undefined,
+  isAnsweredAfterRun: false,
   resultText: undefined as string | undefined,
 }
 /** The inbox fields of the Linux worker's sessions file. */
@@ -359,10 +362,11 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   })
   on('tool.call', { tool: 'Bash' }, ($, e) => {
     if (WORKER.isBashMissing) throw new Error('no tool named "Bash" in this session')
-    if (WORKER.bashAnswer !== undefined) return WORKER.bashAnswer as never
+    if (WORKER.bashAnswer !== undefined && !WORKER.isAnsweredAfterRun) return WORKER.bashAnswer as never
     w.bash.push(e as never)
     w.spawned = true
     noteName((e as { command?: unknown }).command)
+    if (WORKER.bashAnswer !== undefined) return WORKER.bashAnswer as never
     return { result: 'Command running in background with ID: fixture' }
   })
   // The engine on Windows has the PowerShell tool; this build's tool table does not, hence the name as a string.
@@ -848,9 +852,10 @@ describe('launch_worker', () => {
       const probesBefore = w.calls.filter(one => one.op === 'probe').length
       const out = await $.tool.call({ tool: TOOL, ...args } as never)
       expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: Permission to use Bash has been denied by the auto mode classifier.${ALLOW_HINT}`)
-      // No wait and no probe after the call: the one probe is the launch's own check before it; the launch never ran.
+      // No wait: the launch's own check before the call, and one probe after it for a worker with the launch's name,
+      // which finds none (the launch never ran).
       expect(w.runs.some(argv => argv[0] === 'sleep')).toBe(false)
-      expect(w.calls.filter(one => one.op === 'probe').length).toBe(probesBefore + 1)
+      expect(w.calls.filter(one => one.op === 'probe').length).toBe(probesBefore + 2)
       expect(lastRegistry(w).length).toBe(before)
       // The worker shows up after all (another launch's): no poll registers it for this one.
       WORKER.bashAnswer = undefined
@@ -873,6 +878,80 @@ describe('launch_worker', () => {
       expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
     } finally {
       WORKER.bashAnswer = undefined
+    }
+  })
+
+  // A refusal or an error can come after the command ran (another plugin withholding the result, an interruption): one
+  // probe, never repeated, looks for a worker with the launch's name.
+  describe('the one probe after a refusal or an error of the launch tool', () => {
+    const SID_NEW = 'abcdabcd-0000-4000-8000-000000000001'
+    const hosts = [
+      { name: 'Linux', options: OPTIONS, env: { HOME }, dir: ORCH_DIR, launch: args, configDir: '/fixture/lic/a', runs: `${HOME}/.claude/session-control/runs`, socket: '/run/user/1000/cc-socks/7001.sock' },
+      {
+        name: 'Windows',
+        options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}`, licencePickCommand: '' },
+        env: { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' },
+        dir: `C:${ORCH_DIR}`,
+        launch: { ...args, dir: '/c/work/new', prompt_file: '/c/work/new/prompt.md' },
+        configDir: 'C:/fixture/home/.claude',
+        runs: `C:${HOME}/.claude/session-control/runs`,
+        socket: 'none',
+      },
+    ] as const
+    /** The process probes so far (the helper's on Linux, PROBE_PS1 runs on Windows) and the waits of a search (2 s each). */
+    const probes = (w: World) => w.calls.filter(one => one.op === 'probe').length + w.runs.filter(argv => argv[0] === POWERSHELL && String(argv[6]).endsWith('/probe.ps1')).length
+    const searchWaits = (w: World) => w.runs.filter(argv => argv.join(' ') === 'sleep 2').length + w.calls.filter(one => one.op === 'pause' && one.request.ms === 2000).length
+    const reset = () => {
+      WORKER.bashAnswer = undefined
+      WORKER.isAnsweredAfterRun = false
+    }
+
+    for (const host of hosts) {
+      for (const [what, answer, said] of [
+        ['a refusal (another plugin withheld the result)', { deny: 'a plugin withheld the result' }, 'refused the launch (a plugin withheld the result)'],
+        ['an error (an interruption)', { isError: true, result: 'Interrupted by user', text: 'Interrupted by user' }, 'answered the launch with an error (Interrupted by user)'],
+      ] as const) {
+        test(`${host.name}, ${what} after the command ran: the one probe finds the worker by its name; registered, answered as started, with what the tool answered`, { options: host.options }, async ($, on) => {
+          WORKER.bashAnswer = answer
+          WORKER.isAnsweredAfterRun = true
+          try {
+            const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+            await $.session.start(start(host.dir))
+            const before = probes(w)
+            const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+            expect(out.deny).toBeUndefined()
+            expect(String(out.result)).toBe(
+              `Launched pid 7001, session ${SID_NEW}, config_dir ${host.configDir}, registered. Name: w-new-260921141320; socket: ${host.socket}. ` +
+                `Result: ${host.runs}/20260921141320-new.json; errors: ${host.runs}/20260921141320-new.err. The Bash tool ${said}, although the worker started.`,
+            )
+            expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, session_id: SID_NEW, result_file: `${host.runs}/20260921141320-new.json` })
+            // The launch's own check before the call, the one probe after it, and the refresh after the registration: no search.
+            expect(probes(w) - before).toBe(3)
+            expect(searchWaits(w)).toBe(0)
+          } finally {
+            reset()
+          }
+        })
+      }
+
+      test(`${host.name}, a refusal before the command ran: the one probe finds no worker; the refusal as before, nothing registered, nothing looked for later`, { options: host.options }, async ($, on) => {
+        WORKER.bashAnswer = { deny: 'refused by a hook' }
+        try {
+          const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+          await $.session.start(start(host.dir))
+          const before = probes(w)
+          const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+          expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: refused by a hook${ALLOW_HINT}`)
+          // The launch's own check before the call and the one probe after it; no wait.
+          expect(probes(w) - before).toBe(2)
+          expect(searchWaits(w)).toBe(0)
+          expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+          await w.clock.advance(5000)
+          expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+        } finally {
+          reset()
+        }
+      })
     }
   })
 

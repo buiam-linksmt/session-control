@@ -2021,10 +2021,10 @@ async function launch($: EngineInterface, given: LaunchInput) {
 }
 
 /**
- * What the launch tool answered when it did not run the command: its refusal (`deny`: the permission mode, a settings
- * hook or another plugin refused the call) or its error; undefined when it ran. The text says which tool refused, the
- * reason as the engine gave it (cut to LAUNCH_REASON_MAX characters), that nothing was launched or registered, and how
- * a person allows the launch.
+ * What the launch tool answered when it refused the call or failed: its refusal (`deny`: the permission mode, a settings
+ * hook or another plugin refused the call) or its error; undefined for an answer of a command that ran. The text, for a
+ * launch whose worker spawnWorker's one probe does not find, says which tool refused, the reason as the engine gave it
+ * (cut to LAUNCH_REASON_MAX characters), that nothing was launched or registered, and how a person allows the launch.
  */
 function launchRefused(tool: string, answer: { deny?: string; isError?: true; text?: string; result?: unknown }): { text: string; reason: string; isError: boolean } | undefined {
   const isError = answer.isError === true
@@ -2084,19 +2084,28 @@ async function spawnWorker(
     trace($, 'error', { where: 'worker.start', ...messageFields(errorText(err)) })
     return { deny: `${PLUGIN}: the worker could not be started through the ${machine.launchTool} tool (${errorText(err).slice(0, 160)}); nothing was launched.${hint}` }
   }
-  // The tool's answer: a refusal (the permission mode, a settings hook, another plugin) or an error means the command
-  // never ran, so nothing is looked for or registered.
+  let worker: ProcFact | undefined
+  // The launch's session name tells its worker from another launch's of the same dir, config dir and model.
+  const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model, name }
+  // The tool's answer: a refusal (the permission mode, a settings hook, another plugin) or an error. Most come before the
+  // command runs, but one can come after it ran (another plugin withholding the result, an interruption): one probe,
+  // never repeated, looks for a worker with this launch's name. Found, the launch goes on as one that ran, and its answer
+  // says what the tool answered; not found, the refusal is the answer and nothing is looked for or registered.
   const refused = launchRefused(machine.launchTool, started)
+  let refusalNote = ''
   if (refused !== undefined) {
-    trace($, 'worker.refused', { tool: machine.launchTool, isError: refused.isError, ...messageFields(refused.reason, 'reason') })
-    return { deny: `${PLUGIN}: ${refused.text}` }
+    const facts = await probe($, entries, [verdict.configDir]).catch((err: unknown) => {
+      traceError($, 'worker.refused', err)
+      return undefined
+    })
+    worker = facts === undefined ? undefined : await machine.findNewWorker(port, facts, want, known, launchedAt)
+    trace($, 'worker.refused', { tool: machine.launchTool, isError: refused.isError, isStarted: worker !== undefined, ...messageFields(refused.reason, 'reason') })
+    if (worker === undefined) return { deny: `${PLUGIN}: ${refused.text}` }
+    refusalNote = ` The ${machine.launchTool} tool ${refused.isError ? 'answered the launch with an error' : 'refused the launch'} (${refused.reason}), although the worker started.`
   }
   // The background task's id names this launch in the task notification its end brings (prompt.submit).
   const taskId = backgroundTaskId(typeof started.result === 'string' ? started.result : (started.text ?? ''))
   if (taskId !== undefined) launchTasks.set(taskId, files.result)
-  let worker: ProcFact | undefined
-  // The launch's session name tells its worker from another launch's of the same dir, config dir and model.
-  const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model, name }
   // Looked for during LAUNCH_FIND_SEC by the clock from the tool's answer (a probe on Windows takes seconds), at most
   // LAUNCH_FIND_TRIES probes; each wait between them runs in a process (host.pause), never on the hook's budget.
   const searchFrom = await $.clock.now()
@@ -2163,7 +2172,7 @@ async function spawnWorker(
           `Neither its sessions file (${sessionPath}) nor its result file (${files.result}) holds a session id yet. ` +
           `The mod's poll reads them again and registers the worker as soon as one of them holds it (up to ${LATE_LAUNCH_SEC / 60} min after the launch): ` +
           `from the sessions file while it runs, from the result file once it has ended. Until then it is not registered: while it runs it is an orphan row in list_sessions (cwd ${args.dir}). ` +
-          `Errors: ${files.err}.${warningLines}`,
+          `Errors: ${files.err}.${refusalNote}${warningLines}`,
       }
     }
     await refresh($)
@@ -2171,7 +2180,7 @@ async function spawnWorker(
     return {
       result:
         `Worker pid ${worker.pid} started and ended before its sessions file could be read: session ${ended.sessionId} (from its result file), config_dir ${verdict.configDir}, ${endedNote}, outcome ${ended.outcome.kind}. ` +
-        `Name: ${name}; socket: none. Result: ${files.result}; errors: ${files.err}.${warningLines}`,
+        `Name: ${name}; socket: none. Result: ${files.result}; errors: ${files.err}.${refusalNote}${warningLines}`,
     }
   }
   const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
@@ -2188,7 +2197,7 @@ async function spawnWorker(
   const promptNote = ownPrompt === undefined ? '' : ` Prompt: ${ownPrompt.path} (written by the mod${added.length === 0 ? '' : `; ${added.join('; ')}`}).`
   const entryNote = fromEntry.length === 0 ? '' : ` From the entry: ${fromEntry.join(', ')}.`
   return {
-    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}${promptNote}${entryNote}${launchRun.licenceNote ?? ''}${warningLines}`,
+    result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}${promptNote}${entryNote}${launchRun.licenceNote ?? ''}${refusalNote}${warningLines}`,
   }
 }
 
