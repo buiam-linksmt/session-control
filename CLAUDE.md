@@ -109,16 +109,16 @@ exactly what was named. Anything adjacent that seems to belong (a sibling direct
 instruction didn't mention, message content beyond what was specified) is a call to surface and wait
 on, never one for the worker, however reasonable the inference.
 
-**Sign-off list.** Each instance needs the user's go-ahead in this conversation and is never relayed as
-a routine gate token: a push to a repo the user marked local-only; a push to a protected branch (`main`,
-`develop`, or what the repo's git rules name) where the project's push policy asks (below);
-force-push or any rewrite of pushed history; deleting a
-remote branch, tag or PR; `reset --hard`, `checkout --`, `clean`, `branch -D` or a forced
-`worktree remove` over uncommitted or unpushed work; stopping, resetting or reconfiguring a shared live
-stack or anything the user set up by hand; sending, sharing or deleting anything outside the repo. A
-non-protected branch the worker created or the user named is pushed, fast-forward only, right after
-each commit, with no gate (Worker prompt, item 3). The mod refuses a force, delete, mirror or pruning push,
-`reset --hard`, a forced `clean` and `branch -D` as the orchestrator's own command.
+**Sign-off list.** Each instance needs the user's go-ahead in this conversation and is never relayed as a routine
+gate token: a push to a repo the user marked local-only; a push to a protected branch (`main`, `develop`, or what the
+repo's git rules name) where the project's push policy asks (below); force-push, any rewrite of pushed history or
+deleting a remote branch, unless the prompt of the worker that runs it cites by its decision id a recorded Standing
+go-ahead that covers it (no protected branch deleted, no `branch -D`); deleting a remote tag or PR; `reset --hard`,
+`checkout --`, `clean`, `branch -D` or a forced `worktree remove` over uncommitted or unpushed work; stopping,
+resetting or reconfiguring a shared live stack or anything the user set up by hand; sending, sharing or deleting
+anything outside the repo. A non-protected branch the worker created or the user named is pushed, fast-forward only,
+right after each commit, with no gate (Worker prompt, item 3). The mod always refuses a force, delete, mirror or
+pruning push, `reset --hard`, a forced `clean` and `branch -D` as the orchestrator's own command.
 
 **Push policy per project.** The user decides per project whether a push to a protected branch needs a
 go-ahead. The policy is a decision recorded with `record_decision` in a `Standing` section (id
