@@ -348,6 +348,73 @@ describe('harvest: queue-ready, compliance-due and unit-complete', () => {
   })
 })
 
+describe('toast order on a surface other than the terminal (decision mod-28)', () => {
+  const COMPLETION = 'Session finished \u00B7 unit worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.'
+  const READY = [
+    'Queued task ready \u00B7 queued task q-next waited for w-unit-worker-261011090000, which finished',
+    'Queued task ready \u00B7 queued task q-id8 waited for w-unit-worker-261011090000, which finished',
+  ]
+  const DUE = 'Compliance check due \u00B7 compliance check due for section Unit X (user, 2026-10-11) (session w-unit-worker-261011090000)'
+  // The hourly reminder of the poll's first tick (its tasks wait on a session that finished): raised during the hold, held after the others.
+  const HOUSEKEEPING = 'Housekeeping due \u00B7 2 queue tasks look stale (q-next, q-id8): run audit_state'
+  const QUEUE = [
+    { id: 'q-next', status: 'queued', title: 'Next step', waits_for: 'w-unit-worker-261011090000 to finish' },
+    { id: 'q-id8', status: 'queued', title: 'By id', waits_for: `session ${SID_UNIT.slice(0, 8)}` },
+  ]
+  /** The surfaces the session draws on, as $.session.surfaces answers them. */
+  const drawsOn = (on: On, surfaces: readonly string[]) => on('session.surfaces', () => ({ value: surfaces }) as never)
+
+  test('on the desktop the completion toast shows alone for its 8 s, then the harvest\'s notice toasts follow it in order; the prompt lines are not held', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    drawsOn(on, ['desktop'])
+    seed(world, { entries: [UNIT_ENTRY], queue: QUEUE })
+    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
+    await start($)
+    expect(world.toasts).toEqual([COMPLETION])
+    const sent = (await $.prompt.submit({ text: 'notification', wait: false, origin: { kind: 'task-notification' } } as never)) as { context?: readonly unknown[] }
+    expect(noticeLines(sent).length).toBe(3)
+    await world.clock.advance(7999)
+    expect(world.toasts).toEqual([COMPLETION])
+    await world.clock.advance(1)
+    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, HOUSEKEEPING])
+    // Nothing waits any more: a later notice toast goes out at once.
+    await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-next', status: 'done' } as never)
+    await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-id8', status: 'done' } as never)
+    expect(world.toasts.at(-1)).toBe('Queue empty \u00B7 queue empty: run audit_state and report')
+  })
+
+  test('on the desktop a second completion waits for the first, and holds the toasts after it in turn', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    drawsOn(on, ['terminal', 'desktop'])
+    const second = { ...UNIT_ENTRY, title: 'second worker', pid: 4301, session_id: SID_FREE, name: 'w-second-worker-261011090000', section: undefined, result_file: `${RUNS}/second.json` }
+    seed(world, { entries: [UNIT_ENTRY, second], queue: QUEUE })
+    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
+    world.files.set(`${RUNS}/second.json`, RESULTS.clean)
+    await start($)
+    const secondToast = COMPLETION.replace('unit worker', 'second worker')
+    expect(world.toasts).toEqual([COMPLETION])
+    await world.clock.advance(8000)
+    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast])
+    await world.clock.advance(7999)
+    expect(world.toasts.length).toBe(5)
+    await world.clock.advance(1)
+    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast, HOUSEKEEPING])
+  })
+
+  test('on the terminal alone nothing is held: the completion and the notice toasts of a pass go out together, as before', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    drawsOn(on, ['terminal'])
+    seed(world, { entries: [UNIT_ENTRY], queue: QUEUE })
+    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
+    await start($)
+    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE])
+  })
+})
+
 describe('open-point-age', () => {
   const dayMs = 86_400_000
   const raisedAgo = (days: number) => localDate(NOW_MS - days * dayMs)
