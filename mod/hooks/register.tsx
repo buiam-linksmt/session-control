@@ -65,7 +65,8 @@ import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { signoffDenyText, signoffVerdict } from './guard'
 import { findSecrets, secretScanLine, tallyFromAnswer, tallyOf } from './secrets'
-import { promptLint, signoffGrants, signoffLint } from './lint'
+import { hasSignoffBlock, promptLint, signoffLint } from './lint'
+import type { StandingRead } from './lint'
 import type { SecretTally } from './secrets'
 import type { StopReport } from './host'
 import type { GitState, ListedFile } from './audit'
@@ -1884,6 +1885,24 @@ async function archiveSections($: EngineInterface, sections: unknown) {
   return { deny: `${PLUGIN}: ${file} changed while it was being edited; ${DECISIONS_ARCHIVE} holds the sections, ${file} still does too: try again` }
 }
 
+/** The engine's read cap: a file over it is never read whole (`$.fs.read` rejects). */
+const READ_CAP_BYTES = 4 * 1024 * 1024
+
+/**
+ * The decisions file a signoff block is checked against (signoffLint), or why it could not be read: it is not there,
+ * it is no regular file, or the engine's read refused it (with its size, and whether that is over the read cap).
+ */
+async function standingRead($: EngineInterface): Promise<StandingRead> {
+  const path = orchPath('agreed-decisions.md')
+  const text = await $.fs.read(path).catch(() => undefined)
+  if (text !== undefined) return { text }
+  if (!(await $.fs.exists(path).catch(() => true))) return { unreadable: `${path} is not there` }
+  const stat = await $.fs.stat(path).catch(() => undefined)
+  if (stat === undefined) return { unreadable: `${path} is there but its read and its stat both failed` }
+  if (stat.kind !== 'file') return { unreadable: `${path} is no regular file (${stat.kind})` }
+  return { unreadable: stat.size > READ_CAP_BYTES ? `${path} holds ${stat.size} bytes, over the engine's read cap of ${READ_CAP_BYTES} bytes` : `${path} holds ${stat.size} bytes and the engine's read of it failed` }
+}
+
 /** The prompt a launch built itself, and where it goes: an inline prompt, or a prompt_file the launch extended. */
 type OwnPrompt = { path: string; composed: ComposedPrompt; section?: string }
 
@@ -1927,20 +1946,18 @@ async function launch($: EngineInterface, given: LaunchInput) {
   // licence picker included; a missing branch or decision section is a warning in the answer.
   // The sign-off guard (lint.ts, README Sign-off guard) refuses a prompt that instructs a force-push, a remote deletion,
   // reset --hard, a forced clean or branch -D as a step, a skill test's too; it warns on a push to main or develop.
-  // A refused remote branch deletion or force-push is checked again against the Standing go-ahead lines the prompt
-  // given cites (agreed-decisions.md, read only then): an instance that fits a cited class passes, named in a warning.
+  // A signoff block in the prompt as given (never in the section's block or the rules block appended after it) is
+  // checked against the Standing go-ahead lines of agreed-decisions.md, read only then: its lines pass, named in a warning.
   const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text)
-  let signoff = composed === undefined ? { warnings: [] as string[] } : signoffLint(composed.text)
-  if (composed !== undefined && lint.refusal === undefined && signoff.isCitable === true) {
-    const grants = signoffGrants(sourceText ?? '', await $.fs.read(orchPath('agreed-decisions.md')).catch(() => undefined))
-    if (grants.length > 0) signoff = signoffLint(composed.text, grants)
-  }
+  const ownLines = (sourceText ?? '').replace(/\s+$/, '').split('\n').length
+  const standing = composed !== undefined && lint.refusal === undefined && hasSignoffBlock(composed.text, ownLines) ? await standingRead($) : undefined
+  const signoff = composed === undefined ? { warnings: [] as string[] } : signoffLint(composed.text, standing, ownLines)
   const lintRefusal = lint.refusal ?? signoff.refusal
   if (lintRefusal !== undefined) {
     trace($, 'guard', { tool: 'launch_worker', isOk: false, check: lint.refusal === undefined ? 'sign-off' : 'prompt-lint', ...messageFields(lintRefusal, 'reason') })
     return { deny: `${PLUGIN}: ${lintRefusal}; nothing was launched` }
   }
-  // What a cited go-ahead allowed: its id, its class and how many commands, never a branch or a command.
+  // What a signoff block allowed: the go-ahead's id, its class and how many commands, never a branch or a command.
   for (const one of signoff.allowed ?? []) trace($, 'guard', { tool: 'launch_worker', isOk: true, check: 'sign-off', allowedBy: one.id, actionClass: one.actionClass, commands: one.commands.length })
   const runsDir = await runsPath($)
   const nowMs = await $.clock.now()

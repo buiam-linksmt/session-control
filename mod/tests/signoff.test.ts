@@ -3,14 +3,17 @@
 // (the negation window, both ways), a push to main or develop warns, and a skill test is not exempt; the orchestrator's
 // own Bash and PowerShell commands that run one of those git actions are refused in its own session, nowhere else. The
 // fix-up's rule: the window counted from the token, governing no and without, gates, negated lists, past forms, short
-// flags only after git, quoted examples, and the mirror and pruning pushes, each form both ways. A cited Standing
-// go-ahead: each allowed form of its two classes and each refused neighbour, the Standing lookup, the warning and the trace.
+// flags only after git, quoted examples, and the mirror and pruning pushes, each form both ways. A signoff block: each
+// line form of its two classes and each refused neighbour, the checker's bypass families inside and outside a block, the
+// block's syntax, the Standing lookup, the decisions file not read, the warning and the trace; a decision id in prose
+// lifts nothing (the checker's 202 cited cases), and a prompt without a block gets main's verdicts.
 
 import { describe, expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { gitSignoffAction, signoffDenyText, signoffVerdict } from '../hooks/guard'
-import { CITE_HINT, NEGATION_WORDS_AFTER, NEGATION_WORDS_BEFORE, isNegatedAt, signoffGrants, signoffLint } from '../hooks/lint'
+import { BLOCK_HINT, BLOCK_MAX_LINES, NEGATION_WORDS_AFTER, NEGATION_WORDS_BEFORE, WARNED_COMMANDS, isNegatedAt, signoffLint, standingGrants } from '../hooks/lint'
+import type { StandingRead } from '../hooks/lint'
 import { OPTIONS, ORCH, REGISTRY, RUNS, mockWorld } from './mock-world'
 import type { World } from './mock-world'
 
@@ -68,7 +71,7 @@ describe('the prompt guard (lint.ts)', () => {
     expect(signoffLint(`${ITEMS}git push -f origin x\ngit reset --hard`).refusal).toBe(
       "refused by the sign-off guard: the prompt instructs a force-push on line 2, reset --hard on line 3 as a step for the worker; that needs the user's go-ahead in this conversation, a sign-off item the mod cannot see. " +
         'Raise an open point for the go-ahead and launch without the step; with the go-ahead the user runs it or says how, and a prompt may tell the worker to stop before it and report. ' +
-        'A sentence that tells the worker not to do it (never, do not, stop before) passes; to authorise a class the user has recorded a Standing go-ahead for, cite its decision id in the prompt',
+        'A sentence that tells the worker not to do it (never, do not, stop before) passes; to authorise a class the user has recorded a Standing go-ahead for, write its commands, one per line, in a fenced block whose info line is signoff <id>',
     )
   })
 
@@ -334,7 +337,7 @@ describe('the sign-off guard through the plugin', () => {
   })
 })
 
-// ---------------------------------------------------------------- a cited Standing go-ahead
+// ---------------------------------------------------------------- a signoff block
 
 const DECISIONS = [
   '# Agreed decisions',
@@ -353,251 +356,552 @@ const DECISIONS = [
   'signoff-after-standing. [signoff:delete-branch] A marked line after the Standing section ended.',
   '',
 ].join('\n')
-const CITE_DELETE = 'Cited: signoff-delete-branches.\n'
-const CITE_LEASE = 'Cited: signoff-rewrite-root-author.\n'
+const STANDING: StandingRead = { text: DECISIONS }
+const DELETE_ID = 'signoff-delete-branches'
+const LEASE_ID = 'signoff-rewrite-root-author'
 const MAIN_WARNING = "the prompt names a push to main: a push to a protected branch needs the user's go-ahead where the project's push policy asks (a Standing decision push-<project>); check it before the worker pushes"
+const FORMS_TEXT =
+  'a signoff block holds one command per line, nothing else, each of the class of its go-ahead: git push <remote> --delete refs/heads/<name>, git push <remote> :refs/heads/<name> or git branch -d <name> for delete-branch, git push --force-with-lease <remote> main for force-push (README, Sign-off guard)'
 
-/** The guard on a prompt with the go-ahead lines it cites in DECISIONS (or in the text given). */
-const citedWith = (prompt: string, decisions: string | undefined) => signoffLint(prompt, signoffGrants(prompt, decisions))
-const cited = (prompt: string) => citedWith(prompt, DECISIONS)
-/** A command as the warning names it: up to where it ends. */
-const shown = (command: string) => command.replace(/(?:,|\s(?:and|or)\b).*$/, '')
-const refusedWith = (prompt: string, decisions: string | undefined) => /instructs (.*?) as a step/.exec(citedWith(prompt, decisions).refusal ?? '')?.[1]
-const refusedCited = (prompt: string) => refusedWith(prompt, DECISIONS)
+/** A signoff block citing `id`, with these lines. */
+const block = (id: string, ...lines: string[]) => `\`\`\`signoff ${id}\n${lines.join('\n')}\n\`\`\``
+/** The guard with the decisions file of this test read (STANDING), or the one given. */
+const guarded = (prompt: string, standing: StandingRead = STANDING, ownLines?: number) => signoffLint(prompt, standing, ownLines)
+/** What a block's refusal says is wrong: the text between `(signoff <id>): ` and the forms. */
+const faultOf = (prompt: string, standing: StandingRead = STANDING) => /^refused by the sign-off guard: the signoff block on line \d+ \(signoff [^)]*\): (.*); a signoff block holds/.exec(guarded(prompt, standing).refusal ?? '')?.[1]
+/** What a syntax refusal says: the text after `line <n> ` up to the forms. */
+const brokenOf = (prompt: string) => /^refused by the sign-off guard: (line \d+ .*); a signoff block holds/.exec(guarded(prompt).refusal ?? '')?.[1]
+/** The actions a refusal of the check outside the blocks lists. */
+const listedOf = (lint: { refusal?: string }) => /instructs (.*?) as a step/.exec(lint.refusal ?? '')?.[1]
+const notAForm = (cls: string, at = 1, line = 3) => `its line ${at} (line ${line} of the prompt) is not one command in a form of the ${cls} class`
 
-describe('a cited Standing go-ahead (lint.ts)', () => {
-  test('signoffGrants: a marked line of a Standing section whose id the prompt holds as a whole word; nothing else', () => {
-    expect(signoffGrants('signoff-delete-branches and signoff-rewrite-root-author', DECISIONS)).toEqual([
-      { id: 'signoff-delete-branches', actionClass: 'delete-branch', text: ' User: delete merged branches from both remotes and locally; never main, develop or release/*.' },
-      { id: 'signoff-rewrite-root-author', actionClass: 'force-push', text: ' User: rewrite the root author and push main to both remotes (origin and backup) with --force-with-lease.' },
+describe('a signoff block (lint.ts)', () => {
+  test('standingGrants: the marked lines of Standing sections only (## Standing, ## Standing:..., ## Standing <text>, in that case), none inside a fenced block; a BOM, CRLF and CR read', () => {
+    expect(standingGrants(DECISIONS)).toEqual([
+      { id: DELETE_ID, actionClass: 'delete-branch', text: ' User: delete merged branches from both remotes and locally; never main, develop or release/*.' },
+      { id: LEASE_ID, actionClass: 'force-push', text: ' User: rewrite the root author and push main to both remotes (origin and backup) with --force-with-lease.' },
     ])
-    for (const prompt of ['signoff-in-unit', 'signoff-after-standing', 'signoff-no-marker', 'signoff-unknown', 'signoff-delete-branches-old', 'xsignoff-delete-branches', 'signoff-delete-branches_2', '[signoff:delete-branch]', 'signoff-delete']) {
-      expect({ prompt, grants: signoffGrants(prompt, DECISIONS) }).toEqual({ prompt, grants: [] })
-    }
-    expect(signoffGrants('signoff-delete-branches', undefined)).toEqual([])
-    expect(signoffGrants('signoff-delete-branches', '')).toEqual([])
-    // A heading that starts with Standing is a Standing section; CRLF line ends are read too.
-    expect(signoffGrants('del-x', '## Standing: the scratch mod (user)\r\ndel-x. [signoff:delete-branch] go.\r\n').map(one => one.id)).toEqual(['del-x'])
-    expect(signoffGrants('del-x.', '## Standing\ndel-x. [signoff:delete-branch] go.\n').map(one => one.id)).toEqual(['del-x'])
-  })
-
-  test('delete-branch: every allowed remote and local form passes, named in one warning line with its id, class and commands', () => {
-    for (const command of [
-      'git push origin --delete feature/old',
-      'git push --delete origin feature/old',
-      'git push origin -d feature/old',
-      'git push origin :feature/old',
-      'git push origin :refs/heads/feature/old',
-      'git push origin --delete refs/heads/feature/old',
-      'git push backup --delete feature/a bugfix/b-2',
-      'git push origin :feature/a :feature/b',
-      'git -C /tmp/scratch push origin --delete feature/old',
-      'git push /tmp/scratch-remote.git --delete feature/old',
-      'git push origin --delete maintenance',
-      'git push origin --delete feature/old and report',
-      'git push origin --delete feature/old, then report',
-    ]) {
-      expect({ command, lint: cited(`${ITEMS}${CITE_DELETE}${command}`) }).toEqual({
-        command,
-        lint: { warnings: [`sign-off allowed by signoff-delete-branches: delete-branch: ${shown(command)}`], allowed: [{ id: 'signoff-delete-branches', actionClass: 'delete-branch', commands: [shown(command)] }] },
-      })
-    }
-    // In backticks, in a sentence, several commands on several lines: one warning line, each command once.
-    const prompt = `${ITEMS}${CITE_DELETE}Run \`git push origin --delete feature/a\` now.\nThen git push backup :feature/a.\nRun \`git push origin --delete feature/a\` again.\ngit branch -d feature/a\ngit branch --delete feature/a`
-    expect(cited(prompt).warnings).toEqual(['sign-off allowed by signoff-delete-branches: delete-branch: git push origin --delete feature/a; git push backup :feature/a'])
-  })
-
-  test('delete-branch: a protected name, a glob, a variable, a tag, -D, --force, a mirror or pruning push, an extra option, no branch and a bare push stay refused', () => {
-    // A `:` refspec with a glob is no deletion the guard reads, with or without the id, as before.
-    expect([signoffLint(`${ITEMS}git push origin :feature/*`).refusal, refusedCited(`${ITEMS}${CITE_DELETE}git push origin :feature/*`)]).toEqual([undefined, undefined])
-    const DELETION = 'a remote branch or tag deletion on line 3'
-    for (const [command, refused] of [
-      ['git push origin --delete main', DELETION],
-      ['git push origin --delete Main', DELETION],
-      ['git push origin --delete MASTER', DELETION],
-      ['git push origin --delete refs/heads/main', DELETION],
-      ['git push origin :main', DELETION],
-      ['git push origin :refs/heads/develop', DELETION],
-      ['git push origin --delete release/1.2', DELETION],
-      ['git push origin --delete Release/x', DELETION],
-      ['git push origin --delete release', DELETION],
-      ['git push origin --delete HEAD', DELETION],
-      ['git push origin --delete feature/a main', DELETION],
-      ['git push origin --delete feature/a, main', DELETION],
-      ['git push origin --delete feature/a and main.', DELETION],
-      ['git push origin --delete feature/a or `develop`', DELETION],
-      ['git push origin :feature/a, refs/heads/master', DELETION],
-      ['git push origin --delete feature/a, feature/*', DELETION],
-      ['git push origin --delete feature/*', DELETION],
-      ['git push origin --delete $BRANCH', DELETION],
-      ['git push origin --delete feature/$X', DELETION],
-      ['git push origin --delete `git branch --show-current`', DELETION],
-      ['git push origin --delete refs/tags/v1', DELETION],
-      ['git push origin :refs/tags/v1', DELETION],
-      ['git push origin --delete tag v1', DELETION],
-      ['git push origin --delete refs/remotes/origin/x', DELETION],
-      ['git push --tags origin --delete v1', DELETION],
-      ['git push origin --delete', DELETION],
-      ['git push origin --delete feature/a --no-verify', DELETION],
-      ['git push origin --delete ../x', DELETION],
-      ['push origin --delete feature/old', DELETION],
-      ['git push --force origin --delete feature/x', 'a force-push on line 3, a remote branch or tag deletion on line 3'],
-      ['git push -df origin feature/x', 'a force-push on line 3, a remote branch or tag deletion on line 3'],
-      ['git branch -D feature/old', 'branch -D on line 3'],
-      ['git branch -d -f feature/old', 'branch -D on line 3'],
-      ['git branch --delete --force feature/old', 'branch -D on line 3'],
-      ['git push --mirror origin', 'a mirror push on line 3'],
-      ['git push --prune origin refs/heads/*:refs/heads/*', 'a pruning push on line 3'],
-      ['git reset --hard origin/main', 'reset --hard on line 3'],
-      ['git clean -fdx', 'a forced clean on line 3'],
+    const marked = (id: string) => `${id}. [signoff:delete-branch] go.`
+    const ids = (text: string) => standingGrants(text).map(one => one.id)
+    for (const [name, text, expected] of [
+      ['## Standing', `## Standing\n${marked('s1')}\n`, ['s1']],
+      ['## Standing: text', `## Standing: the mod (user)\n${marked('s1')}\n`, ['s1']],
+      ['## Standing text', `## Standing for the repo\n${marked('s1')}\n`, ['s1']],
+      ['## standing', `## standing\n${marked('s1')}\n`, []],
+      ['## Standing-ish', `## Standing-ish\n${marked('s1')}\n`, []],
+      ['## Standings', `## Standings\n${marked('s1')}\n`, []],
+      ['## Standing and a blank only', `## Standing \n${marked('s1')}\n`, []],
+      ['##Standing', `##Standing\n${marked('s1')}\n`, []],
+      ['### Standing under a unit', `## Unit\n### Standing\n${marked('s1')}\n`, []],
+      ['# Standing', `# Standing\n${marked('s1')}\n`, []],
+      ['a ### heading stays inside', `## Standing\n### More\n${marked('s1')}\n`, ['s1']],
+      ['##Other stays inside', `## Standing\n##Other\n${marked('s1')}\n`, ['s1']],
+      ['a # heading ends it', `## Standing\n# Other\n${marked('s1')}\n`, []],
+      ['a ## heading ends it', `## Standing\nx. y\n## Unit\n${marked('s1')}\n`, []],
+      ['## Standing inside a fence of a unit', `## Unit\n\`\`\`\n## Standing\n\`\`\`\n${marked('s1')}\n`, []],
+      ['## Standing inside a tilde fence', `## Unit\n~~~\n## Standing\n${marked('s1')}\n~~~\n`, []],
+      ['a marked line inside a fence of a Standing section', `## Standing\n\`\`\`\n${marked('s1')}\n\`\`\`\n${marked('s2')}\n`, ['s2']],
+      ['a ## heading inside a fence does not end it', `## Standing\n\`\`\`md\n## Unit\n\`\`\`\n${marked('s1')}\n`, ['s1']],
+      ['the marker not right after the id', '## Standing\ns1. User [signoff:delete-branch]\n', []],
+      ['the marker misspelt', '## Standing\ns1. [signoff:delete-branches] User\n', []],
+      ['the marker in upper case', '## Standing\ns1. [SIGNOFF:delete-branch] User\n', []],
+      ['no blank after the dot', '## Standing\ns1.[signoff:delete-branch] User\n', []],
+      ['a bullet before the id', `## Standing\n- ${marked('s1')}\n`, []],
+      ['indented', `## Standing\n  ${marked('s1')}\n`, []],
+      ['two Standing sections', `## Standing\n${marked('s1')}\n## Unit\n${marked('u1')}\n## Standing: more\n${marked('s2')}\n`, ['s1', 's2']],
+      ['an id once, from its first marked line', `## Standing\ns1. User: plain\n${marked('s1')}\ns1. [signoff:force-push] later\n`, ['s1']],
+      ['CRLF', `# D\r\n\r\n## Standing\r\n${marked('s1')}\r\n`, ['s1']],
+      ['CR', `# D\r\r## Standing\r${marked('s1')}\r`, ['s1']],
+      ['a BOM before the heading', `\ufeff## Standing\n${marked('s1')}\n`, ['s1']],
+      ['empty', '', []],
     ] as const) {
-      expect({ command, refused: refusedCited(`${ITEMS}${CITE_DELETE}${command}`) }).toEqual({ command, refused })
+      expect({ name, ids: ids(text) }).toEqual({ name, ids: [...expected] })
+    }
+    expect(standingGrants(`## Standing\ns1. User: plain\n${marked('s1')}\ns1. [signoff:force-push] later\n`)[0]?.actionClass).toBe('delete-branch')
+    // A file of more than 3 MB with its Standing section at the end is read whole (the read cap is the engine's, below).
+    const big = `# D\n\n## Unit\n${'u-1. x\n'.repeat(450_000)}## Standing\n${marked('s-big')}\n`
+    expect(big.length).toBeGreaterThan(3_000_000)
+    expect(ids(big)).toEqual(['s-big'])
+  })
+
+  test('delete-branch: each line form passes, every line named in one warning line with the id and the class', () => {
+    const lines = [
+      'git push origin --delete refs/heads/feature/old',
+      'git push backup :refs/heads/feature/old',
+      'git branch -d feature/old',
+      'git push origin --delete refs/heads/bugfix/a-1.2_b',
+      'git push upstream-2 :refs/heads/x',
+      'git branch -d maintenance',
+      'git branch -d mainline',
+      'git push origin --delete refs/heads/releases',
+      'git push origin --delete refs/heads/developer-notes',
+      'git branch -d Feature/A',
+      'git push my.remote --delete refs/heads/a/b/c',
+    ]
+    for (const line of [...lines, `git push origin --delete refs/heads/feature/${'x'.repeat(5000)}`]) {
+      expect({ line, lint: guarded(`${ITEMS}${block(DELETE_ID, line)}`) }).toEqual({ line, lint: { warnings: [`sign-off allowed by ${DELETE_ID}: delete-branch: ${line}`], allowed: [{ id: DELETE_ID, actionClass: 'delete-branch', commands: [line] }] } })
+    }
+    const all = guarded(`${ITEMS}Delete the merged branches:\n${block(DELETE_ID, ...lines)}\nThen report.`)
+    expect(all).toEqual({ warnings: [`sign-off allowed by ${DELETE_ID}: delete-branch: ${lines.join('; ')}`], allowed: [{ id: DELETE_ID, actionClass: 'delete-branch', commands: lines }] })
+  })
+
+  test('force-push: git push --force-with-lease[=main|=refs/heads/main] <a remote its line holds as a word> main passes, with the push-to-main warning', () => {
+    for (const line of ['git push --force-with-lease origin main', 'git push --force-with-lease backup main', 'git push --force-with-lease=main origin main', 'git push --force-with-lease=refs/heads/main backup main']) {
+      expect({ line, lint: guarded(`${ITEMS}${block(LEASE_ID, line)}`) }).toEqual({ line, lint: { warnings: [MAIN_WARNING, `sign-off allowed by ${LEASE_ID}: force-push: ${line}`], allowed: [{ id: LEASE_ID, actionClass: 'force-push', commands: [line] }] } })
     }
   })
 
-  test('force-push: git push --force-with-lease[=main[:<expect>]] <a remote the line names> main or main:main passes, with the push-to-main warning', () => {
-    for (const command of [
-      'git push --force-with-lease origin main',
-      'git push --force-with-lease backup main:main',
-      'git push origin main --force-with-lease',
-      'git push --force-with-lease=main origin main',
-      'git push --force-with-lease=main:0123abc origin main',
-      'git push --force-with-lease=refs/heads/main:origin/main backup main',
-      'git -C /tmp/scratch push --force-with-lease origin main',
-      'git push --force-with-lease origin main and report',
-    ]) {
-      expect({ command, lint: cited(`${ITEMS}${CITE_LEASE}${command}`) }).toEqual({
-        command,
-        lint: { warnings: [MAIN_WARNING, `sign-off allowed by signoff-rewrite-root-author: force-push: ${shown(command)}`], allowed: [{ id: 'signoff-rewrite-root-author', actionClass: 'force-push', commands: [shown(command)] }] },
-      })
+  test('a line no form takes whole refuses its block, naming the line: protected names, short ref paths of each namespace, the bare remote form, globs, variables, options, more refs, other remotes and forms', () => {
+    const DELETE_REFUSED = [
+      'git push origin --delete refs/heads/main', 'git push origin --delete refs/heads/Main', 'git push origin --delete refs/heads/MASTER', 'git push origin --delete refs/heads/develop', 'git push origin --delete refs/heads/release',
+      'git push origin --delete refs/heads/release/1.0', 'git push origin --delete refs/heads/Release/x', 'git push origin --delete refs/heads/HEAD', 'git push origin :refs/heads/main', 'git push origin :refs/heads/develop',
+      'git branch -d main', 'git branch -d Develop', 'git branch -d release/2', 'git branch -d RELEASE', 'git branch -d master', 'git branch -d head',
+      // The bare remote form: git resolves a bare name against every ref of the remote.
+      'git push origin --delete feature/old', 'git push origin :feature/old', 'git push origin --delete x', 'git push origin --delete main',
+      // git's short ref paths and special refs, under refs/heads/ and bare.
+      ...['heads/main', 'heads/feature/a', 'tags/x', 'remotes/origin/x', 'for/x', 'pull/1/head', 'notes/commits', 'refs/tags/x', 'refs/remotes/origin/x', 'refs/notes/x', 'changes/1', 'HEAD', 'FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'Tags/x', 'HEADS/main'].flatMap(ref => [
+        `git push origin --delete refs/heads/${ref}`,
+        `git push origin :refs/heads/${ref}`,
+        `git branch -d ${ref}`,
+      ]),
+      'git push origin --delete refs/heads/feature/*', 'git push origin --delete refs/heads/a?', 'git push origin --delete refs/heads/[ab]', 'git push origin --delete refs/heads/$B', 'git push origin --delete refs/heads/${B}',
+      'git push origin --delete "refs/heads/a"', "git branch -d 'a'", 'git branch -d `a`', 'git branch -d $(echo a)', 'git branch -d a~1', 'git branch -d a^', 'git branch -d a..b', 'git branch -d a//b', 'git branch -d a/', 'git branch -d a.',
+      'git branch -d a./b', 'git branch -d a.lock', 'git branch -d a.LOCK/b', 'git branch -d .a', 'git branch -d -a', 'git branch -d a@{1}', 'git branch -d @', 'git branch -d a:b', 'git branch -d +a', 'git branch -d refs/heads/a',
+      'git push origin --delete refs/heads/a refs/heads/b', 'git push origin :refs/heads/a :refs/heads/b', 'git branch -d a b', 'git push --delete origin refs/heads/a', 'git push -d origin refs/heads/a', 'git push origin -d refs/heads/a',
+      'git push origin --delete refs/heads/a --no-verify', 'git push --no-verify origin --delete refs/heads/a', 'git push origin --delete --force refs/heads/a', 'git branch --delete a', 'git branch -D a', 'git branch -d -f a', 'git branch -df a',
+      'git -C /r push origin --delete refs/heads/a', 'git -c x=y branch -d a', 'push origin --delete refs/heads/a', 'git push origin --delete', 'git push origin :', 'git branch -d',
+      'git push /tmp/r.git --delete refs/heads/a', 'git push ../r --delete refs/heads/a', 'git push . --delete refs/heads/a', 'git push https://example.invalid/r.git --delete refs/heads/a', 'git push git@example.invalid:r.git --delete refs/heads/a',
+      'git push $REMOTE --delete refs/heads/a', 'git push "origin" --delete refs/heads/a', 'git push main --delete refs/heads/a', 'git push heads --delete refs/heads/a', 'git push -q --delete refs/heads/a',
+      ' git push origin --delete refs/heads/a', 'git push origin --delete refs/heads/a ', 'git push  origin --delete refs/heads/a', 'git\tpush origin --delete refs/heads/a', 'git push origin --delete refs/heads/a\r',
+      'GIT push origin --delete refs/heads/a', 'git PUSH origin --delete refs/heads/a', 'git push origin --DELETE refs/heads/a', 'git push origin --delete REFS/HEADS/a', 'git push origin \u2010\u2010delete refs/heads/a',
+      'git push origin --delete refs/heads/\u200ba', 'git push origin --delete refs/heads/caf\u00e9',
+    ]
+    for (const line of DELETE_REFUSED) expect({ line, fault: faultOf(`${ITEMS}${block(DELETE_ID, line)}`) }).toEqual({ line, fault: notAForm('delete-branch') })
+    const LEASE_REFUSED = [
+      'git push --force-with-lease origin main:main', 'git push --force-with-lease origin +main', 'git push --force-with-lease origin refs/heads/main', 'git push --force-with-lease origin HEAD:main', 'git push --force-with-lease origin main:develop',
+      'git push --force-with-lease origin develop', 'git push --force-with-lease origin feature/x', 'git push --force-with-lease origin', 'git push --force-with-lease main', 'git push --force-with-lease', 'git push --force-with-lease main main',
+      'git push --force-with-lease remotes main', 'git push origin main --force-with-lease', 'git push origin --force-with-lease main', 'git push --force-with-lease=main:abc123 origin main', 'git push --force-with-lease=develop origin main',
+      'git push --force-with-lease=origin/main origin main', 'git push --force-with-lease= origin main', 'git push --force-with-lease=main:$SHA origin main', 'git push --force origin main', 'git push -f origin main', 'git push origin +main',
+      'git push --force-with-lease --force origin main', 'git push --force-with-lease --force-if-includes origin main', 'git push --force-with-lease --no-verify origin main', 'git push --force-with-lease origin main --no-verify',
+      'git push --force-with-lease origin main develop', 'git push --force-with-lease origin main +develop', 'git push --force-with-lease origin main "+develop"', 'git push --force-with-lease /tmp/r.git main', 'git push --force-with-lease $REMOTE main',
+      'git -C /r push --force-with-lease origin main', 'git -c remote.origin.url=/tmp/x push --force-with-lease origin main', 'push --force-with-lease origin main', 'force-push main to origin', 'git push --mirror --force-with-lease origin',
+    ]
+    for (const line of LEASE_REFUSED) expect({ line, fault: faultOf(`${ITEMS}${block(LEASE_ID, line)}`) }).toEqual({ line, fault: notAForm('force-push') })
+    // A remote the go-ahead's line does not hold as a word (in this case).
+    for (const remote of ['upstream', 'Origin', 'mirror', 'orig']) {
+      expect(faultOf(`${ITEMS}${block(LEASE_ID, `git push --force-with-lease ${remote} main`)}`)).toBe(`its line 1 (line 3 of the prompt) pushes to ${remote}, a word the line of ${LEASE_ID} does not hold`)
+    }
+    // The first line that fails is named, by its place in the block and in the prompt.
+    expect(faultOf(`${ITEMS}${block(DELETE_ID, 'git push origin --delete refs/heads/a', 'git branch -d b', 'git push origin --delete refs/heads/main', 'git push origin --delete x')}`)).toBe(notAForm('delete-branch', 3, 5))
+    expect(guarded(`${ITEMS}${block(DELETE_ID, 'git push origin --delete refs/heads/main')}`)).toEqual({ refusal: `refused by the sign-off guard: the signoff block on line 2 (signoff ${DELETE_ID}): ${notAForm('delete-branch')}; ${FORMS_TEXT}`, warnings: [] })
+  })
+
+  // The checker's bypass families: what a shell or git reads beyond what a word-reading parser read.
+  const FAMILIES: readonly (readonly [string, string, 'delete' | 'lease'])[] = [
+    ['an extra quoted name', 'git push origin --delete refs/heads/feature/a "develop"', 'delete'],
+    ['an extra quoted name', "git push origin --delete refs/heads/feature/a 'develop'", 'delete'],
+    ['a substitution', 'git push origin --delete refs/heads/feature/a `printf develop`', 'delete'],
+    ['a substitution', 'git push origin --delete refs/heads/feature/a $(printf develop)', 'delete'],
+    ['a substitution', 'git push origin --delete refs/heads/feature/a "$B"', 'delete'],
+    ['a substitution', 'git push origin --delete refs/heads/$B', 'delete'],
+    ['an extra plus refspec', 'git push --force-with-lease origin main "+develop"', 'lease'],
+    ['an extra plus refspec', 'git push --force-with-lease origin main +develop', 'lease'],
+    ['an extra plus refspec', 'git push --force-with-lease origin +main', 'lease'],
+    ['xargs', 'echo develop | xargs git push origin --delete refs/heads/feature/a', 'delete'],
+    ['xargs', "printf 'main\\n' | xargs -n1 git push origin --delete", 'delete'],
+    ['a prose list', 'git push origin --delete refs/heads/feature/a, refs/heads/feature/b and develop', 'delete'],
+    ['a prose list', 'git push origin --delete refs/heads/feature/a and develop', 'delete'],
+    ...['heads/main', 'heads/develop', 'heads/release/1.0', 'tags/x', 'remotes/origin/main', 'for/main', 'pull/1/head', 'notes/commits'].flatMap(ref => [
+      ['a short ref path', `git push origin --delete ${ref}`, 'delete'] as const,
+      ['a short ref path', `git push origin :${ref}`, 'delete'] as const,
+      ['a short ref path', `git push origin --delete refs/heads/${ref}`, 'delete'] as const,
+    ]),
+    ...['then', 'if', 'so', 'but', 'until', 'while', 'once', 'unless', 'except', 'after', 'before', 'when', 'and', 'or'].map(word => ['a clause word', `git push origin --delete refs/heads/feature/a ${word} develop`, 'delete'] as const),
+    ...['.', '!', '?', ':', ',', ';'].map(mark => ['punctuation', `git push origin --delete refs/heads/feature/a${mark} develop`, 'delete'] as const),
+    ['punctuation', 'git push origin --delete refs/heads/feature/a (develop)', 'delete'],
+    ['a clause word', 'git push --force-with-lease origin main then develop', 'lease'],
+    ['punctuation', 'git push --force-with-lease origin main, develop', 'lease'],
+  ]
+
+  test('the bypass families inside a block: each line is refused, named by its place', () => {
+    for (const [family, line, kind] of FAMILIES) {
+      const prompt = `${ITEMS}${block(kind === 'delete' ? DELETE_ID : LEASE_ID, kind === 'delete' ? 'git branch -d feature/ok' : 'git push --force-with-lease origin main', line)}`
+      expect({ family, line, fault: faultOf(prompt) }).toEqual({ family, line, fault: notAForm(kind === 'delete' ? 'delete-branch' : 'force-push', 2, 4) })
     }
   })
 
-  test('force-push: the unleased and + forms, another branch, another or no remote, more words and the force-push words stay refused', () => {
-    for (const command of [
-      'git push --force origin main',
-      'git push -f origin main',
-      'git push origin +main',
-      'git push --force-with-lease origin +main',
-      'git push --force-with-lease origin +main:main',
-      'git push --force-with-lease --force origin main',
-      'git push --force-with-lease origin feature/x',
-      'git push --force-with-lease origin develop',
-      'git push --force-with-lease origin HEAD:main',
-      'git push --force-with-lease origin refs/heads/main',
-      'git push --force-with-lease origin main:develop',
-      'git push --force-with-lease main',
-      'git push --force-with-lease',
-      'git push --force-with-lease upstream main',
-      'git push --force-with-lease $REMOTE main',
-      'git push --force-with-lease origin main feature/x',
-      'git push --force-with-lease origin main --no-verify',
-      'git push --force-with-lease origin main, feature/x',
-      'git push --force-with-lease origin main and develop',
-      'git push --force-with-lease origin main, +main',
-      'git push --force-with-lease=develop origin main',
-      'git push --force-with-lease=main:$SHA origin main',
-      'push --force-with-lease origin main',
-      'Then force-push main to origin',
-    ]) {
-      expect({ command, refused: refusedCited(`${ITEMS}${CITE_LEASE}${command}`) }).toEqual({ command, refused: 'a force-push on line 3' })
+  test('the bypass families outside a block, after a valid one: refused as without a block, with the same text', () => {
+    const valid = block(DELETE_ID, 'git push origin --delete refs/heads/feature/ok')
+    for (const [family, line] of FAMILIES) {
+      for (const shape of [(one: string) => one, (one: string) => `Then run ${one} as well.`, (one: string) => `Run \`${one}\`.`]) {
+        const after = guarded(`${ITEMS}${valid}\n${shape(line)}`)
+        // The same line on the same line number with no block before it: main's check.
+        const alone = signoffLint(`${ITEMS}x\nx\nx\n${shape(line)}`)
+        expect({ family, line: shape(line), refusal: after.refusal }).toEqual({ family, line: shape(line), refusal: alone.refusal })
+        expect({ family, line: shape(line), refused: after.refusal?.startsWith('refused by the sign-off guard: the prompt instructs ') }).toEqual({ family, line: shape(line), refused: true })
+      }
     }
-    expect(refusedCited(`${ITEMS}${CITE_LEASE}git push --mirror --force-with-lease origin`)).toBe('a force-push on line 3, a mirror push on line 3')
+    // A step in other words, after a valid block: the guard reads commands, as without a block.
+    expect(guarded(`${ITEMS}${valid}\nThen delete develop on origin too.`)).toEqual({ warnings: [`sign-off allowed by ${DELETE_ID}: delete-branch: git push origin --delete refs/heads/feature/ok`], allowed: [{ id: DELETE_ID, actionClass: 'delete-branch', commands: ['git push origin --delete refs/heads/feature/ok'] }] })
   })
 
-  test('the class must match, the id must be cited whole, in a Standing section, its line must carry the marker; no file is no citation', () => {
-    const deletion = 'git push origin --delete feature/old'
-    const lease = 'git push --force-with-lease origin main'
-    expect(refusedCited(`${ITEMS}${CITE_LEASE}${deletion}`)).toBe('a remote branch or tag deletion on line 3')
-    expect(refusedCited(`${ITEMS}${CITE_DELETE}${lease}`)).toBe('a force-push on line 3')
-    for (const citation of ['signoff-in-unit', 'signoff-after-standing', 'signoff-no-marker', 'signoff-unknown', 'signoff-delete-branches-old', 'xsignoff-delete-branches', 'signoff-delete-branches_2', '[signoff:delete-branch]']) {
-      const prompt = `${ITEMS}Cited: ${citation}.\n${deletion}`
-      expect({ citation, refused: refusedCited(prompt) }).toEqual({ citation, refused: 'a remote branch or tag deletion on line 3' })
+  test('the block syntax: unterminated, nested, four backticks or tildes, info line faults, quoted or indented, CR, tabs, lookalikes and zero-width characters refuse; two blocks pass; an empty line or 101 lines refuse', () => {
+    const line = 'git push origin --delete refs/heads/a'
+    const opener = `\`\`\`signoff ${DELETE_ID}`
+    const prefix = "line 2 is written as a signoff block's opening line but is not exactly ```signoff <id>: "
+    for (const [name, prompt, broken] of [
+      ['unterminated', `${ITEMS}${opener}\n${line}\n`, 'line 2 opens a signoff block that no line of exactly three backticks closes'],
+      ['closed by four backticks only', `${ITEMS}${opener}\n${line}\n\`\`\`\``, 'line 2 opens a signoff block that no line of exactly three backticks closes'],
+      ['closed by three backticks and a blank only', `${ITEMS}${opener}\n${line}\n\`\`\` `, 'line 2 opens a signoff block that no line of exactly three backticks closes'],
+      ['four backticks', `${ITEMS}\`\`\`\`signoff ${DELETE_ID}\n${line}\n\`\`\`\``, `${prefix}its fence has more than three backticks`],
+      ['tildes', `${ITEMS}~~~signoff ${DELETE_ID}\n${line}\n~~~`, `${prefix}its fence is not three backticks`],
+      ['a second word', `${ITEMS}${opener} now\n${line}\n\`\`\``, `${prefix}its info line is not exactly the word signoff, one blank and one decision id (no other word, no trailing blank)`],
+      ['a trailing blank', `${ITEMS}${opener} \n${line}\n\`\`\``, `${prefix}its info line is not exactly the word signoff, one blank and one decision id (no other word, no trailing blank)`],
+      ['two blanks', `${ITEMS}\`\`\`signoff  ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}its info line is not exactly the word signoff, one blank and one decision id (no other word, no trailing blank)`],
+      ['no id', `${ITEMS}\`\`\`signoff\n${line}\n\`\`\``, `${prefix}its info line is not exactly the word signoff, one blank and one decision id (no other word, no trailing blank)`],
+      ['a blank after the fence', `${ITEMS}\`\`\` signoff ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}its info line does not start with the word signoff, in lower case, right after the backticks`],
+      ['Signoff', `${ITEMS}\`\`\`Signoff ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}its info line does not start with the word signoff, in lower case, right after the backticks`],
+      ['sign-off', `${ITEMS}\`\`\`sign-off ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}its info line does not start with the word signoff, in lower case, right after the backticks`],
+      ['quoted', `${ITEMS}> ${opener}\n> ${line}\n> \`\`\``, `${prefix}it does not start at the start of the line (an indented or quoted fence)`],
+      ['indented', `${ITEMS}  ${opener}\n  ${line}\n  \`\`\``, `${prefix}it does not start at the start of the line (an indented or quoted fence)`],
+      ['CRLF', `${ITEMS.replace('\n', '\r\n')}${opener}\r\n${line}\r\n\`\`\`\r\n`, `${prefix}it ends with a carriage return (a prompt with CRLF line ends holds no signoff block)`],
+      ['a tab', `${ITEMS}\`\`\`signoff\t${DELETE_ID}\n${line}\n\`\`\``, `${prefix}it holds a tab`],
+      ['a zero-width space in the info line', `${ITEMS}\`\`\`signoff\u200b ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}it holds an invisible format character (a zero-width space, say)`],
+      ['a zero-width space in the fence', `${ITEMS}\`\`\u200b\`signoff ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}it holds an invisible format character (a zero-width space, say)`],
+      ['fullwidth backticks', `${ITEMS}\uff40\uff40\uff40signoff ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}it holds a character that is not printable ASCII (a lookalike of a backtick, a letter or a blank)`],
+      ['modifier grave accents', `${ITEMS}\u02cb\u02cb\u02cbsignoff ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}it holds a character that is not printable ASCII (a lookalike of a backtick, a letter or a blank)`],
+      ['a lookalike hyphen', `${ITEMS}\`\`\`sign\u2010off ${DELETE_ID}\n${line}\n\`\`\``, `${prefix}it holds a character that is not printable ASCII (a lookalike of a backtick, a letter or a blank)`],
+      ['a no-break space', `${ITEMS}\`\`\`signoff\u00a0${DELETE_ID}\n${line}\n\`\`\``, `${prefix}it holds a character that is not printable ASCII (a lookalike of a backtick, a letter or a blank)`],
+    ] as const) {
+      expect({ name, broken: brokenOf(prompt) }).toEqual({ name, broken })
     }
-    expect(refusedWith(`${ITEMS}${CITE_DELETE}${deletion}`, undefined)).toBe('a remote branch or tag deletion on line 3')
-    expect(refusedWith(`${ITEMS}${CITE_DELETE}${deletion}`, '')).toBe('a remote branch or tag deletion on line 3')
-    // Both ids cited: each class by its own line.
-    const both = cited(`${ITEMS}Cited: signoff-delete-branches, signoff-rewrite-root-author.\n${deletion}\n${lease}`)
-    expect(both).toEqual({
-      warnings: [MAIN_WARNING, `sign-off allowed by signoff-delete-branches: delete-branch: ${deletion}`, `sign-off allowed by signoff-rewrite-root-author: force-push: ${lease}`],
+    // Inside another fenced block an opening line is no block: its lines are read as without one, and refused.
+    for (const [name, prompt] of [
+      ['in a four-backtick fence', `${ITEMS}\`\`\`\`\n${opener}\n${line}\n\`\`\`\n\`\`\`\``],
+      ['in a tilde fence', `${ITEMS}~~~\n${opener}\n${line}\n\`\`\`\n~~~`],
+      ['in a backtick fence', `${ITEMS}\`\`\`text\n${opener}\n${line}\n\`\`\``],
+    ] as const) {
+      const lint = guarded(prompt)
+      expect({ name, lint }).toEqual({ name, lint: signoffLint(prompt) })
+      expect({ name, listed: listedOf(lint) }).toEqual({ name, listed: 'a remote branch or tag deletion on line 4' })
+    }
+    // A sound block after a line that introduces an example is a block all the same, and named in the warning.
+    expect(guarded(`${ITEMS}For example:\n${block(DELETE_ID, line)}`).warnings).toEqual([`sign-off allowed by ${DELETE_ID}: delete-branch: ${line}`])
+    // Two blocks: each go-ahead its own warning line, a go-ahead's blocks in one, in order.
+    expect(guarded(`${ITEMS}${block(DELETE_ID, line)}\nThen:\n${block(LEASE_ID, 'git push --force-with-lease origin main')}\nAnd:\n${block(DELETE_ID, 'git branch -d a')}`)).toEqual({
+      warnings: [MAIN_WARNING, `sign-off allowed by ${DELETE_ID}: delete-branch: ${line}; git branch -d a`, `sign-off allowed by ${LEASE_ID}: force-push: git push --force-with-lease origin main`],
       allowed: [
-        { id: 'signoff-delete-branches', actionClass: 'delete-branch', commands: [deletion] },
-        { id: 'signoff-rewrite-root-author', actionClass: 'force-push', commands: [lease] },
+        { id: DELETE_ID, actionClass: 'delete-branch', commands: [line, 'git branch -d a'] },
+        { id: LEASE_ID, actionClass: 'force-push', commands: ['git push --force-with-lease origin main'] },
       ],
     })
+    expect(faultOf(`${ITEMS}${block(DELETE_ID, line)}\n${block(DELETE_ID, 'git branch -d main')}`)).toBe(notAForm('delete-branch', 1, 6))
+    for (const [name, lines, fault] of [
+      ['an empty line', [line, '', 'git branch -d a'], 'its line 2 (line 4 of the prompt) is empty'],
+      ['a line of blanks', [line, '   '], notAForm('delete-branch', 2, 4)],
+      ['a comment', [line, '# the merged ones'], notAForm('delete-branch', 2, 4)],
+      ['prose', [line, 'and the other merged ones'], notAForm('delete-branch', 2, 4)],
+      ['a continued line', ['git push origin --delete \\', 'refs/heads/a'], notAForm('delete-branch', 1, 3)],
+      ['a carriage return in a line', [`${line}\r`], notAForm('delete-branch')],
+      ['a tab in a line', ['git branch -d\ta'], notAForm('delete-branch')],
+      ['no line', [], 'it holds no command'],
+    ] as const) {
+      const prompt = (lines as readonly string[]).length === 0 ? `${ITEMS}\`\`\`signoff ${DELETE_ID}\n\`\`\`` : `${ITEMS}${block(DELETE_ID, ...lines)}`
+      expect({ name, fault: faultOf(prompt) }).toEqual({ name, fault })
+    }
+    const many = (count: number) => block(DELETE_ID, ...Array.from({ length: count }, (_, at) => `git push origin --delete refs/heads/feature/n${at}`))
+    expect(guarded(`${ITEMS}${many(BLOCK_MAX_LINES)}`).allowed?.[0]?.commands.length).toBe(100)
+    expect(faultOf(`${ITEMS}${many(BLOCK_MAX_LINES + 1)}`)).toBe('it holds 101 lines, more than 100')
+  })
+
+  test('the id must be on a marked line of a Standing section, of the class of every line; a decisions file not read refuses with its reason, before any other check', () => {
+    const deletion = 'git push origin --delete refs/heads/feature/old'
+    const lease = 'git push --force-with-lease origin main'
+    for (const id of ['signoff-in-unit', 'signoff-after-standing', 'signoff-no-marker', 'signoff-unknown', 'Signoff-delete-branches', 'push-scratch']) {
+      expect({ id, fault: faultOf(`${ITEMS}${block(id, deletion)}`) }).toEqual({ id, fault: `${id} is on no line of a Standing section as \`${id}. [signoff:<class>] <text>\` (the marker right after the id)` })
+    }
+    expect(faultOf(`${ITEMS}${block(LEASE_ID, deletion)}`)).toBe(`its line 1 (line 3 of the prompt) is a delete-branch command, and ${LEASE_ID} covers force-push`)
+    expect(faultOf(`${ITEMS}${block(DELETE_ID, lease)}`)).toBe(`its line 1 (line 3 of the prompt) is a force-push command, and ${DELETE_ID} covers delete-branch`)
+    expect(faultOf(`${ITEMS}${block(DELETE_ID, deletion, lease)}`)).toBe(`its line 2 (line 4 of the prompt) is a force-push command, and ${DELETE_ID} covers delete-branch`)
+    for (const [standing, why] of [
+      [undefined, 'it was not read'],
+      [{ unreadable: '/o/agreed-decisions.md holds 5000000 bytes, over the engine\'s read cap of 4194304 bytes' }, '/o/agreed-decisions.md holds 5000000 bytes, over the engine\'s read cap of 4194304 bytes'],
+      [{ unreadable: '/o/agreed-decisions.md is not there' }, '/o/agreed-decisions.md is not there'],
+    ] as const) {
+      for (const prompt of [`${ITEMS}${block(DELETE_ID, deletion)}`, `${ITEMS}${block('signoff-unknown', 'git branch -d main')}`]) {
+        expect(signoffLint(prompt, standing)).toEqual({ refusal: `refused by the sign-off guard: the signoff block on line 2 cannot be checked: the Standing decisions file could not be read: ${why}`, warnings: [] })
+      }
+    }
+    // A prompt without a block needs no decisions file.
+    expect(signoffLint(`${ITEMS}Commit and push.`)).toEqual({ warnings: [] })
   })
 
   test('a negated sentence still passes as before, with or without the id, and is named in no warning', () => {
-    for (const prompt of [`${ITEMS}${CITE_DELETE}Never run git push origin --delete main.`, `${ITEMS}${CITE_DELETE}Do not run git push origin --delete feature/x.`, `${ITEMS}${CITE_LEASE}Never git push --force origin main.`]) {
-      expect({ prompt, lint: cited(prompt) }).toEqual({ prompt, lint: { warnings: [] } })
+    for (const prompt of [`${ITEMS}Per ${DELETE_ID}: never run git push origin --delete main.`, `${ITEMS}Do not run git push origin --delete feature/x.`, `${ITEMS}Per ${LEASE_ID}: never git push --force origin main.`]) {
+      expect({ prompt, lint: guarded(prompt) }).toEqual({ prompt, lint: { warnings: [] } })
     }
+    expect(guarded(`${ITEMS}${block(DELETE_ID, 'git branch -d a')}\nNever run git push origin --delete main.`)).toEqual({ warnings: [`sign-off allowed by ${DELETE_ID}: delete-branch: git branch -d a`], allowed: [{ id: DELETE_ID, actionClass: 'delete-branch', commands: ['git branch -d a'] }] })
   })
 
-  test('the refusal of a deletion or a force-push ends with how to cite a go-ahead; one of only other actions does not', () => {
-    for (const prompt of [`${ITEMS}git push origin --delete feature/x`, `${ITEMS}git push --force-with-lease origin main`, `${ITEMS}${CITE_DELETE}git push origin --delete main`]) {
-      expect({ prompt, refusal: cited(prompt).refusal }).toEqual({ prompt, refusal: expect.stringMatching(new RegExp(`\\(never, do not, stop before\\) passes; ${CITE_HINT}$`)) as never })
-      expect(cited(prompt).isCitable).toBe(true)
+  test('a decision id in prose lifts nothing: the old citation is refused as without one; the refusal of a deletion or a force-push ends with how to write a block, one of only other actions does not', () => {
+    for (const prompt of [
+      `${ITEMS}Per ${DELETE_ID}: git push origin --delete feature/old`,
+      `${ITEMS}Per ${DELETE_ID}: git push origin --delete refs/heads/feature/old`,
+      `${ITEMS}Cited: ${DELETE_ID}.\ngit push origin :refs/heads/feature/old`,
+      `${ITEMS}Per ${LEASE_ID}: git push --force-with-lease origin main`,
+      `${ITEMS}signoff ${DELETE_ID}: git push origin --delete refs/heads/feature/old`,
+      `${ITEMS}\`\`\`\n${DELETE_ID}\n\`\`\`\ngit push origin --delete refs/heads/feature/old`,
+    ]) {
+      const lint = guarded(prompt)
+      expect({ prompt, lint }).toEqual({ prompt, lint: signoffLint(prompt) })
+      expect({ prompt, ends: lint.refusal?.endsWith(`(never, do not, stop before) passes; ${BLOCK_HINT}`) }).toEqual({ prompt, ends: true })
     }
     for (const prompt of [`${ITEMS}git reset --hard`, `${ITEMS}git branch -D x`, `${ITEMS}git push --mirror origin`]) {
-      const lint = cited(prompt)
-      expect({ prompt, ends: lint.refusal?.endsWith('(never, do not, stop before) passes'), isCitable: lint.isCitable }).toEqual({ prompt, ends: true, isCitable: undefined })
+      expect({ prompt, ends: guarded(prompt).refusal?.endsWith('(never, do not, stop before) passes') }).toEqual({ prompt, ends: true })
     }
   })
 
-  test('100 lines mixing allowed and refused steps: the refusal names the refused steps from the first, never an allowed one', () => {
-    const lines = Array.from({ length: 100 }, (_, i) => (i % 3 === 0 ? `git push origin --delete feature/n${i}` : `Step ${i}: look at the log.`))
-    lines[0] = 'Cited: signoff-delete-branches.'
-    lines[36] = 'git reset --hard origin/main'
-    lines[61] = 'git push backup :main'
-    lines[90] = 'git branch -D feature/n90'
-    const lint = cited(lines.join('\n'))
-    expect(lint.refusal).toStartWith('refused by the sign-off guard: the prompt instructs reset --hard on line 37, a remote branch or tag deletion on line 62, branch -D on line 91 as a step for the worker;')
-    expect(lint.refusal).toEndWith(CITE_HINT)
-    // Without its three refused steps, the same prompt is allowed: one warning line naming every deletion once.
-    const clean = lines.filter((_, i) => ![36, 61, 90].includes(i))
-    const allowedLint = cited(clean.join('\n'))
-    expect(allowedLint.refusal).toBeUndefined()
-    expect(allowedLint.allowed?.[0]?.commands.length).toBe(31)
-    // Without the citation, the first deletion is refused, then each other.
-    expect(signoffLint(clean.join('\n')).refusal).toStartWith('refused by the sign-off guard: the prompt instructs a remote branch or tag deletion on line 4, a remote branch or tag deletion on line 7,')
+  test('100 lines mixing a block and prose steps: the refusal names the refused prose steps from the first, never a block line', () => {
+    const blockLines = Array.from({ length: 30 }, (_, at) => `git push origin --delete refs/heads/feature/n${at}`)
+    const prose = Array.from({ length: 66 }, (_, at) => `Step ${at}: look at the log.`)
+    prose[20] = 'git reset --hard origin/main'
+    prose[41] = 'git push backup :refs/heads/main'
+    prose[60] = 'git branch -D feature/n90'
+    const prompt = [ITEMS.trimEnd(), block(DELETE_ID, ...blockLines), ...prose].join('\n')
+    expect(prompt.split('\n').length).toBe(99)
+    const lint = guarded(prompt)
+    expect(lint.refusal).toStartWith('refused by the sign-off guard: the prompt instructs reset --hard on line 54, a remote branch or tag deletion on line 75, branch -D on line 94 as a step for the worker;')
+    expect(lint.refusal).toEndWith(BLOCK_HINT)
+    const clean = [ITEMS.trimEnd(), block(DELETE_ID, ...blockLines), ...prose.filter((_, at) => ![20, 41, 60].includes(at))].join('\n')
+    const allowed = guarded(clean)
+    expect(allowed.refusal).toBeUndefined()
+    expect(allowed.allowed?.[0]?.commands).toEqual(blockLines)
+    expect(allowed.warnings).toEqual([`sign-off allowed by ${DELETE_ID}: delete-branch: ${blockLines.slice(0, WARNED_COMMANDS).join('; ')}; and 10 more (30 in all)`])
+    // Without the decisions file read, the same block is refused; without the block, each deletion is a refused step.
+    expect(signoffLint(clean).refusal).toContain('could not be read: it was not read')
+    expect(signoffLint(clean.replace(/^```.*$/gm, '')).refusal).toStartWith('refused by the sign-off guard: the prompt instructs a remote branch or tag deletion on line 3, a remote branch or tag deletion on line 4,')
+  })
+
+  test('a block counts only in the prompt as given: past `ownLines` (the section\'s block, the rules block) its lines are read as without a block', () => {
+    const given = `${ITEMS}Do the work.`
+    const appended = `\n\n## Binding decisions (section x)\n\n${block(DELETE_ID, 'git push origin --delete refs/heads/a')}\n`
+    const prompt = `${given}${appended}`
+    const lint = guarded(prompt, STANDING, given.split('\n').length)
+    expect(lint).toEqual(signoffLint(prompt.replace(/^```.*$/gm, 'x')))
+    expect(listedOf(lint)).toBe('a remote branch or tag deletion on line 7')
+    // A line written as an opening line out there is not read as one either.
+    expect(guarded(`${given}\n\n\`\`\`signoff ${DELETE_ID} now\ngit branch -d a\n\`\`\``, STANDING, given.split('\n').length)).toEqual({ warnings: [] })
+    // In the prompt as given, the same block passes.
+    expect(guarded(`${given}\n${block(DELETE_ID, 'git push origin --delete refs/heads/a')}`, STANDING, 5).refusal).toBeUndefined()
   })
 })
 
-describe('a cited Standing go-ahead through the plugin', () => {
-  const seedDecisions = (world: World) => world.files.set(`${ORCH}/agreed-decisions.md`, DECISIONS)
-  const launchOf = (call: (tool: string, input: Record<string, unknown>) => Promise<{ deny?: string; isPassed: boolean; result?: unknown }>) => (prompt: string, title = 'cited case') =>
-    call('mcp__session-control__launch_worker', { dir: '/w/work', model: 'haiku', effort: 'low', title, prompt })
+// The checker's attack set: 202 prompts that cite a go-ahead in prose, each with the old design's verdict (A accepted,
+// R refused). As prose each is now refused, or accepted as main accepts it; as a signoff block with the same id and
+// text each is refused, but for the lines the grammar takes.
+describe('the checker\'s 202 cited cases (lint.ts)', () => {
+  const CHECK_DECISIONS = [
+    '# Agreed decisions',
+    '',
+    '## Unit with a duplicate',
+    'zz-dup-go. [signoff:delete-branch] Not standing: must not count.',
+    '',
+    '## Standing',
+    'zz-del-go. [signoff:delete-branch] User (2026-10-12): delete merged scratch branches from origin and backup; never main.',
+    'zz-lease-go. [signoff:force-push] User (2026-10-12): rewrite the root author and force-push main to origin and backup with --force-with-lease.',
+    'zz-plain. User: no marker on this line.',
+    'zz-late. User: the marker stands late [signoff:delete-branch] here.',
+    'zz-typo. [signof:delete-branch] User: misspelt marker.',
+    'zz-twomark. [signoff:delete-branch] [signoff:force-push] User: two markers.',
+    '',
+  ].join('\n')
+  const D = 'zz-del-go'
+  const L = 'zz-lease-go'
+  const C: string[] = []
+  const add = (p: string) => C.push(p)
+  add(`Per ${D}: git push origin --delete feature/a feature/b`)
+  add(`Per ${D}: git push --delete origin feature/a`)
+  add(`Per ${D}: git push -d origin feature/a`)
+  add(`Per ${D}: git push origin :feature/a :feature/b`)
+  add(`Per ${D}: git push origin --delete refs/heads/feature/a`)
+  add(`Per ${D}: git -C /tmp/r push origin --delete feature/a`)
+  add(`Per ${L}: git push --force-with-lease origin main`)
+  add(`Per ${L}: git push --force-with-lease=main:abc123 backup main:main`)
+  add(`Per ${L}: git push origin main --force-with-lease=refs/heads/main`)
+  for (const b of ['main', 'Main', 'MAIN', 'refs/heads/main', 'heads/main', 'refs/heads/Main', '+main', ':main', 'main:', 'origin/main', 'HEAD', 'head', '@', 'master', 'develop', 'release', 'release/1.0', 'Release', 'Release/2', 'heads/master', 'heads/develop', 'heads/release/1.0', 'refs/heads/heads/main']) add(`Per ${D}: git push origin --delete ${b}`)
+  for (const b of ['main', 'refs/heads/main', 'heads/main', 'HEAD', 'develop', 'release/1.0']) add(`Per ${D}: git push origin :${b}`)
+  for (const b of ['refs/tags/x', 'tags/x', 'refs/remotes/origin/x', 'remotes/origin/x', 'refs/for/x', 'for/x', 'refs/pull/1/head', 'pull/1/head', 'refs/notes/commits', 'notes/commits', 'tag', 'TAG']) add(`Per ${D}: git push origin --delete ${b}`)
+  for (const b of ['*', 'feature/*', 'a?', '[a-z]', '{a,b}', '$B', '${B}', '$(echo main)', '`echo main`', '~', 'a~1', 'a^', 'a..b', 'a//b', 'a/', 'a.', 'a.lock', '"$B"', "'main'", '"main"']) add(`Per ${D}: git push origin --delete feature/a ${b}`)
+  for (const o of ['--delete --force', '-d -f', '--mirror', '--prune', '--all', '--tags', '--no-verify', '-o ci.skip', '--receive-pack=/tmp/x', '--exec=/tmp/x', '--repo=/tmp/x', '-n', '--atomic', '--', '-q', '--porcelain', '--force-with-lease']) add(`Per ${D}: git push origin --delete feature/a ${o}`)
+  for (const o of ['--force', '--mirror', '--prune', '--all']) add(`Per ${D}: git push ${o} origin --delete feature/a`)
+  add(`Per ${D}: git push /tmp/remote.git --delete feature/a`)
+  add(`Per ${D}: git push https://example.invalid/r.git --delete feature/a`)
+  add(`Per ${D}: git push /tmp/x;rm --delete feature/a`)
+  add(`Per ${D}: git push "/tmp/x" --delete feature/a`)
+  add(`Per ${D}: git push $REMOTE --delete feature/a`)
+  for (const tail of ['; git push origin --delete main', ' && git push origin --delete main', ' || git push origin --delete main', ' | git push origin --delete main', ' & git push origin --delete main', '\ngit push origin --delete main', ' \\\nmain', ' git push origin --delete main', ' then main', ' and main', ' or main', ', main', ' if main', ' so main', ' but main', ' until main', ' while main', ' once main', ' unless main', ' except main', ' after main', ' before main', ' when main', '. main', '! main', '? main', ': main', ', feature/b and main', ', feature/b, main', ' "main"', " 'main'", ' `printf main`', ' "$B"', ' (main)', '; git reset --hard', ' && git clean -fdx', '; git branch -D x', '; git push --force origin x'])
+    add(`Per ${D}: git push origin --delete feature/a${tail}`)
+  add(`Per ${D}: delete a, b and main: git push origin --delete feature/a, feature/b and main`)
+  add(`Per ${D}: echo main | xargs git push origin --delete feature/a`)
+  add(`Per ${D}: printf 'main\\n' | xargs -n1 git push origin --delete`)
+  add(`Per ${D}:\n\`\`\`\ngit push origin --delete feature/a then \\\n  main\n\`\`\``)
+  add(`Per ${D}: git push origin --delete ${Array.from({ length: 1000 }, (_, i) => `feature/b${i}`).join(' ')}`)
+  add(`Per ${D}: git push origin --delete ${Array.from({ length: 1000 }, (_, i) => `feature/b${i}`).join(' ')} main`)
+  add(`Per ${D}: git push origin --delete feature/${'x'.repeat(5000)}`)
+  for (const b of ['-x', '--force', '', 'a:b', '+a', 'a@{1}', '@{u}']) add(`Per ${D}: git push origin --delete ${b}`)
+  add(`Per ${D}: git push origin --delete`)
+  add(`Per ${D}: git push origin :`)
+  for (const c of ['git push --force-with-lease other main', 'git push --force-with-lease main main', 'git push --force-with-lease origin main --no-verify', 'git push --force-with-lease --force origin main',
+    'git push --force-with-lease=other origin main', 'git push --force-with-lease=other:abc origin main', 'git push --force-with-lease origin main:other', 'git push --force-with-lease origin +main',
+    'git push --force-with-lease origin HEAD:main', 'git push --force-with-lease origin main:refs/heads/other', 'git push --force-with-lease origin feature/x', 'git push --force-with-lease origin',
+    'git push --force-with-lease origin main develop', 'git push --force origin main', 'git push -f origin main', 'git push origin +main', 'force-push main to origin', 'git push --force-with-lease origin main "+develop"',
+    'git push --force-with-lease origin main then develop', 'git push --force-with-lease origin main and feature', 'git push --force-with-lease origin main, develop', 'git push --force-with-lease origin main --delete x',
+    'git push --force-with-lease --mirror origin', 'git push --force-with-lease origin main; git push --force-with-lease origin develop', 'git push --force-with-lease origin main --force-if-includes',
+    'git push --force-with-lease origin main:main', 'git push --force-with-lease=main origin main', 'git -c remote.origin.url=/tmp/elsewhere push --force-with-lease origin main', 'git -C /tmp/other push --force-with-lease origin main'])
+    add(`Per ${L}: ${c}`)
+  for (const p of [`Never use ${D}. git push origin --delete feature/a`, `\`${D}\`: git push origin --delete feature/a`, `"${D}" git push origin --delete feature/a`, `\`\`\`\n${D}\n\`\`\`\ngit push origin --delete feature/a`, `${D}.md: git push origin --delete feature/a`]) add(p)
+  for (const p of [`pre-${D}: git push origin --delete feature/a`, `${D}-x: git push origin --delete feature/a`, `${D}_x: git push origin --delete feature/a`, `${D.toUpperCase()}: git push origin --delete feature/a`, `Zz-del-go: git push origin --delete feature/a`,
+    `Per ${L}: git push origin --delete feature/a`, `Per ${D}: git push --force-with-lease origin main`, `Per ${D}: git push origin --delete feature/a; git reset --hard`, `Per ${D}: git push origin --delete feature/a. Then git clean -fdx.`,
+    `Per zz-dup-go: git push origin --delete feature/a`, `Per zz-plain: git push origin --delete feature/a`, `Per zz-late: git push origin --delete feature/a`, `Per zz-typo: git push origin --delete feature/a`, `[signoff:delete-branch] git push origin --delete feature/a`])
+    add(p)
+  add('Per zz-twomark: git push origin --delete feature/a')
+  add(`Per ${D} and ${L}: git push origin --delete feature/a; git push --force-with-lease origin main`)
+  add(`Per ${D}: git push origin --delete feature/a and git push origin --delete feature/b`)
+  add(`Per ${D}: Never run git push origin --delete main.`)
+  /** The old design's verdicts (the branch before this change), case by case, in groups of ten. */
+  const OLD = 'AAAAAAAAAR RRRARRRRAR RRRRRRRRAA AARRARRRRA RARARARARR RRARRRRRAR RRRRRARAAA RRRRRRRRRR RRRRRRRRRR RAAAARRRRR RRRRARRRAA AAAAAAAAAA AAAAAAAAAA RRRRAARAAR ARRRRRRRRA RARRRRRRRR RRRRRRRAAA RRRRRAAAAA AAAARRRRRR RRRRRRRRAA AA'.replace(/ /g, '')
+  /** The id and the text a case writes, as a block would carry them. */
+  const parts = (p: string) => {
+    const per = /^Per (.+?):[ \n]?([\s\S]*)$/.exec(p)
+    if (per !== null) return { id: (per[1] ?? '').split(' and ')[0] ?? '', body: per[2] ?? '' }
+    const at = p.indexOf('git push')
+    return { id: p.slice(0, at).replace(/^Never use /, '').replace(/[`"]/g, '').replace(/[:.\s]+$/, '').trim(), body: p.slice(at) }
+  }
+  /** As prose, these four pass as on main: three commands main's reading cuts short, and a negated sentence. */
+  const PROSE_PASSES = [`Per ${D}: git push /tmp/x;rm --delete feature/a`, `Per ${D}: git push "/tmp/x" --delete feature/a`, `Per ${D}: git push origin :`, `Per ${D}: Never run git push origin --delete main.`]
+  /** As a block, these pass: the lines the grammar takes, with an id of their class. */
+  const BLOCK_PASSES = [`${D}|git push origin --delete refs/heads/feature/a`, `${L}|git push --force-with-lease origin main`, `${L}|git push --force-with-lease=main origin main`]
 
-  test('launch_worker: the cited deletion is launched with the WARNING line; a protected name, no citation, another class and no decisions file are refused', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
+  test('each case as prose (main\'s verdict, refused unless main passes it) and as a signoff block (refused but for the lines the grammar takes)', () => {
+    expect([C.length, OLD.length]).toEqual([202, 202])
+    const standing = { text: CHECK_DECISIONS }
+    const rows = C.map((p, at) => {
+      const { id, body } = parts(p)
+      const prose = signoffLint(p, standing)
+      const blocked = signoffLint(`\`\`\`signoff ${id}\n${body}\n\`\`\``, standing)
+      expect({ p, prose }).toEqual({ p, prose: signoffLint(p) })
+      return { at: at + 1, old: OLD[at], prose: prose.refusal === undefined ? 'A' : 'R', block: blocked.refusal === undefined ? 'A' : 'R', p, key: `${id}|${body}` }
+    })
+    expect(rows.filter(one => one.prose === 'A').map(one => one.p)).toEqual(PROSE_PASSES)
+    expect(rows.filter(one => one.block === 'A').map(one => one.key)).toEqual(BLOCK_PASSES)
+    // The old design accepted 77; 73 of them are now refused as prose, and 74 as a block.
+    expect(rows.filter(one => one.old === 'A').length).toBe(77)
+    expect(rows.filter(one => one.old === 'A' && one.prose === 'R').length).toBe(73)
+    expect(rows.filter(one => one.old === 'A' && one.block === 'R').length).toBe(74)
+  })
+})
+
+describe('a prompt without a signoff block gets main\'s verdicts (lint.ts)', () => {
+  // The generated part of the checker's uncited corpus: 44 commands in 32 shapes, 1397 prompts. The hash of main's
+  // verdicts (the refusal less its last clause, and the warnings) was taken with main's lint.ts.
+  const BASE = [
+    'git push --force origin feature/x', 'git push -f origin x', 'git push --force-with-lease origin main', 'git push --force-with-lease=main:abc origin main',
+    'git push origin +x', 'git push origin --delete x', 'git push --delete origin a', 'git push -d origin a', 'git push origin :x',
+    'git push origin HEAD:refs/heads/x --delete', 'git push --mirror origin', 'git push --prune origin', 'git reset --hard origin/main', 'git clean -fdx',
+    'git clean --force', 'git branch -D x', 'git branch -d -f x', 'git branch --delete --force x', 'force-push the branch', 'git -C /r push -f origin x',
+    'git -c core.x=y push --delete origin a', 'git --no-pager push origin --delete a', 'git push origin --delete main', 'git push origin --delete feature/a feature/b',
+    'git push origin :refs/heads/x', 'git push origin --delete refs/tags/v1', 'git push --force-with-lease origin main:main',
+    'git push origin --delete a; git push origin --delete main', 'git push origin --delete a && git push --force origin main', 'git push origin --delete feature/a, feature/b and main',
+    'git push origin --delete feature/a "main"', 'git push origin --delete feature/a then main', 'git push origin --delete $B', 'git push origin --delete "$B"',
+    'git push origin --delete heads/main', 'git push origin --delete tags/v1', 'git push origin -d -f a', 'git push origin --delete --force a', 'git push --all --prune origin',
+    'git push origin --delete feature/*', 'git branch -d feature/a', 'git push --force-with-lease origin main "+develop"', 'push --delete origin a', 'push -f origin a',
+  ]
+  const WRAP: readonly ((c: string) => string)[] = [
+    c => c, c => `Run ${c} now.`, c => `Run \`${c}\` now.`, c => `Run "${c}" now.`, c => `Run '${c}' now.`, c => `Steps:\n\`\`\`\n${c}\n\`\`\``,
+    c => `\`\`\`bash\n${c}\n\`\`\``, c => `sh -c "${c}"`, c => `bash -lc '${c}'`, c => `cd repo && ${c}`, c => `${c} | tee log`, c => `${c} || true`,
+    c => `true; ${c}`, c => `GIT_TRACE=1 ${c}`, c => `echo x | xargs ${c}`, c => `sh <<'EOF'\n${c}\nEOF`,
+    c => {
+      const i = c.lastIndexOf(' ')
+      return i < 0 ? c : `${c.slice(0, i)} \\\n  ${c.slice(i + 1)}`
+    },
+    c => `${c}\r\nThen report.\r\n`, c => c.replace(/ /g, '\t'), c => c.toUpperCase(), c => c.replace('git', 'gi\u200bt'), c => c.replace('push', 'pu\u0455h'),
+    c => `Never ${c}.`, c => `Do not run ${c}.`, c => ITEMS + c, c => `- ${c}`, c => `You may NOT:\n- ${c}`, c => `Then, ${c} and report.`, c => `${c}\n${c}`,
+    c => `1. ${c}\n2. report`, c => `For example, \`${c}\` is refused.`, c => `Use git -C /tmp/r ${c.replace(/^git /, '')}`,
+  ]
+  const fnv = (text: string) => {
+    let hash = 0x811c9dc5
+    for (let at = 0; at < text.length; at++) hash = Math.imul(hash ^ text.charCodeAt(at), 0x01000193) >>> 0
+    return hash.toString(16).padStart(8, '0')
+  }
+
+  test('the generated corpus: 1397 prompts, 1088 refused, the same verdicts as main (hash 3e486e10), with or without a decisions file', () => {
+    const prompts = [...new Set(BASE.flatMap(command => WRAP.map(wrap => wrap(command))))]
+    expect(prompts.length).toBe(1397)
+    for (const standing of [undefined, STANDING]) {
+      const verdicts = prompts.map(prompt => signoffLint(prompt, standing)).map(lint => `${(lint.refusal ?? '-').replace(`; ${BLOCK_HINT}`, '')}\u0001${lint.warnings.join('\u0002')}`)
+      expect(verdicts.filter(one => !one.startsWith('-\u0001')).length).toBe(1088)
+      expect(fnv(verdicts.join('\n'))).toBe('3e486e10')
+    }
+  })
+})
+
+describe('a signoff block through the plugin', () => {
+  const seedDecisions = (world: World, text = DECISIONS) => world.files.set(`${ORCH}/agreed-decisions.md`, text)
+  const launchOf = (call: (tool: string, input: Record<string, unknown>) => Promise<{ deny?: string; isPassed: boolean; result?: unknown }>) => (prompt: string, title = 'block case') =>
+    call('mcp__session-control__launch_worker', { dir: '/w/work', model: 'haiku', effort: 'low', title, prompt })
+  const launched = (world: World) => world.passed.filter(one => one.tool === 'Bash').length
+
+  test('launch_worker: a valid block is launched with the WARNING line; a stray prose deletion, a bad line, the old citation and a decisions file over the read cap, missing or a folder are refused', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
     const { world, call } = await started($, on)
     seedDecisions(world)
     const launch = launchOf(call)
-    const steps = 'git push origin --delete feature/a\ngit push origin :feature/b'
-    const accepted = await launch(`${ITEMS}${CITE_DELETE}${steps}`)
+    const lines = ['git push origin --delete refs/heads/feature/a', 'git push origin :refs/heads/feature/b', 'git branch -d feature/a']
+    const valid = `${ITEMS}${block(DELETE_ID, ...lines)}\nReport.`
+    const accepted = await launch(valid)
     expect(accepted.deny).toBeUndefined()
-    expect(String(accepted.result)).toContain('\nWARNING: sign-off allowed by signoff-delete-branches: delete-branch: git push origin --delete feature/a; git push origin :feature/b')
-    expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
-    for (const [prompt, title, listed, end] of [
-      [`${ITEMS}${CITE_DELETE}git push origin --delete main`, 'protected', 'a remote branch or tag deletion on line 3', CITE_HINT],
-      [`${ITEMS}${steps}`, 'uncited', 'a remote branch or tag deletion on line 2, a remote branch or tag deletion on line 3', CITE_HINT],
-      [`${ITEMS}${CITE_LEASE}${steps}`, 'other class', 'a remote branch or tag deletion on line 3, a remote branch or tag deletion on line 4', CITE_HINT],
-      [`${ITEMS}${CITE_DELETE}git push origin --delete feature/a\ngit branch -D feature/a`, 'branch -D', 'branch -D on line 4', '(never, do not, stop before) passes'],
+    expect(String(accepted.result).split('\n')).toContain(`WARNING: sign-off allowed by ${DELETE_ID}: delete-branch: ${lines.join('; ')}`)
+    expect(launched(world)).toBe(1)
+    for (const [prompt, title, deny] of [
+      [`${valid}\nThen git push origin --delete main.`, 'stray', `refused by the sign-off guard: the prompt instructs a remote branch or tag deletion on line 8 as a step for the worker;`],
+      [`${ITEMS}${block(DELETE_ID, lines[0] ?? '', 'git push origin --delete refs/heads/feature/a "develop"')}`, 'bad line', `refused by the sign-off guard: the signoff block on line 2 (signoff ${DELETE_ID}): its line 2 (line 4 of the prompt) is not one command in a form of the delete-branch class;`],
+      [`${ITEMS}Per ${DELETE_ID}: git push origin --delete refs/heads/feature/a`, 'old citation', 'refused by the sign-off guard: the prompt instructs a remote branch or tag deletion on line 2 as a step for the worker;'],
+      [`${ITEMS}${block(LEASE_ID, lines[0] ?? '')}`, 'other class', `refused by the sign-off guard: the signoff block on line 2 (signoff ${LEASE_ID}): its line 1 (line 3 of the prompt) is a delete-branch command, and ${LEASE_ID} covers force-push;`],
     ] as const) {
       const refused = await launch(prompt, title)
-      expect({ title, deny: refused.deny }).toEqual({ title, deny: expect.stringMatching(new RegExp(`^session-control: refused by the sign-off guard: the prompt instructs ${listed} as a step for the worker;.*${end.replace(/[()]/g, '\\$&')}; nothing was launched$`)) as never })
+      expect({ title, deny: refused.deny?.slice(0, 'session-control: '.length + deny.length) }).toEqual({ title, deny: `session-control: ${deny}` })
+      expect({ title, end: refused.deny?.endsWith('; nothing was launched') }).toEqual({ title, end: true })
     }
-    expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
-    world.files.delete(`${ORCH}/agreed-decisions.md`)
-    expect((await launch(`${ITEMS}${CITE_DELETE}${steps}`, 'no file')).deny).toContain('the prompt instructs a remote branch or tag deletion on line 3, a remote branch or tag deletion on line 4 as a step')
-    expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
+    expect(launched(world)).toBe(1)
+    const path = `${ORCH}/agreed-decisions.md`
+    const cannot = (why: string) => `session-control: refused by the sign-off guard: the signoff block on line 2 cannot be checked: the Standing decisions file could not be read: ${why}; nothing was launched`
+    // Over the read cap: the engine's read refuses it; its size says why.
+    seedDecisions(world, `${DECISIONS}${'x'.repeat(5_000_000)}`)
+    world.unreadable.add(path)
+    expect((await launch(valid, 'over the cap')).deny).toBe(cannot(`${path} holds 5000740 bytes, over the engine's read cap of 4194304 bytes`))
+    world.unreadable.delete(path)
+    world.files.delete(path)
+    expect((await launch(valid, 'missing')).deny).toBe(cannot(`${path} is not there`))
+    world.files.set(`${path}/inner`, 'x')
+    expect((await launch(valid, 'a folder')).deny).toBe(cannot(`${path} is no regular file (dir)`))
+    expect(launched(world)).toBe(1)
     // The trace: the id, the class and the count; never a branch or a command.
     const trace = world.files.get(`${RUNS}/trace.log`) ?? ''
-    const lines = trace.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
-    const allowed = lines.filter(line => line.event === 'guard' && line.allowedBy !== undefined)
+    const traced = trace.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    const allowed = traced.filter(line => line.event === 'guard' && line.allowedBy !== undefined)
     expect(allowed.map(({ tool, isOk, check, allowedBy, actionClass, commands }) => ({ tool, isOk, check, allowedBy, actionClass, commands }))).toEqual([
-      { tool: 'launch_worker', isOk: true, check: 'sign-off', allowedBy: 'signoff-delete-branches', actionClass: 'delete-branch', commands: 2 },
+      { tool: 'launch_worker', isOk: true, check: 'sign-off', allowedBy: DELETE_ID, actionClass: 'delete-branch', commands: 3 },
     ])
     expect(JSON.stringify(allowed)).not.toContain('feature/')
+  })
+
+  test('launch_worker: a block of 25 lines is named with 20 commands and the count; the trace counts all 25', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
+    const { world, call } = await started($, on)
+    seedDecisions(world)
+    const lines = Array.from({ length: 25 }, (_, at) => `git push origin --delete refs/heads/feature/n${at}`)
+    const answer = await launchOf(call)(`${ITEMS}${block(DELETE_ID, ...lines)}`)
+    expect(String(answer.result).split('\n')).toContain(`WARNING: sign-off allowed by ${DELETE_ID}: delete-branch: ${lines.slice(0, 20).join('; ')}; and 5 more (25 in all)`)
+    const traced = (world.files.get(`${RUNS}/trace.log`) ?? '').trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    expect(traced.filter(line => line.allowedBy !== undefined).map(line => line.commands)).toEqual([25])
   })
 
   test('the orchestrator session: its own deletion and force-push stay refused with the id in the command text', { options: OPTIONS }, async ($, on) => {
@@ -608,6 +912,7 @@ describe('a cited Standing go-ahead through the plugin', () => {
       'echo signoff-delete-branches && git push origin :feature/old',
       'git push --force-with-lease origin main # signoff-rewrite-root-author',
       'git branch -D feature/old # signoff-delete-branches',
+      `cat <<'EOF'\n\`\`\`signoff signoff-delete-branches\ngit push origin --delete refs/heads/feature/old\n\`\`\`\nEOF\ngit push origin --delete refs/heads/feature/old`,
     ]) {
       const answer = await call('Bash', { command })
       expect({ command, isPassed: answer.isPassed, refused: answer.deny?.startsWith('session-control: refused by the sign-off guard: git ') }).toEqual({ command, isPassed: false, refused: true })

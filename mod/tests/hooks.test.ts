@@ -955,11 +955,13 @@ describe('launch_worker', () => {
     }
   })
 
-  // A Standing go-ahead cited in the prompt (lint.ts, README Sign-off guard): read from the orchestrator's
-  // agreed-decisions.md on either host, it lets the cited class's commands through with a WARNING line; the rest stays refused.
-  describe('a cited Standing go-ahead, on both hosts', () => {
-    const CITED_DECISIONS = '# Agreed decisions\n\n## Standing\nscratch-delete-go. [signoff:delete-branch] User: delete merged scratch branches; never main.\nscratch-lease-go. [signoff:force-push] User: push main to origin with --force-with-lease once.\n'
-    const STEPS = 'Wait in the foreground; report git status -sb; no attribution.\ngit push origin --delete feature/a\ngit push origin :feature/b'
+  // A signoff block (lint.ts, README Sign-off guard): checked against the orchestrator's agreed-decisions.md on either
+  // host, read only for a prompt that holds one; its lines are launched with a WARNING line; the rest stays refused.
+  describe('a signoff block, on both hosts', () => {
+    const BLOCK_DECISIONS = '# Agreed decisions\n\n## Standing\nscratch-delete-go. [signoff:delete-branch] User: delete merged scratch branches; never main.\nscratch-lease-go. [signoff:force-push] User: push main to origin with --force-with-lease once.\n'
+    const HEAD = 'Wait in the foreground; report git status -sb; no attribution.'
+    const LINES = ['git push origin --delete refs/heads/feature/a', 'git push origin :refs/heads/feature/b']
+    const BLOCK = `${HEAD}\n\`\`\`signoff scratch-delete-go\n${LINES.join('\n')}\n\`\`\``
     const hosts = [
       { name: 'Linux', options: OPTIONS, env: { HOME }, dir: ORCH_DIR, launch: { dir: '/work/new', model: 'opus', effort: 'high', title: 'new' } },
       {
@@ -972,31 +974,47 @@ describe('launch_worker', () => {
     ] as const
 
     for (const host of hosts) {
-      test(`${host.name}: the cited deletions are launched with the WARNING line; without the citation, for main or for the other class they are refused and nothing runs`, { options: host.options }, async ($, on) => {
-        DECISIONS.text = CITED_DECISIONS
+      test(`${host.name}: a valid block is launched with the WARNING line; the old citation, a stray deletion, another class, a bad line and a decisions file not there or unreadable are refused and nothing runs`, { options: host.options }, async ($, on) => {
+        DECISIONS.text = BLOCK_DECISIONS
         try {
           const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
           await $.session.start(start(host.dir))
           const decisionReads = () => w.reads.filter(path => fixture(path) === `${ORCH_DIR}/agreed-decisions.md`).length
           const readsBefore = decisionReads()
           const launch = (prompt: string) => $.tool.call({ tool: TOOL, ...host.launch, prompt } as never)
-          for (const [prompt, listed] of [
-            [STEPS, 'a remote branch or tag deletion on line 2, a remote branch or tag deletion on line 3'],
-            [`Cited: scratch-lease-go.\n${STEPS}`, 'a remote branch or tag deletion on line 3, a remote branch or tag deletion on line 4'],
-            [`Cited: scratch-delete-go.\n${STEPS}\ngit push origin --delete main`, 'a remote branch or tag deletion on line 5'],
+          const DELETION = 'refused by the sign-off guard: the prompt instructs a remote branch or tag deletion'
+          for (const [prompt, start] of [
+            [`${HEAD}\n${LINES.join('\n')}`, `${DELETION} on line 2, a remote branch or tag deletion on line 3 as a step for the worker;`],
+            [`${HEAD}\nPer scratch-delete-go:\n${LINES.join('\n')}`, `${DELETION} on line 3, a remote branch or tag deletion on line 4 as a step for the worker;`],
+            [`${BLOCK}\nThen git push origin --delete main.`, `${DELETION} on line 6 as a step for the worker;`],
+            [BLOCK.replace('signoff scratch-delete-go', 'signoff scratch-lease-go'), 'refused by the sign-off guard: the signoff block on line 2 (signoff scratch-lease-go): its line 1 (line 3 of the prompt) is a delete-branch command, and scratch-lease-go covers force-push;'],
+            [BLOCK.replace('refs/heads/feature/b', 'refs/heads/feature/b "develop"'), 'refused by the sign-off guard: the signoff block on line 2 (signoff scratch-delete-go): its line 2 (line 4 of the prompt) is not one command in a form of the delete-branch class;'],
           ] as const) {
-            const refused = await launch(prompt)
-            expect({ listed, deny: String(refused.deny) }).toEqual({ listed, deny: expect.stringMatching(new RegExp(`^session-control: refused by the sign-off guard: the prompt instructs ${listed} as a step for the worker;.*cite its decision id in the prompt; nothing was launched$`)) as never })
+            const deny = String((await launch(prompt)).deny)
+            expect({ start, deny: deny.slice(0, 'session-control: '.length + start.length) }).toEqual({ start, deny: `session-control: ${start}` })
+            expect({ start, end: deny.endsWith('; nothing was launched') }).toEqual({ start, end: true })
           }
-          // A refusal no citation can lift reads no decisions file and carries no citation hint.
-          expect(String((await launch(`Cited: scratch-delete-go.\n${STEPS.split('\n')[0]}\ngit reset --hard`)).deny)).toEndWith('(never, do not, stop before) passes; nothing was launched')
+          // A refusal of the check outside the blocks ends with how a block is written when a block could cover the action.
+          expect(String((await launch(`${HEAD}\n${LINES[0]}`)).deny)).toEndWith('write its commands, one per line, in a fenced block whose info line is signoff <id>; nothing was launched')
+          expect(String((await launch(`${HEAD}\ngit reset --hard`)).deny)).toEndWith('(never, do not, stop before) passes; nothing was launched')
           expect([w.bash.length, w.powershell.length]).toEqual([0, 0])
-          const out = await launch(`Cited: scratch-delete-go.\n${STEPS}`)
+          // The decisions file is read for each prompt that holds a well-formed block, and for no other: three of them so far.
+          expect(decisionReads() - readsBefore).toBe(3)
+          const out = await launch(BLOCK)
           expect(out.deny).toBeUndefined()
           expect(String(out.result)).toContain('Launched pid 7001')
-          expect(String(out.result)).toEndWith('\nWARNING: sign-off allowed by scratch-delete-go: delete-branch: git push origin --delete feature/a; git push origin :feature/b')
-          // The decisions file is read once per launch whose first verdict a citation could lift: all four here.
+          expect(String(out.result)).toEndWith(`\nWARNING: sign-off allowed by scratch-delete-go: delete-branch: ${LINES.join('; ')}`)
           expect(decisionReads() - readsBefore).toBe(4)
+          const path = host.name === 'Windows' ? `C:${ORCH_DIR}/agreed-decisions.md` : `${ORCH_DIR}/agreed-decisions.md`
+          DECISIONS.text = undefined
+          expect(String((await launch(BLOCK)).deny)).toBe(`session-control: refused by the sign-off guard: the signoff block on line 2 cannot be checked: the Standing decisions file could not be read: ${path} is not there; nothing was launched`)
+          UNREADABLE.add(`${ORCH_DIR}/agreed-decisions.md`)
+          try {
+            expect(String((await launch(BLOCK)).deny)).toBe(`session-control: refused by the sign-off guard: the signoff block on line 2 cannot be checked: the Standing decisions file could not be read: ${path} is there but its read and its stat both failed; nothing was launched`)
+          } finally {
+            UNREADABLE.delete(`${ORCH_DIR}/agreed-decisions.md`)
+          }
+          expect(w.bash.length + w.powershell.length).toBe(1)
         } finally {
           DECISIONS.text = undefined
         }

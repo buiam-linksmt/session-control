@@ -92,13 +92,7 @@ export function promptLint(prompt: string): PromptLint {
  * (`at` to `end`: the flag, the refspec or the force-push word), and where the action's words start (`from`: the verb,
  * or `git` before it), which a governing no or without must stand right before.
  */
-type ActionHit = { label: string; at: number; end: number; from: number; command?: GitCommand }
-
-/**
- * A git command a VERB match found: every word after the verb up to where the command ends (no cap), its text from `git`
- * on, and the word its list goes on with after a comma, and or or (`--delete feature/a, main`), if any.
- */
-type GitCommand = { words: string[]; text: string; next?: string }
+type ActionHit = { label: string; at: number; end: number; from: number }
 
 /** git's own options before the subcommand, as a prompt writes them (`git -C /r push`, `git --no-pager push`). */
 const GIT_OPTIONS = String.raw`(?:\s+(?:-C|-c|--git-dir|--work-tree)(?:=|\s+)\S+|\s+--?[A-Za-z][\w-]*(?:=\S+)?)*`
@@ -130,18 +124,6 @@ function commandWords(sentence: string, from: number): Word[] {
   return [...(stop < 0 ? rest : rest.slice(0, stop)).matchAll(/\S+/g)].slice(0, 12).map(one => ({ word: one[0], at: from + (one.index ?? 0) }))
 }
 
-/** A command's list that goes on after it ends: a comma, and or or, then a word (its quotes and closing marks dropped). */
-const LIST_GOES_ON = /^(?:\s*,|\s+(?:and|or)\b)\s*[`"']?([^\s`"',;.!?)]+)/i
-
-/** The whole git command whose verb match starts at `start` and ends at `from`: its words up to COMMAND_END, uncapped, its text and the next word of its list. */
-function gitCommandOf(sentence: string, start: number, from: number): GitCommand {
-  const rest = sentence.slice(from)
-  const stop = rest.search(COMMAND_END)
-  const span = stop < 0 ? rest : rest.slice(0, stop)
-  const next = LIST_GOES_ON.exec(rest.slice(span.length))?.[1]
-  return { words: span.match(/\S+/g) ?? [], text: sentence.slice(start, from + span.length).trim(), ...(next === undefined ? {} : { next }) }
-}
-
 /**
  * The sign-off actions of the command a VERB match found. A short flag cluster (`-f`, `-d`, `-fd`) counts only after
  * `git` (a `-f` after make, tail or rm is no git flag), and so does every flag of clean (clean is an English word);
@@ -155,9 +137,8 @@ function verbActions(sentence: string, match: RegExpMatchArray): ActionHit[] {
   if (!isGit && PAST_BEFORE.test(sentence.slice(0, from))) return []
   const words = commandWords(sentence, from + match[0].length)
   const hits: ActionHit[] = []
-  const command = isGit ? gitCommandOf(sentence, from, from + match[0].length) : undefined
   const add = (label: string, one: Word | undefined) => {
-    if (one !== undefined) hits.push({ label, at: one.at, end: one.at + one.word.length, from, ...(command === undefined ? {} : { command }) })
+    if (one !== undefined) hits.push({ label, at: one.at, end: one.at + one.word.length, from })
   }
   const first = (test: (word: string) => boolean) => words.find(one => test(one.word))
   if (verb === 'push') {
@@ -316,117 +297,233 @@ function isNegatingHead(line: string): boolean {
 /** A code fence line. */
 const FENCE = /^\s*(?:```|~~~)/
 
-// ---------------------------------------------------------------- a cited Standing go-ahead (README, Sign-off guard)
+// ---------------------------------------------------------------- a Standing go-ahead and its signoff block (README, Sign-off guard)
 
-/** The action classes a Standing go-ahead lifts, each by the marker its line starts with (`[signoff:delete-branch]`). */
+/** The action classes a Standing go-ahead covers, each by the marker its line starts with (`[signoff:delete-branch]`). */
 export type SignoffClass = 'delete-branch' | 'force-push'
 
-/** A Standing go-ahead the prompt cites: its decision id, its class and the text of its line after the marker. */
-export type SignoffGrant = { id: string; actionClass: SignoffClass; text: string }
+/** A Standing go-ahead: its decision id, its class and the text of its line after the marker. */
+export type StandingGrant = { id: string; actionClass: SignoffClass; text: string }
+
+/** The decisions file as the launch read it, or why it could not be read. */
+export type StandingRead = { text: string } | { unreadable: string }
 
 /** A line of a Standing section that carries a marker: `<id>. [signoff:<class>] <text>`. */
 const GRANT_LINE = /^([A-Za-z0-9][\w-]*)\.\s+\[signoff:(delete-branch|force-push)\](.*)$/
+
+/** A Standing section's heading, in this case: `## Standing`, `## Standing:...` or `## Standing <text>`. */
+const STANDING_HEADING = /^## Standing(?:$|:| +\S)/
+
+/** A heading that ends a section: one or two `#` and a blank (a `###` heading stays inside it). */
+const SECTION_HEADING = /^#{1,2}(?:[ \t]|$)/
+
+/** A CommonMark fence line: up to three blanks, three or more backticks or tildes (group 1), the rest (group 2). */
+const FENCE_RUN = /^ {0,3}(`{3,}|~{3,})(.*)$/
+
+/** The run of marks a line opens a fenced block with, outside one; a backtick fence's info holds no backtick. */
+function fenceOpened(line: string): string | undefined {
+  const match = FENCE_RUN.exec(line)
+  if (match === null) return undefined
+  const [, run = '', info = ''] = match
+  return run.startsWith('`') && info.includes('`') ? undefined : run
+}
+
+/** Whether a line closes the fenced block `run` opened: the same mark, at least as many, nothing after but blanks. */
+function fenceCloses(run: string, line: string): boolean {
+  const match = FENCE_RUN.exec(line)
+  const [, marks = '', rest = ''] = match ?? []
+  return match !== null && marks[0] === run[0] && marks.length >= run.length && rest.trim() === ''
+}
+
+/**
+ * The Standing go-ahead lines of the decisions file: each line `<id>. [signoff:<class>] <text>` (GRANT_LINE, the
+ * marker right after the id) of a section whose heading is STANDING_HEADING, up to the next `#` or `##` heading;
+ * a line inside a fenced block is neither a heading nor a go-ahead. A leading byte order mark and CRLF or CR line
+ * ends are read as LF. An id counts once, from its first marked line.
+ */
+export function standingGrants(decisions: string): StandingGrant[] {
+  const grants: StandingGrant[] = []
+  let isStanding = false
+  let fence: string | undefined
+  for (const line of decisions.replace(/^\ufeff/, '').split(/\r\n|\r|\n/)) {
+    if (fence !== undefined) {
+      if (fenceCloses(fence, line)) fence = undefined
+      continue
+    }
+    fence = fenceOpened(line)
+    if (fence !== undefined) continue
+    if (SECTION_HEADING.test(line)) {
+      isStanding = STANDING_HEADING.test(line)
+      continue
+    }
+    const match = isStanding ? GRANT_LINE.exec(line) : null
+    if (match === null) continue
+    const [, id = '', actionClass = '', text = ''] = match
+    if (!grants.some(one => one.id === id)) grants.push({ id, actionClass: actionClass as SignoffClass, text })
+  }
+  return grants
+}
 
 const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /** Whether a text holds a word exactly: no letter, digit, `_` or `-` right before or after it. */
 const holdsWord = (text: string, word: string) => new RegExp(`(?<![\\w-])${escaped(word)}(?![\\w-])`).test(text)
 
+/** A word in any case, one character class per letter (`[mM][aA][iI][nN]`), so a form needs no `i` flag. */
+const anyCase = (word: string) => word.replace(/[A-Za-z]/g, letter => `[${letter.toLowerCase()}${letter.toUpperCase()}]`)
+const anyOf = (words: readonly string[]) => `(?:${words.map(anyCase).join('|')})`
+
+/** The branch names a signoff block never deletes, in any case (and release with anything under it). */
+const PROTECTED_NAMES = ['main', 'master', 'develop', 'release', 'head']
+
+/** git's first path segments of other namespaces and its special refs, in any case: a name starting with one reaches them through git's short ref paths. */
+const RESERVED_SEGMENTS = ['heads', 'tags', 'remotes', 'for', 'pull', 'notes', 'refs', 'changes', 'HEAD', 'FETCH_HEAD', 'ORIG_HEAD', 'MERGE_HEAD', 'CHERRY_PICK_HEAD']
+
+/** One segment of a name: a letter or digit, then letters, digits, `.`, `_` and `-`. */
+const SEGMENT = '[A-Za-z0-9][A-Za-z0-9._-]*'
+
 /**
- * The Standing go-ahead lines a prompt cites: each line of a `## Standing...` section of the decisions file (up to the
- * next `## ` heading) that starts with its id and a marker, whose id the prompt holds as a whole word. No file, no grant.
+ * A literal branch name, the last word of its line: segments joined by one `/`; no `..`, no segment that ends in `.`
+ * or `.lock`; never a protected name or release/..., never one whose first segment is reserved (in any case), so a
+ * name cannot reach another namespace through git's short ref paths.
  */
-export function signoffGrants(prompt: string, decisions: string | undefined): SignoffGrant[] {
-  const grants: SignoffGrant[] = []
-  let isStanding = false
-  for (const line of (decisions ?? '').split(/\r?\n/)) {
-    if (line.startsWith('## ')) {
-      isStanding = /^standing\b/i.test(line.slice(3).trim())
+const NAME = String.raw`(?!${anyOf(RESERVED_SEGMENTS)}(?:/|$))(?!${anyOf(PROTECTED_NAMES)}$)(?!${anyCase('release')}/)(?!.*\.\.)(?!.*\.(?:/|$))(?!.*\.${anyCase('lock')}(?:/|$))${SEGMENT}(?:/${SEGMENT})*`
+
+/** A remote: one literal name (no path, no URL), never a protected name or a reserved segment. */
+const REMOTE = `(?!(?:${anyOf(PROTECTED_NAMES)}|${anyOf(RESERVED_SEGMENTS)}) )${SEGMENT}`
+
+/**
+ * The lines a signoff block takes: one anchored regular expression for each whole line, by class; group 1 is the
+ * remote of a push. A remote branch deletion names one remote and one branch as `refs/heads/<name>` (git resolves a bare
+ * name against every ref of the remote: with no such branch it deletes a tag or another ref of that name); a local one
+ * names a bare `<name>` (git branch looks only among the branches); the leased push takes `main` to one remote, the
+ * flag bare, `=main` or `=refs/heads/main`.
+ */
+export const BLOCK_FORMS: readonly { actionClass: SignoffClass; form: RegExp }[] = [
+  { actionClass: 'delete-branch', form: new RegExp(`^git push (${REMOTE}) --delete refs/heads/${NAME}$`) },
+  { actionClass: 'delete-branch', form: new RegExp(`^git push (${REMOTE}) :refs/heads/${NAME}$`) },
+  { actionClass: 'delete-branch', form: new RegExp(`^git branch -d ${NAME}$`) },
+  { actionClass: 'force-push', form: new RegExp(`^git push --force-with-lease(?:=main|=refs/heads/main)? (${REMOTE}) main$`) },
+]
+
+/** The class and the remote of a line one form of BLOCK_FORMS takes whole; undefined for any other line. */
+function lineForm(line: string): { actionClass: SignoffClass; remote?: string } | undefined {
+  for (const one of BLOCK_FORMS) {
+    const match = one.form.exec(line)
+    if (match !== null) return { actionClass: one.actionClass, ...(match[1] === undefined ? {} : { remote: match[1] }) }
+  }
+  return undefined
+}
+
+/** A signoff block's opening line: three backticks at the start of the line, `signoff`, one blank, the decision id, nothing more. */
+const BLOCK_OPEN = /^```signoff ([A-Za-z0-9][\w-]*)$/
+
+/** The line that closes a signoff block: exactly three backticks. */
+const BLOCK_CLOSE = '```'
+
+/** The most lines a signoff block holds. */
+export const BLOCK_MAX_LINES = 100
+
+/** The most commands of a go-ahead its warning line lists before their count. */
+export const WARNED_COMMANDS = 20
+
+/**
+ * A line written as a signoff block's opening line, once format characters (a zero-width space) are dropped: three or
+ * more marks that are no ASCII letter, digit or blank (backticks, tildes, their lookalikes, after a quote's `>`), then
+ * signoff in any case, also with up to three such marks between sign and off (sign-off, sign off, a lookalike hyphen).
+ */
+const NEAR_OPEN = /^[\s>]*[^A-Za-z0-9\s]{3,}\s*sign[^A-Za-z0-9]{0,3}off/iu
+
+/** Why a line written as an opening line (NEAR_OPEN) is not one (BLOCK_OPEN), the first reason that applies. */
+function nearOpenFault(line: string): string {
+  if (line.includes('\r')) return 'it ends with a carriage return (a prompt with CRLF line ends holds no signoff block)'
+  if (line.includes('\t')) return 'it holds a tab'
+  if (/\p{Cf}/u.test(line)) return 'it holds an invisible format character (a zero-width space, say)'
+  if (/[^\x20-\x7e]/.test(line)) return 'it holds a character that is not printable ASCII (a lookalike of a backtick, a letter or a blank)'
+  if (/^[\s>]/.test(line)) return 'it does not start at the start of the line (an indented or quoted fence)'
+  if (!line.startsWith('```')) return 'its fence is not three backticks'
+  if (line.startsWith('````')) return 'its fence has more than three backticks'
+  if (!line.startsWith('```signoff')) return 'its info line does not start with the word signoff, in lower case, right after the backticks'
+  return 'its info line is not exactly the word signoff, one blank and one decision id (no other word, no trailing blank)'
+}
+
+/** A signoff block: the decision id its opening line cites, that line's index, and its lines with their indexes. */
+type SignoffBlock = { id: string; open: number; body: { text: string; index: number }[] }
+
+/**
+ * The signoff blocks among a prompt's first `ownLines` lines, outside fenced blocks (fenceOpened, fenceCloses): an
+ * opening line (BLOCK_OPEN) up to the next line of exactly three backticks. Or the first line that breaks the syntax and
+ * why: an opening line no such line closes (an unterminated block is no block), or a line written as an opening line
+ * that is not one (NEAR_OPEN). An opening line inside another fenced block is no block, and its lines are prose.
+ */
+function signoffBlocks(lines: readonly string[], ownLines: number): { blocks: SignoffBlock[]; broken?: { index: number; why: string } } {
+  const blocks: SignoffBlock[] = []
+  const end = Math.min(lines.length, ownLines)
+  let fence: string | undefined
+  for (let index = 0; index < end; index++) {
+    const line = lines[index] ?? ''
+    if (fence !== undefined) {
+      if (fenceCloses(fence, line)) fence = undefined
       continue
     }
-    const match = isStanding ? GRANT_LINE.exec(line) : null
-    if (match === null) continue
-    const [, id = '', actionClass = '', text = ''] = match
-    if (!grants.some(one => one.id === id) && holdsWord(prompt, id)) grants.push({ id, actionClass: actionClass as SignoffClass, text })
+    const id = BLOCK_OPEN.exec(line)?.[1]
+    if (id !== undefined) {
+      const close = lines.indexOf(BLOCK_CLOSE, index + 1)
+      if (close < 0 || close >= end) return { blocks, broken: { index, why: 'opens a signoff block that no line of exactly three backticks closes' } }
+      blocks.push({ id, open: index, body: lines.slice(index + 1, close).map((text, at) => ({ text, index: index + 1 + at })) })
+      index = close
+      continue
+    }
+    if (NEAR_OPEN.test(line.replace(/\p{Cf}/gu, ''))) return { blocks, broken: { index, why: `is written as a signoff block's opening line but is not exactly \`\`\`signoff <id>: ${nearOpenFault(line)}` } }
+    fence = fenceOpened(line)
   }
-  return grants
+  return { blocks }
 }
 
-/** A literal remote: a name, a path or a URL; no `$`, backtick, glob or quote. */
-const LITERAL_REMOTE = /^[\w./@][\w./@:+-]*$/
-
-/** A literal branch name: no `$`, backtick, glob, `:`, `~`, `^`, `..`, `//` or `@{`, no trailing `/`, `.` or `.lock`. */
-const LITERAL_BRANCH = /^(?!.*\.\.)(?!.*\/\/)(?!.*(?:\/|\.|\.lock)$)[\w][\w./-]*$/
-
-/** A protected branch: main, master, develop, HEAD, release and release/..., in any case. */
-const PROTECTED_BRANCH = /^(?:main|master|develop|head|release(?:\/.*)?)$/i
-
-/** Whether a ref a deletion names is a literal branch other than a protected one; `refs/heads/` may stand before it, no other `refs/`, never `tag`. */
-function isDeletableBranch(ref: string): boolean {
-  const name = /^refs\/heads\//i.test(ref) ? ref.slice('refs/heads/'.length) : ref
-  return !/^refs\//i.test(name) && name.toLowerCase() !== 'tag' && LITERAL_BRANCH.test(name) && !PROTECTED_BRANCH.test(name)
+/** Whether the first `ownLines` lines of a prompt hold a well-formed signoff block, which the decisions file is read for. */
+export function hasSignoffBlock(prompt: string, ownLines = Number.POSITIVE_INFINITY): boolean {
+  const scan = signoffBlocks(prompt.split('\n'), ownLines)
+  return scan.broken === undefined && scan.blocks.length > 0
 }
 
 /**
- * A remote branch deletion of the delete-branch class: `git push <remote> --delete <branch>...` (or `-d`, the flag
- * anywhere) or `git push <remote> :<branch>...`, each branch literal and not protected (isDeletableBranch), no other
- * option, at least one branch.
+ * What is wrong with a signoff block, checked against the Standing go-ahead lines: its id on none of them, no line,
+ * more than BLOCK_MAX_LINES lines, or, at its first such line, a line no form takes whole (BLOCK_FORMS), a line of the
+ * other class, or a leased push to a remote the go-ahead's line does not hold as a word. Undefined when nothing is.
  */
-function fitsBranchDeletion(words: readonly string[]): boolean {
-  const flags = words.filter(one => one.startsWith('-'))
-  const isFlagged = flags.length === 1 && (flags[0] === '--delete' || flags[0] === '-d')
-  if (flags.length > (isFlagged ? 1 : 0)) return false
-  const [remote, ...refs] = words.filter(one => !one.startsWith('-'))
-  if (remote === undefined || !LITERAL_REMOTE.test(remote) || refs.length === 0) return false
-  return refs.every(ref => (isFlagged ? isDeletableBranch(ref) : ref.startsWith(':') && isDeletableBranch(ref.slice(1))))
+function blockFault(block: SignoffBlock, grants: readonly StandingGrant[]): string | undefined {
+  const grant = grants.find(one => one.id === block.id)
+  if (grant === undefined) return `${block.id} is on no line of a Standing section as \`${block.id}. [signoff:<class>] <text>\` (the marker right after the id)`
+  if (block.body.length === 0) return 'it holds no command'
+  if (block.body.length > BLOCK_MAX_LINES) return `it holds ${block.body.length} lines, more than ${BLOCK_MAX_LINES}`
+  for (const [at, line] of block.body.entries()) {
+    const where = `its line ${at + 1} (line ${line.index + 1} of the prompt)`
+    const form = lineForm(line.text)
+    if (form === undefined) return `${where} is ${line.text === '' ? 'empty' : `not one command in a form of the ${grant.actionClass} class`}`
+    if (form.actionClass !== grant.actionClass) return `${where} is a ${form.actionClass} command, and ${block.id} covers ${grant.actionClass}`
+    if (form.remote !== undefined && form.actionClass === 'force-push' && !holdsWord(grant.text, form.remote)) return `${where} pushes to ${form.remote}, a word the line of ${block.id} does not hold`
+  }
+  return undefined
 }
 
-/** The one force-push flag the force-push class takes: `--force-with-lease`, `=main` or `=refs/heads/main`, then `:<expect>`. */
-const LEASE = /^--force-with-lease(?:=(?:refs\/heads\/)?main(?::[\w./-]+)?)?$/
+/** What a signoff block's refusal ends with: the forms its lines may take. */
+const BLOCK_FORMS_TEXT =
+  'a signoff block holds one command per line, nothing else, each of the class of its go-ahead: git push <remote> --delete refs/heads/<name>, git push <remote> :refs/heads/<name> or git branch -d <name> for delete-branch, git push --force-with-lease <remote> main for force-push (README, Sign-off guard)'
 
-/**
- * A history-rewriting push of the force-push class: `git push --force-with-lease[=main[:<expect>]] <remote> main` (or
- * `main:main`; the flag anywhere), the remote a name the go-ahead's line holds, no other option or refspec.
- */
-function fitsLeasedMainPush(words: readonly string[], text: string): boolean {
-  const flags = words.filter(one => one.startsWith('-'))
-  const [remote, refspec, ...more] = words.filter(one => !one.startsWith('-'))
-  if (flags.length !== 1 || !LEASE.test(flags[0] ?? '') || more.length > 0 || remote === undefined) return false
-  return (refspec === 'main' || refspec === 'main:main') && LITERAL_REMOTE.test(remote) && holdsWord(text, remote)
-}
-
-/** The class of the refusal labels a go-ahead can lift. */
+/** The class of the refusal labels a signoff block can cover. */
 const CLASS_OF: Readonly<Record<string, SignoffClass>> = { 'a remote branch or tag deletion': 'delete-branch', 'a force-push': 'force-push' }
 
-/**
- * Whether the word a command's list goes on with may name what the class never allows: a protected branch, a name that
- * is not literal (a glob, `$`), and for the force-push class also any ref (a `/`, a `:` or a leading `+`).
- */
-function isOutsideList(next: string | undefined, actionClass: SignoffClass): boolean {
-  if (next === undefined) return false
-  const name = /^refs\/heads\//i.test(next) ? next.slice('refs/heads/'.length) : next
-  return PROTECTED_BRANCH.test(name) || !LITERAL_BRANCH.test(name) || (actionClass === 'force-push' && /[/:]|^\+/.test(next))
-}
+/** What the refusal of a deletion or a force-push ends with: how a recorded Standing go-ahead is used. */
+export const BLOCK_HINT = 'to authorise a class the user has recorded a Standing go-ahead for, write its commands, one per line, in a fenced block whose info line is signoff <id>'
 
-/**
- * The go-ahead that lifts an action: the first cited one of its class whose form the action's whole git push command
- * fits, unless the sentence lists more after the command that the class never allows (isOutsideList).
- */
-function grantFor(action: ActionHit, grants: readonly SignoffGrant[]): SignoffGrant | undefined {
-  const actionClass = CLASS_OF[action.label]
-  const command = action.command
-  // Both labels come from a push only (verbActions); the force-push words carry no command and are never lifted.
-  if (actionClass === undefined || command === undefined || isOutsideList(command.next, actionClass)) return undefined
-  return grants.find(one => one.actionClass === actionClass && (actionClass === 'delete-branch' ? fitsBranchDeletion(command.words) : fitsLeasedMainPush(command.words, one.text)))
-}
-
-/** What the refusal of a deletion or a force-push ends with: how a recorded Standing go-ahead is cited. */
-export const CITE_HINT = 'to authorise a class the user has recorded a Standing go-ahead for, cite its decision id in the prompt'
-
-/** What a cited go-ahead allowed: its id, its class and the commands it lifted, each once. */
+/** What a signoff block allowed: the go-ahead's id, its class and every command of its blocks, in order. */
 export type SignoffAllowed = { id: string; actionClass: SignoffClass; commands: string[] }
 
-export type SignoffLint = { refusal?: string; warnings: string[]; isCitable?: true; allowed?: SignoffAllowed[] }
+export type SignoffLint = { refusal?: string; warnings: string[]; allowed?: SignoffAllowed[] }
+
+/** The commands of a warning line: all of them up to WARNED_COMMANDS, else that many and how many more. */
+const commandsShown = (commands: readonly string[]) =>
+  commands.length <= WARNED_COMMANDS ? commands.join('; ') : `${commands.slice(0, WARNED_COMMANDS).join('; ')}; and ${commands.length - WARNED_COMMANDS} more (${commands.length} in all)`
 
 /**
  * The sign-off guard on a worker prompt: each action of the sign-off list (a force-push, a remote branch or tag
@@ -435,17 +532,42 @@ export type SignoffLint = { refusal?: string; warnings: string[]; isCitable?: tr
  * negates it (isNegatedAt), when it is an item of a list under a negating head line (isNegatingHead) with no contrast
  * word before it in the item, and when it is a quoted example (isQuotedExample) or a line of a fenced block whose
  * line before holds an introducing word or is a negating head. A skill test is not exempt. A slip guard: it reads words.
- * A remote branch deletion or a force-push whose whole git command fits the class of a cited Standing go-ahead
- * (`grants`, signoffGrants; grantFor) passes too, and is named in a warning; every other action keeps its refusal.
+ *
+ * A signoff block (signoffBlocks) among the first `ownLines` lines, the prompt as given, is checked first, against the
+ * Standing go-ahead lines of `standing` (standingGrants; blockFault): a broken block, a decisions file that could not
+ * be read or a fault refuses the launch. The lines of sound blocks are left out of the check above, recorded and named in
+ * one warning line per go-ahead; every other line is checked as above, whatever id it names.
  */
-export function signoffLint(prompt: string, grants: readonly SignoffGrant[] = []): SignoffLint {
-  const found: { label: string; line: number }[] = []
+export function signoffLint(prompt: string, standing?: StandingRead, ownLines = Number.POSITIVE_INFINITY): SignoffLint {
+  const lines = prompt.split('\n')
+  const scan = signoffBlocks(lines, ownLines)
+  if (scan.broken !== undefined) return { refusal: `refused by the sign-off guard: line ${scan.broken.index + 1} ${scan.broken.why}; ${BLOCK_FORMS_TEXT}`, warnings: [] }
   const allowed: SignoffAllowed[] = []
+  const blockLines = new Set<number>()
+  const [first] = scan.blocks
+  if (first !== undefined) {
+    if (standing === undefined || 'unreadable' in standing) {
+      const why = standing === undefined ? 'it was not read' : standing.unreadable
+      return { refusal: `refused by the sign-off guard: the signoff block on line ${first.open + 1} cannot be checked: the Standing decisions file could not be read: ${why}`, warnings: [] }
+    }
+    const grants = standingGrants(standing.text)
+    for (const block of scan.blocks) {
+      const fault = blockFault(block, grants)
+      if (fault !== undefined) return { refusal: `refused by the sign-off guard: the signoff block on line ${block.open + 1} (signoff ${block.id}): ${fault}; ${BLOCK_FORMS_TEXT}`, warnings: [] }
+      const actionClass = grants.find(one => one.id === block.id)?.actionClass ?? 'delete-branch'
+      const one = allowed.find(each => each.id === block.id)
+      const commands = block.body.map(line => line.text)
+      if (one === undefined) allowed.push({ id: block.id, actionClass, commands })
+      else one.commands.push(...commands)
+      for (const line of block.body) blockLines.add(line.index)
+    }
+  }
+  const found: { label: string; line: number }[] = []
   const warned = new Set<string>()
   let fence: { isExample: boolean } | undefined
   let list: { headIndent: number } | undefined
   let previous = ''
-  for (const [index, line] of prompt.split('\n').entries()) {
+  for (const [index, line] of lines.entries()) {
     if (FENCE.test(line)) {
       fence = fence === undefined ? { isExample: INTRODUCER.test(previous) || isNegatingHead(previous) } : undefined
       list = undefined
@@ -461,19 +583,14 @@ export function signoffLint(prompt: string, grants: readonly SignoffGrant[] = []
     const indent = (/^\s*/.exec(line)?.[0] ?? '').length
     if (list !== undefined && !(bullet !== null ? indent > list.headIndent : indent > Math.max(list.headIndent, 0))) list = undefined
     const isListed = list !== undefined
+    // A line of a sound signoff block: its form was matched whole (blockFault), so only the push warning reads it.
+    const isBlockLine = blockLines.has(index)
     for (const range of sentenceRanges(line)) {
       const sentence = line.slice(range.start, range.end)
-      for (const action of actionsOf(sentence)) {
+      for (const action of isBlockLine ? [] : actionsOf(sentence)) {
         if (isNegatedAt(sentence, action.at, action.end, action.from)) continue
         if (isListed && !HAS_CONTRAST.test(line.slice(0, range.start + action.at))) continue
         if (isQuotedExample(line, range.start, range.start + action.at)) continue
-        const grant = grantFor(action, grants)
-        if (grant !== undefined && action.command !== undefined) {
-          const one = allowed.find(each => each.id === grant.id && each.actionClass === grant.actionClass)
-          if (one === undefined) allowed.push({ id: grant.id, actionClass: grant.actionClass, commands: [action.command.text] })
-          else if (!one.commands.includes(action.command.text)) one.commands.push(action.command.text)
-          continue
-        }
         if (!found.some(one => one.label === action.label && one.line === index + 1)) found.push({ label: action.label, line: index + 1 })
       }
       for (const match of sentence.matchAll(PROTECTED_PUSH)) {
@@ -487,16 +604,15 @@ export function signoffLint(prompt: string, grants: readonly SignoffGrant[] = []
   const warnings = [...warned].sort().map(branch => `the prompt names a push to ${branch}: a push to a protected branch needs the user's go-ahead where the project's push policy asks (a Standing decision push-<project>); check it before the worker pushes`)
   if (found.length === 0) {
     if (allowed.length === 0) return { warnings }
-    return { warnings: [...warnings, ...allowed.map(one => `sign-off allowed by ${one.id}: ${one.actionClass}: ${one.commands.join('; ')}`)], allowed }
+    return { warnings: [...warnings, ...allowed.map(one => `sign-off allowed by ${one.id}: ${one.actionClass}: ${commandsShown(one.commands)}`)], allowed }
   }
   const listed = found.map(one => `${one.label} on line ${one.line}`).join(', ')
-  const isCitable = found.some(one => CLASS_OF[one.label] !== undefined)
+  const isCoverable = found.some(one => CLASS_OF[one.label] !== undefined)
   return {
     refusal:
       `refused by the sign-off guard: the prompt instructs ${listed} as a step for the worker; that needs the user's go-ahead in this conversation, a sign-off item the mod cannot see. ` +
       'Raise an open point for the go-ahead and launch without the step; with the go-ahead the user runs it or says how, and a prompt may tell the worker to stop before it and report. ' +
-      `A sentence that tells the worker not to do it (never, do not, stop before) passes${isCitable ? `; ${CITE_HINT}` : ''}`,
+      `A sentence that tells the worker not to do it (never, do not, stop before) passes${isCoverable ? `; ${BLOCK_HINT}` : ''}`,
     warnings,
-    ...(isCitable ? { isCitable: true as const } : {}),
   }
 }
