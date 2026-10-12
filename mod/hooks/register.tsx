@@ -378,18 +378,23 @@ let trackingToasted: { text: string; seenAt: number } | undefined
 const TRACKING_QUIET_MS = 600_000
 /**
  * On a surface other than the terminal (the desktop app's Code tab, a phone, an editor) a plugin's newer toast takes the
- * place of its toast on show, so a notice toast raised in the same pass replaced the completion toast ("Session
- * finished" never seen). There a completion toast is read for its whole time: while one shows (toastHold, its timer),
- * the notice toasts, the summary of those past their cap and the next completion toasts wait in heldToasts, in order, and
- * go out when it ends (a completion among them holds the rest again); at most TOASTS_HELD_MAX wait, past that the oldest
- * goes. The terminal's stack draws a plugin's toasts together: there nothing is held. The tracking, trace and Node
- * helper toasts are never held. `isToastHeldHere` says whether such a surface is drawn on: read at the board's start and
- * at each poll ($.session.surfaces()).
+ * place of its toast on show, so of toasts raised together only the last was seen ("Session finished" replaced by a
+ * notice toast of the same pass). There each completion, notice and summary toast shows for TOAST_SHOW_MS (the 8 s of a
+ * completion toast) before the next goes out: while one shows (toastHold, its timer) the toasts raised after it wait in
+ * heldToasts, in order, at most TOAST_QUEUE_MAX. Past that the newest waiting notice toast (a completion toast only when
+ * nothing else waits) is folded into one summary toast, `N more notices: see the next prompt`, which goes out after the
+ * waiting ones (queueMore, its count); the summary of the notices past their per-source cap joins that count. The
+ * terminal's stack draws a plugin's toasts together: there nothing waits. The tracking, trace and Node helper toasts
+ * never wait. `isToastHeldHere` says whether such a surface is drawn on: read at the board's start and at each poll
+ * ($.session.surfaces()).
  */
+type HeldToast = { text: string; timeoutMs: number; isCompletion: boolean; more: number }
 let toastHold: { cancel: () => void } | undefined
-let heldToasts: { text: string; timeoutMs: number; isCompletion: boolean }[] = []
+let heldToasts: HeldToast[] = []
+let queueMore = 0
 let isToastHeldHere = false
-const TOASTS_HELD_MAX = 50
+const TOAST_SHOW_MS = 8000
+const TOAST_QUEUE_MAX = 5
 /**
  * Whether a call is probing now: at most one `claude -p /usage` runs at a time, across calls too. A call that finds one
  * running does not wait for it (a wait on another call's work would count against the hook's own 10 s budget): it
@@ -771,17 +776,31 @@ const shortIds = (ids: readonly string[]) => (ids.length === 0 ? 'none' : ids.ma
 const writeFailed = (why: string) => `registry write FAILED: ${why.slice(0, 120)}`
 
 /**
- * A completion, notice or summary toast: shown now, or held while a completion toast shows (toastHold). On a surface
- * other than the terminal a completion toast holds the ones after it for its own time.
+ * A completion, notice or summary toast (`more`: the notices a summary tells): shown now, or queued while another shows
+ * (toastHold), which on a surface other than the terminal each one does for TOAST_SHOW_MS.
  */
-function raiseToast($: EngineInterface, text: string, timeoutMs: number, isCompletion = false): void {
-  if (toastHold !== undefined) {
-    heldToasts.push({ text, timeoutMs, isCompletion })
-    if (heldToasts.length > TOASTS_HELD_MAX) heldToasts.shift()
+function raiseToast($: EngineInterface, text: string, timeoutMs: number, isCompletion = false, more = 0): void {
+  if (toastHold === undefined) {
+    showToast($, { text, timeoutMs, isCompletion, more })
     return
   }
-  $.ui.toast(text, { timeoutMs })
-  if (isCompletion && isToastHeldHere) holdToasts($, timeoutMs)
+  // A summary joins the queue's own: one summary toast after the waiting ones.
+  if (more > 0) {
+    queueMore += more
+    return
+  }
+  heldToasts.push({ text, timeoutMs, isCompletion, more })
+  while (heldToasts.length > TOAST_QUEUE_MAX) {
+    const notice = heldToasts.findLastIndex(one => !one.isCompletion)
+    heldToasts.splice(notice === -1 ? heldToasts.length - 1 : notice, 1)
+    queueMore += 1
+  }
+}
+
+/** Shows one toast; on a surface other than the terminal the next waits for its TOAST_SHOW_MS. */
+function showToast($: EngineInterface, one: HeldToast): void {
+  $.ui.toast(one.text, { timeoutMs: one.timeoutMs })
+  if (isToastHeldHere) holdToasts($)
 }
 
 /** Whether the session draws on a surface other than the terminal, where a completion toast holds the next ones. */
@@ -789,15 +808,27 @@ async function readToastSurfaces($: EngineInterface): Promise<void> {
   isToastHeldHere = (await $.session.surfaces().catch(() => [] as const)).some(one => one !== 'terminal')
 }
 
-/** Holds the toasts after a completion toast for its time, then lets the held ones out in order. */
-function holdToasts($: EngineInterface, timeoutMs: number): void {
-  toastHold = $.clock.after(timeoutMs, () => {
+/**
+ * Holds the toasts after the one shown for TOAST_SHOW_MS, then lets out the next waiting one, then the summary of those
+ * folded; all that wait at once when the session no longer draws on such a surface.
+ */
+function holdToasts($: EngineInterface): void {
+  toastHold = $.clock.after(TOAST_SHOW_MS, () => {
     toastHold = undefined
-    while (toastHold === undefined && heldToasts.length > 0) {
-      const one = heldToasts.shift()
-      if (one !== undefined) raiseToast($, one.text, one.timeoutMs, one.isCompletion)
+    while (toastHold === undefined) {
+      const one = heldToasts.shift() ?? foldedSummary()
+      if (one === undefined) return
+      showToast($, one)
     }
   })
+}
+
+/** The summary toast of the toasts folded past the queue's cap, once; undefined when none was. */
+function foldedSummary(): HeldToast | undefined {
+  if (queueMore === 0) return undefined
+  const more = queueMore
+  queueMore = 0
+  return { text: toastText(TOAST_TITLES.moreNotices, moreToastText(more)), timeoutMs: 10000, isCompletion: false, more }
 }
 
 /** A worker whose recorded pid is gone: classify, maybe merge into the registry, toast. */
@@ -934,7 +965,7 @@ async function secretsAnswered($: EngineInterface, entry: SessionEntry, answer: 
 /** The one summary toast of the notices past their toast cap, when there were any. */
 function toastMore($: EngineInterface, toasts: ToastBudget): void {
   if (toasts.more === 0) return
-  raiseToast($, toastText(TOAST_TITLES.moreNotices, moreToastText(toasts.more)), 10000)
+  raiseToast($, toastText(TOAST_TITLES.moreNotices, moreToastText(toasts.more)), 10000, false, toasts.more)
   toasts.more = 0
 }
 
@@ -2703,6 +2734,7 @@ export const register: Register = (on, options) => {
   trackingToasted = undefined
   toastHold = undefined
   heldToasts = []
+  queueMore = 0
   isToastHeldHere = false
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),

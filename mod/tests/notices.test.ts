@@ -378,7 +378,15 @@ describe('toast order on a surface other than the terminal (decision mod-28)', (
     await world.clock.advance(7999)
     expect(world.toasts).toEqual([COMPLETION])
     await world.clock.advance(1)
+    // Then one toast each time the one before has shown for its 8 s, in order.
+    expect(world.toasts).toEqual([COMPLETION, READY[0]])
+    await world.clock.advance(8000)
+    expect(world.toasts).toEqual([COMPLETION, ...READY])
+    await world.clock.advance(8000)
+    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE])
+    await world.clock.advance(8000)
     expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, HOUSEKEEPING])
+    await world.clock.advance(8000)
     // Nothing waits any more: a later notice toast goes out at once.
     await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-next', status: 'done' } as never)
     await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-id8', status: 'done' } as never)
@@ -396,12 +404,93 @@ describe('toast order on a surface other than the terminal (decision mod-28)', (
     await start($)
     const secondToast = COMPLETION.replace('unit worker', 'second worker')
     expect(world.toasts).toEqual([COMPLETION])
-    await world.clock.advance(8000)
-    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast])
+    // The notice toasts of the first harvest, one each 8 s, then the second completion, which holds the next in turn.
+    for (const [at, shown] of [[8000, 2], [16000, 3], [24000, 4], [32000, 5]] as const) {
+      await world.clock.set(NOW_MS + at)
+      expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast].slice(0, shown))
+    }
     await world.clock.advance(7999)
     expect(world.toasts.length).toBe(5)
     await world.clock.advance(1)
     expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast, HOUSEKEEPING])
+  })
+
+  /** Three open points two days old: three open-point-age notices of one pass, the poll's cap. */
+  const threePoints = (world: World) => {
+    const raised = localDate(NOW_MS - 2 * 86_400_000)
+    const ids = ['op-a', 'op-b', 'op-c']
+    seed(world, { points: ids.map(id => ({ id, status: 'open', raised, title: `Point ${id}` })) })
+    return ids.map(id => `Open point waiting \u00B7 open point ${id} (raised ${raised}) is still open: Point ${id}`)
+  }
+
+  test('on the desktop three notice toasts raised together come out one after another, each once the one before has shown for 8 s', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    drawsOn(on, ['desktop'])
+    const waiting = threePoints(world)
+    await start($)
+    expect(world.toasts).toEqual(waiting.slice(0, 1))
+    // The model has every line at once: only the toasts wait.
+    expect(noticeLines(await userPrompt($)).length).toBe(3)
+    await world.clock.advance(7999)
+    expect(world.toasts).toEqual(waiting.slice(0, 1))
+    await world.clock.advance(1)
+    expect(world.toasts).toEqual(waiting.slice(0, 2))
+    await world.clock.advance(7999)
+    expect(world.toasts).toEqual(waiting.slice(0, 2))
+    await world.clock.advance(1)
+    expect(world.toasts).toEqual(waiting)
+    await world.clock.advance(8000)
+    expect(world.toasts).toEqual(waiting)
+  })
+
+  test('on the terminal the same three notice toasts go out together, at once, as before', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    drawsOn(on, ['terminal'])
+    const waiting = threePoints(world)
+    await start($)
+    expect(world.toasts).toEqual(waiting)
+  })
+
+  test('on the desktop at most 5 toasts wait: past that the newest waiting notice toast is folded into one summary toast after them, with the notices past their per-source cap; a completion toast keeps its place', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    drawsOn(on, ['desktop'])
+    const more = (id: string) => ({ id, status: 'queued', title: `More ${id}`, waits_for: 'w-unit-worker-261011090000 to finish' })
+    const second = { ...UNIT_ENTRY, title: 'second worker', pid: 4301, session_id: SID_FREE, name: 'w-second-worker-261011090000', section: undefined, result_file: `${RUNS}/second.json` }
+    const third = { ...UNIT_ENTRY, title: 'third worker', pid: 4302, session_id: SID_KEPT, name: 'w-third-worker-261011090000', section: undefined, result_file: `${RUNS}/third.json` }
+    const live = seedLiveWorker(world, SID_LIVE)
+    seed(world, { entries: [UNIT_ENTRY, second, third, live], queue: [...QUEUE, more('q-third'), more('q-fourth')] })
+    for (const file of ['unit', 'second', 'third', 'live']) world.files.set(`${RUNS}/${file}.json`, RESULTS.clean)
+    await start($)
+    const finished = (who: string) => COMPLETION.replace('unit worker', who)
+    const thirdReady = 'Queued task ready \u00B7 queued task q-third waited for w-unit-worker-261011090000, which finished'
+    // The first harvest: its completion shows; three of its five notices (the source's cap) wait with the next two
+    // completions, the other two go to the summary.
+    expect(world.toasts).toEqual([COMPLETION])
+    // The live worker ends before the poll's first tick: its completion comes to a full queue and takes the place of the
+    // newest waiting notice toast (q-third's), and the tick's hourly reminder after it is folded too.
+    for (const pid of [4103, 4102, 4101]) world.table.procs.delete(pid)
+    await world.clock.advance(5000)
+    expect(world.toasts).toEqual([COMPLETION])
+    const order = [COMPLETION, ...READY, finished('second worker'), finished('third worker'), finished('live worker'), 'More notices \u00B7 4 more notices: see the next prompt']
+    for (let shown = 2; shown <= order.length; shown++) {
+      await world.clock.set(NOW_MS + (shown - 1) * 8000 - 1)
+      expect(world.toasts).toEqual(order.slice(0, shown - 1))
+      await world.clock.advance(1)
+      expect(world.toasts).toEqual(order.slice(0, shown))
+    }
+    await world.clock.advance(60_000)
+    expect(world.toasts).toEqual(order)
+    expect(world.toasts).not.toContain(thirdReady)
+    // The folded notices still reach the model: every line rides on the next prompt.
+    const lines = noticeLines(await userPrompt($))
+    expect(lines).toContain('session-control notice: queue-ready: queued task q-third waited for w-unit-worker-261011090000, which finished')
+    expect(lines).toContain('session-control notice: queue-ready: queued task q-fourth waited for w-unit-worker-261011090000, which finished')
+    expect(lines.some(line => line.startsWith('session-control notice: retire-due: '))).toBe(true)
   })
 
   test('on the terminal alone nothing is held: the completion and the notice toasts of a pass go out together, as before', { options: OPTIONS }, async ($, on) => {
