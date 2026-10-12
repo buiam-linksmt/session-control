@@ -117,6 +117,8 @@ import {
   findBySid,
   lintReport,
   formatHeader,
+  desktopRowText,
+  DESKTOP_HEADER,
   boxAt,
   MIN_BOX,
   MIN_SESSIONS_BOX,
@@ -2817,6 +2819,9 @@ export const register: Register = (on, options) => {
       read($, now),
     ])
     const width = Math.max(20, columns - 4)
+    // The desktop draws in a proportional font, collapses blanks and reports a width in cells that is not its own: its rows
+    // carry no padding, no fixed cell widths and no cut of the mod's, and the surface wraps or ends them in its own room.
+    const isDesktop = e.surface === 'desktop'
     const isLogOpen = sel !== null && view !== null
     // Docked, a section expanded by its header icon takes the body, the other two kept as one-line headers; an open log wins over it.
     const expandedId: ExpandableId | null = isLogOpen ? null : expandedState
@@ -2829,7 +2834,7 @@ export const register: Register = (on, options) => {
     const bodyRows = isCompact ? compactRows : Math.max(MIN_SESSIONS_BOX + 2 * MIN_BOX, e.props.scroll.bodyRows)
     const boxes: SectionBox[] = isCompact ? [{ id: activeId, top: 1, height: compactRows - 1 }] : sectionBoxes(bodyRows, isLogOpen, expandedId)
     layout = { boxes, totals: {} }
-    type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning' }
+    type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end' }
     // The elapsed column at the display clock: the tick's time, never before the probe the rows come from.
     const probedSec = Math.floor(snap.at / 1000)
     const clock = { nowSec: Math.max(nowSec, probedSec), probedSec }
@@ -2863,6 +2868,17 @@ export const register: Register = (on, options) => {
           onPress={r.press}
         />
       )
+    // On the desktop a row is its whole text: a Text the surface wraps (or ends, `truncate-end`, for a log line) and a
+    // pressable row a Button with its label as it is, never padded.
+    const deskRowEl = (r: PRow, scope?: string) =>
+      r.press === undefined ? (
+        <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap={r.wrap ?? 'wrap'}>
+          {r.text}
+        </Text>
+      ) : (
+        <Button key={r.key} label={r.text === '' ? ' ' : r.text} plain dimColor={r.dim} hover={scope === undefined ? undefined : { scope, inverse: true }} onPress={r.press} />
+      )
+    const anyRowEl = (r: PRow, fill = 0, scope?: string) => (isDesktop ? deskRowEl(r, scope) : rowEl(r, fill, scope))
     const block = (id: SectionId, title: string, fixed: PRow[], body: PRow[], offset: number, isTail = false, isPlain = false) => {
       const box = boxes.find(one => one.id === id) as SectionBox
       const visible = Math.max(1, box.height - (isPlain ? 0 : 3) - fixed.length)
@@ -2879,7 +2895,7 @@ export const register: Register = (on, options) => {
       const rows = (
         <Box flexDirection="row" height={visible}>
           <Box flexDirection="column" flexGrow={1}>
-            {shown.map((r, i) => rowEl(r, fill, scopes[i]))}
+            {shown.map((r, i) => anyRowEl(r, fill, scopes[i]))}
           </Box>
           <Box flexDirection="column" width={1}>
             {bar.map((ch, i) => (
@@ -2894,7 +2910,7 @@ export const register: Register = (on, options) => {
       if (isPlain) {
         return (
           <Box flexDirection="column" height={box.height} overflow="hidden">
-            {fixed.map(r => rowEl(r))}
+            {fixed.map(r => anyRowEl(r))}
             {rows}
           </Box>
         )
@@ -2907,14 +2923,15 @@ export const register: Register = (on, options) => {
             </Box>
             {id !== 'log' && <Button key={`x:${id}`} label={expandedId === id ? '[-]' : '[+]'} plain dimColor onPress={expand(id)} />}
           </Box>
-          {fixed.map(r => rowEl(r))}
+          {fixed.map(r => anyRowEl(r))}
           {rows}
         </Box>
       )
     }
     const sessionRows: PRow[] = snap.rows.length === 0 ? [{ text: 'No workers in the registry.', dim: true }] : snap.rows.map(row => {
       const sid = row.sid
-      const text = (sid !== undefined && sid === sel ? '\u25B8 ' : '  ') + formatRow(row, width - 2, widths, clock)
+      const isSelected = sid !== undefined && sid === sel
+      const text = isDesktop ? (isSelected ? '\u25B8 ' : '') + desktopRowText(row, clock) : (isSelected ? '\u25B8 ' : '  ') + formatRow(row, width - 2, widths, clock)
       if (sid === undefined) return { text, dim: row.status === 'done', color: row.status === 'dead' || row.status === 'orphan' ? ('warning' as const) : undefined }
       return { text, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done' }
     })
@@ -2937,11 +2954,17 @@ export const register: Register = (on, options) => {
         {inner}
       </Box>
     )
-    const sessionsBlock = (isPlain = false) => block('sessions', 'SESSIONS', [...(snap.error === undefined ? [] : [{ text: wrapText(`! session-control: ${snap.error}`, width)[0] ?? '', dim: false }]), { text: '  ' + formatHeader(width - 2, widths), dim: true }], sessionRows, offs.sessions, false, isPlain)
+    const warningRow: PRow[] =
+      snap.error === undefined ? [] : isDesktop ? [{ text: `! session-control: ${snap.error}`, dim: false, wrap: 'truncate-end' }] : [{ text: wrapText(`! session-control: ${snap.error}`, width)[0] ?? '', dim: false }]
+    const headerRow: PRow = isDesktop ? { text: DESKTOP_HEADER, dim: true } : { text: '  ' + formatHeader(width - 2, widths), dim: true }
+    const sessionsBlock = (isPlain = false) => block('sessions', 'SESSIONS', [...warningRow, headerRow], sessionRows, offs.sessions, false, isPlain)
     if (isLogOpen && view !== null) {
+      // The desktop ends each log line at its own width: one row per line, so the newest lines stay in the box.
       const logRows: PRow[] = view.lines.flatMap(line => {
+        const dim = line.startsWith('  <') || line.startsWith('>')
+        if (isDesktop) return [{ text: line, dim, wrap: 'truncate-end' as const }]
         const wrapped = wrapText(line, width).slice(0, 2)
-        return wrapped.map(text => ({ text, dim: line.startsWith('  <') || line.startsWith('>') }))
+        return wrapped.map(text => ({ text, dim }))
       })
       if (logRows.length === 0) logRows.push({ text: 'Waiting for output.', dim: true })
       if (isCompact) return compactView(block('log', `LOG ${view.title}`, [], logRows, 0, true, true))
@@ -2957,9 +2980,11 @@ export const register: Register = (on, options) => {
         ? [{ text: 'task queue unreadable.', dim: true }]
         : queue.length === 0
           ? [{ text: 'none', dim: true }]
-          : queue.flatMap(task =>
-              wrapText(task.title, width - 2).map((text, i) => ({ text: (i === 0 ? '\u2022 ' : '  ') + text })),
-            )
+          : isDesktop
+            ? queue.map(task => ({ text: '\u2022 ' + task.title }))
+            : queue.flatMap(task =>
+                wrapText(task.title, width - 2).map((text, i) => ({ text: (i === 0 ? '\u2022 ' : '  ') + text })),
+              )
     const pointRows: PRow[] =
       list === null
         ? [{ text: 'open points unreadable.', dim: true }]
@@ -2969,8 +2994,16 @@ export const register: Register = (on, options) => {
               const id = point.id || String(index)
               const press = togglePoint(point.id)
               if (point.id === '' || point.id !== pointSel) {
+                if (isDesktop) return [{ text: `${index + 1}. ${point.title}`, key: `p:${id}:0`, press }]
                 const row = `  ${index + 1}. ${point.title}`
                 return [{ text: row.length > width ? row.slice(0, width - 1) + '\u2026' : row, key: `p:${id}:0`, press }]
+              }
+              if (isDesktop) {
+                return [
+                  { text: `\u25B8 ${index + 1}. ${point.title}`, key: `p:${id}:t:0`, group: `p:${id}:t`, press, bold: true },
+                  ...(point.detail === '' ? [] : [{ text: point.detail, dim: true }]),
+                  ...(point.recommendation === '' ? [] : [{ text: 'Recommendation: ' + point.recommendation, dim: true }]),
+                ]
               }
               // Rows of one block share a hover scope: hovering any row lights every row of the block together.
               const lines: PRow[] = []

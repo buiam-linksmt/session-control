@@ -2922,3 +2922,74 @@ describe('close_worker', () => {
     expect(String(out.result)).toBe('Acknowledged: 57575751. Retired: none. Refused: 57575751 (outcome login needs a resume).')
   })
 })
+
+// ---------------------------------------------------------------- the panel on the desktop surface (decision mod-28)
+
+describe('the panel on the desktop surface', () => {
+  type Ui = Awaited<ReturnType<typeof mountPane>>
+  const SID = 'aaaaaaaa-1111-4111-8111-111111111111'
+  // Claude Desktop reported a pane width in cells far below what its proportional font fits: rows the mod padded and cut
+  // to that width came out as "desktop toa... 0d5c7a11 ...", the status and elapsed columns gone.
+  const NARROW = { ...PANE_PROPS, bodyColumns: 30 }
+  const LONG_TASK = 'Queued task with a title long enough to pass any narrow width the pane reports'
+  const open = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On, surface: 'terminal' | 'desktop', props: Record<string, unknown> = NARROW) => {
+    world(on)
+    stubPanel(on)
+    await $.session.start(start(ORCH_DIR))
+    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    return $.ui.mount({ plugin: 'session-control', surface, component: 'Pane', requestId: 'session-control', props: props as never })
+  }
+  /** Every Text drawn, with its wrap prop. */
+  const textsOf = async (ui: Ui | Awaited<ReturnType<typeof open>>) => (await ui.findAll({ type: 'Text' })).map(one => ({ text: one.text, wrap: one.props.wrap }))
+
+  test('desktop: each session row is its whole text, title to elapsed, with no padding and no cut of the mod; the header names the cells', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on, 'desktop')
+    const row = String((await ui.find({ key: `s:${SID}` }))?.props.label)
+    expect(row).toMatch(/^alive worker · aaaaaaaa · running · opus · high · \d+m\d\ds$/)
+    const texts = await textsOf(ui)
+    expect(texts).toContainEqual({ text: 'title · sid · status · model · effort · elapsed', wrap: 'wrap' })
+    // No row of any box is cut, padded or wrapped by the mod: the surface does that in its own room.
+    for (const label of (await ui.findAll({ type: 'Button' })).map(one => String(one.props.label))) {
+      expect(label).not.toContain('…')
+      expect(label).toBe(label.trim())
+    }
+    for (const one of texts) expect(one.text).not.toContain('…')
+    // A press on the row still opens its log, the row then marked.
+    await ui.press({ key: `s:${SID}` })
+    expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toMatch(/^▸ alive worker · aaaaaaaa · running · /)
+  })
+
+  test('the terminal keeps its columns at the same width: padded cells, cut with an ellipsis', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on, 'terminal')
+    const row = String((await ui.find({ key: `s:${SID}` }))?.props.label)
+    expect(row).toContain('…')
+    expect(row).not.toContain('·')
+    expect((await textsOf(ui)).every(one => one.wrap === undefined)).toBe(true)
+  })
+
+  test('desktop: queued work and open points are whole texts, a selected point with its detail and recommendation; log lines end at the surface\'s width', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = JSON.stringify({ tasks: [{ id: 'q1', status: 'queued', title: LONG_TASK }] })
+    try {
+      const ui = await open($, on, 'desktop')
+      expect(await textsOf(ui)).toContainEqual({ text: `• ${LONG_TASK}`, wrap: 'wrap' })
+      expect(String((await ui.find({ key: 'p:a:0' }))?.props.label)).toBe('1. First question')
+      await ui.press({ key: 'p:a:0' })
+      expect(String((await ui.find({ key: 'p:a:t:0' }))?.props.label)).toBe('▸ 1. First question')
+      const texts = await textsOf(ui)
+      expect(texts).toContainEqual({ text: 'Detail one', wrap: 'wrap' })
+      expect(texts).toContainEqual({ text: 'Recommendation: Do A', wrap: 'wrap' })
+      await ui.press({ key: `s:${SID}` })
+      const log = (await textsOf(ui)).filter(one => /Reading the suite files|> Bash git status -sb/.test(one.text))
+      expect(log.length).toBe(2)
+      expect(log.every(one => one.wrap === 'truncate-end')).toBe(true)
+      // The terminal at the same width wraps the long title into rows of its own (the log closed first).
+      await ui.press({ key: `s:${SID}` })
+      await ui.unmount()
+      const term = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: NARROW as never })
+      const rows = (await textsOf(term)).filter(one => one.text.startsWith('• ') || (one.text.startsWith('  ') && LONG_TASK.includes(one.text.trim())))
+      expect(rows.length).toBeGreaterThan(1)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+})
