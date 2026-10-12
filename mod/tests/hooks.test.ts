@@ -66,8 +66,8 @@ const MISSING = new Set<string>()
 const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
-// Reads a test holds until it releases them: the transcript tail of the alive worker.
-const HELD: { tail: Promise<unknown> | undefined } = { tail: undefined }
+// Reads a test holds until it releases them: the transcript tail of the alive worker; every append (the trace's too).
+const HELD: { tail: Promise<unknown> | undefined; append?: Promise<unknown> } = { tail: undefined }
 // The CLAUDE_CONFIG_DIR the Linux probe reads from the new worker's environment ('' when it has none).
 // isInboxless: the Linux worker's sessions file has no name and no messagingSocketPath, as an older claude writes it.
 // sid: the session id the Linux worker's sessions file names (a resume keeps the resumed one).
@@ -89,8 +89,9 @@ const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320
 const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
-// isWorkerHidden (both fixtures): the probe does not show the launched worker yet.
-const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false }
+// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone: the alive worker 4101 has
+// exited (its lines left out of the probe).
+const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false }
 // The orchestrator's agreed-decisions.md, when a test serves one (undefined: the file is missing).
 const DECISIONS: { text: string | undefined } = { text: undefined }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
@@ -176,7 +177,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       const worker = w.spawned && !LINUX_FIXTURE.isWorkerHidden
         ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
         : ''
-      return { out: PROBE_STDOUT + worker }
+      return { out: (LINUX_FIXTURE.isAliveGone ? PROBE_STDOUT.split('\n').filter(line => !line.includes('\t4101\t')).join('\n') : PROBE_STDOUT) + worker }
     }
     // A write is recorded as what it puts in place; with `expected`, only while the fixture still holds that text.
     if (op === 'writeAtomic') {
@@ -193,6 +194,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (op === 'removeFile') return { removed: true }
     // An append is recorded as a write of what it adds.
     if (op === 'append') {
+      if (HELD.append !== undefined) await HELD.append
       if (LINUX_FIXTURE.isAppendBroken) return 'READ_ONLY'
       w.writes.push({ path: seen(path), text: String(request.text) })
       return { bytes: String(request.text).length }
@@ -1058,6 +1060,60 @@ describe('launch_worker', () => {
     await $.session.start(start(ORCH_DIR))
     const out = await $.tool.call({ tool: TOOL, ...args, prompt_file: '/work/new/thin.md' } as never)
     expect(JSON.stringify(out)).toContain('the prompt lacks')
+  })
+
+  test('a prompt runs no probe, no registry read and no git, and does not wait for the trace: a trace write that hangs holds no prompt', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
+    const w = world(on)
+    on('classic.PostCompact', () => ({}))
+    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+    await $.session.start(start(ORCH_DIR))
+    const [calls, reads, runs] = [w.calls.length, w.reads.length, w.runs.length]
+    let release = () => {}
+    HELD.append = new Promise<void>(resolve => {
+      release = resolve
+    })
+    try {
+      const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
+      // The completion the start's poll harvested rides on it; no helper call but the trace's write (a batch) was made.
+      expect(sent.context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
+      expect(w.calls.slice(calls).filter(one => one.op !== 'batch')).toEqual([])
+      expect(w.reads.slice(reads).filter(path => path === REGISTRY_PATH)).toEqual([])
+      expect(w.runs.slice(runs).filter(argv => argv[0] === 'git' || (argv[0] === 'node' && argv[2] === 'probe'))).toEqual([])
+      // The poll goes on: the prompt's trace write is still hanging (one batch, never answered), and nothing waited for it.
+      await w.clock.advance(5000)
+      expect(w.calls.slice(calls).filter(one => one.op === 'batch').length).toBe(1)
+      expect(w.calls.slice(calls).some(one => one.op === 'probe')).toBe(true)
+      const before = w.calls.length
+      // After a compaction the digest is the last poll's: no probe either.
+      await $.classic.PostCompact({ hook_event_name: 'PostCompact', trigger: 'auto', compact_summary: 's', session_id: 's', transcript_path: '/t', cwd: ORCH_DIR } as never)
+      const digest = await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)
+      expect(JSON.stringify(digest.context)).toContain('after compaction')
+      expect(w.calls.slice(before).filter(one => one.op === 'probe')).toEqual([])
+    } finally {
+      release()
+      HELD.append = undefined
+    }
+  })
+
+  test('a task notification\'s status goes to the next poll\'s harvest, whose note rides on the next prompt of any origin', { options: OPTIONS }, async ($, on) => {
+    const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_ALIVE ? { ...one, result_file: '/fixture/results/alive.json' } : one)))
+    const w = world(on, '/fixture/lic/a\n', true, registry)
+    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+    await $.session.start(start(ORCH_DIR))
+    expect((await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)).context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
+    LINUX_FIXTURE.isAliveGone = true
+    try {
+      const probes = w.calls.filter(one => one.op === 'probe').length
+      const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
+      expect(sent.context).toBeUndefined()
+      expect(w.calls.filter(one => one.op === 'probe').length).toBe(probes)
+      await w.clock.advance(5000)
+      expect(w.toasts).toContain('Session killed \u00B7 alive worker: killed: background task killed')
+      // The poll's first tick also told its hourly reminder: a notice line after the note.
+      expect((await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)).context?.[0]).toBe('session-control completions: alive worker: killed: background task killed')
+    } finally {
+      LINUX_FIXTURE.isAliveGone = false
+    }
   })
 
   test('the first prompt after a compaction carries the state digest, once', { options: OPTIONS }, async ($, on) => {

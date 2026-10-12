@@ -340,6 +340,8 @@ type LateLaunch = {
   until: number
 }
 let lateLaunches: LateLaunch[] = []
+/** The status of the last task notification (`killed`), for the next poll's harvest; taken by that harvest. */
+let notifiedStatus: string | undefined
 /**
  * On a surface other than the terminal (the desktop app's Code tab, a phone, an editor) a plugin's newer toast takes the
  * place of its toast on show, so a notice toast raised in the same pass replaced the completion toast ("Session
@@ -458,10 +460,11 @@ async function write($: EngineInterface, path: string, text: string, isQuiet = f
 }
 
 /**
- * Writes the buffered trace lines; a flush already running takes the lines that arrive meanwhile. A failure is
- * swallowed and toasted once: the trace never stops the mod.
+ * Writes the buffered trace lines; a flush already running takes the lines that arrive meanwhile, until none is left
+ * with `isDrain` (the poll's tick), else for one more pass at most, so a hook that waits for it waits for at most two
+ * writes. A failure is swallowed and toasted once: the trace never stops the mod.
  */
-async function flushTrace($: EngineInterface): Promise<void> {
+async function flushTrace($: EngineInterface, isDrain = false): Promise<void> {
   if (!isTracing || isTraceFlushing || traceBuffer.length === 0) return
   isTraceFlushing = true
   try {
@@ -470,7 +473,7 @@ async function flushTrace($: EngineInterface): Promise<void> {
       traceBuffer.splice(0, Math.max(0, traceBuffer.length - TRACE_HELD_MAX))
       return
     }
-    while (traceBuffer.length > 0) {
+    for (let pass = 0; traceBuffer.length > 0 && (isDrain || pass < 2); pass++) {
       const entries = traceBuffer.splice(0)
       await Promise.all(entries.map(entry => entry.stamp))
       const lines = entries.map(entry => traceLine(entry.seq, entry.at ?? 0, entry.event, entry.fields))
@@ -1177,8 +1180,11 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   const facts = await probe($, parsed.entries, [...new Set(lateLaunches.map(one => one.verdict.configDir))])
   const reread = (await registerLate($, parsed.entries, facts, now)) ? parseRegistry(await readRegistryText($)) : undefined
   const entries = reread?.ok === true ? reread.entries : parsed.entries
+  // The status a task notification left (prompt.submit) goes to this harvest, once.
+  const status = taskStatus ?? notifiedStatus
+  notifiedStatus = undefined
   for (const entry of entries) {
-    if (rowStatus(entry, facts) === 'dead') await complete($, entry, taskStatus, toasts)
+    if (rowStatus(entry, facts) === 'dead') await complete($, entry, status, toasts)
   }
   const rows = buildRows(entries, facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
@@ -1379,7 +1385,7 @@ async function tracedTick($: EngineInterface): Promise<void> {
   traceRenders = 0
   trace($, 'poll.tick')
   await Promise.allSettled([refresh($, undefined, true), refreshWatch($)])
-  await flushTrace($)
+  await flushTrace($, true)
 }
 
 /** One edit of a helper file: read, back up once per day, write; open points also rotate into the archive. */
@@ -2567,6 +2573,7 @@ export const register: Register = (on, options) => {
   usageSeen.clear()
   isUsageProbing = false
   lateLaunches = []
+  notifiedStatus = undefined
   toastHold = undefined
   heldToasts = []
   isToastHeldHere = false
@@ -2628,21 +2635,27 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // The prompt is never held for the machine or the trace: no probe, registry read or git runs here, only what the polls
+  // left is handed on, and the trace's lines are written behind it (flushTrace not awaited). On Windows a refresh is a
+  // PowerShell probe of seconds, and a trace write a Node start of seconds on a loaded machine.
   on('prompt.submit', async ($, e, next) => {
     trace($, 'prompt.submit', { origin: e.origin.kind })
     if (!isActive) {
-      await flushTrace($)
+      void flushTrace($)
       return next(e)
     }
     const extra: string[] = []
-    if (e.origin.kind === 'task-notification') {
-      await refresh($, parseTaskNotification(e.text).status)
-      const notes = await read($, pendingNotes)
-      if (notes.length > 0) {
-        await update($, pendingNotes, () => [])
-        extra.push(`session-control completions: ${notes.join('; ')}`)
-      }
+    // A task notification's status (a background task killed) goes to the next poll's harvest of a finished worker.
+    if (e.origin.kind === 'task-notification') notifiedStatus = parseTaskNotification(e.text).status
+    // The completion notes the polls harvested ride on the next prompt, whatever started it.
+    let notes: string[] = []
+    if ((await read($, pendingNotes)).length > 0) {
+      await update($, pendingNotes, list => {
+        notes = list
+        return []
+      })
     }
+    if (notes.length > 0) extra.push(`session-control completions: ${notes.join('; ')}`)
     // The notices ride on the next prompt, whatever started it: one line each.
     let notices: string[] = []
     if ((await read($, pendingNotices)).length > 0) {
@@ -2652,13 +2665,13 @@ export const register: Register = (on, options) => {
       })
     }
     if (notices.length > 0) extra.push(notices.join('\n'))
+    // After a compaction the digest is made of the last poll's rows and points.
     if (isAfterCompact) {
       isAfterCompact = false
-      await refresh($)
       const [snap, list] = await Promise.all([read($, snapshot), read($, points)])
       extra.push(compactionDigest(snap?.rows ?? [], list, unackedPeers(await read($, ledger))))
     }
-    await flushTrace($)
+    void flushTrace($)
     if (extra.length === 0) return next(e)
     return next({ ...e, context: [...(e.context ?? []), ...extra] })
   })
@@ -2670,12 +2683,12 @@ export const register: Register = (on, options) => {
     const answer = e.last_assistant_message ?? ''
     trace($, 'classic.Stop', { isChecked: isActive && !e.stop_hook_active && answer !== '' })
     if (!isActive || e.stop_hook_active || answer === '') {
-      await flushTrace($)
+      void flushTrace($)
       return done
     }
     const findings = lintReport(answer, { unackedPeers: unackedPeers(await read($, ledger)) })
     if (findings.length > 0) trace($, 'guard', { check: 'report', isOk: false, findings })
-    await flushTrace($)
+    void flushTrace($)
     if (findings.length === 0) return done
     return { ...done, block: `Report check failed: ${findings.join('; ')}. Resend the corrected report; say nothing about this check.` }
   })
