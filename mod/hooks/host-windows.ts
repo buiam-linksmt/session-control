@@ -307,7 +307,7 @@ async function stillAlive(port: HostPort, targets: readonly string[], sleepSec: 
   return new Set(parseStopOutput(ran.stdout).final.filter(one => one.status === 'alive').map(one => one.pid))
 }
 
-/** How long a stop on Windows re-checks after `taskkill /T /F`, in seconds of wall-clock time. */
+/** After `taskkill /T /F`, the seconds of wall-clock time after which a stop on Windows starts no further re-check, and the most re-checks after the first. */
 const KILL_WAIT_SECONDS = 3
 
 /**
@@ -315,8 +315,9 @@ const KILL_WAIT_SECONDS = 3
  * TREE_PS1's list unless given; then for the root, and after it for every descendant still alive, `taskkill /PID <pid>
  * /T /F` (taskkill without /F asks a process's windows to close, and claude.exe, a console process without a window of
  * its own, always refuses it: "can only be terminated forcefully", exit 128, also for the console host of its Git Bash),
- * re-checks about every second for up to KILL_WAIT_SECONDS of wall-clock time, each check reporting the seconds that
- * really passed; then the end state of each.
+ * one re-check right away and, while one is alive and less than KILL_WAIT_SECONDS have passed since that re-check began,
+ * another after a pause of a second, at most KILL_WAIT_SECONDS more (a re-check is a PowerShell start, so the last can
+ * end well after them), the step reporting the seconds that really passed; then the end state of each.
  */
 async function stopProcessTree(port: HostPort, target: StopTarget, tree?: ProcTree): Promise<StopReport> {
   const listed = tree === undefined ? await listTree(port, target) : { tree, notes: [] }
