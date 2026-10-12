@@ -5,7 +5,9 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { RULES_BLOCK, missingPromptItems, probeArgs } from '../hooks/core'
+import { RULES_BLOCK, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
+import { auditFindings } from '../hooks/audit'
+import { isRegistrySound } from '../hooks/notices'
 import { PROBE_PS1 } from '../hooks/host-windows'
 import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
 
@@ -76,6 +78,7 @@ const PROBES = { inFlight: 0, max: 0 }
 // sid: the session id the Linux worker's sessions file names (a resume keeps the resumed one).
 // isPowerShellMissing: the session offers no PowerShell tool.
 // bashAnswer: what the Bash tool answers the launch instead of running it (a refusal or an error); undefined: it runs it.
+// resultText: what the launch's result file in the runs directory holds (undefined: there is none).
 const WORKER = {
   linuxConfigDir: '/fixture/lic/a',
   isBashMissing: false,
@@ -83,6 +86,7 @@ const WORKER = {
   isInboxless: false,
   sid: 'abcdabcd-0000-4000-8000-000000000001',
   bashAnswer: undefined as Record<string, unknown> | undefined,
+  resultText: undefined as string | undefined,
 }
 /** The inbox fields of the Linux worker's sessions file. */
 const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320', messagingSocketPath: '/run/user/1000/cc-socks/7001.sock' })
@@ -159,6 +163,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === '/fixture/lic/a/sessions/7001.json') return JSON.stringify({ sessionId: WORKER.sid, procStart: '123', ...inboxFields() })
     if (seen(given) === 'C:/fixture/home/.claude/sessions/7001.json') return JSON.stringify({ pid: 7001, sessionId: 'abcdabcd-0000-4000-8000-000000000001', startedAt: NOW_MS })
     if (path === '/work/new/big.md') return BIG_PROMPT
+    if (WORKER.resultText !== undefined && /\/session-control\/runs\/\d{14}-new\.json$/.test(path)) return WORKER.resultText
     // The pid file a PowerShell launch writes beside its result file.
     if (isWin && path.endsWith('.pid') && WINDOWS.pidFileText !== undefined) return WINDOWS.pidFileText
     // The mod's own scripts read back as written.
@@ -1032,6 +1037,198 @@ describe('launch_worker', () => {
       expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
     } finally {
       LINUX_FIXTURE.isWorkerHidden = false
+    }
+  })
+
+  describe('a worker that ends before its sessions file is read', () => {
+    const SID_NEW = 'abcdabcd-0000-4000-8000-000000000001'
+    /** The result file of a run that finished: the engine's `--output-format json` line with the session id. */
+    const FINISHED = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'PONG', duration_ms: 1300, num_turns: 1, total_cost_usd: 0.0025, session_id: SID_NEW })
+    const NOTE = 'session-control completions: new: clean: PONG; new: report check: report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes'
+    const TOAST = 'Session finished \u00B7 new: clean: PONG'
+    const RUNS_DIR = `${HOME}/.claude/session-control/runs`
+    const hosts = [
+      {
+        name: 'Linux',
+        options: OPTIONS,
+        env: { HOME },
+        dir: ORCH_DIR,
+        launch: args,
+        cwd: '/work/new',
+        configDir: '/fixture/lic/a',
+        sessions: '/fixture/lic/a/sessions/7001.json',
+        sessionsShown: '/fixture/lic/a/sessions/7001.json',
+        runs: RUNS_DIR,
+        socket: '/run/user/1000/cc-socks/7001.sock',
+        knobs: LINUX_FIXTURE,
+      },
+      {
+        name: 'Windows',
+        options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}`, licencePickCommand: '' },
+        env: { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' },
+        dir: `C:${ORCH_DIR}`,
+        launch: { ...args, dir: '/c/work/new', prompt_file: '/c/work/new/prompt.md' },
+        cwd: 'C:/work/new',
+        configDir: 'C:/fixture/home/.claude',
+        sessions: '/fixture/home/.claude/sessions/7001.json',
+        sessionsShown: 'C:/fixture/home/.claude/sessions/7001.json',
+        runs: `C:${RUNS_DIR}`,
+        socket: undefined,
+        knobs: WINDOWS,
+      },
+    ] as const
+    const userPrompt = async ($: { prompt: { submit: (e: never) => Promise<{ context?: readonly unknown[] }> } }) => (await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)).context ?? []
+    const reset = (host: (typeof hosts)[number]) => {
+      MISSING.clear()
+      WORKER.resultText = undefined
+      host.knobs.isWorkerHidden = false
+    }
+
+    for (const host of hosts) {
+      const result = `${host.runs}/20260921141320-new.json`
+      const err = `${host.runs}/20260921141320-new.err`
+      /** The entry the launch writes for a worker registered from its result file, ended at `endedSec`. */
+      const finishedEntry = (endedSec: number) => ({
+        title: 'new',
+        session_id: SID_NEW,
+        name: 'w-new-260921141320',
+        config_dir: host.configDir,
+        cwd: host.cwd,
+        model: 'opus',
+        effort: 'high',
+        result_file: result,
+        err_file: err,
+        started_at: NOW_MS / 1000,
+        reported: false,
+        outcome: { kind: 'clean', summary: 'clean: PONG', costUsd: 0.0025 },
+        ended_at: endedSec,
+      })
+
+      test(`${host.name}: its result file holds the session id: registered at once as a finished entry, harvested once, one completion note, sound and audited as any finished worker`, { options: host.options }, async ($, on) => {
+        const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+        on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+        await $.session.start(start(host.dir))
+        // The start's harvest (the limited worker) rides on a first prompt.
+        await userPrompt($ as never)
+        MISSING.add(host.sessions)
+        WORKER.resultText = FINISHED
+        try {
+          const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+          const endedSec = Math.floor(w.clock.now() / 1000)
+          expect(String(out.result)).toBe(
+            `Worker pid 7001 started and ended before its sessions file could be read: session ${SID_NEW} (from its result file), config_dir ${host.configDir}, registered as finished, outcome clean. ` +
+              `Name: w-new-260921141320; socket: none. Result: ${result}; errors: ${err}.`,
+          )
+          // The process has gone: later probes do not show it.
+          host.knobs.isWorkerHidden = true
+          const entries = lastRegistry(w).filter(one => one.session_id === SID_NEW)
+          expect(entries).toEqual([finishedEntry(endedSec)])
+          expect(w.toasts.filter(one => one === TOAST).length).toBe(1)
+          // The next polls neither register it again nor harvest it again.
+          await w.clock.advance(5000)
+          await w.clock.advance(5000)
+          expect(lastRegistry(w).filter(one => one.session_id === SID_NEW)).toEqual([finishedEntry(endedSec)])
+          expect(w.toasts.filter(one => one === TOAST).length).toBe(1)
+          // One completion note, on the next prompt, and on none after it.
+          const completions = (context: readonly unknown[]) => context.filter(line => String(line).startsWith('session-control completions: '))
+          expect(completions(await userPrompt($ as never))).toEqual([NOTE])
+          expect(completions(await userPrompt($ as never))).toEqual([])
+          // The registry is sound; the entry is a finished one not yet reported, and the audit finds of it only what it
+          // finds of any finished worker not acknowledged (its run files named by the entry, so no loose file).
+          const text = w.writes.filter(one => fixture(one.path) === REGISTRY_PATH).at(-1)?.text
+          expect(isRegistrySound(text)).toBe(true)
+          const parsed = parseRegistry(text ?? '')
+          const entry = (parsed.ok ? parsed.entries : []).find(one => one.session_id === SID_NEW)
+          expect(entry === undefined ? undefined : rowStatus(entry, parseProcFacts(''))).toBe('unreported')
+          const runFile = (name: string) => ({ name, kind: 'file' as const, size: 10, mtimeMs: NOW_MS })
+          const findings = auditFindings({ entries: entry === undefined ? [] : [entry], facts: parseProcFacts(''), nowMs: w.clock.now(), runs: [runFile('20260921141320-new.json'), runFile('20260921141320-new.err')] })
+          expect(findings.map(one => [one.kind, one.subject])).toEqual([['unacknowledged', 'session abcdabcd "new"']])
+        } finally {
+          reset(host)
+        }
+      })
+
+      for (const [what, text] of [
+        ['no result file', undefined],
+        ['a result file without a session id', JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'PONG' })],
+        ['a result file that is not JSON', '{"type":"result","is_error":false,"sess'],
+      ] as const) {
+        test(`${host.name}: ${what}: not registered, the answer names both files and what the poll does; the poll registers it once a file holds the session id`, { options: host.options }, async ($, on) => {
+          const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+          await $.session.start(start(host.dir))
+          MISSING.add(host.sessions)
+          WORKER.resultText = text
+          try {
+            const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+            expect(String(out.result)).toBe(
+              'Worker pid 7001 started but its session id could not be read; registry NOT written. ' +
+                `Neither its sessions file (${host.sessionsShown}) nor its result file (${result}) holds a session id yet. ` +
+                "The mod's poll reads them again and registers the worker as soon as one of them holds it (up to 10 min after the launch): " +
+                `from the sessions file while it runs, from the result file once it has ended. Until then it is not registered: while it runs it is an orphan row in list_sessions (cwd ${host.cwd}). ` +
+                `Errors: ${err}.`,
+            )
+            expect(lastRegistry(w).some(one => one.cwd === host.cwd)).toBe(false)
+            // A poll while neither file holds it registers nothing.
+            await w.clock.advance(5000)
+            expect(lastRegistry(w).some(one => one.cwd === host.cwd)).toBe(false)
+            if (text === undefined) {
+              // The sessions file shows while the worker runs: registered with its pid, as the launch registers a worker.
+              MISSING.clear()
+              await w.clock.advance(5000)
+              expect(lastRegistry(w).filter(one => one.cwd === host.cwd)).toEqual([
+                expect.objectContaining({ pid: 7001, session_id: SID_NEW, name: 'w-new-260921141320', ...(host.socket === undefined ? {} : { socket_path: host.socket }), result_file: result }),
+              ] as never)
+            } else {
+              // The worker ends and its result file holds the session id: registered as a finished entry, harvested once.
+              host.knobs.isWorkerHidden = true
+              WORKER.resultText = FINISHED
+              const polledSec = Math.floor(w.clock.now() / 1000)
+              await w.clock.advance(5000)
+              const entries = lastRegistry(w).filter(one => one.cwd === host.cwd)
+              // Ended when the poll registered it, within the 5 s the clock moved.
+              const endedSec = Number(entries[0]?.ended_at)
+              expect(endedSec >= polledSec && endedSec <= Math.floor(w.clock.now() / 1000)).toBe(true)
+              expect(entries).toEqual([finishedEntry(endedSec)])
+              await w.clock.advance(5000)
+              expect(lastRegistry(w).filter(one => one.cwd === host.cwd)).toEqual(entries)
+              expect(w.toasts.filter(one => one === TOAST).length).toBe(1)
+            }
+          } finally {
+            reset(host)
+          }
+        })
+      }
+
+      test(`${host.name}: a sessions file read in time decides as before, whatever the result file holds: the launch's own answer and entry`, { options: host.options }, async ($, on) => {
+        const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+        await $.session.start(start(host.dir))
+        WORKER.resultText = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'PONG', session_id: 'ffffffff-0000-4000-8000-00000000000f' })
+        try {
+          const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+          expect(String(out.result)).toBe(
+            `Launched pid 7001, session ${SID_NEW}, config_dir ${host.configDir}, registered. ` +
+              `Name: w-new-260921141320; socket: ${host.socket ?? 'none'}. Result: ${result}; errors: ${err}.`,
+          )
+          expect(lastRegistry(w).at(-1)).toEqual({
+            title: 'new',
+            pid: 7001,
+            session_id: SID_NEW,
+            name: 'w-new-260921141320',
+            ...(host.socket === undefined ? {} : { socket_path: host.socket }),
+            config_dir: host.configDir,
+            cwd: host.cwd,
+            model: 'opus',
+            effort: 'high',
+            result_file: result,
+            err_file: err,
+            started_at: NOW_MS / 1000,
+          })
+          expect(w.toasts).not.toContain(TOAST)
+          expect(w.reads).not.toContain(result)
+        } finally {
+          reset(host)
+        }
+      })
     }
   })
 

@@ -63,6 +63,7 @@ import {
   rowStatus,
   statusLabel,
   registerEntry,
+  registerFinished,
   removeEntries,
   ackEntries,
   findNewWindowsWorker,
@@ -85,6 +86,7 @@ import {
 import type { LaunchArgs, LaunchFacts } from '../hooks/core'
 import { PROBE_PS1, START_MATCH_MS } from '../hooks/host-windows'
 import { freshText } from '../hooks/store'
+import { isRegistrySound } from '../hooks/notices'
 import {
   DAEMON_RESUME,
   HOME,
@@ -1361,6 +1363,56 @@ describe('the inbox fields of the registry entry', () => {
     const before = JSON.stringify([{ session_id: SID_DEAD, name: N, socket_path: '/old.sock', reported: false }])
     const merged = registerEntry(before, newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }, NOW_SEC - 9), 'resume')
     expect(merged.ok && JSON.parse(merged.text)[0].socket_path).toBeNull()
+  })
+})
+
+describe('a worker registered from its result file (registerFinished)', () => {
+  const args: LaunchArgs = { dir: '/work/new/', prompt_file: '/tmp/p.md', model: 'haiku', effort: 'low', title: 'new' }
+  const files = { result: '/r/new.json', err: '/r/new.err' }
+  const SID_NEW = 'abcdabcd-0000-4000-8000-000000000001'
+  const outcome = { kind: 'clean' as const, summary: 'clean: PONG', costUsd: 0.01, sessionId: SID_NEW }
+  const before = JSON.stringify([{ title: 'alive', pid: 4101, session_id: 'aaaaaaaa-1111-4111-8111-111111111111', cwd: '/work/a' }])
+  test('an entry without a pid has no pid key; the other keys keep their order', () => {
+    expect(Object.keys(newRegistryEntry(args, { configDir: '/c/a' }, undefined, SID_NEW, files, { name: N }, NOW_SEC - 9))).toEqual([
+      'title', 'session_id', 'name', 'config_dir', 'cwd', 'model', 'effort', 'result_file', 'err_file', 'started_at',
+    ])
+  })
+  test('new: the entry is appended as the harvest leaves one: no pid, no socket_path, reported false, the outcome and ended_at', () => {
+    const entry = newRegistryEntry(args, { configDir: '/c/a' }, undefined, SID_NEW, files, { name: N }, NOW_SEC - 9)
+    const edit = registerFinished(before, entry, 'new', { outcome, endedSec: NOW_SEC })
+    expect(edit.ok).toBe(true)
+    const text = edit.ok ? edit.text : ''
+    const list = JSON.parse(text) as SessionEntry[]
+    expect(list[0]).toEqual(JSON.parse(before)[0])
+    expect(list[1]).toEqual({
+      title: 'new', session_id: SID_NEW, name: N, config_dir: '/c/a', cwd: '/work/new', model: 'haiku', effort: 'low', result_file: '/r/new.json', err_file: '/r/new.err', started_at: NOW_SEC - 9,
+      reported: false, outcome: { kind: 'clean', summary: 'clean: PONG', costUsd: 0.01 }, ended_at: NOW_SEC,
+    })
+    // Laid out as the launch's own write lays out the registry; sound; a finished row the harvest leaves alone.
+    expect(text).toBe(JSON.stringify(list, null, 2) + '\n')
+    expect(isRegistrySound(text)).toBe(true)
+    expect(rowStatus(list[1] as SessionEntry, parseProcFacts(''))).toBe('unreported')
+    expect(mergeCompletion(text, SID_NEW, outcome, NOW_SEC + 5)).toEqual({ changed: false, reason: `${SID_NEW} already harvested` })
+  })
+  test('new without the outcome (completionWrites off): no pid, reported false, no outcome and no ended_at; a pid given is dropped', () => {
+    const entry = newRegistryEntry(args, { configDir: '/c/a' }, 7001, SID_NEW, files, { name: N }, NOW_SEC - 9)
+    const edit = registerFinished(before, entry, 'new')
+    const added = (edit.ok ? (JSON.parse(edit.text) as SessionEntry[]) : [])[1] as SessionEntry
+    expect(added).toMatchObject({ session_id: SID_NEW, reported: false })
+    expect(['pid', 'outcome', 'ended_at', 'socket_path'].filter(key => key in added)).toEqual([])
+  })
+  test('resume: merged over the entry, its old pid and outcome replaced, reported false, socket_path null', () => {
+    const old = JSON.stringify([{ title: 'new', pid: 4, session_id: SID_NEW, name: N, socket_path: '/old.sock', reported: true, outcome: { kind: 'limit', summary: 'limit: x' }, ended_at: 1, keep: true }])
+    const entry = newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_NEW }, undefined, SID_NEW, files, { name: N }, NOW_SEC - 9)
+    const edit = registerFinished(old, entry, 'resume', { outcome, endedSec: NOW_SEC })
+    const merged = (edit.ok ? (JSON.parse(edit.text) as SessionEntry[]) : [])[0] as SessionEntry
+    expect('pid' in merged).toBe(false)
+    expect(merged).toMatchObject({ socket_path: null, reported: false, keep: true, outcome: { kind: 'clean', summary: 'clean: PONG', costUsd: 0.01 }, ended_at: NOW_SEC, started_at: NOW_SEC - 9 })
+  })
+  test('a registry the edit refuses is refused the same way; a resume of an empty registry writes nothing', () => {
+    const entry = newRegistryEntry(args, { configDir: '/c/a' }, undefined, SID_NEW, files, { name: N }, NOW_SEC - 9)
+    expect(registerFinished('not json', entry, 'new', { outcome, endedSec: NOW_SEC })).toEqual(registerEntry('not json', entry, 'new'))
+    expect(registerFinished('', entry, 'resume', { outcome, endedSec: NOW_SEC })).toEqual({ ok: true, text: '' })
   })
 })
 

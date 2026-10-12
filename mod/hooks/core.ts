@@ -1173,12 +1173,13 @@ export function pidFromFile(text: string): number | undefined {
  * valid while the pid lives. Without one a fresh entry has no `socket_path` and a resume writes null, so the dead
  * socket of the earlier run is not kept. `started_at` is `startedSec`, when the launch started this run (epoch seconds).
  * `prompt` names the prompt file the mod wrote for the run and the decisions section it appended, when it did: the
- * entry then records `prompt_file` (deleted with the run's other files at a clean retire) and `section`.
+ * entry then records `prompt_file` (deleted with the run's other files at a clean retire) and `section`. Without a
+ * `pid` (a worker registered from its result file, registerFinished) the entry has none.
  */
 export function newRegistryEntry(
   args: LaunchArgs,
   verdict: { configDir: string; resumeSid?: string },
-  pid: number,
+  pid: number | undefined,
   sessionId: string,
   files: { result: string; err: string },
   inbox: { name: string; socketPath?: string },
@@ -1188,7 +1189,7 @@ export function newRegistryEntry(
   const socket = inbox.socketPath !== undefined ? { socket_path: inbox.socketPath } : verdict.resumeSid ? { socket_path: null } : {}
   return {
     title: args.title,
-    pid,
+    ...(pid === undefined ? {} : { pid }),
     session_id: sessionId,
     name: inbox.name,
     ...socket,
@@ -1373,6 +1374,30 @@ export function registerEntry(text: string, entry: SessionEntry, mode: 'new' | '
     return merged
   })
   return { ok: true, text: jqText(list, 2) + '\n' }
+}
+
+/**
+ * registerEntry for a worker that ended before the launch read its sessions file, registered from its result file: the
+ * entry it wrote (`new`: the one appended; `resume`: each one with its session id) is then as the harvest leaves one
+ * (mergeCompletion): no `pid`, `reported` false and, with `finished` (completionWrites on), the outcome and `ended_at`.
+ */
+export function registerFinished(text: string, entry: SessionEntry, mode: 'new' | 'resume', finished?: { outcome: SessionOutcome; endedSec: number }): RegistryEdit {
+  const registered = registerEntry(text, entry, mode)
+  if (!registered.ok || registered.text === '') return registered
+  const read = registryList(registered.text)
+  if (!read.ok) return read
+  const ended = (one: unknown) => {
+    const rec = one as Rec
+    delete rec.pid
+    rec.reported = false
+    if (finished === undefined) return
+    const { outcome } = finished
+    rec.outcome = { kind: outcome.kind, summary: outcome.summary, ...(outcome.costUsd === undefined ? {} : { costUsd: outcome.costUsd }) }
+    rec.ended_at = finished.endedSec
+  }
+  if (mode === 'new') ended(read.list.at(-1))
+  else for (const one of read.list) if (one !== null && jqEqual((one as Rec).session_id, entry.session_id)) ended(one)
+  return { ok: true, text: jqText(read.list, 2) + '\n' }
 }
 
 /** CLEAR_SCRIPT: the registry without the named sessions, and the removed entries as the log lines it appends. */

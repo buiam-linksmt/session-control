@@ -104,6 +104,7 @@ import {
   withRunFigures,
   ackEntries,
   registerEntry,
+  registerFinished,
   removeEntries,
   retireVerdict,
   annotateCleared,
@@ -886,17 +887,8 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   const resultText = await $.fs.read(entry.result_file).catch(() => '')
   const errText = typeof entry.err_file === 'string' ? await $.fs.read(entry.err_file).catch(() => '') : ''
   const outcome: SessionOutcome = classifyResult(resultText, taskStatus, errText)
-  // The report check reads a clean report only: the other outcomes have no report to check.
-  const reportNote = outcome.kind === 'clean' ? reportCheck(resultReport(resultText)) : undefined
   harvested.add(key)
-  trace($, 'completion', { session_id: sid, pid: entry.pid, outcome: outcome.kind, isWritten: config.completionWrites, isReportNoted: reportNote !== undefined })
-  // The note's free text (the entry's title, the outcome's summary from the result file) goes through the redaction the
-  // tools and the notices use, before the toast and the note; the session id the engine made stays readable.
-  const title: unknown = entry.title
-  const who = title === undefined || title === null ? sid.slice(0, 8) : clean(String(title))
-  const label = `${who}: ${clean(outcome.summary)}`
-  // The secret scan of the worker's report (secrets.ts): the notes' last line and one secret-in-result notice per entry.
-  const secrets = tallyOf(findSecrets(resultReport(resultText)))
+  const told = completionTold($, entry, sid, outcome, resultText)
   if (config.completionWrites) {
     // Read again right before writing, so the window against the licence
     // daemon's own writes is as short as this API allows (no lock, no rename).
@@ -909,6 +901,30 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
       if (await writeAtomic($, path, merged.text, fresh)) break
     }
   }
+  await announceCompletion($, entry, outcome, told, toasts)
+}
+
+/**
+ * What a harvest tells of a finished worker, worked out from its result file's text: the completion's trace line goes
+ * out here; the label (redacted), the report check's note and the secret scan's tally are for announceCompletion.
+ */
+function completionTold($: EngineInterface, entry: SessionEntry, sid: string, outcome: SessionOutcome, resultText: string): { who: string; label: string; reportNote?: string; secrets: SecretTally } {
+  // The report check reads a clean report only: the other outcomes have no report to check.
+  const reportNote = outcome.kind === 'clean' ? reportCheck(resultReport(resultText)) : undefined
+  trace($, 'completion', { session_id: sid, pid: entry.pid, outcome: outcome.kind, isWritten: config.completionWrites, isReportNoted: reportNote !== undefined })
+  // The note's free text (the entry's title, the outcome's summary from the result file) goes through the redaction the
+  // tools and the notices use, before the toast and the note; the session id the engine made stays readable.
+  const title: unknown = entry.title
+  const who = title === undefined || title === null ? sid.slice(0, 8) : clean(String(title))
+  const label = `${who}: ${clean(outcome.summary)}`
+  // The secret scan of the worker's report (secrets.ts): the notes' last line and one secret-in-result notice per entry.
+  const secrets = tallyOf(findSecrets(resultReport(resultText)))
+  return { who, label, ...(reportNote === undefined ? {} : { reportNote }), secrets }
+}
+
+/** A harvest's toast, digest event, completion note and notices, for a finished worker's outcome. */
+async function announceCompletion($: EngineInterface, entry: SessionEntry, outcome: SessionOutcome, told: { who: string; label: string; reportNote?: string; secrets: SecretTally }, toasts: ToastBudget): Promise<void> {
+  const { who, label, reportNote, secrets } = told
   raiseToast($, toastText(TOAST_TITLES[outcome.kind], `${label}`), 8000, true)
   recordDigest({ at: await $.clock.now(), kind: 'completion', text: label, ...(secrets.count === 0 ? {} : { secrets }) })
   const notes = [label, ...(reportNote === undefined ? [] : [`${who}: report check: ${reportNote}`]), ...(secrets.count === 0 ? [] : [`${who}: ${secretScanLine(secrets)}`])]
@@ -1302,7 +1318,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   }
   // A launch's worker that did not appear in time is looked for under its config dir too (Windows), and registered here.
   const facts = await probe($, parsed.entries, [...new Set(lateLaunches.map(one => one.verdict.configDir))])
-  const reread = (await registerLate($, parsed.entries, facts, now)) ? parseRegistry(await readRegistryText($)) : undefined
+  const reread = (await registerLate($, parsed.entries, facts, now, toasts)) ? parseRegistry(await readRegistryText($)) : undefined
   const entries = reread?.ok === true ? reread.entries : parsed.entries
   // The status a task notification left (prompt.submit) goes to this harvest, once.
   const status = taskStatus ?? notifiedStatus
@@ -1420,12 +1436,14 @@ async function promptHarvest($: EngineInterface, status: string | undefined): Pr
 }
 
 /**
- * The launches whose worker did not appear within LAUNCH_FIND_SEC (lateLaunches): each one's new worker among the probe's
- * facts (the launch's own match, a pid no registry entry holds), registered as the launch would have registered it, its
- * session id, name and socket read from its sessions file once (not there yet: the next poll reads it again). A launch
- * LATE_LAUNCH_SEC old is no longer looked for. Answers whether an entry was written.
+ * The launches whose worker did not appear within LAUNCH_FIND_SEC, or whose session id the launch could not read
+ * (lateLaunches): each one's new worker among the probe's facts (the launch's own match, a pid no registry entry holds),
+ * registered as the launch would have registered it, its session id, name and socket read from its sessions file once.
+ * When the worker is not among the facts or its sessions file holds no session id, the run's result file is read: one
+ * that holds a session id registers the worker as a finished one (registerFromResult); else the next poll looks again.
+ * A launch LATE_LAUNCH_SEC old is no longer looked for. Answers whether an entry was written.
  */
-async function registerLate($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number): Promise<boolean> {
+async function registerLate($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number, toasts: ToastBudget): Promise<boolean> {
   if (lateLaunches.length === 0) return false
   const machine = await hostOf($)
   const port = portOf($)
@@ -1439,10 +1457,15 @@ async function registerLate($: EngineInterface, entries: readonly SessionEntry[]
       continue
     }
     const worker = await machine.findNewWorker(port, facts, launch.want, new Set([...launch.known, ...claimed]), launch.launchedAt)
-    if (worker === undefined) continue
-    const fromFile = sessionFileFacts(await $.fs.read(`${launch.verdict.configDir}/sessions/${worker.pid}.json`).catch(() => ''))
-    const sessionId = fromFile.sessionId ?? launch.verdict.resumeSid
-    if (sessionId === undefined) continue
+    const fromFile = worker === undefined ? {} : sessionFileFacts(await $.fs.read(`${launch.verdict.configDir}/sessions/${worker.pid}.json`).catch(() => ''))
+    const sessionId = worker === undefined ? undefined : (fromFile.sessionId ?? launch.verdict.resumeSid)
+    if (worker === undefined || sessionId === undefined) {
+      const ended = await registerFromResult($, launch, toasts)
+      if (ended === undefined || ended.failed !== undefined) continue
+      done.add(launch)
+      isWritten = true
+      continue
+    }
     const inbox = { name: fromFile.name ?? launch.name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
     const entry = newRegistryEntry(launch.args, launch.verdict, worker.pid, sessionId, launch.files, inbox, Math.floor(launch.launchedAt / 1000), launch.prompt)
     const failed = await editRegistry($, async text => registerEntry(text, entry, launch.verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
@@ -1454,6 +1477,37 @@ async function registerLate($: EngineInterface, entries: readonly SessionEntry[]
   }
   lateLaunches = lateLaunches.filter(one => !done.has(one))
   return isWritten
+}
+
+/**
+ * A launch's worker that ended before its session id was read from its sessions file: the run's result file
+ * (`--output-format json`, written when the run ends) holds the session id. The worker is registered as a finished entry
+ * (registerFinished: no `pid`, no `socket_path`, `reported` false, with completionWrites on its outcome and `ended_at`)
+ * and its completion is harvested at once as complete() harvests a dead worker's: classified from the same files, told
+ * by a toast, a completion note for the next prompt and the harvest's notices. Undefined when the result file holds no
+ * session id (missing, still empty, not JSON); else the session id, the outcome and why the registry write failed.
+ */
+async function registerFromResult(
+  $: EngineInterface,
+  launch: Pick<LateLaunch, 'args' | 'verdict' | 'files' | 'name' | 'prompt' | 'launchedAt'>,
+  toasts: ToastBudget,
+): Promise<{ sessionId: string; outcome: SessionOutcome; entry: SessionEntry; failed?: string } | undefined> {
+  const resultText = await $.fs.read(launch.files.result).catch(() => '')
+  const errText = await $.fs.read(launch.files.err).catch(() => '')
+  const outcome = classifyResult(resultText, undefined, errText)
+  if (outcome.sessionId === undefined || outcome.sessionId === '') return undefined
+  const sessionId = launch.verdict.resumeSid ?? outcome.sessionId
+  const entry = newRegistryEntry(launch.args, launch.verdict, undefined, sessionId, launch.files, { name: launch.name }, Math.floor(launch.launchedAt / 1000), launch.prompt)
+  const finished = config.completionWrites ? { outcome, endedSec: Math.floor((await $.clock.now()) / 1000) } : undefined
+  const failed = await editRegistry($, async text => registerFinished(text, entry, launch.verdict.resumeSid ? 'resume' : 'new', finished), freshText('headless-sessions.json'))
+  trace($, 'worker.registered', { sessionId, isRegistered: failed === undefined, isFinished: true, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
+  if (failed !== undefined) return { sessionId, outcome, entry, failed }
+  const key = `${sessionId}:${entry.pid}`
+  if (!harvested.has(key)) {
+    harvested.add(key)
+    await announceCompletion($, entry, outcome, completionTold($, entry, sessionId, outcome, resultText), toasts)
+  }
+  return { sessionId, outcome, entry }
 }
 
 /**
@@ -2055,9 +2109,33 @@ async function spawnWorker(
   const filePid = pidFile === undefined ? undefined : pidFromFile(await $.fs.read(pidFile).catch(() => ''))
   const pidFileFact = pidFile === undefined ? {} : { pidFile: filePid === undefined ? 'unread' : filePid === worker.pid ? 'same' : 'differs' }
   trace($, 'worker.found', { pid: worker.pid, sessionId, isNamed: fromFile.name !== undefined, isSocketSeen: fromFile.socketPath !== undefined, ...pidFileFact })
-  if (sessionId === '') return { result: `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written.${warningLines}` }
-  const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
   const prompt = launchRun.own === undefined ? {} : { promptFile: launchRun.own.path, ...(launchRun.own.section === undefined ? {} : { section: launchRun.own.section }) }
+  if (sessionId === '') {
+    // Its sessions file is gone or holds no session id: a worker that has ended has written its session id to its result file.
+    const toasts = toastBudget()
+    const ended = await registerFromResult($, { args, verdict, files, name, prompt, launchedAt }, toasts)
+    toastMore($, toasts)
+    if (ended === undefined) {
+      // Neither file holds a session id yet: the poll reads both again, as for a worker not found in time (registerLate).
+      lateLaunches.push({ args, verdict, want, known, launchedAt, files, name, prompt, until: launchedAt + LATE_LAUNCH_SEC * 1000 })
+      return {
+        result:
+          `Worker pid ${worker.pid} started but its session id could not be read; registry NOT written. ` +
+          `Neither its sessions file (${sessionPath}) nor its result file (${files.result}) holds a session id yet. ` +
+          `The mod's poll reads them again and registers the worker as soon as one of them holds it (up to ${LATE_LAUNCH_SEC / 60} min after the launch): ` +
+          `from the sessions file while it runs, from the result file once it has ended. Until then it is not registered: while it runs it is an orphan row in list_sessions (cwd ${args.dir}). ` +
+          `Errors: ${files.err}.${warningLines}`,
+      }
+    }
+    await refresh($)
+    const endedNote = ended.failed === undefined ? 'registered as finished' : writeFailed(ended.failed)
+    return {
+      result:
+        `Worker pid ${worker.pid} started and ended before its sessions file could be read: session ${ended.sessionId} (from its result file), config_dir ${verdict.configDir}, ${endedNote}, outcome ${ended.outcome.kind}. ` +
+        `Name: ${name}; socket: none. Result: ${files.result}; errors: ${files.err}.${warningLines}`,
+    }
+  }
+  const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
   const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox, Math.floor(launchedAt / 1000), prompt)
   // A missing registry starts as an empty one, as REGISTER_SCRIPT starts it.
   const failed = await editRegistry($, async text => registerEntry(text, entry, verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
