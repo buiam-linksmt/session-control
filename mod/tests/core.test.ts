@@ -58,6 +58,8 @@ import {
   parseProcFacts,
   parseRegistry,
   parseTaskNotification,
+  backgroundTaskId,
+  isFinishedRun,
   pickArgv,
   probeArgs,
   rowStatus,
@@ -376,6 +378,16 @@ describe('completion classifier', () => {
       status: 'killed',
       outputFile: '/tmp/tasks/b7x1.output',
     })
+  })
+  test('the background task id of a launch tool answer: the one its task notification carries', () => {
+    const answer = 'Command running in background with ID: b4y87174f. Output is being written to: /tmp/claude-1000/x/tasks/b4y87174f.output'
+    expect(backgroundTaskId(answer)).toBe('b4y87174f')
+    expect(backgroundTaskId('Command running in background with ID: fixture')).toBe('fixture')
+    expect(backgroundTaskId('done')).toBeUndefined()
+  })
+  test('a finished run: a result object with is_error set either way; an empty, cut or non-object file is none', () => {
+    for (const text of [RESULTS.clean, RESULTS.error, RESULTS.login, RESULTS.chatter]) expect(isFinishedRun(text)).toBe(true)
+    for (const text of [RESULTS.empty, RESULTS.truncated, RESULTS.oom, '[]', 'null', '{"type":"result"}']) expect(isFinishedRun(text)).toBe(false)
   })
 })
 

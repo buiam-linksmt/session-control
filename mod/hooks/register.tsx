@@ -142,6 +142,8 @@ import {
   newRegistryEntry,
   parseRegistry,
   parseTaskNotification,
+  backgroundTaskId,
+  isFinishedRun,
   pickArgv,
   pickWatched,
   summarizeTranscript,
@@ -348,8 +350,18 @@ type LateLaunch = {
   until: number
 }
 let lateLaunches: LateLaunch[] = []
-/** The status of the last task notification (`killed`), for the next poll's harvest; taken by that harvest. */
-let notifiedStatus: string | undefined
+/**
+ * A task notification: its status and, when its task id names a launch of this load (launchTasks), that launch's result
+ * file, which names the worker the status belongs to.
+ */
+type TaskNotice = { status?: string; resultFile?: string }
+/** The background task id of each launch of this load (the launch tool's answer), with the launch's result file. */
+const launchTasks = new Map<string, string>()
+/**
+ * The statuses of task notifications that name a launch, by its result file, for the refresh running when they came,
+ * which may harvest that worker before the notification's own: taken by the next harvest, dropped when that refresh ends.
+ */
+const keptStatuses = new Map<string, string>()
 /**
  * How long a prompt that carries a task notification (a worker's exit) waits for the harvest it starts, so the finished
  * worker's completion note rides on that prompt. The wait is a pause in a process (host.pause: Linux `sleep`, the
@@ -886,7 +898,9 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
   if (typeof entry.result_file !== 'string') return
   const resultText = await $.fs.read(entry.result_file).catch(() => '')
   const errText = typeof entry.err_file === 'string' ? await $.fs.read(entry.err_file).catch(() => '') : ''
-  const outcome: SessionOutcome = classifyResult(resultText, taskStatus, errText)
+  // A task notification's `killed` does not override a run its result file shows finished, a success or an error.
+  const status = taskStatus === 'killed' && isFinishedRun(resultText) ? undefined : taskStatus
+  const outcome: SessionOutcome = classifyResult(resultText, status, errText)
   harvested.add(key)
   const told = completionTold($, entry, sid, outcome, resultText)
   if (config.completionWrites) {
@@ -1290,7 +1304,7 @@ async function loadPoints($: EngineInterface): Promise<{ problem?: string; queue
   return { ...(parsed.ok ? {} : { problem: parsed.error }), ...(queueRead === undefined ? {} : { queueText: queueRead }), ...(text === undefined ? {} : { pointsText: text }) }
 }
 
-async function gather($: EngineInterface, taskStatus: string | undefined, isTick = false): Promise<void> {
+async function gather($: EngineInterface, notice: TaskNotice | undefined, isTick = false): Promise<void> {
   await readToastSurfaces($)
   const files = await loadPoints($)
   // Without a usable Node nothing is tracked: no probe, completion, notice or drift check runs.
@@ -1324,11 +1338,18 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   // An entry this poll registered with a pid has no proof of life in this poll's probe, which ran before the entry
   // existed: it is judged from the next poll on, by that poll's probe, and drawn until then as the orphan row it was.
   const isNew = (entry: SessionEntry) => typeof entry.pid === 'number' && late.pids.has(entry.pid)
-  // The status a task notification left (prompt.submit) goes to this harvest, once.
-  const status = taskStatus ?? notifiedStatus
-  notifiedStatus = undefined
+  // A task notification's status goes to the worker its task names: by this harvest (the notification's own), or by the
+  // refresh that ran when it came (keptStatuses, taken here). A task this load did not launch names no worker: its
+  // status goes to the finished workers of the notification's own harvest.
+  const kept = new Map(keptStatuses)
+  keptStatuses.clear()
+  const statusOf = (entry: SessionEntry): string | undefined => {
+    const file = typeof entry.result_file === 'string' ? entry.result_file : undefined
+    if (notice !== undefined && (notice.resultFile === undefined || notice.resultFile === file)) return notice.status
+    return file === undefined ? undefined : kept.get(file)
+  }
   for (const entry of entries) {
-    if (!isNew(entry) && rowStatus(entry, facts) === 'dead') await complete($, entry, status, toasts)
+    if (!isNew(entry) && rowStatus(entry, facts) === 'dead') await complete($, entry, statusOf(entry), toasts)
   }
   const rows = buildRows(entries.filter(entry => !isNew(entry)), facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
@@ -1392,7 +1413,7 @@ async function showNodeMissing($: EngineInterface, now: number): Promise<void> {
   $.ui.toast(toastText(TOAST_TITLES.helper, `session-control ${NODE_WARNING}`), { timeoutMs: 10000 })
 }
 
-async function refresh($: EngineInterface, taskStatus?: string, isTick = false): Promise<void> {
+async function refresh($: EngineInterface, notice?: TaskNotice, isTick = false): Promise<void> {
   if (!isActive || isBusy) return
   // The poll's tick never starts a second probe, nor one while a launch looks for its worker or the poll rests.
   if (isTick && (isProbing || isLaunchSearching || (await $.clock.now()) < pollRestUntil)) {
@@ -1405,11 +1426,13 @@ async function refresh($: EngineInterface, taskStatus?: string, isTick = false):
     ended = resolve
   })
   try {
-    await gather($, taskStatus, isTick)
+    await gather($, notice, isTick)
   } catch (err) {
     traceError($, 'refresh', err)
     await showError($, String(err).slice(0, 200), await $.clock.now())
   } finally {
+    // A kept status lives through one refresh at most: one that failed or ended early drops it.
+    keptStatuses.clear()
     isBusy = false
     refreshing = undefined
     ended()
@@ -1421,10 +1444,14 @@ async function refresh($: EngineInterface, taskStatus?: string, isTick = false):
  * running now if one runs, raced against a pause of PROMPT_HARVEST_SEC in a process. Answers whether the harvest ended
  * first; when the pause ends first the harvest goes on behind the prompt.
  */
-async function promptHarvest($: EngineInterface, status: string | undefined): Promise<boolean> {
+async function promptHarvest($: EngineInterface, notice: TaskNotice): Promise<boolean> {
   const harvest = (async () => {
     while (refreshing !== undefined) await refreshing
-    await refresh($, status)
+    try {
+      await refresh($, notice)
+    } finally {
+      if (notice.resultFile !== undefined) keptStatuses.delete(notice.resultFile)
+    }
     return true
   })().catch((err: unknown) => {
     traceError($, 'prompt.harvest', err)
@@ -2064,6 +2091,9 @@ async function spawnWorker(
     trace($, 'worker.refused', { tool: machine.launchTool, isError: refused.isError, ...messageFields(refused.reason, 'reason') })
     return { deny: `${PLUGIN}: ${refused.text}` }
   }
+  // The background task's id names this launch in the task notification its end brings (prompt.submit).
+  const taskId = backgroundTaskId(typeof started.result === 'string' ? started.result : (started.text ?? ''))
+  if (taskId !== undefined) launchTasks.set(taskId, files.result)
   let worker: ProcFact | undefined
   // The launch's session name tells its worker from another launch's of the same dir, config dir and model.
   const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model, name }
@@ -2857,7 +2887,8 @@ export const register: Register = (on, options) => {
   usageSeen.clear()
   isUsageProbing = false
   lateLaunches = []
-  notifiedStatus = undefined
+  launchTasks.clear()
+  keptStatuses.clear()
   refreshing = undefined
   isProbing = false
   isLaunchSearching = false
@@ -2946,13 +2977,17 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     const extra: string[] = []
-    // A task notification's status (a background task killed) goes to the harvest this prompt starts, or else to the next
-    // poll's harvest of a finished worker.
+    // A task notification's status (a background task killed) goes to the harvest this prompt starts; when its task id
+    // names a launch of this load, to that launch's worker only, and to the refresh running now too, which may harvest
+    // that worker first.
     if (e.origin.kind === 'task-notification') {
-      const status = parseTaskNotification(e.text).status
-      notifiedStatus = status
+      const told = parseTaskNotification(e.text)
+      const resultFile = told.taskId === undefined ? undefined : launchTasks.get(told.taskId)
+      if (told.taskId !== undefined) launchTasks.delete(told.taskId)
+      const notice: TaskNotice = { ...(told.status === undefined ? {} : { status: told.status }), ...(resultFile === undefined ? {} : { resultFile }) }
+      if (resultFile !== undefined && told.status !== undefined) keptStatuses.set(resultFile, told.status)
       const startedAt = await $.clock.now()
-      const isInTime = await promptHarvest($, status)
+      const isInTime = await promptHarvest($, notice)
       trace($, 'prompt.harvest', { isInTime, ms: (await $.clock.now()) - startedAt })
     }
     // The completion notes the polls harvested ride on the next prompt, whatever started it.

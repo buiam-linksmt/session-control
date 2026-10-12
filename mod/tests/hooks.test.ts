@@ -1650,6 +1650,109 @@ describe('launch_worker', () => {
     })
   })
 
+  // The registry read back as written (REGISTRY_READS): the worker launched here runs as pid 7001 and its launch's
+  // background task is `fixture` (the fixture's Bash answer); the alive worker 4101 is given a result file per test.
+  describe('a task notification\'s status and the worker it names', () => {
+    const notification = (taskId: string) =>
+      `<task-notification>\n<task-id>${taskId}</task-id>\n<output-file>/tmp/tasks/${taskId}.output</output-file>\n<status>killed</status>\n<summary>Background command was killed</summary>\n</task-notification>`
+    const SID_NEW = 'abcdabcd-0000-4000-8000-000000000001'
+    const CLEAN = 'clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.'
+    const aliveWith = (resultFile: string) => JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_ALIVE ? { ...one, result_file: resultFile } : one)))
+    const ALIVE_CLEAN = aliveWith('/fixture/results/clean.json')
+    const ALIVE_UNWRITTEN = aliveWith('/fixture/results/alive.json')
+    const hosts = [
+      { name: 'Linux', options: OPTIONS, env: { HOME }, dir: ORCH_DIR, launch: args, knobs: LINUX_FIXTURE },
+      {
+        name: 'Windows',
+        options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}`, licencePickCommand: '' },
+        env: { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' },
+        dir: `C:${ORCH_DIR}`,
+        launch: { ...args, dir: '/c/work/new', prompt_file: '/c/work/new/prompt.md' },
+        knobs: WINDOWS,
+      },
+    ] as const
+    const outcomeOf = (w: World, sid: string) => (lastRegistry(w).find(one => one.session_id === sid)?.outcome as { kind?: string; summary?: string } | undefined)?.summary
+    const reset = (host: (typeof hosts)[number]) => {
+      REGISTRY_READS.isCurrent = false
+      WORKER.resultText = undefined
+      host.knobs.isProbeBroken = false
+      host.knobs.isWorkerHidden = false
+      host.knobs.isAliveGone = false
+    }
+
+    for (const host of hosts) {
+      test(`${host.name}: the notification's harvest fails: its status is dropped; a worker that ends after it is told by its result file alone`, { options: host.options }, async ($, on) => {
+        REGISTRY_READS.isCurrent = true
+        try {
+          const w = world(on, '/fixture/lic/a\n', true, ALIVE_CLEAN, host.env)
+          on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+          await $.session.start(start(host.dir))
+          expect(String((await $.tool.call({ tool: TOOL, ...host.launch } as never)).result)).toStartWith('Launched pid 7001')
+          await w.clock.advance(5000)
+          // A notification of a task this load did not start, then one of the launch's own task: each prompt's harvest
+          // fails (the probe cannot run).
+          host.knobs.isProbeBroken = true
+          await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
+          await $.prompt.submit({ text: notification('fixture'), wait: false, origin: { kind: 'task-notification' } })
+          host.knobs.isProbeBroken = false
+          // Then the alive worker ends with its clean report, and the launched one with no result written.
+          host.knobs.isAliveGone = true
+          host.knobs.isWorkerHidden = true
+          await w.clock.advance(5000)
+          await w.clock.advance(5000)
+          expect(outcomeOf(w, SID_ALIVE)).toBe(CLEAN)
+          expect(outcomeOf(w, SID_NEW)).toBe('killed: no result written')
+          expect(w.toasts.filter(one => one.includes('background task killed'))).toEqual([])
+        } finally {
+          reset(host)
+        }
+      })
+
+      test(`${host.name}: a notification that names a launch of this load: its status goes to that worker alone`, { options: host.options }, async ($, on) => {
+        REGISTRY_READS.isCurrent = true
+        try {
+          // The alive worker has no result written either: only the status tells the two apart.
+          const w = world(on, '/fixture/lic/a\n', true, ALIVE_UNWRITTEN, host.env)
+          on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+          await $.session.start(start(host.dir))
+          expect(String((await $.tool.call({ tool: TOOL, ...host.launch } as never)).result)).toStartWith('Launched pid 7001')
+          await w.clock.advance(5000)
+          // Both workers end; the notification names the launch's task: killed, with no result written.
+          host.knobs.isAliveGone = true
+          host.knobs.isWorkerHidden = true
+          await $.prompt.submit({ text: notification('fixture'), wait: false, origin: { kind: 'task-notification' } })
+          expect(outcomeOf(w, SID_NEW)).toBe('killed: background task killed')
+          expect(outcomeOf(w, SID_ALIVE)).toBe('killed: no result written')
+          expect(w.toasts).toContain('Session killed \u00B7 new: killed: background task killed')
+        } finally {
+          reset(host)
+        }
+      })
+
+      for (const [what, resultText, summary] of [
+        ['a success', JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'PONG', session_id: SID_NEW }), 'clean: PONG'],
+        ['an error', JSON.stringify({ type: 'result', subtype: 'error_max_turns', is_error: true, result: 'Stopped at the turn limit', session_id: SID_NEW }), 'error: Stopped at the turn limit'],
+      ] as const) {
+        test(`${host.name}: a killed notification for a launch whose result file holds a finished run, ${what}: the run's outcome`, { options: host.options }, async ($, on) => {
+          REGISTRY_READS.isCurrent = true
+          try {
+            const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+            on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+            await $.session.start(start(host.dir))
+            expect(String((await $.tool.call({ tool: TOOL, ...host.launch } as never)).result)).toStartWith('Launched pid 7001')
+            await w.clock.advance(5000)
+            WORKER.resultText = resultText
+            host.knobs.isWorkerHidden = true
+            await $.prompt.submit({ text: notification('fixture'), wait: false, origin: { kind: 'task-notification' } })
+            expect(outcomeOf(w, SID_NEW)).toBe(summary)
+          } finally {
+            reset(host)
+          }
+        })
+      }
+    }
+  })
+
   test('the first prompt after a compaction carries the state digest, once', { options: OPTIONS }, async ($, on) => {
     world(on)
     on('classic.PostCompact', () => ({}))

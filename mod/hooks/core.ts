@@ -722,6 +722,27 @@ export function parseTaskNotification(text: string): { taskId?: string; status?:
   return { taskId: tag('task-id'), status: tag('status'), outputFile: tag('output-file') }
 }
 
+/**
+ * The id of the background task the Bash or PowerShell tool started (its answer `Command running in background with
+ * ID: <id>. ...`), the `<task-id>` its task notification carries; undefined when the answer names none.
+ */
+export function backgroundTaskId(answer: string): string | undefined {
+  return /\bbackground with ID: ([\w-]+)/.exec(answer)?.[1]
+}
+
+/**
+ * Whether a result file holds a finished run: the engine's result object, a success or an error (`is_error` set either
+ * way). A task notification's `killed` does not override such a run (complete).
+ */
+export function isFinishedRun(resultText: string): boolean {
+  try {
+    const value: unknown = JSON.parse(resultText)
+    return typeof value === 'object' && value !== null && !Array.isArray(value) && typeof (value as { is_error?: unknown }).is_error === 'boolean'
+  } catch {
+    return false
+  }
+}
+
 // ---------------------------------------------------------------- launch guard
 
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
