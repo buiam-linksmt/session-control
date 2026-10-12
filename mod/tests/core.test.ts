@@ -48,7 +48,7 @@ import {
   parseOpenPoints,
   expandHome,
   formatHeader,
-  desktopRowText,
+  desktopRowLines,
   DESKTOP_HEADER,
   holdOffset,
   formatRow,
@@ -500,17 +500,17 @@ describe('pane columns', () => {
     expect(formatRow(rows[0]!, 70, widths).length).toBeLessThanOrEqual(70)
   })
 
-  test('the desktop row: the same cells in the same order, whole, joined by a middle dot, with no padding and no cut', () => {
+  test('the desktop row: the title, then the same cells in the same order, whole, joined by a middle dot, with no padding and no cut', () => {
     const rows = buildRows(REGISTRY, facts, NOW_SEC)
-    expect(DESKTOP_HEADER).toBe('title \u00B7 sid \u00B7 status \u00B7 model \u00B7 effort \u00B7 elapsed')
-    expect(desktopRowText(rows[0]!)).toBe(`alive worker \u00B7 ${rows[0]!.sid8} \u00B7 running \u00B7 opus \u00B7 high \u00B7 2m05s`)
+    expect(DESKTOP_HEADER).toEqual(['title', 'sid \u00B7 status \u00B7 model \u00B7 effort \u00B7 elapsed'])
+    expect(desktopRowLines(rows[0]!)).toEqual(['alive worker', `${rows[0]!.sid8} \u00B7 running \u00B7 opus \u00B7 high \u00B7 2m05s`])
     const long = { ...rows[0]!, title: 'a title much longer than any column the terminal would give it, kept whole' }
-    expect(desktopRowText(long)).toStartWith(`${long.title} \u00B7 `)
-    expect(desktopRowText(long)).toEndWith(' \u00B7 2m05s')
+    expect(desktopRowLines(long)[0]).toBe(long.title)
+    expect(desktopRowLines(long)[1]).toEndWith(' \u00B7 2m05s')
     // A row with no session id and no elapsed: a dash for each, as the terminal shows them.
     const orphan = rows.find(row => row.status === 'orphan')!
-    expect(desktopRowText({ ...orphan, sid8: '', elapsedSec: undefined })).toBe(`${orphan.title} \u00B7 - \u00B7 orphan \u00B7 ? \u00B7 ? \u00B7 -`)
-    for (const row of rows) expect(desktopRowText(row)).not.toMatch(/ {2}|\u2026/)
+    expect(desktopRowLines({ ...orphan, sid8: '', elapsedSec: undefined })).toEqual([orphan.title, '- \u00B7 orphan \u00B7 ? \u00B7 ? \u00B7 -'])
+    for (const row of rows) for (const line of desktopRowLines(row)) expect(line).not.toMatch(/ {2}|\u2026/)
   })
 })
 

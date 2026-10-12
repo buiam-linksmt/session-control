@@ -343,17 +343,18 @@ export function formatHeader(columns: number, widths: PaneWidths): string {
 const DESKTOP_SEP = ' \u00B7 '
 
 /**
- * One pane line for a row on the desktop surface: formatRow's cells in its order (title, session id, status, model,
- * effort, elapsed at the display clock), whole, joined by ` · `, with no padding and no cut. The desktop draws text in a
- * proportional font, collapses runs of blanks and reports a width in cells that is not its own, so fixed cell widths
- * there cut the row; the surface wraps this text in the room it has.
+ * A row's two lines on the desktop surface: its title, then formatRow's other cells in its order (session id, status,
+ * model, effort, elapsed at the display clock), whole, joined by ` · `, with no padding and no cut. The desktop draws
+ * text in a proportional font, collapses runs of blanks and reports a width in cells that is not its own, so fixed cell
+ * widths there cut the row; and it draws a Button on one line, cut at the box's edge, so the cells go on a line of their
+ * own, which the surface wraps in the room it has.
  */
-export function desktopRowText(row: SessionRow, clock?: ElapsedClock): string {
-  return [row.title, row.sid8 || '-', statusLabel(row.status), row.model, row.effort, elapsedText(row, clock)].join(DESKTOP_SEP)
+export function desktopRowLines(row: SessionRow, clock?: ElapsedClock): [string, string] {
+  return [row.title, [row.sid8 || '-', statusLabel(row.status), row.model, row.effort, elapsedText(row, clock)].join(DESKTOP_SEP)]
 }
 
-/** The column header of desktopRowText's rows. */
-export const DESKTOP_HEADER = ['title', 'sid', 'status', 'model', 'effort', 'elapsed'].join(DESKTOP_SEP)
+/** The column header of desktopRowLines' rows, its two lines. */
+export const DESKTOP_HEADER: readonly [string, string] = ['title', ['sid', 'status', 'model', 'effort', 'elapsed'].join(DESKTOP_SEP)]
 
 function shortDir(dir: string): string {
   const parts = dir.replace(/\/+$/, '').split('/')

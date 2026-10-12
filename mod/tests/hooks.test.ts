@@ -3087,10 +3087,14 @@ describe('the panel on the desktop surface', () => {
 
   test('desktop: each session row is its whole text, title to elapsed, with no padding and no cut of the mod; the header names the cells', { options: OPTIONS }, async ($, on) => {
     const ui = await open($, on, 'desktop')
-    const row = String((await ui.find({ key: `s:${SID}` }))?.props.label)
-    expect(row).toMatch(/^alive worker · aaaaaaaa · running · opus · high · \d+m\d\ds$/)
+    // The title is the pressable line (Desktop draws a Button on one line, cut at the box's edge); the cells follow on a
+    // Text the surface wraps, so the status and the elapsed time always show.
+    expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toBe('alive worker')
     const texts = await textsOf(ui)
-    expect(texts).toContainEqual({ text: 'title · sid · status · model · effort · elapsed', wrap: 'wrap' })
+    const cells = texts.find(one => /^aaaaaaaa · running · opus · high · \d+m\d\ds$/.test(one.text))
+    expect(cells?.wrap).toBe('wrap')
+    expect(texts).toContainEqual({ text: 'title', wrap: 'wrap' })
+    expect(texts).toContainEqual({ text: 'sid · status · model · effort · elapsed', wrap: 'wrap' })
     // No row of any box is cut, padded or wrapped by the mod: the surface does that in its own room.
     for (const label of (await ui.findAll({ type: 'Button' })).map(one => String(one.props.label))) {
       expect(label).not.toContain('…')
@@ -3099,7 +3103,7 @@ describe('the panel on the desktop surface', () => {
     for (const one of texts) expect(one.text).not.toContain('…')
     // A press on the row still opens its log, the row then marked.
     await ui.press({ key: `s:${SID}` })
-    expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toMatch(/^▸ alive worker · aaaaaaaa · running · /)
+    expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toBe('\u25B8 alive worker')
   })
 
   test('the terminal keeps its columns at the same width: padded cells, cut with an ellipsis', { options: OPTIONS }, async ($, on) => {

@@ -118,7 +118,7 @@ import {
   lintReport,
   formatHeader,
   elapsedText,
-  desktopRowText,
+  desktopRowLines,
   DESKTOP_HEADER,
   boxAt,
   MIN_BOX,
@@ -2985,7 +2985,8 @@ export const register: Register = (on, options) => {
     const boxes: SectionBox[] = isCompact ? [{ id: activeId, top: 1, height: compactRows - 1 }] : sectionBoxes(bodyRows, isLogOpen, expandedId)
     layout = { boxes, totals: {} }
     drawnSessions = undefined
-    type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end' }
+    // `rowIndex`: the session row (snap.rows) a line of the sessions box belongs to.
+    type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end'; rowIndex?: number }
     // The elapsed column at the display clock: the tick's time, never before the probe the rows come from.
     const probedSec = Math.floor(snap.at / 1000)
     const clock = { nowSec: Math.max(nowSec, probedSec), probedSec }
@@ -3038,8 +3039,8 @@ export const register: Register = (on, options) => {
       const from = isTail ? Math.max(0, total - visible - back) : clampOffset(offset, total, visible)
       const bar = scrollbar(total, visible, from)
       const shown = body.slice(from, from + visible)
-      // The session rows in view, for the display tick (its rows are snap.rows one to one).
-      if (id === 'sessions') drawnSessions = { rows: snap.rows.slice(from, from + visible), probedSec }
+      // The session rows in view, for the display tick (one line each on the terminal, two on the desktop).
+      if (id === 'sessions') drawnSessions = { rows: [...new Set(shown.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       // The rows' column: the box's inner width less the scroll bar (no border in the compact panel).
       const fill = Math.max(1, columns - (isPlain ? 1 : 3))
       // A pressable row and its scroll-bar cell share a hover scope (a block's own when it has one), so the light
@@ -3081,12 +3082,19 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    const sessionRows: PRow[] = snap.rows.length === 0 ? [{ text: 'No workers in the registry.', dim: true }] : snap.rows.map(row => {
+    const sessionRows: PRow[] = snap.rows.length === 0 ? [{ text: 'No workers in the registry.', dim: true }] : snap.rows.flatMap((row, rowIndex) => {
       const sid = row.sid
       const isSelected = sid !== undefined && sid === sel
-      const text = isDesktop ? (isSelected ? '\u25B8 ' : '') + desktopRowText(row, clock) : (isSelected ? '\u25B8 ' : '  ') + formatRow(row, width - 2, widths, clock)
-      if (sid === undefined) return { text, dim: row.status === 'done', color: row.status === 'dead' || row.status === 'orphan' ? ('warning' as const) : undefined }
-      return { text, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done' }
+      const color = row.status === 'dead' || row.status === 'orphan' ? ('warning' as const) : undefined
+      if (isDesktop) {
+        // The title is the line pressed (a Button, one line); the cells follow on a line the surface wraps.
+        const [title, cells] = desktopRowLines(row, clock)
+        const head: PRow = sid === undefined ? { text: title, dim: row.status === 'done', color, rowIndex } : { text: (isSelected ? '\u25B8 ' : '') + title, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done', rowIndex }
+        return [head, { text: cells, dim: true, rowIndex }]
+      }
+      const text = (isSelected ? '\u25B8 ' : '  ') + formatRow(row, width - 2, widths, clock)
+      if (sid === undefined) return [{ text, dim: row.status === 'done', color, rowIndex }]
+      return [{ text, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done', rowIndex }]
     })
     const pick = (id: 'sessions' | 'queue' | 'points') => async () => {
       await update($, tab, () => id)
@@ -3109,8 +3117,8 @@ export const register: Register = (on, options) => {
     )
     const warningRow: PRow[] =
       snap.error === undefined ? [] : isDesktop ? [{ text: `! session-control: ${snap.error}`, dim: false, wrap: 'truncate-end' }] : [{ text: wrapText(`! session-control: ${snap.error}`, width)[0] ?? '', dim: false }]
-    const headerRow: PRow = isDesktop ? { text: DESKTOP_HEADER, dim: true } : { text: '  ' + formatHeader(width - 2, widths), dim: true }
-    const sessionsBlock = (isPlain = false) => block('sessions', 'SESSIONS', [...warningRow, headerRow], sessionRows, offs.sessions, false, isPlain)
+    const headerRows: PRow[] = isDesktop ? DESKTOP_HEADER.map(text => ({ text, dim: true })) : [{ text: '  ' + formatHeader(width - 2, widths), dim: true }]
+    const sessionsBlock = (isPlain = false) => block('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, offs.sessions, false, isPlain)
     if (isLogOpen && view !== null) {
       // The desktop ends each log line at its own width: one row per line, so the newest lines stay in the box.
       const logRows: PRow[] = view.lines.flatMap(line => {
