@@ -396,6 +396,17 @@ let isToastHeldHere = false
 const TOAST_SHOW_MS = 8000
 const TOAST_QUEUE_MAX = 5
 /**
+ * While no surface is attached (`$.session.surfaces()` answers none: a desktop session its app does not show yet, a `-p`
+ * run) a toast would never be seen: the completion, notice and summary toasts wait in unattachedToasts, each with the
+ * time it was raised, and go out through the queue above once a surface attaches (read at each poll, and at once when a
+ * client attaches: session.attach), those raised within UNATTACHED_TOAST_MS; older ones are dropped. Their notes and
+ * notice lines reach the model as ever. A surfaces read that fails holds nothing.
+ */
+let isUnattached = false
+let unattachedToasts: { toast: HeldToast; at: Promise<number> }[] = []
+const UNATTACHED_TOAST_MS = 60_000
+const UNATTACHED_TOASTS_MAX = 50
+/**
  * Whether a call is probing now: at most one `claude -p /usage` runs at a time, across calls too. A call that finds one
  * running does not wait for it (a wait on another call's work would count against the hook's own 10 s budget): it
  * answers from memory and names the rest for the next call.
@@ -780,6 +791,11 @@ const writeFailed = (why: string) => `registry write FAILED: ${why.slice(0, 120)
  * (toastHold), which on a surface other than the terminal each one does for TOAST_SHOW_MS.
  */
 function raiseToast($: EngineInterface, text: string, timeoutMs: number, isCompletion = false, more = 0): void {
+  if (isUnattached) {
+    unattachedToasts.push({ toast: { text, timeoutMs, isCompletion, more }, at: $.clock.now().catch(() => 0) })
+    if (unattachedToasts.length > UNATTACHED_TOASTS_MAX) unattachedToasts.shift()
+    return
+  }
   if (toastHold === undefined) {
     showToast($, { text, timeoutMs, isCompletion, more })
     return
@@ -803,9 +819,37 @@ function showToast($: EngineInterface, one: HeldToast): void {
   if (isToastHeldHere) holdToasts($)
 }
 
-/** Whether the session draws on a surface other than the terminal, where a completion toast holds the next ones. */
+/**
+ * Where the session draws: on a surface other than the terminal each toast holds the next ones; on none at all toasts
+ * wait for one (unattachedToasts), and go out once one is there.
+ */
 async function readToastSurfaces($: EngineInterface): Promise<void> {
-  isToastHeldHere = (await $.session.surfaces().catch(() => [] as const)).some(one => one !== 'terminal')
+  const surfaces = await $.session.surfaces().then(
+    list => list,
+    () => undefined,
+  )
+  isToastHeldHere = (surfaces ?? []).some(one => one !== 'terminal')
+  isUnattached = surfaces !== undefined && surfaces.length === 0
+  await settleUnattached($)
+}
+
+/**
+ * The toasts kept while no surface was attached: those raised within UNATTACHED_TOAST_MS go out through the queue once a
+ * surface is attached (still kept while none is), older ones are dropped (a toast.dropped trace line counts them).
+ */
+async function settleUnattached($: EngineInterface): Promise<void> {
+  if (unattachedToasts.length === 0) return
+  const waiting = unattachedToasts
+  unattachedToasts = []
+  const now = await $.clock.now()
+  const ats = await Promise.all(waiting.map(one => one.at))
+  const fresh = waiting.filter((_, at) => now - (ats[at] ?? 0) <= UNATTACHED_TOAST_MS)
+  if (fresh.length < waiting.length) trace($, 'toast.dropped', { count: waiting.length - fresh.length, isUnattached })
+  if (isUnattached) {
+    unattachedToasts = [...fresh, ...unattachedToasts]
+    return
+  }
+  for (const one of fresh) raiseToast($, one.toast.text, one.toast.timeoutMs, one.toast.isCompletion, one.toast.more)
 }
 
 /**
@@ -2736,6 +2780,8 @@ export const register: Register = (on, options) => {
   heldToasts = []
   queueMore = 0
   isToastHeldHere = false
+  isUnattached = false
+  unattachedToasts = []
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
@@ -2775,6 +2821,13 @@ export const register: Register = (on, options) => {
   on('classic.PostCompact', async ($, e, next) => {
     isAfterCompact = true
     return next(e)
+  })
+
+  // A client that attaches (the desktop app showing the session) gets the toasts kept while none was.
+  on('session.attach', async ($, e, next) => {
+    const attached = await next(e)
+    if (isActive) await readToastSurfaces($)
+    return attached
   })
 
   // Peer ledger: tasks sent to a peer stay open until a peer reply arrives.

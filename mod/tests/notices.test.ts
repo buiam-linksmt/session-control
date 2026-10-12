@@ -504,6 +504,98 @@ describe('toast order on a surface other than the terminal (decision mod-28)', (
   })
 })
 
+describe('toasts while no surface is attached (decision mod-28)', () => {
+  const COMPLETION = 'Session finished \u00B7 unit worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.'
+  const READY = [
+    'Queued task ready \u00B7 queued task q-next waited for w-unit-worker-261011090000, which finished',
+    'Queued task ready \u00B7 queued task q-id8 waited for w-unit-worker-261011090000, which finished',
+  ]
+  const DUE = 'Compliance check due \u00B7 compliance check due for section Unit X (user, 2026-10-11) (session w-unit-worker-261011090000)'
+  // The hourly reminder of the poll's first tick (5 s after the start).
+  const HOUSEKEEPING = 'Housekeeping due \u00B7 2 queue tasks look stale (q-next, q-id8): run audit_state'
+  const QUEUE = [
+    { id: 'q-next', status: 'queued', title: 'Next step', waits_for: 'w-unit-worker-261011090000 to finish' },
+    { id: 'q-id8', status: 'queued', title: 'By id', waits_for: `session ${SID_UNIT.slice(0, 8)}` },
+  ]
+  /** The surfaces the session draws on, as $.session.surfaces answers them now: none at first. */
+  const roster = (on: On) => {
+    const surfaces = { list: [] as readonly string[] }
+    on('session.surfaces', () => ({ value: surfaces.list }) as never)
+    on('session.attach', ($, e) => ({ clientId: e.clientId }))
+    return surfaces
+  }
+  /** The harvest of a finished unit worker with two queued tasks waiting for it, started with no surface attached. */
+  const unattachedStart = async ($: Parameters<typeof start>[0], on: On) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    const surfaces = roster(on)
+    seed(world, { entries: [UNIT_ENTRY], queue: QUEUE })
+    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
+    await start($)
+    return { world, surfaces }
+  }
+
+  test('raised before a surface attaches, the toasts wait; the desktop attached 30 s later gets them through the queue, one each 8 s; the note and the lines reach the model at once', { options: OPTIONS }, async ($, on) => {
+    const { world, surfaces } = await unattachedStart($, on)
+    expect(world.toasts).toEqual([])
+    const sent = await userPrompt($)
+    expect(String(sent.context?.[0])).toStartWith('session-control completions: unit worker: clean: ')
+    expect(noticeLines(sent).length).toBe(3)
+    await world.clock.advance(30_000)
+    expect(world.toasts).toEqual([])
+    // The poll at 35 s reads the desktop attached: the kept toasts go out in the order they were raised.
+    surfaces.list = ['desktop']
+    await world.clock.advance(5000)
+    expect(world.toasts).toEqual([COMPLETION])
+    for (const [shown, toast] of [READY[0], READY[1], DUE, HOUSEKEEPING].entries()) {
+      await world.clock.advance(7999)
+      expect(world.toasts.length).toBe(shown + 1)
+      await world.clock.advance(1)
+      expect(world.toasts.at(-1)).toBe(toast)
+    }
+    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, HOUSEKEEPING])
+  })
+
+  test('a client that attaches gets the kept toasts at once, without waiting for the poll', { options: OPTIONS }, async ($, on) => {
+    const { world, surfaces } = await unattachedStart($, on)
+    await world.clock.advance(2000)
+    surfaces.list = ['desktop']
+    await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' } as never)
+    expect(world.toasts).toEqual([COMPLETION])
+    await world.clock.advance(8000)
+    expect(world.toasts).toEqual([COMPLETION, READY[0]])
+  })
+
+  test('a toast kept 60 s with no surface attached is dropped; the note and the lines stay for the model, and a toast raised later still goes out', { options: OPTIONS }, async ($, on) => {
+    const { world, surfaces } = await unattachedStart($, on)
+    // 65 s: the start's four toasts are past their 60 s; the reminder of the 5 s tick is 60 s old, still kept.
+    await world.clock.advance(65_000)
+    surfaces.list = ['desktop']
+    await $.session.attach({ surface: 'desktop', clientId: 'desktop:default' } as never)
+    expect(world.toasts).toEqual([HOUSEKEEPING])
+    const sent = await userPrompt($)
+    expect(String(sent.context?.[0])).toStartWith('session-control completions: unit worker: clean: ')
+    expect(noticeLines(sent).length).toBe(4)
+    await world.clock.advance(60_000)
+    expect(world.toasts).toEqual([HOUSEKEEPING])
+    // Attached now: a notice raised later goes out at once.
+    await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-next', status: 'done' } as never)
+    await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-id8', status: 'done' } as never)
+    expect(world.toasts).toEqual([HOUSEKEEPING, 'Queue empty \u00B7 queue empty: run audit_state and report'])
+  })
+
+  test('the terminal is attached from the start: nothing is kept, the toasts of a pass go out together as before', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    on('session.surfaces', () => ({ value: ['terminal'] }) as never)
+    seed(world, { entries: [UNIT_ENTRY], queue: QUEUE })
+    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
+    await start($)
+    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE])
+  })
+})
+
 describe('open-point-age', () => {
   const dayMs = 86_400_000
   const raisedAgo = (days: number) => localDate(NOW_MS - days * dayMs)
