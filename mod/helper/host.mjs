@@ -19,6 +19,8 @@
 //   probeUsage    {configDir, isInherited?}           -> {five, seven}  `claude -p /usage` for that config directory: each
 //                                                                    window {percent, resets} or null; codes NO_CLAUDE,
 //                                                                    TIMEOUT, NOT_LOGGED_IN, PARSE, FAILED (usage.mjs)
+//   pause         {ms}                                -> {}          answers once ms (0 to 10000) have passed; never in a
+//                                                                    batch (ops.mjs)
 //   batch         {ops: [{op, ...request}, ...]}      -> {results}   file operations in order, in this one process;
 //                                                                    the first failure stops it: {ok:false, code, at}
 

@@ -98,7 +98,6 @@ function portOf(sim: Sim, cap = Infinity): HostPort {
       return { kind: 'file', size: text.length, mtimeMs: NOW_MS, isLink: false } as never
     },
     now: async () => sim.nowMs,
-    sleep: async () => undefined,
     env: async name => (name === 'SystemRoot' ? 'C:\\Windows' : '/m/home'),
     runsDir: async () => '/m/runs',
     noteHelper: note => {

@@ -35,7 +35,6 @@ function recordingPort(answer: (argv: readonly string[], init?: ProcessRunInit) 
       throw new Error('ENOENT')
     },
     now: async () => 1_700_000_000_000,
-    sleep: async () => undefined,
     env: async name => env[name],
     runsDir: async () => '/m/runs',
     noteHelper: note => notes.push(note),

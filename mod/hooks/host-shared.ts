@@ -1,6 +1,6 @@
 // What both adapters and the helper layer share: pure TypeScript and `$.fs` (through the HostPort), which work the same
-// on Linux and on Windows: the launch command, the launch checks and file creation through `$.fs`, the engine's clock,
-// the constants of the helper's requests, and the reading of a process tree and a stop. No `$` here.
+// on Linux and on Windows: the launch command, the launch checks and file creation through `$.fs`, the constants of the
+// helper's requests, and the reading of a process tree and a stop. No `$` here.
 
 import type { FsStat } from 'claude-code'
 
@@ -18,11 +18,6 @@ export async function statLaunchChecks(port: HostPort, args: LaunchArgs): Promis
   const prompt: FsStat | undefined = await port.stat(args.prompt_file).catch(() => undefined)
   const dir: FsStat | undefined = await port.stat(args.dir).catch(() => undefined)
   return { promptFileOk: prompt?.kind === 'file' && prompt.size > 0, dirOk: dir?.kind === 'dir' }
-}
-
-/** Waits on the engine's clock. */
-export async function clockPause(port: HostPort, seconds: number): Promise<void> {
-  await port.sleep(seconds * 1000)
 }
 
 /** The command the Bash tool runs for a launch: bash on Linux, Git Bash on Windows, the same text. */

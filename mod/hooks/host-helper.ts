@@ -1,6 +1,6 @@
 // The host layer: withHelper makes the Host of a platform adapter (host-posix.ts, host-windows.ts). Every file
-// operation, the usage probe and, on Linux, the process probe and the stop of stop_worker run in one
-// `node mod/helper/host.mjs <op>` process each, with the request as JSON on stdin. Node is looked for at the first
+// operation, the usage probe, on Linux the process probe and the stop of stop_worker, and on Windows the wait between
+// discovery checks run in one `node mod/helper/host.mjs <op>` process each, with the request as JSON on stdin. Node is looked for at the first
 // operation that needs it: while none is found, or one older than HELPER_MIN_NODE, the first operation
 // HELPER_REDETECT_MS or more after that lookup looks again, so installing Node needs no reload; once found it stays for
 // the load. Without a usable Node every operation that reads or writes the machine rejects with NodeMissingError, whose
@@ -49,10 +49,10 @@ export const isNodeMissing = (err: unknown): boolean => err instanceof Error && 
 export type HelperSetup = { node: string; script: string }
 
 /** The helper's operations as its protocol names them. */
-export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'hashTree' | 'processTree' | 'stopProcesses' | 'probeUsage' | 'batch'
+export type HelperOp = 'probe' | 'writeAtomic' | 'renameOver' | 'removeFile' | 'append' | 'tail' | 'rotate' | 'filesNewerThan' | 'hashTree' | 'processTree' | 'stopProcesses' | 'probeUsage' | 'pause' | 'batch'
 
 /** One step of a batch: a file operation and its request. */
-export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'processTree' | 'stopProcesses' | 'probeUsage' | 'batch'> } & Record<string, unknown>
+export type HelperStep = { op: Exclude<HelperOp, 'probe' | 'processTree' | 'stopProcesses' | 'probeUsage' | 'pause' | 'batch'> } & Record<string, unknown>
 
 /** What a helper call came to: its answer's fields, or the fixed code it failed with. */
 export type HelperAnswer = { ok: true; fields: Record<string, unknown> } | { ok: false; code: string; at?: number }
@@ -77,6 +77,9 @@ const VERSION_TIMEOUT_MS = 5_000
 
 /** How long a probeUsage call may take: the helper's own 15 s bound on claude, and Node's start. */
 export const USAGE_CALL_TIMEOUT_MS = 20_000
+
+/** The longest wait one pause asks the helper for (its PAUSE_MAX_MS); a pause call may take that and CALL_TIMEOUT_MS. */
+export const PAUSE_MAX_MS = 10_000
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 
@@ -149,9 +152,9 @@ const rotateRequest = (plan: RotatePlan) => ({ path: plan.path, adding: plan.add
  * The Host of a platform adapter: nodeReady, writeAtomic, renameOver, removeFile, removeRegularFile (the helper's
  * removeFile with `regularOnly`), append, tail, rotate, rotateAndAppend (one batch), filesNewerThan, hashTrees (one
  * batch) and probeUsage by the helper on both platforms; probe and stopProcessTree by the helper on Linux and by the
- * adapter's own PowerShell scripts on Windows; launchChecks, createFile, prepareHelperDirs and prepareRunsDir the
- * adapter's own. Each of those runs only once Node is found. Every other member (the paths, the launch's text, the
- * worker match, the wait) is the adapter's own and needs no Node.
+ * adapter's own PowerShell scripts on Windows; pause by the adapter on Linux (`sleep`) and by the helper on Windows;
+ * launchChecks, createFile, prepareHelperDirs and prepareRunsDir the adapter's own. Each of those runs only once Node
+ * is found. Every other member (the paths, the launch's text, the worker match) is the adapter's own and needs no Node.
  */
 export function withHelper(base: Platform, setup: HelperSetup): Host {
   let ready: Promise<boolean> | undefined
@@ -293,7 +296,17 @@ export function withHelper(base: Platform, setup: HelperSetup): Host {
     throw new Error(`the helper's stop failed (${failed(port, 'stopProcesses', answer)}); what it signalled before that is not known`)
   }
 
-  const { probe: ownProbe, stopProcessTree: ownStop, ...own } = base
+  /**
+   * Windows: the wait between discovery checks as one helper process (`pause`), never on the engine's clock: a hook's
+   * time budget counts a `$.clock.sleep` and not the time a `$.process.run` is in flight. A call that fails is told to
+   * the port and ends the wait early; nothing waits on the clock in its place.
+   */
+  async function helperPause(port: HostPort, seconds: number): Promise<void> {
+    const ms = Math.min(PAUSE_MAX_MS, Math.max(0, Math.round(seconds * 1000)))
+    await through(port, 'pause', { ms }, false, { ms }, () => true as const, () => false as const, ms + CALL_TIMEOUT_MS)
+  }
+
+  const { probe: ownProbe, stopProcessTree: ownStop, pause: ownPause, ...own } = base
 
   return {
     ...own,
@@ -305,6 +318,7 @@ export function withHelper(base: Platform, setup: HelperSetup): Host {
     prepareRunsDir: gated(base.prepareRunsDir),
     probe: ownProbe === undefined ? helperProbe : gated(ownProbe),
     stopProcessTree: ownStop === undefined ? helperStop : gated(ownStop),
+    pause: ownPause ?? helperPause,
 
     async writeAtomic(port: HostPort, path: string, text: string, expected?: string): Promise<boolean> {
       const request = expected === undefined ? { path, text } : { path, text, expected }

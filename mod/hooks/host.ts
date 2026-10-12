@@ -34,8 +34,6 @@ export type HostPort = {
   stat(path: string): Promise<FsStat>
   /** `$.clock.now`, epoch milliseconds. */
   now(): Promise<number>
-  /** `$.clock.sleep`. */
-  sleep(ms: number): Promise<void>
   /** `$.env.get` of one of the names an adapter reads. */
   env(name: HostEnvName): Promise<string | undefined>
   /** The runs directory of the settings, in the adapter's own path form. */
@@ -146,7 +144,10 @@ export type Host = {
   findNewWorker(port: HostPort, facts: ProcFacts, want: WorkerWant, known: ReadonlySet<number>, launchedAt: number): Promise<ProcFact | undefined>
   /** The config directory the probe shows for the new worker. */
   workerConfigDir(verdict: { configDir: string; isConfigInherited?: boolean }, own: string | undefined): string
-  /** Waits a few seconds between discovery checks. */
+  /**
+   * Waits a few seconds between discovery checks, inside a process (Linux `sleep`, Windows the helper's `pause`): a
+   * hook's time budget counts a wait on the engine's clock (`$.clock.sleep`) and not the time a process runs.
+   */
   pause(port: HostPort, seconds: number): Promise<void>
 
   // ---- launch
@@ -288,8 +289,9 @@ export type HelperMember = 'nodeReady' | 'writeAtomic' | 'removeFile' | 'removeR
 /**
  * What a platform adapter gives: every member of Host but the helper's. The process probe and the stop are the adapter's
  * own only where the helper has none (native Windows: PROBE_PS1, TREE_PS1 and taskkill); on Linux they are the helper's.
+ * The wait is the adapter's own where the system has a `sleep` to start (Linux); on Windows it is the helper's `pause`.
  */
-export type Platform = Omit<Host, HelperMember | 'probe' | 'stopProcessTree'> & Partial<Pick<Host, 'probe' | 'stopProcessTree'>>
+export type Platform = Omit<Host, HelperMember | 'probe' | 'stopProcessTree' | 'pause'> & Partial<Pick<Host, 'probe' | 'stopProcessTree' | 'pause'>>
 
 /**
  * The one platform choice: native Windows, told by positive signs only (OS is Windows_NT and USERPROFILE a

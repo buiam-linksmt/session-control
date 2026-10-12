@@ -42,8 +42,8 @@ type Machine = {
   /** The path (key) of every removal the helper's removeFile was asked for. */
   removals: string[]
   runs: string[][]
-  /** Milliseconds waited on the engine's clock. */
-  sleeps: number[]
+  /** Milliseconds the helper's pause waited (Windows), one per call. */
+  paused: number[]
   /** The processes the stop of stop_worker sees, and every signal sent to one. */
   table: ProcTable
   /** The machine's clock (epoch ms) as HostPort.now reads it; each TREE_PS1 check moves it on by its sleep and `checkMs`, the time PowerShell takes to start. */
@@ -61,6 +61,7 @@ function machine(env: Record<string, string>): Machine {
   const links = new Map<string, string>()
   const removals: string[] = []
   const runs: string[][] = []
+  const paused: number[] = []
   const table: ProcTable = { procs: new Map(), own: [900, 1], signals: [], nowMs: NOW_MS }
   const clock = { ms: NOW_MS, checkMs: 0 }
   const isDir = (path: string) => [...files.keys()].some(file => file.startsWith(`${keyOf(path).replace(/\/+$/, '')}/`))
@@ -87,6 +88,7 @@ function machine(env: Record<string, string>): Machine {
       const out = isWin ? '' : probeOutput('/m/work', '/m/cfg', 'claude -p --model opus --output-format json -- Goal: x')
       const request = JSON.parse(stdin ?? '') as Record<string, unknown>
       if (argv[2] === 'removeFile') removals.push(keyOf(String(request.path)))
+      if (argv[2] === 'pause') paused.push(Number(request.ms))
       const answer = helperAnswer(files, String(argv[2]), request, out, keyOf, mtimes, links, isWin ? undefined : table)
       return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
     }
@@ -111,7 +113,7 @@ function machine(env: Record<string, string>): Machine {
     }
     throw new Error(`unexpected command ${argv.join(' ')}`)
   }
-  const result: Machine = { env, files, mtimes, links, removals, runs, sleeps: [], table, clock, read, exists: path => files.has(keyOf(path)) || isDir(path), stat, run }
+  const result: Machine = { env, files, mtimes, links, removals, runs, paused, table, clock, read, exists: path => files.has(keyOf(path)) || isDir(path), stat, run }
   return result
 }
 
@@ -144,9 +146,6 @@ function portOf(m: Machine, runsDir: string, notes: string[] = []): HostPort {
     exists: async path => m.exists(path),
     stat: async path => m.stat(path),
     now: async () => m.clock.ms,
-    sleep: async ms => {
-      m.sleeps.push(ms)
-    },
     env: async name => m.env[name],
     runsDir: async () => runsDir,
     noteHelper: note => {
@@ -310,8 +309,18 @@ describe('host contract', () => {
     test(`${one.name}: pause waits the seconds asked`, async () => {
       const m = machine(one.env)
       await host.pause(portOf(m, runs), 2)
-      const waited = m.sleeps.reduce((sum, ms) => sum + ms, 0) + m.runs.filter(argv => argv[0] === 'sleep').reduce((sum, argv) => sum + Number(argv[1]) * 1000, 0)
+      const waited = m.paused.reduce((sum, ms) => sum + ms, 0) + m.runs.filter(argv => argv[0] === 'sleep').reduce((sum, argv) => sum + Number(argv[1]) * 1000, 0)
       expect(waited).toBe(2000)
+    })
+
+    // A hook's time budget counts a wait on the engine's clock and not the time a process runs (decision mod-28): the
+    // port has no clock wait at all, and the wait is one process, Linux's `sleep` or the Node helper's pause on Windows.
+    test(`${one.name}: the wait is one process: sleep on Linux, the helper's pause on Windows`, async () => {
+      const m = machine(one.env)
+      await host.pause(portOf(m, runs), 2)
+      // Node's lookup, made once per composed host, is left out.
+      expect(m.runs.filter(argv => argv[1] !== '--version')).toEqual(one.platform === 'linux' ? [['sleep', '2']] : [[NODE, HELPER, 'pause']])
+      expect(m.paused).toEqual(one.platform === 'linux' ? [] : [2000])
     })
 
     test(`${one.name}: the launch: its paths, its checks, its facts, the picker and the command for the Bash tool`, async () => {

@@ -384,6 +384,35 @@ test('batch: the operations in order in one process; the first failure stops it 
   }
 })
 
+// ---------------------------------------------------------------- pause: the wait between discovery checks (Windows)
+
+test('pause: answers {ok:true} and nothing else once the time asked has passed, as a process of its own', async () => {
+  const startedAt = Date.now()
+  const run = helper('pause', { ms: 600 })
+  const took = Date.now() - startedAt
+  assert.equal(run.code, 0)
+  assert.deepEqual(run.answer, { ok: true })
+  assert.equal(run.stdout, '{"ok":true}\n')
+  assert.equal(run.stderr, '')
+  assert.ok(took >= 600, `answered after ${took} ms`)
+  // Two at once wait side by side: each its own process, neither the other's.
+  const both = Date.now()
+  const [one, two] = await Promise.all([helperAsync('pause', { ms: 700 }), helperAsync('pause', { ms: 700 })])
+  assert.deepEqual([one.answer, two.answer], [{ ok: true }, { ok: true }])
+  assert.ok(Date.now() - both < 1400 + 2000, 'the two waits ran side by side')
+  assert.deepEqual(helper('pause', { ms: 0 }).answer, { ok: true })
+})
+
+test('pause: a time that is not a whole number from 0 to 10000 ms is BAD_REQUEST at once; never in a batch', () => {
+  for (const request of [{}, { ms: -1 }, { ms: 10_001 }, { ms: 1.5 }, { ms: '500' }, { ms: null }]) {
+    const startedAt = Date.now()
+    assertFailure(helper('pause', request), 'BAD_REQUEST')
+    assert.ok(Date.now() - startedAt < 5000)
+  }
+  assert.deepEqual(helper('pause', { ms: 5, extra: 'ignored' }).answer, { ok: true })
+  assert.equal(helper('batch', { ops: [{ op: 'pause', ms: 1 }] }).answer.code, 'BAD_OP')
+})
+
 // ---------------------------------------------------------------- filesNewerThan: the read-only listing
 
 

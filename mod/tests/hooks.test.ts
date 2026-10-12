@@ -78,10 +78,11 @@ const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320
 // Knobs of the Windows fixture: a failing registry write (the helper's writeAtomic) or probe; the config dir the probe
 // finds the new worker's sessions file in, or none (unplaced); what the PowerShell route's pid file holds (undefined:
 // there is none).
-const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined }
+const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
-const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0 }
+// isWorkerHidden (both fixtures): the probe does not show the launched worker yet.
+const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false }
 // The orchestrator's agreed-decisions.md, when a test serves one (undefined: the file is missing).
 const DECISIONS: { text: string | undefined } = { text: undefined }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
@@ -164,7 +165,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     const path = String(request.path ?? '')
     if (op === 'probe') {
       if (LINUX_FIXTURE.isProbeBroken) return 'IO'
-      const worker = w.spawned
+      const worker = w.spawned && !LINUX_FIXTURE.isWorkerHidden
         ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
         : ''
       return { out: PROBE_STDOUT + worker }
@@ -194,6 +195,13 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       return { rotated: true }
     }
     if (op === 'tail') return { text: await tailRows(path), dropped: 0 }
+    // The wait between discovery checks on Windows: the time it waits passes on the fixture's clock, and a session file
+    // the engine writes late is there after it, as after a sleep.
+    if (op === 'pause') {
+      await w.clock.advance(Number(request.ms))
+      LATE.clear()
+      return {}
+    }
     if (op === 'filesNewerThan') return { files: [], total: 0 }
     if (op === 'hashTree') return 'NOT_FOUND'
     return 'BAD_OP'
@@ -243,7 +251,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/probe.ps1')) {
       if (WINDOWS.isProbeBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Invalid class' } }
       const placed = WINDOWS.isWorkerUnplaced ? ['', ''] : ['C:\\work\\new', WINDOWS.workerConfigDir]
-      const worker = w.spawned
+      const worker = w.spawned && !WINDOWS.isWorkerHidden
         ? ['P', 7001, 'claude', 3, ...placed, '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus -n w-new-260921141320 --settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json -- prompt'].join('\t') + '\n'
         : ''
       // PowerShell's own line ends.
@@ -844,6 +852,66 @@ describe('launch_worker', () => {
       expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(true)
     } finally {
       LATE.clear()
+    }
+  })
+
+  const LAUNCH_RUNS = `${HOME}/.claude/session-control/runs`
+  test('a worker that appears only after the 30 s of the launch: answered as started and not registered yet, then registered by the poll that finds it', { options: OPTIONS }, async ($, on) => {
+    LINUX_FIXTURE.isWorkerHidden = true
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const before = lastRegistry(w).length
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toBe(
+        'Started in the background, but no claude process for it appeared within 30 s: it is not registered yet. ' +
+          "Check it with list_sessions: while it runs unregistered it is an orphan row (cwd /work/new); the mod's poll registers it as soon as it finds it " +
+          '(up to 10 min after the launch), and its entry then takes the orphan row\'s place. ' +
+          `If neither row appears, it did not start: read ${LAUNCH_RUNS}/20260921141320-new.err. Result: ${LAUNCH_RUNS}/20260921141320-new.json.`,
+      )
+      // Fifteen checks at most, each after a `sleep 2` process: the Linux wait as it was.
+      expect(w.runs.filter(argv => argv.join(' ') === 'sleep 2').length).toBe(15)
+      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+      // The worker shows up: the next poll registers it with what the launch would have written.
+      LINUX_FIXTURE.isWorkerHidden = false
+      await w.clock.advance(5000)
+      const after = lastRegistry(w)
+      expect(after.length).toBe(before + 1)
+      expect(after.at(-1)).toMatchObject({
+        title: 'new',
+        pid: 7001,
+        session_id: 'abcdabcd-0000-4000-8000-000000000001',
+        name: 'w-new-260921141320',
+        socket_path: '/run/user/1000/cc-socks/7001.sock',
+        config_dir: '/fixture/lic/a',
+        cwd: '/work/new',
+        model: 'opus',
+        effort: 'high',
+        result_file: `${LAUNCH_RUNS}/20260921141320-new.json`,
+        err_file: `${LAUNCH_RUNS}/20260921141320-new.err`,
+        started_at: NOW_MS / 1000,
+      })
+      // Registered once: later polls leave it as it is.
+      await w.clock.advance(5000)
+      expect(lastRegistry(w).filter(one => one.pid === 7001).length).toBe(1)
+    } finally {
+      LINUX_FIXTURE.isWorkerHidden = false
+    }
+  })
+
+  test('a worker still not seen 10 minutes after its launch is no longer looked for', { options: OPTIONS }, async ($, on) => {
+    LINUX_FIXTURE.isWorkerHidden = true
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.result)).toContain('it is not registered yet')
+      for (let step = 0; step < 121; step++) await w.clock.advance(5000)
+      LINUX_FIXTURE.isWorkerHidden = false
+      await w.clock.advance(5000)
+      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+    } finally {
+      LINUX_FIXTURE.isWorkerHidden = false
     }
   })
 
@@ -1551,6 +1619,44 @@ describe('platform', () => {
     expect(w.runs.filter(argv => argv[0] === 'node' && argv[1] === '--version')).toEqual([NODE_LOOKUP])
     expect(w.runs.every(argv => argv[0] === 'node' || (argv[0] === POWERSHELL && /\/probe\.ps1$/.test(String(argv[6]))))).toBe(true)
     expect(w.runs.some(argv => String(argv[6]).endsWith('/probe.ps1') && argv.at(-1) === `c:${WIN_HOME_CLAUDE}`)).toBe(true)
+  })
+
+  test('Windows: the waits between the discovery checks are the helper\'s pause, never the engine\'s clock; a worker not seen in 30 s is answered as started, and the poll registers it when it shows', { options: NO_PICKER }, async ($, on) => {
+    WINDOWS.isWorkerHidden = true
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      const before = w.calls.length
+      // No settled(): nothing in the launch waits on the mocked clock.
+      const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+      expect(String(out.result)).toBe(
+        'Started in the background, but no claude process for it appeared within 30 s: it is not registered yet. ' +
+          "Check it with list_sessions: while it runs unregistered it is an orphan row (cwd C:/work/new); the mod's poll registers it as soon as it finds it " +
+          '(up to 10 min after the launch), and its entry then takes the orphan row\'s place. ' +
+          `If neither row appears, it did not start: read ${WIN_RUNS}/20260921141320-new.err. Result: ${WIN_RUNS}/20260921141320-new.json.`,
+      )
+      expect(w.calls.slice(before).filter(one => one.op === 'pause').map(one => one.request)).toEqual(Array.from({ length: 15 }, () => ({ ms: 2000 })))
+      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+      WINDOWS.isWorkerHidden = false
+      await w.clock.advance(5000)
+      // The poll looks in the launch's config dir too, and registers the worker as the launch would have.
+      expect(w.runs.some(argv => String(argv[6]).endsWith('/probe.ps1') && argv.includes(`c:${WIN_HOME_CLAUDE}`))).toBe(true)
+      expect(lastRegistry(w).at(-1)).toEqual({
+        title: 'new',
+        pid: 7001,
+        session_id: 'abcdabcd-0000-4000-8000-000000000001',
+        name: 'w-new-260921141320',
+        config_dir: WIN_HOME_CLAUDE,
+        cwd: 'C:/work/new',
+        model: 'opus',
+        effort: 'high',
+        result_file: `${WIN_RUNS}/20260921141320-new.json`,
+        err_file: `${WIN_RUNS}/20260921141320-new.err`,
+        started_at: NOW_MS / 1000,
+      })
+    } finally {
+      WINDOWS.isWorkerHidden = false
+    }
   })
 
   test('Windows: an orchestrator with its own CLAUDE_CONFIG_DIR: no variable on the line, its dir in native form in the registry', { options: NO_PICKER }, async ($, on) => {

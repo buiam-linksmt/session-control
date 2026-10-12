@@ -231,6 +231,8 @@ export function helperAnswer(
   const path = keyOf(String(request.path ?? ''))
   const fail = (code: string) => ({ ok: false, code })
   if (op === 'probe') return { ok: true, out: probeOut }
+  // The wait (Windows): a whole number of ms up to 10000, answered at once here; the caller's machine counts it.
+  if (op === 'pause') return Number.isSafeInteger(request.ms) && Number(request.ms) >= 0 && Number(request.ms) <= 10_000 ? { ok: true } : fail('BAD_REQUEST')
   if (op === 'processTree' && table !== undefined) return { ok: true, out: treeInTable(table, Number(request.pid), String(request.start)) }
   if (op === 'stopProcesses' && table !== undefined) return { ok: true, out: stopInTable(table, Number(request.wait), request.targets as string[]) }
   if (op === 'writeAtomic') {

@@ -21,7 +21,7 @@ import {
   utf8Bytes,
 } from './trace'
 import { selectHost } from './host'
-import type { Host, HostEnvName, HostPort, RemoveOutcome, TailShape } from './host'
+import type { Host, HostEnvName, HostPort, RemoveOutcome, TailShape, WorkerWant } from './host'
 import { HELPER_SCRIPT, NODE_REFUSAL, NODE_WARNING, isNodeMissing, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
@@ -317,6 +317,27 @@ let probeDirs: { key: string; dirs: string[]; at: number } | undefined
 let unreadableSeen = 0
 /** probe_licence_usage's answers per licence directory (licences.ts, isUsageFresh), in memory for the load. */
 const usageSeen = new Map<string, UsageSeen>()
+/** How long a launch looks for its new worker, by the clock, and how many probes it makes at most meanwhile. */
+const LAUNCH_FIND_SEC = 30
+const LAUNCH_FIND_TRIES = 15
+/** How long after its launch a worker that did not appear within LAUNCH_FIND_SEC is still looked for by the poll. */
+const LATE_LAUNCH_SEC = 600
+/**
+ * A launch whose worker did not appear within LAUNCH_FIND_SEC: what its registry entry needs, and until when (epoch ms)
+ * the poll looks for it (registerLate). In memory for the load: a reload forgets it, and the worker is then an orphan row.
+ */
+type LateLaunch = {
+  args: LaunchArgs
+  verdict: { configDir: string; resumeSid?: string; isConfigInherited?: boolean }
+  want: WorkerWant
+  known: ReadonlySet<number>
+  launchedAt: number
+  files: { result: string; err: string }
+  name: string
+  prompt: { promptFile?: string; section?: string }
+  until: number
+}
+let lateLaunches: LateLaunch[] = []
 /**
  * Whether a call is probing now: at most one `claude -p /usage` runs at a time, across calls too. A call that finds one
  * running does not wait for it (a wait on another call's work would count against the hook's own 10 s budget): it
@@ -511,7 +532,6 @@ function portOf($: EngineInterface): HostPort {
     exists: path => $.fs.exists(path),
     stat: path => $.fs.stat(path),
     now: () => $.clock.now(),
-    sleep: ms => $.clock.sleep(ms),
     env: name => hostEnv($, name),
     runsDir: () => runsPath($),
     noteHelper: note => noteHelper($, note),
@@ -1105,15 +1125,18 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
     if (isTick) void driftCheck($, now)
     return
   }
-  const facts = await probe($, parsed.entries)
-  for (const entry of parsed.entries) {
+  // A launch's worker that did not appear in time is looked for under its config dir too (Windows), and registered here.
+  const facts = await probe($, parsed.entries, [...new Set(lateLaunches.map(one => one.verdict.configDir))])
+  const reread = (await registerLate($, parsed.entries, facts, now)) ? parseRegistry(await readRegistryText($)) : undefined
+  const entries = reread?.ok === true ? reread.entries : parsed.entries
+  for (const entry of entries) {
     if (rowStatus(entry, facts) === 'dead') await complete($, entry, taskStatus, toasts)
   }
-  const rows = buildRows(parsed.entries, facts, Math.floor(now / 1000))
+  const rows = buildRows(entries, facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
   noteError($, next.error)
   if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
-  await pollNotices($, parsed.entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
+  await pollNotices($, entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
   await sideNotices($, now, isRegistrySound(registryText), isTick, toasts, isRegistryMissing)
   toastMore($, toasts)
   // The drift check, at most once per its interval, from the poll's timer and on its own: a hash of the two folders
@@ -1158,6 +1181,43 @@ async function refresh($: EngineInterface, taskStatus?: string, isTick = false):
   } finally {
     isBusy = false
   }
+}
+
+/**
+ * The launches whose worker did not appear within LAUNCH_FIND_SEC (lateLaunches): each one's new worker among the probe's
+ * facts (the launch's own match, a pid no registry entry holds), registered as the launch would have registered it, its
+ * session id, name and socket read from its sessions file once (not there yet: the next poll reads it again). A launch
+ * LATE_LAUNCH_SEC old is no longer looked for. Answers whether an entry was written.
+ */
+async function registerLate($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number): Promise<boolean> {
+  if (lateLaunches.length === 0) return false
+  const machine = await hostOf($)
+  const port = portOf($)
+  const claimed = new Set(entries.map(entry => entry.pid).filter((pid): pid is number => typeof pid === 'number'))
+  const done = new Set<LateLaunch>()
+  let isWritten = false
+  for (const launch of [...lateLaunches]) {
+    if (nowMs > launch.until) {
+      done.add(launch)
+      trace($, 'worker.missing', { seconds: LATE_LAUNCH_SEC, isLookedFor: false })
+      continue
+    }
+    const worker = await machine.findNewWorker(port, facts, launch.want, new Set([...launch.known, ...claimed]), launch.launchedAt)
+    if (worker === undefined) continue
+    const fromFile = sessionFileFacts(await $.fs.read(`${launch.verdict.configDir}/sessions/${worker.pid}.json`).catch(() => ''))
+    const sessionId = fromFile.sessionId ?? launch.verdict.resumeSid
+    if (sessionId === undefined) continue
+    const inbox = { name: fromFile.name ?? launch.name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
+    const entry = newRegistryEntry(launch.args, launch.verdict, worker.pid, sessionId, launch.files, inbox, Math.floor(launch.launchedAt / 1000), launch.prompt)
+    const failed = await editRegistry($, async text => registerEntry(text, entry, launch.verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
+    trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, isLate: true, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
+    if (failed !== undefined) continue
+    done.add(launch)
+    claimed.add(worker.pid)
+    isWritten = true
+  }
+  lateLaunches = lateLaunches.filter(one => !done.has(one))
+  return isWritten
 }
 
 /**
@@ -1664,15 +1724,27 @@ async function spawnWorker(
     return { deny: `${PLUGIN}: the worker could not be started through the ${machine.launchTool} tool (${errorText(err).slice(0, 160)}); nothing was launched.${hint}` }
   }
   let worker: ProcFact | undefined
-  for (let attempt = 0; attempt < 15 && worker === undefined; attempt++) {
+  const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model }
+  // Looked for during LAUNCH_FIND_SEC by the clock from the tool's answer (a probe on Windows takes seconds), at most
+  // LAUNCH_FIND_TRIES probes; each wait between them runs in a process (host.pause), never on the hook's budget.
+  const searchFrom = await $.clock.now()
+  for (let attempt = 0; attempt < LAUNCH_FIND_TRIES && worker === undefined && (await $.clock.now()) - searchFrom < LAUNCH_FIND_SEC * 1000; attempt++) {
     await machine.pause(port, 2)
     const facts = await probe($, entries, [verdict.configDir])
-    const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model }
     worker = await machine.findNewWorker(port, facts, want, known, launchedAt)
   }
   if (worker === undefined) {
-    trace($, 'worker.missing', { seconds: 30 })
-    return { result: `Started in the background but no claude process appeared within 30 s; check ${files.err}. Not registered.${warningLines}` }
+    // Started and not found yet: the poll goes on looking for it and registers it when it appears (registerLate).
+    const prompt = launchRun.own === undefined ? {} : { promptFile: launchRun.own.path, ...(launchRun.own.section === undefined ? {} : { section: launchRun.own.section }) }
+    lateLaunches.push({ args, verdict, want, known, launchedAt, files, name, prompt, until: launchedAt + LATE_LAUNCH_SEC * 1000 })
+    trace($, 'worker.missing', { seconds: LAUNCH_FIND_SEC, isLookedFor: true })
+    return {
+      result:
+        `Started in the background, but no claude process for it appeared within ${LAUNCH_FIND_SEC} s: it is not registered yet. ` +
+        `Check it with list_sessions: while it runs unregistered it is an orphan row (cwd ${args.dir}); the mod's poll registers it as soon as it finds it ` +
+        `(up to ${LATE_LAUNCH_SEC / 60} min after the launch), and its entry then takes the orphan row's place. ` +
+        `If neither row appears, it did not start: read ${files.err}. Result: ${files.result}.${warningLines}`,
+    }
   }
   // The engine writes the session file shortly after the process starts: read it again until it is there. Its name
   // and messaging socket are taken from the same file; an older claude writes no socket, and the entry then has none.
@@ -2413,6 +2485,7 @@ export const register: Register = (on, options) => {
   unreadableSeen = 0
   usageSeen.clear()
   isUsageProbing = false
+  lateLaunches = []
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),

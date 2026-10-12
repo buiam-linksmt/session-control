@@ -1,14 +1,15 @@
 // The Windows adapter of the host interface (native Windows: Claude Code on Windows, Git Bash as the Bash tool's
 // shell, which has no sh, jq, mv or /proc on the PATH a command starts with). The process probe and the process tree of
 // stop_worker, which the Node helper does not do on Windows, are Windows PowerShell 5.1 scripts (PROBE_PS1, TREE_PS1),
-// written to the runs directory and run with -File, and the stop's signals are taskkill.exe; the file operations are
-// the helper's (host-helper.ts). Paths are kept in the native C:/... form and compared as Windows compares them.
+// written to the runs directory and run with -File, and the stop's signals are taskkill.exe; the file operations and
+// the wait between discovery checks are the helper's (host-helper.ts). Paths are kept in the native C:/... form and
+// compared as Windows compares them.
 
 import type { SessionEntry } from '../types'
 import { defaultConfigDir, findNewWindowsWorker, isDefaultConfigDir, isSameWinPath, isWinAbsolute, parseProcFacts, probeArgs, transcriptPath, windowsPickerRefusal, winPath } from './core'
 import type { LaunchInput, ProcFacts } from './core'
 import type { HostPort, Platform, ProcTree, StopReport, StopStep, StopTarget, WorkerWant } from './host'
-import { bashLaunchCommand, clockPause, parseStopOutput, statLaunchChecks, treeOf, unstoppable, writeIfAbsent } from './host-shared'
+import { bashLaunchCommand, parseStopOutput, statLaunchChecks, treeOf, unstoppable, writeIfAbsent } from './host-shared'
 
 /**
  * How far a sessions file's `startedAt` may sit from its process's creation for the pid to count as that process,
@@ -447,8 +448,6 @@ export const windowsHost: Platform = {
   },
   /** The probe reads where the worker's sessions file is: the config dir itself. */
   workerConfigDir: (verdict: { configDir: string }) => verdict.configDir,
-  /** The engine's clock: Windows has no sleep to start. */
-  pause: clockPause,
 
   launchArgs: <T extends LaunchInput>(given: T): T => ({
     ...given,
