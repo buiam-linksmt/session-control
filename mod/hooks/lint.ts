@@ -576,15 +576,69 @@ function isNegatedAfter(ix: SentenceIndex, end: number): boolean {
   return ix.joinedAfter().some(spans => isSpanInside(spans, from, to))
 }
 
-/** The quoted parts of a line: backtick spans and double-quoted spans, straight or curly. */
-const QUOTED = /`[^`\n]*`|"[^"\n]*"|“[^”\n]*”/g
+/** The mark that closes a quoted part, by the kind of its opening mark (quoteKind). */
+const QUOTE_CLOSES = ['`', '"', '”'] as const
+
+/** The kind of a quoted part a character opens: 0 a backtick, 1 a straight double quote, 2 a curly one; -1 none. */
+const quoteKind = (code: number) => (code === 0x60 ? 0 : code === 0x22 ? 1 : code === 0x201c ? 2 : -1)
+
+/**
+ * The quoted parts of a line: backtick spans and double-quoted spans, straight or curly, the spans the pattern
+ * `` `[^`\n]*`|"[^"\n]*"|“[^”\n]*” `` (flag g) matches: from left to right, an opening mark and the first closing mark
+ * of its pair after it, with no line break between; an opening mark with none is no part. The place of the next closing
+ * mark of each kind and of the next line break is looked up once and kept while it lies ahead, so the work grows with
+ * the length of the line, however many opening marks lack a closing one.
+ */
+export function quotedSpans(line: string): Spans {
+  const spans: Spans = { starts: [], ends: [] }
+  const ahead = [-1, -1, -1]
+  let newline = -1
+  const nextOf = (mark: string, from: number) => {
+    const found = line.indexOf(mark, from)
+    return found < 0 ? line.length : found
+  }
+  for (let at = 0; at < line.length; at++) {
+    const kind = quoteKind(line.charCodeAt(at))
+    if (kind < 0) continue
+    if ((ahead[kind] ?? -1) <= at) ahead[kind] = nextOf(QUOTE_CLOSES[kind] ?? '', at + 1)
+    if (newline <= at) newline = nextOf('\n', at + 1)
+    const stop = ahead[kind] ?? line.length
+    if (stop >= newline) continue
+    spans.starts.push(at)
+    spans.ends.push(stop + 1)
+    at = stop
+  }
+  return spans
+}
+
+/** A text with the matches of `pattern` (flag g) that lie inside its quoted parts (`spans`) replaced by `by`. */
+function maskInQuoted(text: string, spans: Spans, pattern: RegExp, by: string): string {
+  let part = 0
+  return text.replace(pattern, (match: string, at: number) => {
+    while ((spans.ends[part] ?? Number.POSITIVE_INFINITY) <= at) part++
+    return (spans.starts[part] ?? Number.POSITIVE_INFINITY) <= at ? by : match
+  })
+}
+
+/** A text with its quoted parts (`spans`) blanked out, each character a blank. */
+function blankQuoted(text: string, spans: Spans): string {
+  const out: string[] = []
+  let done = 0
+  for (const [at, start] of spans.starts.entries()) {
+    const end = spans.ends[at] ?? start
+    out.push(text.slice(done, start), ' '.repeat(end - start))
+    done = end
+  }
+  out.push(text.slice(done))
+  return out.join('')
+}
 
 /** Words that introduce a quoted example: refuse, refused, deny, denied, reject, example, e.g., for instance, form(s), such as, attack. */
 const INTRODUCER = /\b(?:refus(?:e|es|ed|ing|al)|den(?:y|ies|ied|ial)|reject(?:s|ed|ing)?|examples?|e\.g\.|for instance|forms?|such as|attacks?)(?![\w-])/i
 
 /** The sentences of a line with their places, split as sentencesOf splits but never inside a quoted part or after e.g. or i.e. */
 function sentenceRanges(line: string): { start: number; end: number }[] {
-  const masked = line.replace(QUOTED, part => part.replace(/[.!?;]/g, '_')).replace(/\b(?:e\.g|i\.e)\./gi, part => part.replace(/\./g, '_'))
+  const masked = maskInQuoted(line, quotedSpans(line), /[.!?;]/g, '_').replace(/\b(?:e\.g|i\.e)\./gi, part => part.replace(/\./g, '_'))
   const ranges: { start: number; end: number }[] = []
   let start = 0
   for (const one of masked.matchAll(/(?<=[.!?;])\s+/g)) {
@@ -602,10 +656,11 @@ function sentenceRanges(line: string): { start: number; end: number }[] {
 type LineIndex = { line: string; quoted: () => Spans; contrasts: () => Spans; blankContrasts: () => Spans; introducers: () => Spans }
 
 function lineIndex(line: string): LineIndex {
-  const blanked = once(() => line.replace(QUOTED, one => ' '.repeat(one.length)))
+  const quoted = once(() => quotedSpans(line))
+  const blanked = once(() => blankQuoted(line, quoted()))
   return {
     line,
-    quoted: once(() => spansOf(QUOTED, line)),
+    quoted,
     contrasts: once(() => spansOf(CONTRAST, line)),
     blankContrasts: once(() => spansOf(CONTRAST, blanked())),
     introducers: once(() => spansOf(INTRODUCER, blanked())),

@@ -3,11 +3,13 @@
 // before a verb and the negation windows and clauses took seconds or never ended before; the near opening line test
 // against the pattern it replaces, on 100000 generated lines and the near-miss lines of signoff.test.ts; the verbs
 // against the pattern they replace; isNegatedAt against its reading slice by slice; and the launch of a 1 MB prompt
-// of `>`, refused by the size cap as on main, and launched as a skill test.
+// of `>`, refused by the size cap as on main, and launched as a skill test. The quoted parts (quotedSpans) and the
+// whole guard on 1 MB lines of opening marks with no closing one, of every quote pair, and quotedSpans against the
+// pattern it replaces, on generated lines.
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BLOCK_FORMS, NEAR_OPEN_MAX_CHARS, PROMPT_MAX_CHARS, hasSignoffBlock, isNearOpen, isNegatedAt, isNegatedAtBySlices, promptLint, signoffLint, standingGrants, verbsOf } from '../hooks/lint'
+import { BLOCK_FORMS, NEAR_OPEN_MAX_CHARS, PROMPT_MAX_CHARS, hasSignoffBlock, isNearOpen, isNegatedAt, isNegatedAtBySlices, promptLint, quotedSpans, signoffLint, standingGrants, verbsOf } from '../hooks/lint'
 import { OPTIONS, ORCH, REGISTRY, mockWorld } from './mock-world'
 
 const MB = 1_000_000
@@ -18,6 +20,11 @@ const MB = 1_000_000
  */
 const FAMILY_MS = 2000
 const GUARD_MS = 4000
+/**
+ * The bound of the quoted parts and the whole guard on a 1 MB line of opening marks with no closing one: generous, as
+ * FAMILY_MS (the pattern quotedSpans replaces took 458 s on such a line of curly opening quotes).
+ */
+const QUOTE_MS = 2000
 
 const repeat = (unit: string, length: number) => unit.repeat(Math.ceil(length / unit.length)).slice(0, length)
 
@@ -62,6 +69,23 @@ const SHAPES: Readonly<Record<string, (n: number) => string>> = {
   'e-g': n => repeat('e.g. ', n),
   'semicolons': n => repeat('; ', n),
   'no-gap': n => `no${repeat(' any', n)} x`,
+  'quotes-alternating': n => repeat('“’«`"‘»„「', n),
+  'quotes-nested': n => repeat('““a”', n),
+}
+
+/** The opening mark of each quote pair, by name: the pairs a quoted part is made of, and the others a prompt may hold. */
+const OPENERS: Readonly<Record<string, string>> = {
+  'backtick `': '`',
+  'straight double "': '"',
+  'curly double “': '“',
+  "straight single '": "'",
+  'curly single ‘': '‘',
+  'angle «': '«',
+  'single angle ‹': '‹',
+  'low double „': '„',
+  'low single ‚': '‚',
+  'corner 「': '「',
+  'white corner 『': '『',
 }
 
 const STANDING = { text: '## Standing\nzz. [signoff:delete-branch] x\n' }
@@ -96,7 +120,7 @@ const FAMILY_SHAPES: Readonly<Record<string, readonly string[]>> = {
   blocks: ['gt', 'backticks-sign-of'],
   negation: ['parens', 'colons'],
   prompt: ['section', 'branch'],
-  guard: ['gt', 'zero-width-gt', 'git-C', 'push', 'parens', 'colons', 'force-push', 'push-main', 'quotes'],
+  guard: ['gt', 'zero-width-gt', 'git-C', 'push', 'parens', 'colons', 'force-push', 'push-main', 'quotes', 'quotes-alternating', 'quotes-nested'],
 }
 const shapesOf = (family: string) => FAMILY_SHAPES[family] ?? []
 
@@ -138,6 +162,30 @@ describe('the sign-off guard on 1 MB lines: each family of its patterns within t
     expect(signoffLint(`Do it.\n${near}\nReport.`)).toEqual({ warnings: [] })
     expect(signoffLint(`Do it.\n${near}\ngit push origin --delete refs/heads/a\n\`\`\``).refusal).toContain('the prompt instructs a remote branch or tag deletion on line 3')
   })
+
+  for (const [name, mark] of Object.entries(OPENERS)) {
+    test(`the quoted parts (quotedSpans) and the whole guard on a 1 MB line of ${name} with no closing mark, as a line and as a negating head: at most ${QUOTE_MS} ms each`, () => {
+      const line = mark.repeat(MB)
+      const runs: Record<string, (text: string) => unknown> = {
+        quotedSpans: text => quotedSpans(text),
+        line: text => signoffLint(`Do it.\n${text}\nReport.`, STANDING),
+        head: text => signoffLint(`Never ${text}:\n- git push -f\nReport.`, STANDING),
+      }
+      const slow: Record<string, number> = {}
+      for (const [run, read] of Object.entries(runs)) {
+        const measure = () => {
+          const start = performance.now()
+          read(line)
+          return Math.round(performance.now() - start)
+        }
+        const first = measure()
+        const ms = first > QUOTE_MS ? Math.min(first, measure()) : first
+        if (ms > QUOTE_MS) slow[run] = ms
+      }
+      expect(slow).toEqual({})
+      expect(quotedSpans(line).starts.length).toBe(mark === '`' || mark === '"' ? MB / 2 : 0)
+    })
+  }
 
   for (const name of shapesOf('guard')) {
     test(`the whole guard (signoffLint) on a 1 MB line of ${name}: at most ${GUARD_MS} ms`, () => {
@@ -225,6 +273,25 @@ describe('the patterns replaced: the same lines, the same matches', () => {
     }
     expect(differ).toEqual([])
     expect(taken).toBeGreaterThan(5000)
+  })
+
+  test('quotedSpans finds the spans the pattern it replaces finds: 100000 generated lines of quote marks of every pair, words and line breaks', () => {
+    const QUOTED = /`[^`\n]*`|"[^"\n]*"|“[^”\n]*”/g
+    const { next, pick } = generator(4096)
+    const parts = ['`', '"', '“', '”', "'", '‘', '’', '«', '»', '‹', '›', '„', '「', '」', '“', '”', '`', '"', 'a', ' ', ' ', '.', '\n', 'push', '-f', 'never', ':']
+    const differ: string[] = []
+    let found = 0
+    for (let one = 0; one < 100_000; one++) {
+      let line = ''
+      const length = Math.floor(next() * 40)
+      for (let part = 0; part < length; part++) line += pick(parts)
+      const old = [...line.matchAll(QUOTED)]
+      found += old.length
+      const spans = { starts: old.map(match => match.index ?? 0), ends: old.map(match => (match.index ?? 0) + match[0].length) }
+      if (JSON.stringify(quotedSpans(line)) !== JSON.stringify(spans)) differ.push(line)
+    }
+    expect(differ).toEqual([])
+    expect(found).toBeGreaterThan(100_000)
   })
 
   test('isNegatedAt through the index reads what the slices read: 1500 generated sentences, an action place at each word', () => {
