@@ -1685,6 +1685,31 @@ async function launch($: EngineInterface, given: LaunchInput) {
   return spawnWorker($, args, { ...verdict, isConfigInherited }, reg.entries, reg.facts, ownDir, { base, name, own, fromEntry, warnings, ...(licenceNote === undefined ? {} : { licenceNote }) })
 }
 
+/**
+ * What the launch tool answered when it did not run the command: its refusal (`deny`: the permission mode, a settings
+ * hook or another plugin refused the call) or its error; undefined when it ran. The text says which tool refused, the
+ * reason as the engine gave it (cut to LAUNCH_REASON_MAX characters), that nothing was launched or registered, and how
+ * a person allows the launch.
+ */
+function launchRefused(tool: string, answer: { deny?: string; isError?: true; text?: string; result?: unknown }): { text: string; reason: string; isError: boolean } | undefined {
+  const isError = answer.isError === true
+  if (typeof answer.deny !== 'string' && !isError) return undefined
+  const given = typeof answer.deny === 'string' ? answer.deny : typeof answer.text === 'string' ? answer.text : typeof answer.result === 'string' ? answer.result : ''
+  const reason = given.trim() === '' ? 'no reason given' : given.trim().slice(0, LAUNCH_REASON_MAX)
+  const what = isError ? `answered the launch with an error: ${reason}` : `refused the launch: ${reason}`
+  return {
+    reason,
+    isError,
+    text:
+      `the ${tool} tool ${what}; the worker was not started and nothing was registered. ` +
+      `The launch runs claude -p with --dangerously-skip-permissions through the shell, which a permission mode can refuse ` +
+      `(the Auto mode of Claude Desktop's Code tab among them): allow that ${tool} command when you are asked, or with a permission rule, then launch again.`,
+  }
+}
+
+/** The most characters of the launch tool's refusal a launch answer quotes. */
+const LAUNCH_REASON_MAX = 500
+
 /** Start the worker as a background task of the host's launch tool, find its real pid and session, register it. */
 async function spawnWorker(
   $: EngineInterface,
@@ -1708,8 +1733,9 @@ async function spawnWorker(
   const launchedAt = await $.clock.now()
   trace($, 'worker.start', { configDir: verdict.configDir, isConfigDirSet: verdict.isConfigInherited !== true, resultFile: files.result, errFile: files.err, timeoutMs: launchTimeoutMs(args) })
   // The engine's own background task: its exit notification reaches the session.
+  let started: Awaited<ReturnType<typeof $.tool.call>>
   try {
-    await $.tool.call({
+    started = await $.tool.call({
       // The PowerShell tool takes the Bash tool's input; a build's tool table lists only the tools it registers on its
       // own machine (no PowerShell on Linux), so the name is typed as Bash's.
       tool: machine.launchTool as 'Bash',
@@ -1722,6 +1748,13 @@ async function spawnWorker(
     const hint = machine.launchToolHint
     trace($, 'error', { where: 'worker.start', ...messageFields(errorText(err)) })
     return { deny: `${PLUGIN}: the worker could not be started through the ${machine.launchTool} tool (${errorText(err).slice(0, 160)}); nothing was launched.${hint}` }
+  }
+  // The tool's answer: a refusal (the permission mode, a settings hook, another plugin) or an error means the command
+  // never ran, so nothing is looked for or registered.
+  const refused = launchRefused(machine.launchTool, started)
+  if (refused !== undefined) {
+    trace($, 'worker.refused', { tool: machine.launchTool, isError: refused.isError, ...messageFields(refused.reason, 'reason') })
+    return { deny: `${PLUGIN}: ${refused.text}` }
   }
   let worker: ProcFact | undefined
   const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model }

@@ -72,7 +72,15 @@ const HELD: { tail: Promise<unknown> | undefined } = { tail: undefined }
 // isInboxless: the Linux worker's sessions file has no name and no messagingSocketPath, as an older claude writes it.
 // sid: the session id the Linux worker's sessions file names (a resume keeps the resumed one).
 // isPowerShellMissing: the session offers no PowerShell tool.
-const WORKER = { linuxConfigDir: '/fixture/lic/a', isBashMissing: false, isPowerShellMissing: false, isInboxless: false, sid: 'abcdabcd-0000-4000-8000-000000000001' }
+// bashAnswer: what the Bash tool answers the launch instead of running it (a refusal or an error); undefined: it runs it.
+const WORKER = {
+  linuxConfigDir: '/fixture/lic/a',
+  isBashMissing: false,
+  isPowerShellMissing: false,
+  isInboxless: false,
+  sid: 'abcdabcd-0000-4000-8000-000000000001',
+  bashAnswer: undefined as Record<string, unknown> | undefined,
+}
 /** The inbox fields of the Linux worker's sessions file. */
 const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320', messagingSocketPath: '/run/user/1000/cc-socks/7001.sock' })
 // Knobs of the Windows fixture: a failing registry write (the helper's writeAtomic) or probe; the config dir the probe
@@ -264,6 +272,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   })
   on('tool.call', { tool: 'Bash' }, ($, e) => {
     if (WORKER.isBashMissing) throw new Error('no tool named "Bash" in this session')
+    if (WORKER.bashAnswer !== undefined) return WORKER.bashAnswer as never
     w.bash.push(e as never)
     w.spawned = true
     return { result: 'Command running in background with ID: fixture' }
@@ -733,6 +742,74 @@ describe('launch_worker', () => {
       expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: '/fixture/lic/own' })
     } finally {
       WORKER.linuxConfigDir = '/fixture/lic/a'
+    }
+  })
+
+  /** The text after the reason in the answer to a refused launch: nothing ran, and how a person allows it. */
+  const ALLOW_HINT =
+    '; the worker was not started and nothing was registered. The launch runs claude -p with --dangerously-skip-permissions through the shell, ' +
+    "which a permission mode can refuse (the Auto mode of Claude Desktop's Code tab among them): allow that Bash command when you are asked, or with a permission rule, then launch again."
+
+  test('a launch the Bash tool refuses ({ deny }): the refusal with its reason at once, no probe for the worker, no entry, nothing looked for later', { options: OPTIONS }, async ($, on) => {
+    WORKER.bashAnswer = { deny: 'Permission to use Bash has been denied by the auto mode classifier.' }
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const before = lastRegistry(w).length
+      const probesBefore = w.calls.filter(one => one.op === 'probe').length
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: Permission to use Bash has been denied by the auto mode classifier.${ALLOW_HINT}`)
+      // No wait and no probe after the call: the one probe is the launch's own check before it; the launch never ran.
+      expect(w.runs.some(argv => argv[0] === 'sleep')).toBe(false)
+      expect(w.calls.filter(one => one.op === 'probe').length).toBe(probesBefore + 1)
+      expect(lastRegistry(w).length).toBe(before)
+      // The worker shows up after all (another launch's): no poll registers it for this one.
+      WORKER.bashAnswer = undefined
+      w.spawned = true
+      await w.clock.advance(5000)
+      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+    } finally {
+      WORKER.bashAnswer = undefined
+    }
+  })
+
+  test('a launch the Bash tool answers with an error: said with its text, nothing registered, nothing looked for', { options: OPTIONS }, async ($, on) => {
+    WORKER.bashAnswer = { isError: true, result: 'Error: spawn failed', text: 'Error: spawn failed' }
+    try {
+      const w = world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.deny)).toBe(`session-control: the Bash tool answered the launch with an error: Error: spawn failed${ALLOW_HINT}`)
+      expect(w.runs.some(argv => argv[0] === 'sleep')).toBe(false)
+      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+    } finally {
+      WORKER.bashAnswer = undefined
+    }
+  })
+
+  test('a settings hook that denies the Bash call (classic PreToolUse) is a refusal of the launch too', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    // Its input is the call's envelope (the tool and its arguments), as a settings hook's PreToolUse sees it.
+    on('classic.PreToolUse', ($, e) => (String((e as { tool?: unknown }).tool) === 'Bash' ? { deny: 'blocked by a PreToolUse hook' } : {}))
+    await $.session.start(start(ORCH_DIR))
+    const out = await $.tool.call({ tool: TOOL, ...args } as never)
+    expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: blocked by a PreToolUse hook${ALLOW_HINT}`)
+    expect(w.bash.length).toBe(0)
+    expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+  })
+
+  test('a refusal reason past 500 characters is cut there; an empty one is said as none given', { options: OPTIONS }, async ($, on) => {
+    WORKER.bashAnswer = { deny: `x${'y'.repeat(700)}` }
+    try {
+      world(on)
+      await $.session.start(start(ORCH_DIR))
+      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: x${'y'.repeat(499)}${ALLOW_HINT}`)
+      WORKER.bashAnswer = { deny: '  ' }
+      const empty = await $.tool.call({ tool: TOOL, ...args } as never)
+      expect(String(empty.deny)).toBe(`session-control: the Bash tool refused the launch: no reason given${ALLOW_HINT}`)
+    } finally {
+      WORKER.bashAnswer = undefined
     }
   })
 
