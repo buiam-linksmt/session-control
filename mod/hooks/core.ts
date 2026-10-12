@@ -288,7 +288,8 @@ const GAP = '   '
 
 export type PaneWidths = { title: number; sid: number; status: number; model: number; effort: number }
 
-function elapsedText(row: SessionRow, clock?: ElapsedClock): string {
+/** A row's elapsed column at the display clock: formatAge of elapsedSeconds, `-` when there is nothing to tell. */
+export function elapsedText(row: SessionRow, clock?: ElapsedClock): string {
   const sec = elapsedSeconds(row, clock)
   return sec === undefined ? '-' : formatAge(sec)
 }

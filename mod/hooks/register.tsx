@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessRunInit, ProcessRunResult, Register } from 'claude-code'
 
-import type { SessionEntry, SessionOutcome } from '../types'
+import type { SessionEntry, SessionOutcome, SessionRow } from '../types'
 import { ARCHIVE_SCHEMA, ARCHIVED_HEADING, DECISIONS_ARCHIVE, DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, archiveDecisions, editOpenPoints, editQueue, findDecisionSection } from './bookkeeping'
 import type { Edit } from './bookkeeping'
 import { backupName, freshText, localDate } from './store'
@@ -117,6 +117,7 @@ import {
   findBySid,
   lintReport,
   formatHeader,
+  elapsedText,
   desktopRowText,
   DESKTOP_HEADER,
   boxAt,
@@ -261,6 +262,12 @@ let isArmed = false
 let isPolling = false
 /** The display tick of the elapsed column, while the panel is shown; undefined when none runs. */
 let displayTick: { cancel: () => void } | undefined
+/**
+ * The session rows the pane drew last (the sessions box's rows in view) and the second of the probe they come from;
+ * undefined when its last drawing showed no session row (another section expanded, another tab, no entry). The display
+ * tick redraws only when the elapsed text of one of these changes.
+ */
+let drawnSessions: { rows: SessionRow[]; probedSec: number } | undefined
 /** The display tick's period: it only moves the `now` atom on, so the pane redraws its elapsed column. */
 const DISPLAY_TICK_MS = 1000
 let lastError: string | undefined
@@ -1189,13 +1196,30 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   const rows = buildRows(entries, facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
   noteError($, next.error)
-  if (!isSame(await read($, snapshot), next, 'at')) await update($, snapshot, () => next)
+  // Written only when what the panel draws changed: not for the time alone (a transcript's age, a process's age).
+  if (!isSame(drawnKey(await read($, snapshot)), drawnKey(next))) await update($, snapshot, () => next)
   await pollNotices($, entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
   await sideNotices($, now, isRegistrySound(registryText), isTick, toasts, isRegistryMissing)
   toastMore($, toasts)
   // The drift check, at most once per its interval, from the poll's timer and on its own: a hash of the two folders
   // never holds the poll.
   if (isTick) void driftCheck($, now)
+}
+
+/**
+ * What of a snapshot the panel draws, for the poll's comparison: its rows and warning, with the values only the time moves
+ * left out or made constant: a row's transcript age (never drawn) and the process age the probe read, which the elapsed
+ * column counts on from only where it has no run times (elapsedSeconds: an orphan, a running entry without
+ * `started_at`), kept there as the second the process started (the age back from the snapshot's time).
+ */
+function drawnKey(snap: { at: number; rows: readonly SessionRow[]; error?: string } | null): unknown {
+  if (snap === null) return null
+  const rows = snap.rows.map(({ transcriptAgeSec, elapsedSec, ...row }) => {
+    const isFinished = row.status === 'dead' || row.status === 'unreported' || row.status === 'done'
+    const hasRunTimes = row.startedAt !== undefined && (row.status === 'alive' || (isFinished && row.endedAt !== undefined))
+    return { ...row, startSec: hasRunTimes || elapsedSec === undefined ? undefined : Math.round(snap.at / 1000 - elapsedSec) }
+  })
+  return { rows, error: snap.error }
 }
 
 /** A problem is toasted once, when it first appears or changes. */
@@ -1338,7 +1362,8 @@ async function transcriptTail($: EngineInterface, path: string): Promise<string 
 }
 
 function tick($: EngineInterface): void {
-  // A panel shown again (after another pane in front of it, or a reload) gets its display tick back here.
+  // A panel shown again (after another pane in front of it, or a reload), or one whose session rows are in view again,
+  // gets its display tick back here.
   if (displayTick === undefined) void armDisplayTick($)
   if (!isTracing) {
     void refresh($, undefined, true)
@@ -1348,9 +1373,12 @@ function tick($: EngineInterface): void {
   void tracedTick($)
 }
 
-/** Starts the display tick when the panel is shown and none runs. */
-async function armDisplayTick($: EngineInterface): Promise<void> {
-  if (displayTick !== undefined || !(await isPanelShown($))) return
+/**
+ * Starts the display tick when the panel is shown and none runs, and the pane's last drawing showed a session row
+ * (`isOpening`: the panel is being opened, its first drawing still to come).
+ */
+async function armDisplayTick($: EngineInterface, isOpening = false): Promise<void> {
+  if (displayTick !== undefined || (!isOpening && (drawnSessions?.rows.length ?? 0) === 0) || !(await isPanelShown($))) return
   // Checked again after the wait: the poll and the command may both have asked.
   if (displayTick !== undefined) return
   displayTick = $.clock.every(DISPLAY_TICK_MS, () => void displayStep($))
@@ -1368,14 +1396,20 @@ async function isPanelShown($: EngineInterface): Promise<boolean> {
 
 /**
  * One display tick: no process and no file read, only the clock into the `now` atom the pane reads, so the elapsed
- * column redraws with the seconds; the tick ends itself once the panel is hidden or closed.
+ * column redraws with the seconds; and only when the elapsed text of a session row in view changes at this second (a
+ * running row under an hour each second, one of an hour or more each minute, a finished row never), so an unchanged
+ * pane is not drawn again. The tick ends itself once the panel is hidden or closed, or no session row is in view (the
+ * poll brings it back: tick).
  */
 async function displayStep($: EngineInterface): Promise<void> {
-  if (!(await isPanelShown($))) {
+  const drawn = drawnSessions
+  if (drawn === undefined || drawn.rows.length === 0 || !(await isPanelShown($))) {
     stopDisplayTick()
     return
   }
   const sec = Math.floor((await $.clock.now()) / 1000)
+  const textsAt = (nowSec: number) => drawn.rows.map(row => elapsedText(row, { nowSec: Math.max(nowSec, drawn.probedSec), probedSec: drawn.probedSec })).join('\n')
+  if (textsAt(sec) === textsAt(await read($, now))) return
   await update($, now, () => sec)
 }
 
@@ -2470,7 +2504,7 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
   const opened = await $.ui.open({ id: PANE, title: 'Session control' })
   const shownSec = Math.floor((await $.clock.now()) / 1000)
   await update($, now, () => shownSec)
-  await armDisplayTick($)
+  await armDisplayTick($, true)
   trace($, 'panel', { isShown: true, isPlaced: opened.isPlaced })
   return { text: opened.isPlaced ? 'Session-control panel opened.' : `Session-control panel waits: ${opened.reason}` }
 }
@@ -2896,6 +2930,7 @@ export const register: Register = (on, options) => {
     const bodyRows = isCompact ? compactRows : Math.max(MIN_SESSIONS_BOX + 2 * MIN_BOX, e.props.scroll.bodyRows)
     const boxes: SectionBox[] = isCompact ? [{ id: activeId, top: 1, height: compactRows - 1 }] : sectionBoxes(bodyRows, isLogOpen, expandedId)
     layout = { boxes, totals: {} }
+    drawnSessions = undefined
     type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end' }
     // The elapsed column at the display clock: the tick's time, never before the probe the rows come from.
     const probedSec = Math.floor(snap.at / 1000)
@@ -2949,6 +2984,8 @@ export const register: Register = (on, options) => {
       const from = isTail ? Math.max(0, total - visible - back) : clampOffset(offset, total, visible)
       const bar = scrollbar(total, visible, from)
       const shown = body.slice(from, from + visible)
+      // The session rows in view, for the display tick (its rows are snap.rows one to one).
+      if (id === 'sessions') drawnSessions = { rows: snap.rows.slice(from, from + visible), probedSec }
       // The rows' column: the box's inner width less the scroll bar (no border in the compact panel).
       const fill = Math.max(1, columns - (isPlain ? 1 : 3))
       // A pressable row and its scroll-bar cell share a hover scope (a block's own when it has one), so the light

@@ -90,8 +90,8 @@ const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
 // isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone: the alive worker 4101 has
-// exited (its lines left out of the probe).
-const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false }
+// exited (its lines left out of the probe); isOrphanGone: so has the unregistered headless claude 4999.
+const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false }
 // The orchestrator's agreed-decisions.md, when a test serves one (undefined: the file is missing).
 const DECISIONS: { text: string | undefined } = { text: undefined }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
@@ -177,7 +177,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       const worker = w.spawned && !LINUX_FIXTURE.isWorkerHidden
         ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
         : ''
-      return { out: (LINUX_FIXTURE.isAliveGone ? PROBE_STDOUT.split('\n').filter(line => !line.includes('\t4101\t')).join('\n') : PROBE_STDOUT) + worker }
+      const gone = [...(LINUX_FIXTURE.isAliveGone ? ['\t4101\t'] : []), ...(LINUX_FIXTURE.isOrphanGone ? ['\t4999\t'] : [])]
+      return { out: PROBE_STDOUT.split('\n').filter(line => !gone.some(pid => line.includes(pid))).join('\n') + worker }
     }
     // A write is recorded as what it puts in place; with `expected`, only while the fixture still holds that text.
     if (op === 'writeAtomic') {
@@ -2515,6 +2516,70 @@ describe('seconds tick', () => {
     const gone = pane.asked
     await w.clock.advance(2000)
     expect(pane.asked).toBe(gone)
+  })
+
+  /** The pane's renders the trace counted, one number per poll tick that had any. */
+  const renderCounts = (w: World) => traceOf(w).filter(line => line.event === 'ui.render').map(line => Number(line.count))
+  /** The panel opened with the trace on over `registry`; the first poll tick counts the renders of the opening. */
+  const traced = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On, registry: string) => {
+    const w = world(on, '/fixture/lic/a\n', true, registry)
+    const pane = { asked: 0 }
+    on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+    on('ui.panes', () => {
+      pane.asked++
+      return { value: [{ id: 'session-control', title: 'Session control', isShown: true, isFocused: false, isPlaced: true }] } as never
+    })
+    await $.session.start(start(ORCH_DIR))
+    await $.command.run({ command: 'session-control', args: '' } as never)
+    const ui = await mountPane($)
+    await w.clock.advance(5000)
+    return { w, pane, ui }
+  }
+  // The running entry started 2 h and 10 s before the fixture clock: its elapsed text moves once a minute.
+  const HOURS = JSON.stringify(JSON.parse(TIMED).map((one: { session_id?: string }) => (one.session_id === SID_ALIVE ? { ...one, started_at: NOW_MS / 1000 - 7210 } : one)))
+
+  test('the tick draws the pane again only when the elapsed text of a row in view changes: a row of an hour or more once a minute, the poll not at all when nothing drawn changed', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
+    // No orphan row (its age under an hour would count each second): every row's text is still within its minute.
+    LINUX_FIXTURE.isOrphanGone = true
+    try {
+      const { w, ui } = await traced($, on, HOURS)
+      expect(await elapsedOf(ui, SID_ALIVE)).toBe('2h00m')
+      const counted = renderCounts(w)
+      // Ten seconds of ticks and two polls inside the minute: nothing redrawn, so no render line.
+      for (let step = 0; step < 10; step++) await w.clock.advance(1000)
+      expect(renderCounts(w)).toEqual(counted)
+      expect(await elapsedOf(ui, SID_ALIVE)).toBe('2h00m')
+      // The minute turns at 2h01m (7260 s): one redraw.
+      for (let step = 0; step < 40; step++) await w.clock.advance(1000)
+      expect(await elapsedOf(ui, SID_ALIVE)).toBe('2h01m')
+      expect(renderCounts(w).slice(counted.length).reduce((sum, n) => sum + n, 0)).toBe(1)
+    } finally {
+      LINUX_FIXTURE.isOrphanGone = false
+    }
+  })
+
+  test('a running row under an hour: one redraw a second, as before', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
+    const { w, ui } = await traced($, on, TIMED)
+    const counted = renderCounts(w).length
+    for (let step = 0; step < 5; step++) await w.clock.advance(1000)
+    expect(renderCounts(w).slice(counted)).toEqual([5])
+    expect(await elapsedOf(ui, SID_ALIVE)).toBe('52s')
+  })
+
+  test('with no session row in view the tick stops; the poll brings it back once one is', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
+    const { w, pane, ui } = await traced($, on, TIMED)
+    await ui.press({ key: 'x:points' })
+    await w.clock.advance(1000)
+    const [asked, counted] = [pane.asked, renderCounts(w).length]
+    for (let step = 0; step < 3; step++) await w.clock.advance(1000)
+    // No tick asks for the panes and nothing is redrawn (the poll at 10 s has not come).
+    expect(pane.asked).toBe(asked)
+    expect(renderCounts(w).length).toBe(counted)
+    await ui.press({ key: 'x:points' })
+    // The poll at 10 s arms the tick again; its first step a second later draws 53 s.
+    await w.clock.advance(1000)
+    await w.clock.advance(1000)
+    expect(await elapsedOf(ui, SID_ALIVE)).toBe('53s')
   })
 
   test('an expanded section and a selected point stay as they are across ticks', { options: OPTIONS }, async ($, on) => {
