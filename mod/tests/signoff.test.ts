@@ -3,14 +3,15 @@
 // (the negation window, both ways), a push to main or develop warns, and a skill test is not exempt; the orchestrator's
 // own Bash and PowerShell commands that run one of those git actions are refused in its own session, nowhere else. The
 // fix-up's rule: the window counted from the token, governing no and without, gates, negated lists, past forms, short
-// flags only after git, quoted examples, and the mirror and pruning pushes, each form both ways.
+// flags only after git, quoted examples, and the mirror and pruning pushes, each form both ways. A cited Standing
+// go-ahead: each allowed form of its two classes and each refused neighbour, the Standing lookup, the warning and the trace.
 
 import { describe, expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { gitSignoffAction, signoffDenyText, signoffVerdict } from '../hooks/guard'
-import { NEGATION_WORDS_AFTER, NEGATION_WORDS_BEFORE, isNegatedAt, signoffLint } from '../hooks/lint'
-import { OPTIONS, ORCH, REGISTRY, mockWorld } from './mock-world'
+import { CITE_HINT, NEGATION_WORDS_AFTER, NEGATION_WORDS_BEFORE, isNegatedAt, signoffGrants, signoffLint } from '../hooks/lint'
+import { OPTIONS, ORCH, REGISTRY, RUNS, mockWorld } from './mock-world'
 import type { World } from './mock-world'
 
 const ITEMS = 'Wait for long runs in the foreground. Report git status -sb last. No AI attribution trailer in commits. Work on branch `feature/x`.\n'
@@ -67,7 +68,7 @@ describe('the prompt guard (lint.ts)', () => {
     expect(signoffLint(`${ITEMS}git push -f origin x\ngit reset --hard`).refusal).toBe(
       "refused by the sign-off guard: the prompt instructs a force-push on line 2, reset --hard on line 3 as a step for the worker; that needs the user's go-ahead in this conversation, a sign-off item the mod cannot see. " +
         'Raise an open point for the go-ahead and launch without the step; with the go-ahead the user runs it or says how, and a prompt may tell the worker to stop before it and report. ' +
-        'A sentence that tells the worker not to do it (never, do not, stop before) passes',
+        'A sentence that tells the worker not to do it (never, do not, stop before) passes; to authorise a class the user has recorded a Standing go-ahead for, cite its decision id in the prompt',
     )
   })
 
@@ -330,5 +331,287 @@ describe('the sign-off guard through the plugin', () => {
     const warned = await launch(`${ITEMS}Merge and push to main when green.`)
     expect(warned.deny).toBeUndefined()
     expect(String(warned.result)).toContain('\nWARNING: the prompt names a push to main:')
+  })
+})
+
+// ---------------------------------------------------------------- a cited Standing go-ahead
+
+const DECISIONS = [
+  '# Agreed decisions',
+  '',
+  '## A unit (user, 2026-10-12)',
+  'unit-1. Something decided.',
+  'signoff-in-unit. [signoff:delete-branch] A marked line outside a Standing section.',
+  '',
+  '## Standing',
+  'push-scratch. Pushes to main need no go-ahead.',
+  'signoff-delete-branches. [signoff:delete-branch] User: delete merged branches from both remotes and locally; never main, develop or release/*.',
+  'signoff-rewrite-root-author. [signoff:force-push] User: rewrite the root author and push main to both remotes (origin and backup) with --force-with-lease.',
+  'signoff-no-marker. User: a go-ahead whose line carries no marker at its start [signoff:delete-branch].',
+  '',
+  '## Session-control mod',
+  'signoff-after-standing. [signoff:delete-branch] A marked line after the Standing section ended.',
+  '',
+].join('\n')
+const CITE_DELETE = 'Cited: signoff-delete-branches.\n'
+const CITE_LEASE = 'Cited: signoff-rewrite-root-author.\n'
+const MAIN_WARNING = "the prompt names a push to main: a push to a protected branch needs the user's go-ahead where the project's push policy asks (a Standing decision push-<project>); check it before the worker pushes"
+
+/** The guard on a prompt with the go-ahead lines it cites in DECISIONS (or in the text given). */
+const citedWith = (prompt: string, decisions: string | undefined) => signoffLint(prompt, signoffGrants(prompt, decisions))
+const cited = (prompt: string) => citedWith(prompt, DECISIONS)
+/** A command as the warning names it: up to where it ends. */
+const shown = (command: string) => command.replace(/(?:,|\s(?:and|or)\b).*$/, '')
+const refusedWith = (prompt: string, decisions: string | undefined) => /instructs (.*?) as a step/.exec(citedWith(prompt, decisions).refusal ?? '')?.[1]
+const refusedCited = (prompt: string) => refusedWith(prompt, DECISIONS)
+
+describe('a cited Standing go-ahead (lint.ts)', () => {
+  test('signoffGrants: a marked line of a Standing section whose id the prompt holds as a whole word; nothing else', () => {
+    expect(signoffGrants('signoff-delete-branches and signoff-rewrite-root-author', DECISIONS)).toEqual([
+      { id: 'signoff-delete-branches', actionClass: 'delete-branch', text: ' User: delete merged branches from both remotes and locally; never main, develop or release/*.' },
+      { id: 'signoff-rewrite-root-author', actionClass: 'force-push', text: ' User: rewrite the root author and push main to both remotes (origin and backup) with --force-with-lease.' },
+    ])
+    for (const prompt of ['signoff-in-unit', 'signoff-after-standing', 'signoff-no-marker', 'signoff-unknown', 'signoff-delete-branches-old', 'xsignoff-delete-branches', 'signoff-delete-branches_2', '[signoff:delete-branch]', 'signoff-delete']) {
+      expect({ prompt, grants: signoffGrants(prompt, DECISIONS) }).toEqual({ prompt, grants: [] })
+    }
+    expect(signoffGrants('signoff-delete-branches', undefined)).toEqual([])
+    expect(signoffGrants('signoff-delete-branches', '')).toEqual([])
+    // A heading that starts with Standing is a Standing section; CRLF line ends are read too.
+    expect(signoffGrants('del-x', '## Standing: the scratch mod (user)\r\ndel-x. [signoff:delete-branch] go.\r\n').map(one => one.id)).toEqual(['del-x'])
+    expect(signoffGrants('del-x.', '## Standing\ndel-x. [signoff:delete-branch] go.\n').map(one => one.id)).toEqual(['del-x'])
+  })
+
+  test('delete-branch: every allowed remote and local form passes, named in one warning line with its id, class and commands', () => {
+    for (const command of [
+      'git push origin --delete feature/old',
+      'git push --delete origin feature/old',
+      'git push origin -d feature/old',
+      'git push origin :feature/old',
+      'git push origin :refs/heads/feature/old',
+      'git push origin --delete refs/heads/feature/old',
+      'git push backup --delete feature/a bugfix/b-2',
+      'git push origin :feature/a :feature/b',
+      'git -C /tmp/scratch push origin --delete feature/old',
+      'git push /tmp/scratch-remote.git --delete feature/old',
+      'git push origin --delete maintenance',
+      'git push origin --delete feature/old and report',
+      'git push origin --delete feature/old, then report',
+    ]) {
+      expect({ command, lint: cited(`${ITEMS}${CITE_DELETE}${command}`) }).toEqual({
+        command,
+        lint: { warnings: [`sign-off allowed by signoff-delete-branches: delete-branch: ${shown(command)}`], allowed: [{ id: 'signoff-delete-branches', actionClass: 'delete-branch', commands: [shown(command)] }] },
+      })
+    }
+    // In backticks, in a sentence, several commands on several lines: one warning line, each command once.
+    const prompt = `${ITEMS}${CITE_DELETE}Run \`git push origin --delete feature/a\` now.\nThen git push backup :feature/a.\nRun \`git push origin --delete feature/a\` again.\ngit branch -d feature/a\ngit branch --delete feature/a`
+    expect(cited(prompt).warnings).toEqual(['sign-off allowed by signoff-delete-branches: delete-branch: git push origin --delete feature/a; git push backup :feature/a'])
+  })
+
+  test('delete-branch: a protected name, a glob, a variable, a tag, -D, --force, a mirror or pruning push, an extra option, no branch and a bare push stay refused', () => {
+    // A `:` refspec with a glob is no deletion the guard reads, with or without the id, as before.
+    expect([signoffLint(`${ITEMS}git push origin :feature/*`).refusal, refusedCited(`${ITEMS}${CITE_DELETE}git push origin :feature/*`)]).toEqual([undefined, undefined])
+    const DELETION = 'a remote branch or tag deletion on line 3'
+    for (const [command, refused] of [
+      ['git push origin --delete main', DELETION],
+      ['git push origin --delete Main', DELETION],
+      ['git push origin --delete MASTER', DELETION],
+      ['git push origin --delete refs/heads/main', DELETION],
+      ['git push origin :main', DELETION],
+      ['git push origin :refs/heads/develop', DELETION],
+      ['git push origin --delete release/1.2', DELETION],
+      ['git push origin --delete Release/x', DELETION],
+      ['git push origin --delete release', DELETION],
+      ['git push origin --delete HEAD', DELETION],
+      ['git push origin --delete feature/a main', DELETION],
+      ['git push origin --delete feature/a, main', DELETION],
+      ['git push origin --delete feature/a and main.', DELETION],
+      ['git push origin --delete feature/a or `develop`', DELETION],
+      ['git push origin :feature/a, refs/heads/master', DELETION],
+      ['git push origin --delete feature/a, feature/*', DELETION],
+      ['git push origin --delete feature/*', DELETION],
+      ['git push origin --delete $BRANCH', DELETION],
+      ['git push origin --delete feature/$X', DELETION],
+      ['git push origin --delete `git branch --show-current`', DELETION],
+      ['git push origin --delete refs/tags/v1', DELETION],
+      ['git push origin :refs/tags/v1', DELETION],
+      ['git push origin --delete tag v1', DELETION],
+      ['git push origin --delete refs/remotes/origin/x', DELETION],
+      ['git push --tags origin --delete v1', DELETION],
+      ['git push origin --delete', DELETION],
+      ['git push origin --delete feature/a --no-verify', DELETION],
+      ['git push origin --delete ../x', DELETION],
+      ['push origin --delete feature/old', DELETION],
+      ['git push --force origin --delete feature/x', 'a force-push on line 3, a remote branch or tag deletion on line 3'],
+      ['git push -df origin feature/x', 'a force-push on line 3, a remote branch or tag deletion on line 3'],
+      ['git branch -D feature/old', 'branch -D on line 3'],
+      ['git branch -d -f feature/old', 'branch -D on line 3'],
+      ['git branch --delete --force feature/old', 'branch -D on line 3'],
+      ['git push --mirror origin', 'a mirror push on line 3'],
+      ['git push --prune origin refs/heads/*:refs/heads/*', 'a pruning push on line 3'],
+      ['git reset --hard origin/main', 'reset --hard on line 3'],
+      ['git clean -fdx', 'a forced clean on line 3'],
+    ] as const) {
+      expect({ command, refused: refusedCited(`${ITEMS}${CITE_DELETE}${command}`) }).toEqual({ command, refused })
+    }
+  })
+
+  test('force-push: git push --force-with-lease[=main[:<expect>]] <a remote the line names> main or main:main passes, with the push-to-main warning', () => {
+    for (const command of [
+      'git push --force-with-lease origin main',
+      'git push --force-with-lease backup main:main',
+      'git push origin main --force-with-lease',
+      'git push --force-with-lease=main origin main',
+      'git push --force-with-lease=main:0123abc origin main',
+      'git push --force-with-lease=refs/heads/main:origin/main backup main',
+      'git -C /tmp/scratch push --force-with-lease origin main',
+      'git push --force-with-lease origin main and report',
+    ]) {
+      expect({ command, lint: cited(`${ITEMS}${CITE_LEASE}${command}`) }).toEqual({
+        command,
+        lint: { warnings: [MAIN_WARNING, `sign-off allowed by signoff-rewrite-root-author: force-push: ${shown(command)}`], allowed: [{ id: 'signoff-rewrite-root-author', actionClass: 'force-push', commands: [shown(command)] }] },
+      })
+    }
+  })
+
+  test('force-push: the unleased and + forms, another branch, another or no remote, more words and the force-push words stay refused', () => {
+    for (const command of [
+      'git push --force origin main',
+      'git push -f origin main',
+      'git push origin +main',
+      'git push --force-with-lease origin +main',
+      'git push --force-with-lease origin +main:main',
+      'git push --force-with-lease --force origin main',
+      'git push --force-with-lease origin feature/x',
+      'git push --force-with-lease origin develop',
+      'git push --force-with-lease origin HEAD:main',
+      'git push --force-with-lease origin refs/heads/main',
+      'git push --force-with-lease origin main:develop',
+      'git push --force-with-lease main',
+      'git push --force-with-lease',
+      'git push --force-with-lease upstream main',
+      'git push --force-with-lease $REMOTE main',
+      'git push --force-with-lease origin main feature/x',
+      'git push --force-with-lease origin main --no-verify',
+      'git push --force-with-lease origin main, feature/x',
+      'git push --force-with-lease origin main and develop',
+      'git push --force-with-lease origin main, +main',
+      'git push --force-with-lease=develop origin main',
+      'git push --force-with-lease=main:$SHA origin main',
+      'push --force-with-lease origin main',
+      'Then force-push main to origin',
+    ]) {
+      expect({ command, refused: refusedCited(`${ITEMS}${CITE_LEASE}${command}`) }).toEqual({ command, refused: 'a force-push on line 3' })
+    }
+    expect(refusedCited(`${ITEMS}${CITE_LEASE}git push --mirror --force-with-lease origin`)).toBe('a force-push on line 3, a mirror push on line 3')
+  })
+
+  test('the class must match, the id must be cited whole, in a Standing section, its line must carry the marker; no file is no citation', () => {
+    const deletion = 'git push origin --delete feature/old'
+    const lease = 'git push --force-with-lease origin main'
+    expect(refusedCited(`${ITEMS}${CITE_LEASE}${deletion}`)).toBe('a remote branch or tag deletion on line 3')
+    expect(refusedCited(`${ITEMS}${CITE_DELETE}${lease}`)).toBe('a force-push on line 3')
+    for (const citation of ['signoff-in-unit', 'signoff-after-standing', 'signoff-no-marker', 'signoff-unknown', 'signoff-delete-branches-old', 'xsignoff-delete-branches', 'signoff-delete-branches_2', '[signoff:delete-branch]']) {
+      const prompt = `${ITEMS}Cited: ${citation}.\n${deletion}`
+      expect({ citation, refused: refusedCited(prompt) }).toEqual({ citation, refused: 'a remote branch or tag deletion on line 3' })
+    }
+    expect(refusedWith(`${ITEMS}${CITE_DELETE}${deletion}`, undefined)).toBe('a remote branch or tag deletion on line 3')
+    expect(refusedWith(`${ITEMS}${CITE_DELETE}${deletion}`, '')).toBe('a remote branch or tag deletion on line 3')
+    // Both ids cited: each class by its own line.
+    const both = cited(`${ITEMS}Cited: signoff-delete-branches, signoff-rewrite-root-author.\n${deletion}\n${lease}`)
+    expect(both).toEqual({
+      warnings: [MAIN_WARNING, `sign-off allowed by signoff-delete-branches: delete-branch: ${deletion}`, `sign-off allowed by signoff-rewrite-root-author: force-push: ${lease}`],
+      allowed: [
+        { id: 'signoff-delete-branches', actionClass: 'delete-branch', commands: [deletion] },
+        { id: 'signoff-rewrite-root-author', actionClass: 'force-push', commands: [lease] },
+      ],
+    })
+  })
+
+  test('a negated sentence still passes as before, with or without the id, and is named in no warning', () => {
+    for (const prompt of [`${ITEMS}${CITE_DELETE}Never run git push origin --delete main.`, `${ITEMS}${CITE_DELETE}Do not run git push origin --delete feature/x.`, `${ITEMS}${CITE_LEASE}Never git push --force origin main.`]) {
+      expect({ prompt, lint: cited(prompt) }).toEqual({ prompt, lint: { warnings: [] } })
+    }
+  })
+
+  test('the refusal of a deletion or a force-push ends with how to cite a go-ahead; one of only other actions does not', () => {
+    for (const prompt of [`${ITEMS}git push origin --delete feature/x`, `${ITEMS}git push --force-with-lease origin main`, `${ITEMS}${CITE_DELETE}git push origin --delete main`]) {
+      expect({ prompt, refusal: cited(prompt).refusal }).toEqual({ prompt, refusal: expect.stringMatching(new RegExp(`\\(never, do not, stop before\\) passes; ${CITE_HINT}$`)) as never })
+      expect(cited(prompt).isCitable).toBe(true)
+    }
+    for (const prompt of [`${ITEMS}git reset --hard`, `${ITEMS}git branch -D x`, `${ITEMS}git push --mirror origin`]) {
+      const lint = cited(prompt)
+      expect({ prompt, ends: lint.refusal?.endsWith('(never, do not, stop before) passes'), isCitable: lint.isCitable }).toEqual({ prompt, ends: true, isCitable: undefined })
+    }
+  })
+
+  test('100 lines mixing allowed and refused steps: the refusal names the refused steps from the first, never an allowed one', () => {
+    const lines = Array.from({ length: 100 }, (_, i) => (i % 3 === 0 ? `git push origin --delete feature/n${i}` : `Step ${i}: look at the log.`))
+    lines[0] = 'Cited: signoff-delete-branches.'
+    lines[36] = 'git reset --hard origin/main'
+    lines[61] = 'git push backup :main'
+    lines[90] = 'git branch -D feature/n90'
+    const lint = cited(lines.join('\n'))
+    expect(lint.refusal).toStartWith('refused by the sign-off guard: the prompt instructs reset --hard on line 37, a remote branch or tag deletion on line 62, branch -D on line 91 as a step for the worker;')
+    expect(lint.refusal).toEndWith(CITE_HINT)
+    // Without its three refused steps, the same prompt is allowed: one warning line naming every deletion once.
+    const clean = lines.filter((_, i) => ![36, 61, 90].includes(i))
+    const allowedLint = cited(clean.join('\n'))
+    expect(allowedLint.refusal).toBeUndefined()
+    expect(allowedLint.allowed?.[0]?.commands.length).toBe(31)
+    // Without the citation, the first deletion is refused, then each other.
+    expect(signoffLint(clean.join('\n')).refusal).toStartWith('refused by the sign-off guard: the prompt instructs a remote branch or tag deletion on line 4, a remote branch or tag deletion on line 7,')
+  })
+})
+
+describe('a cited Standing go-ahead through the plugin', () => {
+  const seedDecisions = (world: World) => world.files.set(`${ORCH}/agreed-decisions.md`, DECISIONS)
+  const launchOf = (call: (tool: string, input: Record<string, unknown>) => Promise<{ deny?: string; isPassed: boolean; result?: unknown }>) => (prompt: string, title = 'cited case') =>
+    call('mcp__session-control__launch_worker', { dir: '/w/work', model: 'haiku', effort: 'low', title, prompt })
+
+  test('launch_worker: the cited deletion is launched with the WARNING line; a protected name, no citation, another class and no decisions file are refused', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
+    const { world, call } = await started($, on)
+    seedDecisions(world)
+    const launch = launchOf(call)
+    const steps = 'git push origin --delete feature/a\ngit push origin :feature/b'
+    const accepted = await launch(`${ITEMS}${CITE_DELETE}${steps}`)
+    expect(accepted.deny).toBeUndefined()
+    expect(String(accepted.result)).toContain('\nWARNING: sign-off allowed by signoff-delete-branches: delete-branch: git push origin --delete feature/a; git push origin :feature/b')
+    expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
+    for (const [prompt, title, listed, end] of [
+      [`${ITEMS}${CITE_DELETE}git push origin --delete main`, 'protected', 'a remote branch or tag deletion on line 3', CITE_HINT],
+      [`${ITEMS}${steps}`, 'uncited', 'a remote branch or tag deletion on line 2, a remote branch or tag deletion on line 3', CITE_HINT],
+      [`${ITEMS}${CITE_LEASE}${steps}`, 'other class', 'a remote branch or tag deletion on line 3, a remote branch or tag deletion on line 4', CITE_HINT],
+      [`${ITEMS}${CITE_DELETE}git push origin --delete feature/a\ngit branch -D feature/a`, 'branch -D', 'branch -D on line 4', '(never, do not, stop before) passes'],
+    ] as const) {
+      const refused = await launch(prompt, title)
+      expect({ title, deny: refused.deny }).toEqual({ title, deny: expect.stringMatching(new RegExp(`^session-control: refused by the sign-off guard: the prompt instructs ${listed} as a step for the worker;.*${end.replace(/[()]/g, '\\$&')}; nothing was launched$`)) as never })
+    }
+    expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
+    world.files.delete(`${ORCH}/agreed-decisions.md`)
+    expect((await launch(`${ITEMS}${CITE_DELETE}${steps}`, 'no file')).deny).toContain('the prompt instructs a remote branch or tag deletion on line 3, a remote branch or tag deletion on line 4 as a step')
+    expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
+    // The trace: the id, the class and the count; never a branch or a command.
+    const trace = world.files.get(`${RUNS}/trace.log`) ?? ''
+    const lines = trace.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
+    const allowed = lines.filter(line => line.event === 'guard' && line.allowedBy !== undefined)
+    expect(allowed.map(({ tool, isOk, check, allowedBy, actionClass, commands }) => ({ tool, isOk, check, allowedBy, actionClass, commands }))).toEqual([
+      { tool: 'launch_worker', isOk: true, check: 'sign-off', allowedBy: 'signoff-delete-branches', actionClass: 'delete-branch', commands: 2 },
+    ])
+    expect(JSON.stringify(allowed)).not.toContain('feature/')
+  })
+
+  test('the orchestrator session: its own deletion and force-push stay refused with the id in the command text', { options: OPTIONS }, async ($, on) => {
+    const { world, call } = await started($, on)
+    seedDecisions(world)
+    for (const command of [
+      'git push origin --delete feature/old # signoff-delete-branches',
+      'echo signoff-delete-branches && git push origin :feature/old',
+      'git push --force-with-lease origin main # signoff-rewrite-root-author',
+      'git branch -D feature/old # signoff-delete-branches',
+    ]) {
+      const answer = await call('Bash', { command })
+      expect({ command, isPassed: answer.isPassed, refused: answer.deny?.startsWith('session-control: refused by the sign-off guard: git ') }).toEqual({ command, isPassed: false, refused: true })
+    }
+    expect((await call('PowerShell', { command: 'git push origin --delete feature/old # signoff-delete-branches' })).deny).toContain('(PowerShell)')
   })
 })

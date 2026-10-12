@@ -955,6 +955,55 @@ describe('launch_worker', () => {
     }
   })
 
+  // A Standing go-ahead cited in the prompt (lint.ts, README Sign-off guard): read from the orchestrator's
+  // agreed-decisions.md on either host, it lets the cited class's commands through with a WARNING line; the rest stays refused.
+  describe('a cited Standing go-ahead, on both hosts', () => {
+    const CITED_DECISIONS = '# Agreed decisions\n\n## Standing\nscratch-delete-go. [signoff:delete-branch] User: delete merged scratch branches; never main.\nscratch-lease-go. [signoff:force-push] User: push main to origin with --force-with-lease once.\n'
+    const STEPS = 'Wait in the foreground; report git status -sb; no attribution.\ngit push origin --delete feature/a\ngit push origin :feature/b'
+    const hosts = [
+      { name: 'Linux', options: OPTIONS, env: { HOME }, dir: ORCH_DIR, launch: { dir: '/work/new', model: 'opus', effort: 'high', title: 'new' } },
+      {
+        name: 'Windows',
+        options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}`, licencePickCommand: '' },
+        env: { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' },
+        dir: `C:${ORCH_DIR}`,
+        launch: { dir: '/c/work/new', model: 'opus', effort: 'high', title: 'new' },
+      },
+    ] as const
+
+    for (const host of hosts) {
+      test(`${host.name}: the cited deletions are launched with the WARNING line; without the citation, for main or for the other class they are refused and nothing runs`, { options: host.options }, async ($, on) => {
+        DECISIONS.text = CITED_DECISIONS
+        try {
+          const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+          await $.session.start(start(host.dir))
+          const decisionReads = () => w.reads.filter(path => fixture(path) === `${ORCH_DIR}/agreed-decisions.md`).length
+          const readsBefore = decisionReads()
+          const launch = (prompt: string) => $.tool.call({ tool: TOOL, ...host.launch, prompt } as never)
+          for (const [prompt, listed] of [
+            [STEPS, 'a remote branch or tag deletion on line 2, a remote branch or tag deletion on line 3'],
+            [`Cited: scratch-lease-go.\n${STEPS}`, 'a remote branch or tag deletion on line 3, a remote branch or tag deletion on line 4'],
+            [`Cited: scratch-delete-go.\n${STEPS}\ngit push origin --delete main`, 'a remote branch or tag deletion on line 5'],
+          ] as const) {
+            const refused = await launch(prompt)
+            expect({ listed, deny: String(refused.deny) }).toEqual({ listed, deny: expect.stringMatching(new RegExp(`^session-control: refused by the sign-off guard: the prompt instructs ${listed} as a step for the worker;.*cite its decision id in the prompt; nothing was launched$`)) as never })
+          }
+          // A refusal no citation can lift reads no decisions file and carries no citation hint.
+          expect(String((await launch(`Cited: scratch-delete-go.\n${STEPS.split('\n')[0]}\ngit reset --hard`)).deny)).toEndWith('(never, do not, stop before) passes; nothing was launched')
+          expect([w.bash.length, w.powershell.length]).toEqual([0, 0])
+          const out = await launch(`Cited: scratch-delete-go.\n${STEPS}`)
+          expect(out.deny).toBeUndefined()
+          expect(String(out.result)).toContain('Launched pid 7001')
+          expect(String(out.result)).toEndWith('\nWARNING: sign-off allowed by scratch-delete-go: delete-branch: git push origin --delete feature/a; git push origin :feature/b')
+          // The decisions file is read once per launch whose first verdict a citation could lift: all four here.
+          expect(decisionReads() - readsBefore).toBe(4)
+        } finally {
+          DECISIONS.text = undefined
+        }
+      })
+    }
+  })
+
   test('a settings hook that denies the Bash call (classic PreToolUse) is a refusal of the launch too', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     // Its input is the call's envelope (the tool and its arguments), as a settings hook's PreToolUse sees it.

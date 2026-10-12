@@ -65,7 +65,7 @@ import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { signoffDenyText, signoffVerdict } from './guard'
 import { findSecrets, secretScanLine, tallyFromAnswer, tallyOf } from './secrets'
-import { promptLint, signoffLint } from './lint'
+import { promptLint, signoffGrants, signoffLint } from './lint'
 import type { SecretTally } from './secrets'
 import type { StopReport } from './host'
 import type { GitState, ListedFile } from './audit'
@@ -1927,13 +1927,21 @@ async function launch($: EngineInterface, given: LaunchInput) {
   // licence picker included; a missing branch or decision section is a warning in the answer.
   // The sign-off guard (lint.ts, README Sign-off guard) refuses a prompt that instructs a force-push, a remote deletion,
   // reset --hard, a forced clean or branch -D as a step, a skill test's too; it warns on a push to main or develop.
+  // A refused remote branch deletion or force-push is checked again against the Standing go-ahead lines the prompt
+  // given cites (agreed-decisions.md, read only then): an instance that fits a cited class passes, named in a warning.
   const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text)
-  const signoff = composed === undefined ? { warnings: [] as string[] } : signoffLint(composed.text)
+  let signoff = composed === undefined ? { warnings: [] as string[] } : signoffLint(composed.text)
+  if (composed !== undefined && lint.refusal === undefined && signoff.isCitable === true) {
+    const grants = signoffGrants(sourceText ?? '', await $.fs.read(orchPath('agreed-decisions.md')).catch(() => undefined))
+    if (grants.length > 0) signoff = signoffLint(composed.text, grants)
+  }
   const lintRefusal = lint.refusal ?? signoff.refusal
   if (lintRefusal !== undefined) {
     trace($, 'guard', { tool: 'launch_worker', isOk: false, check: lint.refusal === undefined ? 'sign-off' : 'prompt-lint', ...messageFields(lintRefusal, 'reason') })
     return { deny: `${PLUGIN}: ${lintRefusal}; nothing was launched` }
   }
+  // What a cited go-ahead allowed: its id, its class and how many commands, never a branch or a command.
+  for (const one of signoff.allowed ?? []) trace($, 'guard', { tool: 'launch_worker', isOk: true, check: 'sign-off', allowedBy: one.id, actionClass: one.actionClass, commands: one.commands.length })
   const runsDir = await runsPath($)
   const nowMs = await $.clock.now()
   const base = `${runsDir}/${new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(0, 14)}-${slugify(filled.title ?? '')}`
