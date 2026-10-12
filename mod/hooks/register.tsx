@@ -1951,7 +1951,8 @@ async function launch($: EngineInterface, given: LaunchInput) {
   const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text)
   const ownLines = (sourceText ?? '').replace(/\s+$/, '').split('\n').length
   const standing = composed !== undefined && lint.refusal === undefined && hasSignoffBlock(composed.text, ownLines) ? await standingRead($) : undefined
-  const signoff = composed === undefined ? { warnings: [] as string[] } : signoffLint(composed.text, standing, ownLines)
+  // A prompt the lint refused is refused for that: the sign-off guard does not read it.
+  const signoff = composed === undefined || lint.refusal !== undefined ? { warnings: [] as string[] } : signoffLint(composed.text, standing, ownLines)
   const lintRefusal = lint.refusal ?? signoff.refusal
   if (lintRefusal !== undefined) {
     trace($, 'guard', { tool: 'launch_worker', isOk: false, check: lint.refusal === undefined ? 'sign-off' : 'prompt-lint', ...messageFields(lintRefusal, 'reason') })

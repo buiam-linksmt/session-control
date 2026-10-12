@@ -94,17 +94,216 @@ export function promptLint(prompt: string): PromptLint {
  */
 type ActionHit = { label: string; at: number; end: number; from: number }
 
-/** git's own options before the subcommand, as a prompt writes them (`git -C /r push`, `git --no-pager push`). */
-const GIT_OPTIONS = String.raw`(?:\s+(?:-C|-c|--git-dir|--work-tree)(?:=|\s+)\S+|\s+--?[A-Za-z][\w-]*(?:=\S+)?)*`
+// ---------------------------------------------------------------- the sentence index: work that grows with the line
 
-/** A verb whose flags can make a sign-off action, with `git` and its options before it (group 1) or alone. */
-const VERB = new RegExp(String.raw`(\bgit${GIT_OPTIONS}\s+)?\b(push|reset|clean|branch)\b`, 'gi')
+/**
+ * The matches of a pattern in a text, in order, as `matchAll` finds them. None of the patterns the guard indexes has two
+ * matches that overlap or nest, and each has one match at most at a place, so a later match also ends later.
+ */
+type Spans = { starts: number[]; ends: number[] }
+
+function spansOf(pattern: RegExp, text: string): Spans {
+  const spans: Spans = { starts: [], ends: [] }
+  for (const one of text.matchAll(new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`))) {
+    spans.starts.push(one.index ?? 0)
+    spans.ends.push((one.index ?? 0) + one[0].length)
+  }
+  return spans
+}
+
+/** The index of the first number of a sorted list that is at least `at`; the list's length when none is. */
+function firstFrom(list: readonly number[], at: number): number {
+  let low = 0
+  let high = list.length
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    if ((list[mid] ?? 0) < at) low = mid + 1
+    else high = mid
+  }
+  return low
+}
+
+/** Whether a match lies inside text[from, to): the first that starts at or after `from` ends by `to`. */
+function isSpanInside(spans: Spans, from: number, to: number): boolean {
+  const at = firstFrom(spans.starts, from)
+  return at < spans.starts.length && (spans.ends[at] ?? 0) <= to
+}
+
+/** Whether the character at `at` is a blank (`\s`), ASCII ones read by their code. */
+function isBlankAt(text: string, at: number): boolean {
+  const code = text.charCodeAt(at)
+  return code === 32 || (code >= 9 && code <= 13) || (code > 127 && /\s/.test(text[at] ?? ''))
+}
+
+/** A value computed on its first use, then kept. */
+function once<T>(make: () => T): () => T {
+  let value: { made: T } | undefined
+  return () => (value ??= { made: make() }).made
+}
+
+/**
+ * What the guard reads of one sentence, each part made once, on its first use: its words (its `\S+` runs), the words
+ * joined by one blank as the negation windows join them (and where each word starts there), and the matches of the
+ * patterns the windows test. A window is then a range of words, and whether a pattern matches inside it a search among
+ * the matches, so the work of the guard grows with the length of a line and not with its square (README, Sign-off guard).
+ */
+type SentenceIndex = {
+  text: string
+  words: () => { starts: number[]; ends: number[] }
+  joined: () => { text: string; starts: number[] }
+  /** CONTRAST, GOVERNING and COMMAND_END over the text. */
+  contrasts: () => Spans
+  governing: () => Spans
+  commandEnds: () => number[]
+  /** GUARD_NEGATION, GATE and REFUSAL_BEFORE over the text, and over the joined words; GUARD_NEGATION, GATE and REFUSAL_AFTER over the joined words. */
+  before: () => Spans[]
+  joinedBefore: () => Spans[]
+  joinedAfter: () => Spans[]
+  /** The places of the colons, the opening and the closing parentheses. */
+  openers: () => { colons: number[]; opens: number[]; closes: number[] }
+  /** The list heads of each clause, by where the clause starts (listHeads). */
+  heads: Map<number, { colon: number; opens: number[] }>
+}
+
+function sentenceIndex(text: string): SentenceIndex {
+  const words = once(() => {
+    const starts: number[] = []
+    const ends: number[] = []
+    for (const one of text.matchAll(/\S+/g)) {
+      starts.push(one.index ?? 0)
+      ends.push((one.index ?? 0) + one[0].length)
+    }
+    return { starts, ends }
+  })
+  const joined = once(() => {
+    const { starts, ends } = words()
+    const parts = starts.map((start, at) => text.slice(start, ends[at]))
+    let length = 0
+    return { text: parts.join(' '), starts: parts.map(part => (length += part.length + 1) - part.length - 1) }
+  })
+  const joinedGates = once(() => [spansOf(GUARD_NEGATION, joined().text), spansOf(GATE, joined().text)])
+  const places = (mark: RegExp) => [...text.matchAll(mark)].map(one => one.index ?? 0)
+  return {
+    text,
+    words,
+    joined,
+    contrasts: once(() => spansOf(CONTRAST, text)),
+    governing: once(() => spansOf(GOVERNING, text)),
+    commandEnds: once(() => spansOf(COMMAND_END, text).starts),
+    before: once(() => [spansOf(GUARD_NEGATION, text), spansOf(GATE, text), spansOf(REFUSAL_BEFORE, text)]),
+    joinedBefore: once(() => [...joinedGates(), spansOf(REFUSAL_BEFORE, joined().text)]),
+    joinedAfter: once(() => [...joinedGates(), spansOf(REFUSAL_AFTER, joined().text)]),
+    openers: once(() => ({ colons: places(/:/g), opens: places(/\(/g), closes: places(/\)/g) })),
+    heads: new Map(),
+  }
+}
+
+/** The last `count` words of text[from, to), cut at both ends: where the first starts, and the indexes of the first and the last word. */
+function lastWords(ix: SentenceIndex, from: number, to: number, count: number): { start: number; first: number; last: number } | undefined {
+  const { starts, ends } = ix.words()
+  const last = firstFrom(starts, to) - 1
+  if (last < 0 || (ends[last] ?? 0) <= from) return undefined
+  let first = last
+  while (last - first + 1 < count && first > 0 && (ends[first - 1] ?? 0) > from) first--
+  return { start: Math.max(starts[first] ?? 0, from), first, last }
+}
+
+/** The first `count` words of text[from, to), cut at both ends: where the last ends, and the indexes of the first and the last word. */
+function firstWords(ix: SentenceIndex, from: number, to: number, count: number): { end: number; first: number; last: number } | undefined {
+  const { starts, ends } = ix.words()
+  const first = firstFrom(ends, from + 1)
+  if (first >= starts.length || (starts[first] ?? 0) >= to) return undefined
+  let last = first
+  while (last - first + 1 < count && last + 1 < starts.length && (starts[last + 1] ?? 0) < to) last++
+  return { end: Math.min(ends[last] ?? 0, to), first, last }
+}
+
+/** Where a place of the text inside or at the end of word `word` lies in the joined words. */
+const joinedAt = (ix: SentenceIndex, word: number, place: number) => (ix.joined().starts[word] ?? 0) + place - (ix.words().starts[word] ?? 0)
+
+// ---------------------------------------------------------------- the actions of a sentence
+
+/** A word that is one of git's options taking its value as the next word (`-C /r`), in any case. */
+const GIT_PAIR_OPTION = /^(?:-C|-c|--git-dir|--work-tree)$/i
+
+/** A word that is one of git's options by itself (`--no-pager`, `-C=/r`, `--git-dir=/r`). */
+const GIT_OPTION = /^--?[A-Za-z][\w-]*(?:=\S+)?$/i
+
+/** A word that starts with a verb whose flags can make a sign-off action, the verb alone (`push`), and `git` before a blank. */
+const VERB_WORD = /^(?:push|reset|clean|branch)\b/i
+const BARE_VERB = /\b(?:push|reset|clean|branch)\b/gi
+const GIT_WORD = /\bgit(?=\s)/gi
+
+/** A verb found: where its match starts (at `git` when git and its options come before the verb), its length, and the verb. */
+export type VerbMatch = { index: number; length: number; isGit: boolean; verb: string }
+
+/**
+ * The verbs of a sentence, the matches of the pattern `(\bgit<options>\s+)?\b(push|reset|clean|branch)\b` (flags gi)
+ * one after the other, where git's options before the verb are `-C`, `-c`, `--git-dir` or `--work-tree` with its value
+ * as the next word, or one word `--?<letter>[\w-]*(=\S+)?`. The pattern itself backtracks exponentially over a run of
+ * such options that leads to no verb (`git -C -C -C ...`); here each word is read once, from the last: the verb its
+ * options lead to, an option with a value taking the next word first, as the pattern tries it first.
+ */
+function verbMatches(ix: SentenceIndex): VerbMatch[] {
+  const { text } = ix
+  const gits: VerbMatch[] = []
+  const starts = [...text.matchAll(GIT_WORD)].map(one => one.index ?? 0)
+  if (starts.length > 0) {
+    const words = ix.words()
+    const leadsTo = new Int32Array(words.starts.length + 2).fill(-1)
+    for (let at = words.starts.length - 1; at >= 0; at--) {
+      const word = text.slice(words.starts[at], words.ends[at])
+      if (GIT_PAIR_OPTION.test(word) && (leadsTo[at + 2] ?? -1) >= 0) leadsTo[at] = leadsTo[at + 2] ?? -1
+      else if (GIT_OPTION.test(word)) leadsTo[at] = leadsTo[at + 1] ?? -1
+      else if (VERB_WORD.test(word)) leadsTo[at] = at
+    }
+    for (const start of starts) {
+      const verbAt = leadsTo[firstFrom(words.starts, start + 3)] ?? -1
+      if (verbAt < 0) continue
+      const verbStart = words.starts[verbAt] ?? 0
+      const verb = VERB_WORD.exec(text.slice(verbStart, words.ends[verbAt]))?.[0] ?? ''
+      gits.push({ index: start, length: verbStart + verb.length - start, isGit: true, verb: verb.toLowerCase() })
+    }
+  }
+  const bare = spansOf(BARE_VERB, text)
+  const matches: VerbMatch[] = []
+  let from = 0
+  let git = 0
+  let alone = 0
+  for (;;) {
+    while (git < gits.length && (gits[git]?.index ?? 0) < from) git++
+    while (alone < bare.starts.length && (bare.starts[alone] ?? 0) < from) alone++
+    const withGit = gits[git]
+    const start = bare.starts[alone]
+    if (withGit !== undefined && (start === undefined || withGit.index < start)) {
+      matches.push(withGit)
+      from = withGit.index + withGit.length
+    } else if (start !== undefined) {
+      const end = bare.ends[alone] ?? 0
+      matches.push({ index: start, length: end - start, isGit: false, verb: text.slice(start, end).toLowerCase() })
+      from = end
+    } else return matches
+  }
+}
+
+/** The verbs of a sentence (verbMatches). */
+export const verbsOf = (sentence: string) => verbMatches(sentenceIndex(sentence))
 
 /** The words force-push, force push, force-pushes, force-pushing; a past form (force-pushed) describes, it never matches. */
 const FORCE_PUSH_WORDS = /\bforce[- ]?push(?:es|ing)?\b(?!-)/gi
 
-/** A past or passive form right before a verb or the force-push word (`was reset --hard`): it describes, it does not instruct. */
-const PAST_BEFORE = /\b(?:was|were|been|being|had)\s+$/i
+/**
+ * A past or passive form right before a verb or the force-push word (`was reset --hard`, the pattern
+ * `\b(?:was|were|been|being|had)\s+$` on the text before it): it describes, it does not instruct. Read from the blanks
+ * before the place and the word before them only.
+ */
+const PAST_WORD = /\b(?:was|were|been|being|had)$/i
+
+function isPastBefore(text: string, at: number): boolean {
+  let blank = at
+  while (blank > 0 && isBlankAt(text, blank - 1)) blank--
+  return blank < at && PAST_WORD.test(text.slice(Math.max(0, blank - 6), blank))
+}
 
 /**
  * Where one command's words end in a sentence: a quote, a backtick, a parenthesis, a separator, a punctuation mark
@@ -115,34 +314,46 @@ const COMMAND_END = /[`"'()|;&]|[,.!?:](?=\s|$)|\s(?:then|and|or|after|before|wh
 /** A short option cluster (`-fu`, `-df`) that holds a letter. */
 const hasLetter = (word: string, letter: string) => /^-[a-zA-Z]+$/.test(word) && word.slice(1).includes(letter)
 
+/** A `--force-with-lease` flag, bare or with `=` and a value (`^--force-with-lease(?:=\S*)?$` on a word, which holds no blank). */
+const isLease = (word: string) => word.startsWith('--force-with-lease') && (word.length === 18 || word[18] === '=')
+
 type Word = { word: string; at: number }
 
-/** The words of the command after a verb, each with its place in the sentence: at most 12, up to COMMAND_END. */
-function commandWords(sentence: string, from: number): Word[] {
-  const rest = sentence.slice(from)
-  const stop = rest.search(COMMAND_END)
-  return [...(stop < 0 ? rest : rest.slice(0, stop)).matchAll(/\S+/g)].slice(0, 12).map(one => ({ word: one[0], at: from + (one.index ?? 0) }))
+/**
+ * The words of the command after a verb, each with its place in the sentence: at most 12, up to COMMAND_END. A word
+ * that starts with no `-`, `+` or `:` is no flag and no refspec: only its first character is kept.
+ */
+function commandWords(ix: SentenceIndex, from: number): Word[] {
+  const ends = ix.commandEnds()
+  const stop = ends[firstFrom(ends, from)] ?? ix.text.length
+  const words = ix.words()
+  const out: Word[] = []
+  for (let at = firstFrom(words.ends, from + 1); at < words.starts.length && (words.starts[at] ?? 0) < stop && out.length < 12; at++) {
+    const start = Math.max(words.starts[at] ?? 0, from)
+    const end = '-+:'.includes(ix.text[start] ?? '') ? Math.min(words.ends[at] ?? 0, stop) : start + 1
+    out.push({ word: ix.text.slice(start, end), at: start })
+  }
+  return out
 }
 
 /**
- * The sign-off actions of the command a VERB match found. A short flag cluster (`-f`, `-d`, `-fd`) counts only after
+ * The sign-off actions of the command a verb match found (verbMatches). A short flag cluster (`-f`, `-d`, `-fd`) counts only after
  * `git` (a `-f` after make, tail or rm is no git flag), and so does every flag of clean (clean is an English word);
  * a long flag (`--force`, `--force-with-lease`, `--delete`, `--mirror`, `--prune`, `--hard`), a refspec (`+ref`,
  * `:ref`) and branch's `-D` count after the bare verb too.
  */
-function verbActions(sentence: string, match: RegExpMatchArray): ActionHit[] {
-  const isGit = match[1] !== undefined
-  const verb = (match[2] ?? '').toLowerCase()
-  const from = match.index ?? 0
-  if (!isGit && PAST_BEFORE.test(sentence.slice(0, from))) return []
-  const words = commandWords(sentence, from + match[0].length)
+function verbActions(ix: SentenceIndex, match: VerbMatch): ActionHit[] {
+  const { isGit, verb } = match
+  const from = match.index
+  if (!isGit && isPastBefore(ix.text, from)) return []
+  const words = commandWords(ix, from + match.length)
   const hits: ActionHit[] = []
   const add = (label: string, one: Word | undefined) => {
     if (one !== undefined) hits.push({ label, at: one.at, end: one.at + one.word.length, from })
   }
   const first = (test: (word: string) => boolean) => words.find(one => test(one.word))
   if (verb === 'push') {
-    add('a force-push', first(w => w === '--force' || /^--force-with-lease(?:=\S*)?$/.test(w) || /^\+[\w./:@^~-]+$/.test(w) || (isGit && hasLetter(w, 'f'))))
+    add('a force-push', first(w => w === '--force' || isLease(w) || /^\+[\w./:@^~-]+$/.test(w) || (isGit && hasLetter(w, 'f'))))
     add('a remote branch or tag deletion', first(w => w === '--delete' || /^:[\w./-]+$/.test(w) || (isGit && hasLetter(w, 'd'))))
     add('a mirror push', first(w => w === '--mirror'))
     add('a pruning push', first(w => w === '--prune'))
@@ -161,15 +372,18 @@ function verbActions(sentence: string, match: RegExpMatchArray): ActionHit[] {
 }
 
 /** The sign-off actions a sentence names, by their words and by their git flags. */
-function actionsOf(sentence: string): ActionHit[] {
+function actionsOf(ix: SentenceIndex): ActionHit[] {
   const hits: ActionHit[] = []
-  for (const match of sentence.matchAll(FORCE_PUSH_WORDS)) {
+  for (const match of ix.text.matchAll(FORCE_PUSH_WORDS)) {
     const at = match.index ?? 0
-    if (!PAST_BEFORE.test(sentence.slice(0, at))) hits.push({ label: 'a force-push', at, end: at + match[0].length, from: at })
+    if (!isPastBefore(ix.text, at)) hits.push({ label: 'a force-push', at, end: at + match[0].length, from: at })
   }
-  for (const match of sentence.matchAll(VERB)) hits.push(...verbActions(sentence, match))
+  for (const match of verbMatches(ix)) hits.push(...verbActions(ix, match))
   return hits
 }
+
+/** A word every action (FORCE_PUSH_WORDS, verbMatches) and every PROTECTED_PUSH match holds. */
+const ACTION_WORD = /push|reset|clean|branch/i
 
 /** A push to main or develop named in a sentence: warned, since the project's push policy decides whether it needs a go-ahead. */
 const PROTECTED_PUSH = /\bpush(?:es|ed|ing)?\b[^\n]{0,80}?\b(main|develop)\b|\b(main|develop)\b[^\n]{0,40}?\bpush(?:es|ed|ing)?\b/gi
@@ -196,7 +410,9 @@ const GOVERNED_GAP = /^(?:(?:any|a|an|the|other|more|further|git|ever|use|using|
 /** Words that turn a clause around: a negation on the other side of one does not cover the action. */
 const CONTRAST_WORDS = String.raw`\b(?:but|however|then|instead|yet|otherwise|except|unless)\b`
 const CONTRAST = new RegExp(CONTRAST_WORDS, 'gi')
-const HAS_CONTRAST = new RegExp(CONTRAST_WORDS, 'i')
+/** A contrast word that ends a text, or starts it (of a bounded slice of the text: the longest word has 9 letters). */
+const CONTRAST_AT_END = new RegExp(`${CONTRAST_WORDS}$`, 'i')
+const CONTRAST_AT_START = new RegExp(`^${CONTRAST_WORDS}`, 'i')
 
 /** The negation window, counted from the action's token (the flag, the refspec, the force-push word): this many words before it, this many after, in its sentence. */
 export const NEGATION_WORDS_BEFORE = 20
@@ -209,6 +425,7 @@ const negatesBefore = (text: string) => GUARD_NEGATION.test(text) || GATE.test(t
  * Whether an action is an item of a negated list: a colon or an opening parenthesis whose 8 words before hold a
  * negation, a gate or a refusal word (`never: force-push, reset --hard, branch -D`, `need the user's go-ahead (...,
  * force-push, ...`), the parenthesis not closed before the action. `text` runs from the last contrast word to the token.
+ * What isNegatedAt reads where the index cannot answer (isNegatedAtBySlices).
  */
 function isNegatedListItem(text: string): boolean {
   for (const opener of text.matchAll(/[:(]/g)) {
@@ -227,6 +444,15 @@ function isNegatedListItem(text: string): boolean {
  * except, unless) between the two.
  */
 export function isNegatedAt(sentence: string, start: number, end: number, from = start): boolean {
+  return negatedAt(sentenceIndex(sentence), start, end, from)
+}
+
+/**
+ * isNegatedAt read on slices of the sentence, each window cut out and tested again: its work grows with the square of
+ * the sentence. negatedAt reads the same through the sentence's index, and comes here only at the two edges where a
+ * window can hold a match that the whole sentence does not (NEGATION_TAIL); no action the guard finds stands at one.
+ */
+export function isNegatedAtBySlices(sentence: string, start: number, end: number, from: number): boolean {
   let lo = 0
   for (const one of sentence.slice(0, start).matchAll(CONTRAST)) lo = (one.index ?? 0) + one[0].length
   if (isNegatedListItem(sentence.slice(lo, start))) return true
@@ -243,6 +469,111 @@ export function isNegatedAt(sentence: string, start: number, end: number, from =
   if (cut >= 0) after = after.slice(0, cut)
   const afterText = (after.match(/\S+/g) ?? []).slice(0, NEGATION_WORDS_AFTER).join(' ')
   return GUARD_NEGATION.test(afterText) || GATE.test(afterText) || REFUSAL_AFTER.test(afterText)
+}
+
+/** The last word of a match of GUARD_NEGATION, GATE or REFUSAL_BEFORE, at the end of a text (of its last 12 characters). */
+const NEGATION_TAIL = /(?:not|never|nothing|neither|nor|n['’]t|cannot|refrain|avoid|forbidden|prohibited|disallowed|before|go-ahead|sign-?off|approval|permission|consent|items?|list|actions?|refuse[sd]?|refusing|refusal|deny|denies|denied|denial|reject(?:s|ed|ing)?)$/i
+
+/** A no or without that ends a text (GOVERNING). */
+const GOVERNING_AT_END = /(?<![\w-])(?:no|without)$/i
+
+/**
+ * isNegatedAt through the sentence's index: the same windows, each a range of words, each test a search among the
+ * matches of its pattern. A window ends where a match of the whole sentence would end too, except right before a
+ * letter, a digit, `_` or `-` (a match may end there inside the window and not in the sentence): before the token, when
+ * the text before it ends with a word a negation, a gate or a refusal ends with, and after the token, when a word goes on
+ * through its end; there the slices themselves are read (isNegatedAtBySlices).
+ */
+function negatedAt(ix: SentenceIndex, start: number, end: number, from: number): boolean {
+  const { text } = ix
+  const isTokenEdge = /[\w-]/.test(text[start] ?? '') && NEGATION_TAIL.test(text.slice(Math.max(0, start - 12), start))
+  const isAfterEdge = /[A-Za-z]/.test(text[end] ?? '') && /[\w-]/.test(text[end - 1] ?? '')
+  if (isTokenEdge || isAfterEdge) return isNegatedAtBySlices(text, start, end, from)
+  const lo = contrastEndBefore(ix, start)
+  if (isListItemAt(ix, lo, start)) return true
+  const windowStart = lastWords(ix, lo, start, NEGATION_WORDS_BEFORE)?.start ?? lo
+  if (ix.before().some(spans => isSpanInside(spans, windowStart, start))) return true
+  if (isGovernedAt(ix, windowStart, from)) return true
+  return isNegatedAfter(ix, end)
+}
+
+/** Where the last contrast word before `at` ends (the end of the text before it counts as a word's end); 0 when there is none. */
+function contrastEndBefore(ix: SentenceIndex, at: number): number {
+  if (CONTRAST_AT_END.test(ix.text.slice(Math.max(0, at - 12), at))) return at
+  const { ends } = ix.contrasts()
+  return ends[firstFrom(ends, at + 1) - 1] ?? 0
+}
+
+/**
+ * isNegatedListItem of text[lo, start): an opener of the clause from `lo` before `start`, its 8 words before negating
+ * (listHeads), the first such colon, or the last such opening parenthesis with no closing one before `start`.
+ */
+function isListItemAt(ix: SentenceIndex, lo: number, start: number): boolean {
+  if (lo >= start) return false
+  const heads = listHeads(ix, lo)
+  if (heads.colon < start) return true
+  const open = heads.opens[firstFrom(heads.opens, start) - 1]
+  if (open === undefined) return false
+  const { closes } = ix.openers()
+  return (closes[firstFrom(closes, open + 1)] ?? Number.POSITIVE_INFINITY) >= start
+}
+
+/**
+ * The openers of the clause that starts at `lo` (up to the end of the next contrast word) whose 8 words before, from
+ * `lo`, hold a negation, a gate or a refusal word: the first such colon, and every such opening parenthesis. Each opener
+ * is read once, for its own clause.
+ */
+function listHeads(ix: SentenceIndex, lo: number): { colon: number; opens: number[] } {
+  const known = ix.heads.get(lo)
+  if (known !== undefined) return known
+  const { ends } = ix.contrasts()
+  const clauseEnd = ends[firstFrom(ends, lo + 1)] ?? ix.text.length
+  const { colons, opens } = ix.openers()
+  const negates = (at: number) => {
+    const words = lastWords(ix, lo, at, 8)
+    if (words === undefined) return false
+    const from = joinedAt(ix, words.first, words.start)
+    const to = joinedAt(ix, words.last, Math.min(ix.words().ends[words.last] ?? 0, at))
+    return ix.joinedBefore().some(spans => isSpanInside(spans, from, to))
+  }
+  let colon = Number.POSITIVE_INFINITY
+  for (let at = firstFrom(colons, lo); at < colons.length && (colons[at] ?? 0) < clauseEnd; at++) {
+    if (negates(colons[at] ?? 0)) {
+      colon = colons[at] ?? 0
+      break
+    }
+  }
+  const heads = { colon, opens: opens.slice(firstFrom(opens, lo), firstFrom(opens, clauseEnd)).filter(negates) }
+  ix.heads.set(lo, heads)
+  return heads
+}
+
+/**
+ * Whether a no or without in text[windowStart, from) governs the action: only the last one can (the gap after an
+ * earlier one holds the later one's word), when nothing but up to three of GOVERNED_GAP's words, blanks, quotes and `*`
+ * stand between it and `from`.
+ */
+function isGovernedAt(ix: SentenceIndex, windowStart: number, from: number): boolean {
+  if (GOVERNING_AT_END.test(ix.text.slice(Math.max(windowStart, from - 8), from))) return true
+  const { starts, ends } = ix.governing()
+  const at = firstFrom(ends, from + 1) - 1
+  if (at < 0 || (starts[at] ?? 0) < windowStart) return false
+  const gapStart = ends[at] ?? 0
+  let marks = 0
+  for (let place = from; place > gapStart; place--) if (!isBlankAt(ix.text, place - 1) && !'`"\'*'.includes(ix.text[place - 1] ?? '') && ++marks > 24) return false
+  const gap = ix.text.slice(gapStart, from).replace(/[`"'*]/g, ' ').trim()
+  return gap === '' || GOVERNED_GAP.test(`${gap} `)
+}
+
+/** Whether a negation, a gate or a passive refusal stands in the NEGATION_WORDS_AFTER words after `end`, before the next contrast word. */
+function isNegatedAfter(ix: SentenceIndex, end: number): boolean {
+  const { starts } = ix.contrasts()
+  const cut = CONTRAST_AT_START.test(ix.text.slice(end, end + 12)) ? end : (starts[firstFrom(starts, end)] ?? ix.text.length)
+  const words = firstWords(ix, end, cut, NEGATION_WORDS_AFTER)
+  if (words === undefined) return false
+  const from = joinedAt(ix, words.first, Math.max(ix.words().starts[words.first] ?? 0, end))
+  const to = joinedAt(ix, words.last, words.end)
+  return ix.joinedAfter().some(spans => isSpanInside(spans, from, to))
 }
 
 /** The quoted parts of a line: backtick spans and double-quoted spans, straight or curly. */
@@ -265,17 +596,39 @@ function sentenceRanges(line: string): { start: number; end: number }[] {
 }
 
 /**
+ * What the guard reads of one line, each part made once: its quoted parts, the line with them blanked out, and the
+ * contrast words of each and the introducing words of the blanked line.
+ */
+type LineIndex = { line: string; quoted: () => Spans; contrasts: () => Spans; blankContrasts: () => Spans; introducers: () => Spans }
+
+function lineIndex(line: string): LineIndex {
+  const blanked = once(() => line.replace(QUOTED, one => ' '.repeat(one.length)))
+  return {
+    line,
+    quoted: once(() => spansOf(QUOTED, line)),
+    contrasts: once(() => spansOf(CONTRAST, line)),
+    blankContrasts: once(() => spansOf(CONTRAST, blanked())),
+    introducers: once(() => spansOf(INTRODUCER, blanked())),
+  }
+}
+
+/**
  * Whether the action token at `at` of a line sits in a quoted example: inside a backtick or quoted part, with an
  * introducing word (INTRODUCER) before that part in its sentence and no contrast word between them, outside quotes.
  */
-function isQuotedExample(line: string, sentenceStart: number, at: number): boolean {
-  const part = [...line.matchAll(QUOTED)].find(one => (one.index ?? 0) < at && at < (one.index ?? 0) + one[0].length)
-  if (part === undefined || (part.index ?? 0) < sentenceStart) return false
-  const lead = line.slice(sentenceStart, part.index).replace(QUOTED, one => ' '.repeat(one.length))
-  let lo = 0
-  for (const one of lead.matchAll(CONTRAST)) lo = (one.index ?? 0) + one[0].length
-  return INTRODUCER.test(lead.slice(lo))
+function isQuotedExample(lx: LineIndex, sentenceStart: number, at: number): boolean {
+  const quoted = lx.quoted()
+  const part = firstFrom(quoted.starts, at) - 1
+  const partStart = quoted.starts[part]
+  if (partStart === undefined || at >= (quoted.ends[part] ?? 0) || partStart < sentenceStart) return false
+  const contrasts = lx.blankContrasts()
+  const last = firstFrom(contrasts.ends, partStart + 1) - 1
+  const lo = last >= 0 && (contrasts.starts[last] ?? 0) >= sentenceStart ? (contrasts.ends[last] ?? 0) : sentenceStart
+  return isSpanInside(lx.introducers(), lo, partStart)
 }
+
+/** Whether a contrast word stands in a line before `at` (the end of the text before it counts as a word's end). */
+const hasContrastBefore = (lx: LineIndex, at: number) => (lx.contrasts().ends[0] ?? Number.POSITIVE_INFINITY) <= at || CONTRAST_AT_END.test(lx.line.slice(Math.max(0, at - 12), at))
 
 /** A list item: a bullet (`-`, `*`, `+`, `•`) or a number (`1.`, `1)`), its indentation in group 1. */
 const BULLET = /^(\s*)(?:[-*+•]|\d+[.)])\s+/
@@ -343,6 +696,7 @@ function fenceCloses(run: string, line: string): boolean {
  */
 export function standingGrants(decisions: string): StandingGrant[] {
   const grants: StandingGrant[] = []
+  const ids = new Set<string>()
   let isStanding = false
   let fence: string | undefined
   for (const line of decisions.replace(/^\ufeff/, '').split(/\r\n|\r|\n/)) {
@@ -359,7 +713,9 @@ export function standingGrants(decisions: string): StandingGrant[] {
     const match = isStanding ? GRANT_LINE.exec(line) : null
     if (match === null) continue
     const [, id = '', actionClass = '', text = ''] = match
-    if (!grants.some(one => one.id === id)) grants.push({ id, actionClass: actionClass as SignoffClass, text })
+    if (ids.has(id)) continue
+    ids.add(id)
+    grants.push({ id, actionClass: actionClass as SignoffClass, text })
   }
   return grants
 }
@@ -383,11 +739,13 @@ const RESERVED_SEGMENTS = ['heads', 'tags', 'remotes', 'for', 'pull', 'notes', '
 const SEGMENT = '[A-Za-z0-9][A-Za-z0-9._-]*'
 
 /**
- * A literal branch name, the last word of its line: segments joined by one `/`; no `..`, no segment that ends in `.`
- * or `.lock`; never a protected name or release/..., never one whose first segment is reserved (in any case), so a
- * name cannot reach another namespace through git's short ref paths.
+ * A literal branch name, the last word of its line: segments (SEGMENT) joined by one `/`; no `..`, no segment that ends
+ * in `.` or `.lock`; never a protected name or release/..., never one whose first segment is reserved (in any case), so
+ * a name cannot reach another namespace through git's short ref paths. The segments are read as one run of their
+ * characters in which every `/` is followed by a letter or digit: the same names as `SEGMENT(?:/SEGMENT)*`, which the
+ * engine reads at a cost per segment, 0.3 s over a 1 MB name of `a/a/...`, against 3 ms.
  */
-const NAME = String.raw`(?!${anyOf(RESERVED_SEGMENTS)}(?:/|$))(?!${anyOf(PROTECTED_NAMES)}$)(?!${anyCase('release')}/)(?!.*\.\.)(?!.*\.(?:/|$))(?!.*\.${anyCase('lock')}(?:/|$))${SEGMENT}(?:/${SEGMENT})*`
+const NAME = String.raw`(?!${anyOf(RESERVED_SEGMENTS)}(?:/|$))(?!${anyOf(PROTECTED_NAMES)}$)(?!${anyCase('release')}/)(?!.*\.\.)(?!.*\.(?:/|$))(?!.*\.${anyCase('lock')}(?:/|$))(?!.*\/(?:[\/._-]|$))[A-Za-z0-9][A-Za-z0-9._\/-]*`
 
 /** A remote: one literal name (no path, no URL), never a protected name or a reserved segment. */
 const REMOTE = `(?!(?:${anyOf(PROTECTED_NAMES)}|${anyOf(RESERVED_SEGMENTS)}) )${SEGMENT}`
@@ -430,11 +788,29 @@ export const WARNED_COMMANDS = 20
 /**
  * A line written as a signoff block's opening line, once format characters (a zero-width space) are dropped: three or
  * more marks that are no ASCII letter, digit or blank (backticks, tildes, their lookalikes, after a quote's `>`), then
- * signoff in any case, also with up to three such marks between sign and off (sign-off, sign off, a lookalike hyphen).
+ * signoff in any case, also with up to three such marks between sign and off (sign-off, sign off, a lookalike hyphen):
+ * the lines the pattern `^[\s>]*[^A-Za-z0-9\s]{3,}\s*sign[^A-Za-z0-9]{0,3}off` (flags iu) matches. In that pattern `>`
+ * is in both classes, so it backtracks over a run of `>` in time that grows with the square of the run; here the leading
+ * blanks and `>` are skipped first, and MARKS_SIGNOFF, whose quantified classes share no character, reads what follows
+ * them, and what follows the last `>` run among them (its `>` are the first marks then).
  */
-const NEAR_OPEN = /^[\s>]*[^A-Za-z0-9\s]{3,}\s*sign[^A-Za-z0-9]{0,3}off/iu
+const MARKS_SIGNOFF = /^[^A-Za-z0-9\s]{3,}\s*sign[^A-Za-z0-9]{0,3}off/iu
 
-/** Why a line written as an opening line (NEAR_OPEN) is not one (BLOCK_OPEN), the first reason that applies. */
+export function isNearOpen(line: string): boolean {
+  const lead = /^[\s>]*/.exec(line)?.[0].length ?? 0
+  let quote = lead
+  while (quote > 0 && isBlankAt(line, quote - 1)) quote--
+  while (quote > 0 && line[quote - 1] === '>') quote--
+  return MARKS_SIGNOFF.test(line.slice(lead)) || (quote < lead && MARKS_SIGNOFF.test(line.slice(quote)))
+}
+
+/**
+ * The longest line read for a near opening line (isNearOpen): a longer line is no signoff block's opening line, and only
+ * the exact test (BLOCK_OPEN) reads it; it is prose or a fence line, as for every other line, so it lifts nothing.
+ */
+export const NEAR_OPEN_MAX_CHARS = 4096
+
+/** Why a line written as an opening line (isNearOpen) is not one (BLOCK_OPEN), the first reason that applies. */
 function nearOpenFault(line: string): string {
   if (line.includes('\r')) return 'it ends with a carriage return (a prompt with CRLF line ends holds no signoff block)'
   if (line.includes('\t')) return 'it holds a tab'
@@ -454,7 +830,8 @@ type SignoffBlock = { id: string; open: number; body: { text: string; index: num
  * The signoff blocks among a prompt's first `ownLines` lines, outside fenced blocks (fenceOpened, fenceCloses): an
  * opening line (BLOCK_OPEN) up to the next line of exactly three backticks. Or the first line that breaks the syntax and
  * why: an opening line no such line closes (an unterminated block is no block), or a line written as an opening line
- * that is not one (NEAR_OPEN). An opening line inside another fenced block is no block, and its lines are prose.
+ * that is not one (isNearOpen, on a line of at most NEAR_OPEN_MAX_CHARS characters). An opening line inside another
+ * fenced block is no block, and its lines are prose.
  */
 function signoffBlocks(lines: readonly string[], ownLines: number): { blocks: SignoffBlock[]; broken?: { index: number; why: string } } {
   const blocks: SignoffBlock[] = []
@@ -474,7 +851,7 @@ function signoffBlocks(lines: readonly string[], ownLines: number): { blocks: Si
       index = close
       continue
     }
-    if (NEAR_OPEN.test(line.replace(/\p{Cf}/gu, ''))) return { blocks, broken: { index, why: `is written as a signoff block's opening line but is not exactly \`\`\`signoff <id>: ${nearOpenFault(line)}` } }
+    if (line.length <= NEAR_OPEN_MAX_CHARS && isNearOpen(line.replace(/\p{Cf}/gu, ''))) return { blocks, broken: { index, why: `is written as a signoff block's opening line but is not exactly \`\`\`signoff <id>: ${nearOpenFault(line)}` } }
     fence = fenceOpened(line)
   }
   return { blocks }
@@ -563,6 +940,7 @@ export function signoffLint(prompt: string, standing?: StandingRead, ownLines = 
     }
   }
   const found: { label: string; line: number }[] = []
+  const foundKeys = new Set<string>()
   const warned = new Set<string>()
   let fence: { isExample: boolean } | undefined
   let list: { headIndent: number } | undefined
@@ -585,17 +963,23 @@ export function signoffLint(prompt: string, standing?: StandingRead, ownLines = 
     const isListed = list !== undefined
     // A line of a sound signoff block: its form was matched whole (blockFault), so only the push warning reads it.
     const isBlockLine = blockLines.has(index)
+    const lx = lineIndex(line)
     for (const range of sentenceRanges(line)) {
-      const sentence = line.slice(range.start, range.end)
-      for (const action of isBlockLine ? [] : actionsOf(sentence)) {
-        if (isNegatedAt(sentence, action.at, action.end, action.from)) continue
-        if (isListed && !HAS_CONTRAST.test(line.slice(0, range.start + action.at))) continue
-        if (isQuotedExample(line, range.start, range.start + action.at)) continue
-        if (!found.some(one => one.label === action.label && one.line === index + 1)) found.push({ label: action.label, line: index + 1 })
+      // Every action and every push to main or develop holds one of these words: a sentence without them names none.
+      if (!ACTION_WORD.test(line.slice(range.start, range.end))) continue
+      const ix = sentenceIndex(line.slice(range.start, range.end))
+      for (const action of isBlockLine ? [] : actionsOf(ix)) {
+        if (negatedAt(ix, action.at, action.end, action.from)) continue
+        if (isListed && !hasContrastBefore(lx, range.start + action.at)) continue
+        if (isQuotedExample(lx, range.start, range.start + action.at)) continue
+        const key = `${action.label}\n${index + 1}`
+        if (foundKeys.has(key)) continue
+        foundKeys.add(key)
+        found.push({ label: action.label, line: index + 1 })
       }
-      for (const match of sentence.matchAll(PROTECTED_PUSH)) {
+      for (const match of ix.text.matchAll(PROTECTED_PUSH)) {
         const at = match.index ?? 0
-        if (!isNegatedAt(sentence, at, at + match[0].length)) warned.add((match[1] ?? match[2] ?? '').toLowerCase())
+        if (!negatedAt(ix, at, at + match[0].length, at)) warned.add((match[1] ?? match[2] ?? '').toLowerCase())
       }
     }
     if (isNegatingHead(line)) list = { headIndent: bullet === null ? -1 : indent }
