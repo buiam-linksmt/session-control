@@ -1890,16 +1890,18 @@ const READ_CAP_BYTES = 4 * 1024 * 1024
 
 /**
  * The decisions file a signoff block is checked against (signoffLint), or why it could not be read: it is not there,
- * it is no regular file, or the engine's read refused it (with its size, and whether that is over the read cap).
+ * it is no regular file, or the engine's read refused it (with its size, and whether that is over the read cap). Its
+ * kind comes first, from a stat, which opens nothing: a path that is no regular file (a folder, a named pipe, whose
+ * open waits for a writer) is never read.
  */
 async function standingRead($: EngineInterface): Promise<StandingRead> {
   const path = orchPath('agreed-decisions.md')
+  const stat = await $.fs.stat(path).catch(() => undefined)
+  if (stat !== undefined && stat.kind !== 'file') return { unreadable: `${path} is no regular file (${stat.kind})` }
   const text = await $.fs.read(path).catch(() => undefined)
   if (text !== undefined) return { text }
   if (!(await $.fs.exists(path).catch(() => true))) return { unreadable: `${path} is not there` }
-  const stat = await $.fs.stat(path).catch(() => undefined)
   if (stat === undefined) return { unreadable: `${path} is there but its read and its stat both failed` }
-  if (stat.kind !== 'file') return { unreadable: `${path} is no regular file (${stat.kind})` }
   return { unreadable: stat.size > READ_CAP_BYTES ? `${path} holds ${stat.size} bytes, over the engine's read cap of ${READ_CAP_BYTES} bytes` : `${path} holds ${stat.size} bytes and the engine's read of it failed` }
 }
 

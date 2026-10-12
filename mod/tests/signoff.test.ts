@@ -894,6 +894,23 @@ describe('a signoff block through the plugin', () => {
     expect(JSON.stringify(allowed)).not.toContain('feature/')
   })
 
+  test('launch_worker: a decisions file that is a named pipe is refused as no regular file, from its stat, and never opened (its open waits for a writer)', { options: OPTIONS }, async ($, on) => {
+    const { world, call } = await started($, on)
+    const path = `${ORCH}/agreed-decisions.md`
+    world.fifos.add(path)
+    const valid = `${ITEMS}${block(DELETE_ID, 'git push origin --delete refs/heads/feature/a')}\nReport.`
+    const refused = await launchOf(call)(valid, 'a named pipe')
+    expect(refused.deny).toBe(`session-control: refused by the sign-off guard: the signoff block on line 2 cannot be checked: the Standing decisions file could not be read: ${path} is no regular file (other); nothing was launched`)
+    expect(world.fifoReads).toEqual([])
+    expect(world.statted).toContain(path)
+    expect(launched(world)).toBe(0)
+    // A regular file there again is read and the block launched.
+    world.fifos.delete(path)
+    seedDecisions(world)
+    expect((await launchOf(call)(valid, 'a file again')).deny).toBeUndefined()
+    expect(launched(world)).toBe(1)
+  })
+
   test('launch_worker: a block of 25 lines is named with 20 commands and the count; the trace counts all 25', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
     const { world, call } = await started($, on)
     seedDecisions(world)

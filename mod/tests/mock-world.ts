@@ -61,6 +61,12 @@ export type World = {
   listed: string[]
   /** Files that are there but cannot be read (over the read cap, say). */
   unreadable: Set<string>
+  /**
+   * Named pipes: a stat answers `other`, as the engine answers for what is no file and no folder; a read is recorded in
+   * `fifoReads` and never settles, as the open of a pipe that no process writes to waits.
+   */
+  fifos: Set<string>
+  fifoReads: string[]
   /** A transcript's mtime the probe reports, epoch seconds, by session id (not listed: 5 s before the fixture's start). */
   mtimes: Map<string, number>
   /** How `git` answers (its arguments after the program); not set: exit 128, as where there is no repository. */
@@ -125,6 +131,8 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     statted: [],
     listed: [],
     unreadable: new Set(),
+    fifos: new Set(),
+    fifoReads: [],
     mtimes: new Map(),
     clock: mock.clock(on, { now: NOW_MS }),
     usage: new Map(),
@@ -168,6 +176,10 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     return { value: { tool: `mcp__session-control__${e.name}` } }
   })
   on('fs.read', ($, e) => {
+    if (world.fifos.has(real(worldPath(e.path)))) {
+      world.fifoReads.push(worldPath(e.path))
+      return new Promise<never>(() => undefined)
+    }
     if (world.unreadable.has(real(worldPath(e.path)))) throw new Error(`EFBIG ${worldPath(e.path)}`)
     const text = files.get(real(worldPath(e.path)))
     if (text === undefined) throw new Error(`ENOENT ${worldPath(e.path)}`)
@@ -177,13 +189,14 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     write(worldPath(e.path), e.text, 'fs.write')
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: files.has(real(worldPath(e.path))) || isDir(worldPath(e.path)) }))
+  on('fs.exists', ($, e) => ({ value: files.has(real(worldPath(e.path))) || isDir(worldPath(e.path)) || world.fifos.has(real(worldPath(e.path))) }))
   on('fs.stat', ($, e) => {
     world.statted.push((e as { resolve?: boolean }).resolve === true ? `${worldPath(e.path)}+resolve` : worldPath(e.path))
     const path = worldPath(e.path).replace(/\/+$/, '')
     const target = real(path)
     const base = { mtimeMs: NOW_MS, isLink: links.has(path) }
     const realPath = (e as { resolve?: boolean }).resolve === true ? { realPath: target } : {}
+    if (world.fifos.has(target)) return { value: { ...base, kind: 'other', size: 0, ...realPath } as FsStat }
     if (files.has(target)) return { value: { ...base, kind: 'file', size: (files.get(target) ?? '').length, ...realPath } as FsStat }
     if (isDir(path) || target === '/' || [HOME, ORCH, '/w', '/w/work'].includes(target)) return { value: { ...base, kind: 'dir', size: 0, ...realPath } as FsStat }
     // A link that leads nowhere is `other`, as the engine says it, with no realPath.
