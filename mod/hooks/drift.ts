@@ -57,9 +57,14 @@ function names(changed: readonly string[]): string {
 
 const countText = (n: number) => `${n} ${n === 1 ? 'file' : 'files'} changed`
 
-/** The band's one line: the source folder, how many files differ, up to three names, and how to reload. */
-export function driftBandText(modDir: string, changed: readonly string[]): string {
-  return `session-control: the loaded mod differs from ${modDir} (${countText(changed.length)}: ${names(changed)}). Reload it: copy hooks, helper, types and plugin.json to the plugin folder, or restart with --plugin-dir ${modDir}`
+/**
+ * The band's one line: the source folder, how many files differ, up to three names, and how to reload on the surface it
+ * is drawn on. The terminal's advice names --plugin-dir; the desktop has no such flag: its Code tab loads the folders
+ * CLAUDE_CODE_PLUGIN_DIRS names when a session starts, so its advice is to restart the Code session.
+ */
+export function driftBandText(modDir: string, changed: readonly string[], surface: 'terminal' | 'desktop' = 'terminal'): string {
+  const head = `session-control: the loaded mod differs from ${modDir} (${countText(changed.length)}: ${names(changed)}). Reload it: copy hooks, helper, types and plugin.json to the plugin folder`
+  return surface === 'desktop' ? `${head}, or name ${modDir} in CLAUDE_CODE_PLUGIN_DIRS, then restart the Code session` : `${head}, or restart with --plugin-dir ${modDir}`
 }
 
 /** The `mod-drift` notice's message. */

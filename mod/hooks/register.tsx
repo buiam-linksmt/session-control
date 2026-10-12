@@ -1008,8 +1008,9 @@ async function driftCheck($: EngineInterface, nowMs: number): Promise<void> {
   try {
     const found = await driftChanged($)
     const changed = found?.changed
-    const text = found === undefined || changed === undefined || changed.length === 0 ? null : driftBandText(found.dir, changed)
-    if ((await read($, driftBand))?.text !== text) await update($, driftBand, () => (text === null ? null : { text }))
+    // The line per surface: the render hook draws the desktop's on the desktop, the terminal's everywhere else.
+    const band = found === undefined || changed === undefined || changed.length === 0 ? null : { text: driftBandText(found.dir, changed), desktopText: driftBandText(found.dir, changed, 'desktop') }
+    if (!isSame(await read($, driftBand), band)) await update($, driftBand, () => band)
     trace($, 'drift', { isSourceThere: found !== undefined, isCompared: changed !== undefined, changed: changed?.length ?? 0 })
     if (found !== undefined) {
       const toasts = toastBudget()
@@ -2794,7 +2795,7 @@ export const register: Register = (on, options) => {
     const { Box, Text } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
-        <Text dimColor>{band.text}</Text>
+        <Text dimColor>{e.surface === 'desktop' ? band.desktopText : band.text}</Text>
         {below}
       </Box>
     )

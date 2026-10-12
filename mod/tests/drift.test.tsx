@@ -91,6 +91,8 @@ const checks = (world: World) => world.statted.filter(one => one === `${SOURCE}+
 
 const changedOne = { ...MOD_FILES, 'hooks/core.ts': 'export const core = 2\n' }
 const BAND_ONE = `session-control: the loaded mod differs from ${SOURCE} (1 file changed: hooks/core.ts). Reload it: copy hooks, helper, types and plugin.json to the plugin folder, or restart with --plugin-dir ${SOURCE}`
+/** The same band on the desktop surface: Claude Desktop loads the mod through CLAUDE_CODE_PLUGIN_DIRS, with no --plugin-dir. */
+const BAND_DESKTOP = `session-control: the loaded mod differs from ${SOURCE} (1 file changed: hooks/core.ts). Reload it: copy hooks, helper, types and plugin.json to the plugin folder, or name ${SOURCE} in CLAUDE_CODE_PLUGIN_DIRS, then restart the Code session`
 const TOAST_ONE = `${TOAST_TITLES['mod-drift']} \u00B7 the loaded mod differs from ${SOURCE} (1 file changed: hooks/core.ts); the band above the prompt says how to reload it`
 
 describe('the drift band on the mock world', () => {
@@ -301,6 +303,20 @@ describe('the drift band on the mock world', () => {
     expect(await bandLines($)).toEqual([BAND_ONE, 'engine band'])
   })
 
+  test('on the desktop the band says to restart the Code session, not --plugin-dir; the terminal keeps its line', { options: SOURCE_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: FAST })
+    storeOf(on)
+    engineBand(on)
+    await started($, world, changedOne)
+    await poll(world, EVERY)
+    const desktop = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'AbovePrompt', props: BAND_PROPS } as never)
+    expect(((await desktop.findAll({ type: 'Text' })) as { text?: string }[]).map(one => String(one.text))).toEqual([BAND_DESKTOP, 'engine band'])
+    expect(BAND_DESKTOP).not.toContain('--plugin-dir')
+    expect(await bandOf($)).toBe(BAND_ONE)
+    // The one toast and notice line are the same on both surfaces.
+    expect(toastsOf(world.toasts, 'mod-drift')).toEqual([TOAST_ONE])
+  })
+
   test('a survey holds the band: the engine draws', { options: SOURCE_OPTIONS }, async ($, on) => {
     const world = mockWorld(on, { env: FAST })
     storeOf(on)
@@ -436,6 +452,10 @@ describe('drift.ts', () => {
   test('the band and the notice: the count, up to three names, nothing else', () => {
     expect(driftBandText('/r/mod', ['a'])).toBe('session-control: the loaded mod differs from /r/mod (1 file changed: a). Reload it: copy hooks, helper, types and plugin.json to the plugin folder, or restart with --plugin-dir /r/mod')
     expect(driftBandText('/r/mod', ['a', 'b', 'c', 'd'])).toContain('(4 files changed: a, b, c, ...)')
+    expect(driftBandText('/r/mod', ['a'], 'terminal')).toBe(driftBandText('/r/mod', ['a']))
+    expect(driftBandText('/r/mod', ['a'], 'desktop')).toBe(
+      'session-control: the loaded mod differs from /r/mod (1 file changed: a). Reload it: copy hooks, helper, types and plugin.json to the plugin folder, or name /r/mod in CLAUDE_CODE_PLUGIN_DIRS, then restart the Code session',
+    )
     expect(driftNoticeMessage('/r/mod', ['a', 'b'])).toBe('the loaded mod differs from /r/mod (2 files changed: a, b); the band above the prompt says how to reload it')
     expect(DRIFT_SPEC).toEqual({ dirs: ['hooks', 'helper', 'types'], files: ['.claude-plugin/plugin.json'] })
   })
