@@ -95,21 +95,26 @@ export type SimProc = {
    * that exec'd it, which is gone, so only the MSYS process table links it to the tree.
    */
   msysParent?: number
+  /** Windows, with `msysParent`: the runtime folder (an MSYS table's `dir`) it runs from, when not the first table's. */
+  msysDir?: string
   /** A process even taskkill /F cannot end (access denied: exit 1). */
   isUnkillable?: boolean
 }
 /**
- * `msys`, Windows: the folder of the MSYS process table TREE_PS1 reads (Git's usr/bin), and whether that table cannot be
- * read (its ps.exe fails), or what its ps.exe does instead of printing the table (`garbage`: it exits 0 with no row of
- * a table, which TREE_PS1 takes as a table it could not read).
+ * Windows: the folder of an MSYS process table TREE_PS1 reads (Git's usr/bin), and whether that table cannot be read
+ * (its ps.exe fails), or what its ps.exe does instead of printing the table (`garbage`: it exits 0 with no row of a
+ * table, which TREE_PS1 takes as a table it could not read; `hang`: it gives no answer, and TREE_PS1 ends it at its
+ * limit and reads no table).
  */
-export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number; msys?: { dir: string; isUnreadable?: boolean; ps?: 'garbage' } }
+export type MsysTable = { dir: string; isUnreadable?: boolean; ps?: 'garbage' | 'hang' }
+/** `msys`, Windows: the MSYS process table, or the tables, TREE_PS1 reads, in the order it reads them. */
+export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number; msys?: MsysTable | MsysTable[] }
 
 /**
  * The helper's processTree lines over the table (TREE_PS1's list prints the same): R or N, the G lines, the D lines
- * breadth first. `isWindows`: TREE_PS1's own part after them, the table's MSYS process table (`table.msys`) read for
- * the programs started through Git Bash (a D line with state msys per process whose MSYS parent is a member and which
- * started after it), then its M line.
+ * breadth first. `isWindows`: TREE_PS1's own part after them, the table's MSYS process tables (`table.msys`) read for
+ * the programs started through Git Bash (an M line with -1, or -2 for a ps.exe that hangs, per table not read; a D line
+ * with state msys per process whose MSYS parent is a member and which started after it), then an M line per table read.
  */
 export function treeInTable(table: ProcTable, pid: number, start: string, isWindows = false): string {
   const root = table.procs.get(pid)
@@ -126,20 +131,26 @@ export function treeInTable(table: ProcTable, pid: number, start: string, isWind
       }
     }
     if (isWindows && table.msys !== undefined) {
-      if (table.msys.isUnreadable === true || table.msys.ps === 'garbage') lines.push(`M\t-1\t${table.msys.dir}`)
-      else {
-        let added = 0
+      const tables = [table.msys].flat()
+      const added = new Map<string, number>()
+      for (const one of tables) {
+        if (one.ps === 'hang') lines.push(`M\t-2\t${one.dir}`)
+        else if (one.isUnreadable === true || one.ps === 'garbage') lines.push(`M\t-1\t${one.dir}`)
+        else added.set(one.dir, 0)
+      }
+      if (added.size > 0) {
         for (let at = 0; at < queue.length; at++) {
           const parent = table.procs.get(queue[at] ?? 0)
           for (const [child, one] of table.procs) {
-            if (one.msysParent !== queue[at] || queue.includes(child) || parent === undefined || BigInt(one.start) < BigInt(parent.start)) continue
+            const dir = one.msysDir ?? tables[0]?.dir ?? ''
+            if (one.msysParent !== queue[at] || !added.has(dir) || queue.includes(child) || parent === undefined || BigInt(one.start) < BigInt(parent.start)) continue
             queue.push(child)
-            added++
+            added.set(dir, (added.get(dir) ?? 0) + 1)
             lines.push(`D\t${child}\t${queue[at]}\t${one.start}\tmsys\t${one.comm}`)
           }
         }
-        lines.push(`M\t${added}\t${table.msys.dir}`)
       }
+      for (const [dir, count] of added) lines.push(`M\t${count}\t${dir}`)
     }
   }
   return lines.map(line => `${line}\n`).join('')

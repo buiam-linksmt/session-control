@@ -15,7 +15,7 @@ import { withHelper } from '../hooks/host-helper'
 import { withPowerShellLaunch } from '../hooks/host-powershell'
 import { NEWER_MAX } from '../hooks/host-shared'
 import { posixHost } from '../hooks/host-posix'
-import { PROBE_PS1, TREE_PS1, windowsHost } from '../hooks/host-windows'
+import { MSYS_PS_MS, PROBE_PS1, TREE_PS1, windowsHost } from '../hooks/host-windows'
 import { localDate } from '../hooks/store'
 import { checkInTable, helperAnswer, taskkillInTable, treeInTable } from './fake-helper'
 import type { ProcTable } from './fake-helper'
@@ -507,6 +507,34 @@ describe('host contract', () => {
         expect(m.table.signals.some(sent => [5003, 6000].includes(sent.pid))).toBe(false)
       })
 
+      test(`${one.name}: stopProcessTree goes on with the Windows tree and the other MSYS tables when one ps.exe gives no answer, and says that table could not be read`, async () => {
+        const GIT = 'C:\\Program Files\\Git\\usr\\bin'
+        const OTHER = 'C:\\Users\\u\\gb3\\usr\\bin'
+        const m = machine(one.env)
+        seedTree(m)
+        // The standard Git Bash 5001's sleep.exe, and a second Git Bash 5005 of another installation with its sleep.exe:
+        // each linked to its bash only by the MSYS process table of its own installation.
+        m.table.procs.set(5003, { ppid: 4999, start: '103', state: '', comm: 'sleep.exe', msysParent: 5001 })
+        m.table.procs.set(5005, { ppid: 5000, start: '105', state: '', comm: 'bash.exe' })
+        m.table.procs.set(5006, { ppid: 4996, start: '106', state: '', comm: 'sleep.exe', msysParent: 5005, msysDir: OTHER })
+        m.table.msys = [{ dir: GIT }, { dir: OTHER, ps: 'hang' }]
+        const report = await host.stopProcessTree(portOf(m, runs), { pid: 5000, start: '100' })
+        expect(report.tree.descendants.map(proc => [proc.pid, proc.ppid, proc.state])).toEqual([
+          [5001, 5000, 'S'],
+          [5005, 5000, ''],
+          [5002, 5001, 'S'],
+          [5003, 5001, 'msys'],
+        ])
+        expect(report.notes).toEqual([
+          `the MSYS process table of C:/Users/u/gb3/usr/bin (Git Bash) could not be read: its ps.exe gave no answer within ${MSYS_PS_MS / 1000} s and no longer runs; a program the worker started through Git Bash whose Windows parent has exited is not among the descendants listed, and this stop does not reach it`,
+          'the MSYS process table of C:/Program Files/Git/usr/bin (Git Bash) was read before the first signal: 1 program the worker started through Git Bash, whose Windows parent has exited, is among the descendants listed, each with its MSYS parent',
+        ])
+        expect(signalsOf(report.steps)).toEqual(['5000 taskkill /T /F', '5003 taskkill /T /F'])
+        expect(report.final).toEqual([5000, 5001, 5005, 5002, 5003].map(pid => ({ pid, status: 'gone', state: '' })))
+        expect([...m.table.procs.keys()].sort()).toEqual([5006, 6000])
+        expect(m.table.signals.some(sent => [5006, 6000].includes(sent.pid))).toBe(false)
+      })
+
       test(`${one.name}: stopProcessTree sends taskkill /T /F at once, and its re-checks report the seconds of the clock, never the count of checks`, async () => {
         const m = machine(one.env)
         m.table.procs.set(5000, { ppid: 1, start: '100', state: '', comm: 'claude.exe', isUnkillable: true })
@@ -882,6 +910,18 @@ describe('TREE_PS1', () => {
     const noRow = lines.findIndex(line => line.includes('if ($read.Count -eq 0) { [void]$out.Append("M`t-1`t$(Flat $dir)`n"); continue }'))
     expect(noRow).toBeGreaterThan(0)
     expect(noRow).toBeLessThan(lines.findIndex(line => line.includes('$added[$dir] = 0')))
+  })
+
+  test('each ps.exe runs with a limit of its own: past it TREE_PS1 ends that ps.exe alone and reads no table from it', () => {
+    expect(TREE_PS1).toContain(`$psMs = ${MSYS_PS_MS}`)
+    expect(MSYS_PS_MS).toBe(5_000)
+    expect(TREE_PS1).toContain('$ps = [System.Diagnostics.Process]::Start($how)')
+    expect(TREE_PS1).toContain('if ($ps.WaitForExit($psMs) -and $text.Wait(1000)) {')
+    expect(TREE_PS1).toContain('try { $ps.Kill() } catch { }')
+    expect(TREE_PS1).toContain('if ($code -eq -2 -or $code -eq -3) { [void]$out.Append("M`t$code`t$(Flat $dir)`n"); continue }')
+    // The ps.exe is run through the process it started, never by name and never by the call operator, which has no limit.
+    expect(TREE_PS1).not.toContain('& "$dir\\ps.exe"')
+    expect(TREE_PS1).not.toMatch(/taskkill|Stop-Process/i)
   })
 })
 

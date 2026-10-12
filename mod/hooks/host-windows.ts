@@ -150,7 +150,9 @@ export const PROBE_PS1 = [
  * MSYS parent is a member (or one found this way), and which was created after that parent, is a descendant too: a D
  * line with state `msys` and the parent's Windows pid as its parent. An M line per folder gives how many it added
  * (`M <count> <folder>`), or -1 when its table could not be read: its ps.exe is missing or fails, or prints no row of
- * that table (a real one lists at least that ps.exe).
+ * that table (a real one lists at least that ps.exe). Each ps.exe runs with a limit of its own, MSYS_PS_MS: one that
+ * gives no answer by then is ended (that process alone, by the handle of its start) and its table is not read either,
+ * -2 (-3 when it still runs 2 s after that), and the listing goes on with the other folders.
  */
 export const TREE_PS1 = [
   '# session-control: the process tree of a stop and its re-checks, for Windows PowerShell 5.1 (stop_worker)',
@@ -161,6 +163,8 @@ export const TREE_PS1 = [
   '$epoch = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)',
   'function Ms([DateTime]$at) { return [long][Math]::Floor(($at.ToUniversalTime() - $epoch).TotalMilliseconds) }',
   'function Flat($text) { if ($null -eq $text) { return \'\' } return ([string]$text -replace "[`t`r`n]", \' \') }',
+  // MSYS_PS_MS
+  '$psMs = 5000',
   'try {',
   "  if ($Op -eq 'check' -and [int]$A -gt 0) { Start-Sleep -Seconds ([int]$A) }",
   '  $procs = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CreationDate, Name, ExecutablePath)',
@@ -211,10 +215,23 @@ export const TREE_PS1 = [
   '      }',
   '      $msysOf = @{}; $kidsOf = @{}; $added = @{}',
   '      foreach ($dir in @($tables.Keys)) {',
-  '        $rows = @(); $code = -1',
-  "        $ErrorActionPreference = 'Continue'",
-  '        try { if ([System.IO.File]::Exists("$dir\\ps.exe")) { $rows = @(& "$dir\\ps.exe" -al 2>$null); $code = $LASTEXITCODE } } catch { $code = -1 }',
-  "        $ErrorActionPreference = 'Stop'",
+  '        # That ps.exe with a limit of its own ($psMs): past it, that ps.exe alone is ended and its table not read.',
+  '        $rows = @(); $code = -1; $ps = $null',
+  '        if ([System.IO.File]::Exists("$dir\\ps.exe")) {',
+  '          try {',
+  '            $how = New-Object System.Diagnostics.ProcessStartInfo "$dir\\ps.exe", \'-al\'',
+  '            $how.UseShellExecute = $false; $how.CreateNoWindow = $true',
+  '            $how.RedirectStandardOutput = $true; $how.RedirectStandardError = $true; $how.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false',
+  '            $ps = [System.Diagnostics.Process]::Start($how)',
+  '            $text = $ps.StandardOutput.ReadToEndAsync(); $null = $ps.StandardError.ReadToEndAsync()',
+  '            if ($ps.WaitForExit($psMs) -and $text.Wait(1000)) { $rows = @($text.Result -split "`n"); $code = $ps.ExitCode } else { $code = -2 }',
+  '          } catch { $code = -1 }',
+  '          if ($null -ne $ps -and -not $ps.HasExited) {',
+  '            try { $ps.Kill() } catch { }',
+  '            if (-not $ps.WaitForExit(2000)) { $code = -3 }',
+  '          }',
+  '        }',
+  '        if ($code -eq -2 -or $code -eq -3) { [void]$out.Append("M`t$code`t$(Flat $dir)`n"); continue }',
   '        if ($code -ne 0) { [void]$out.Append("M`t-1`t$(Flat $dir)`n"); continue }',
   '        # PID PPID PGID WINPID ..., after a status letter in the first column when there is one. A real table lists',
   '        # at least the ps.exe that prints it: one with no such row was not read.',
@@ -276,8 +293,17 @@ export const TREE_PS1 = [
 ].join('\r\n')
 
 /**
+ * How long TREE_PS1 waits for one ps.exe -al, in milliseconds (`$psMs`). On a Windows 11 VM a call took 26 to 161 ms at
+ * rest and up to 878 ms while its host was busy, and a whole listing 2.4 to 3.5 s; 5 s leaves room for a machine under
+ * more load, and a ps.exe that hangs costs the listing at most 8 s (5 s, 1 s for its output, 2 s for it to end), so the
+ * listing's 30 s hold three of them.
+ */
+export const MSYS_PS_MS = 5_000
+
+/**
  * The notes of TREE_PS1's M lines: per MSYS process table, what it added to the tree, or that it could not be read
- * (then a program the worker started through Git Bash whose Windows parent has exited is outside the stop).
+ * (then a program the worker started through Git Bash whose Windows parent has exited is outside the stop), also when
+ * its ps.exe gave no answer within MSYS_PS_MS and no longer runs (-2) or still ran after it was told to end (-3).
  */
 export function msysNotes(stdout: string): string[] {
   const notes: string[] = []
@@ -287,7 +313,9 @@ export function msysNotes(stdout: string): string[] {
     if (tag !== 'M' || !/^-?\d+$/.test(count ?? '') || dir === '') continue
     const table = `the MSYS process table of ${winPath(dir)} (Git Bash)`
     const added = Number(count)
-    if (added < 0) notes.push(`${table} could not be read: a program the worker started through Git Bash whose Windows parent has exited is not among the descendants listed, and this stop does not reach it`)
+    const outside = 'a program the worker started through Git Bash whose Windows parent has exited is not among the descendants listed, and this stop does not reach it'
+    if (added === -2 || added === -3) notes.push(`${table} could not be read: its ps.exe gave no answer within ${MSYS_PS_MS / 1000} s and ${added === -2 ? 'no longer runs' : 'still ran after it was told to end'}; ${outside}`)
+    else if (added < 0) notes.push(`${table} could not be read: ${outside}`)
     else if (added === 0) notes.push(`${table} was read before the first signal: no program the worker started through Git Bash is outside its Windows process tree`)
     else notes.push(`${table} was read before the first signal: ${added} program${added === 1 ? '' : 's'} the worker started through Git Bash, whose Windows parent has exited, ${added === 1 ? 'is' : 'are'} among the descendants listed, each with its MSYS parent`)
   }
