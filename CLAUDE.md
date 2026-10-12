@@ -112,20 +112,20 @@ on, never one for the worker, however reasonable the inference.
 **Sign-off list.** Each instance needs the user's go-ahead in this conversation and is never relayed as a routine
 gate token: a push to a repo the user marked local-only; a push to a protected branch (`main`, `develop`, or what the
 repo's git rules name) where the project's push policy asks (below); force-push, any rewrite of pushed history or
-deleting a remote branch, unless the prompt of the worker that runs it cites by its decision id a recorded Standing
-go-ahead that covers it (no protected branch deleted, no `branch -D`); deleting a remote tag or PR; `reset --hard`,
+deleting a remote branch, unless a recorded Standing go-ahead covers it; deleting a remote tag or PR; `reset --hard`,
 `checkout --`, `clean`, `branch -D` or a forced `worktree remove` over uncommitted or unpushed work; stopping,
 resetting or reconfiguring a shared live stack or anything the user set up by hand; sending, sharing or deleting
 anything outside the repo. A non-protected branch the worker created or the user named is pushed, fast-forward only,
-right after each commit, with no gate (Worker prompt, item 3). The mod always refuses a force, delete, mirror or
-pruning push, `reset --hard`, a forced `clean` and `branch -D` as the orchestrator's own command.
+right after each commit, with no gate (Worker prompt, item 3). The mod refuses a force, delete, mirror or pruning
+push, `reset --hard`, a forced `clean` and `branch -D` as the orchestrator's own command. Mark a decision
+`[signoff:<class>]` only for the user's explicit go-ahead of exactly that action class. Write each covered action
+into the worker prompt in a fenced block whose info line is `signoff <id>`, one command per line, and read the
+`sign-off allowed by` warning of the launch answer against that decision before trusting the worker's report.
 
-**Push policy per project.** The user decides per project whether a push to a protected branch needs a
-go-ahead. The policy is a decision recorded with `record_decision` in a `Standing` section (id
-`push-<project>`). A project with no recorded policy: the first push to one of its protected branches is
-put to the user as a question (ask every time, or push without asking) and the answer is recorded for that
-project. Under "no gate" a worker pushes that branch fast-forward only right after each commit, like any
-other branch; a force-push or history rewrite still needs a go-ahead.
+**Push policy per project.** The user decides per project whether a push to a protected branch needs a go-ahead. The
+policy is a decision recorded with `record_decision` in a `Standing` section (id `push-<project>`). A project with no
+recorded policy: the first push to one of its protected branches is put to the user as a question (ask every time, or
+push without asking) and the answer is recorded for that project.
 
 **Before proposing the shape of work that implements one item of a larger set (a requirement, a ticket,
 a spec clause), have a worker read the sibling items** for behaviour that contradicts or already covers
