@@ -1318,15 +1318,19 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   }
   // A launch's worker that did not appear in time is looked for under its config dir too (Windows), and registered here.
   const facts = await probe($, parsed.entries, [...new Set(lateLaunches.map(one => one.verdict.configDir))])
-  const reread = (await registerLate($, parsed.entries, facts, now, toasts)) ? parseRegistry(await readRegistryText($)) : undefined
+  const late = await registerLate($, parsed.entries, facts, now, toasts)
+  const reread = late.isWritten ? parseRegistry(await readRegistryText($)) : undefined
   const entries = reread?.ok === true ? reread.entries : parsed.entries
+  // An entry this poll registered with a pid has no proof of life in this poll's probe, which ran before the entry
+  // existed: it is judged from the next poll on, by that poll's probe, and drawn until then as the orphan row it was.
+  const isNew = (entry: SessionEntry) => typeof entry.pid === 'number' && late.pids.has(entry.pid)
   // The status a task notification left (prompt.submit) goes to this harvest, once.
   const status = taskStatus ?? notifiedStatus
   notifiedStatus = undefined
   for (const entry of entries) {
-    if (rowStatus(entry, facts) === 'dead') await complete($, entry, status, toasts)
+    if (!isNew(entry) && rowStatus(entry, facts) === 'dead') await complete($, entry, status, toasts)
   }
-  const rows = buildRows(entries, facts, Math.floor(now / 1000))
+  const rows = buildRows(entries.filter(entry => !isNew(entry)), facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
   noteError($, next.error, now)
   // Written only when what the panel draws changed: not for the time alone (a transcript's age, a process's age).
@@ -1441,10 +1445,12 @@ async function promptHarvest($: EngineInterface, status: string | undefined): Pr
  * registered as the launch would have registered it, its session id, name and socket read from its sessions file once.
  * When the worker is not among the facts or its sessions file holds no session id, the run's result file is read: one
  * that holds a session id registers the worker as a finished one (registerFromResult); else the next poll looks again.
- * A launch LATE_LAUNCH_SEC old is no longer looked for. Answers whether an entry was written.
+ * A launch LATE_LAUNCH_SEC old is no longer looked for. Answers whether an entry was written, and the pids of the
+ * entries written for a running worker (the poll does not judge those against the probe it made before them).
  */
-async function registerLate($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number, toasts: ToastBudget): Promise<boolean> {
-  if (lateLaunches.length === 0) return false
+async function registerLate($: EngineInterface, entries: readonly SessionEntry[], facts: ProcFacts, nowMs: number, toasts: ToastBudget): Promise<{ isWritten: boolean; pids: ReadonlySet<number> }> {
+  const pids = new Set<number>()
+  if (lateLaunches.length === 0) return { isWritten: false, pids }
   const machine = await hostOf($)
   const port = portOf($)
   const claimed = new Set(entries.map(entry => entry.pid).filter((pid): pid is number => typeof pid === 'number'))
@@ -1473,10 +1479,11 @@ async function registerLate($: EngineInterface, entries: readonly SessionEntry[]
     if (failed !== undefined) continue
     done.add(launch)
     claimed.add(worker.pid)
+    pids.add(worker.pid)
     isWritten = true
   }
   lateLaunches = lateLaunches.filter(one => !done.has(one))
-  return isWritten
+  return { isWritten, pids }
 }
 
 /**

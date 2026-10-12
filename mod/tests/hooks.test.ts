@@ -103,6 +103,11 @@ const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C
 // probeMs: how long each Linux probe takes on the fixture's clock (0: no time). probeLateMs: each probe answers only once
 // the test has moved the fixture's clock that far (0: at once).
 const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeMs: 0, probeLateMs: 0 }
+// The registry as a real file (both fixtures): with isCurrent a read answers the text the plugin last wrote there (the
+// seed the test gave until its first write), and the probe asked for the launched worker's pid (7001, while it runs)
+// answers its A line from its sessions file, as the helper's probe and PROBE_PS1 do. Off, every read answers the seed and
+// 7001 has no A line: the older tests rely on that.
+const REGISTRY_READS = { isCurrent: false }
 /** The pause a task notification's prompt races its harvest against (PROMPT_HARVEST_SEC of register.tsx), in seconds. */
 const PROMPT_HARVEST_SEC = 3
 // The orchestrator's agreed-decisions.md, when a test serves one (undefined: the file is missing).
@@ -149,7 +154,11 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (MISSING.has(path) || LATE.has(path)) return undefined
     if (UNREADABLE.has(path)) throw new Error(`EFBIG ${given}`)
     // A test may hold the registry read (a promise) while something else happens.
-    if (path === REGISTRY_PATH) return typeof registryText === 'function' ? registryText() : registryText
+    if (path === REGISTRY_PATH) {
+      const written = REGISTRY_READS.isCurrent ? w.writes.filter(one => fixture(one.path) === REGISTRY_PATH).at(-1) : undefined
+      if (written !== undefined) return written.text
+      return typeof registryText === 'function' ? registryText() : registryText
+    }
     if (path === '/work/orch/CLAUDE.md') return '# Role: Session Orchestrator\n'
     if (path === '/work/new/thin.md') return 'Just do the work.'
     if (path === `${ORCH_DIR}/task-queue.json`) return QUEUE.text
@@ -185,6 +194,22 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     const text = rows.map(r => JSON.stringify(r)).join('\n')
     return held === undefined ? text : held.then(() => text)
   }
+  /**
+   * The A line of the launched worker 7001 when the probe is asked for its pid (REGISTRY_READS.isCurrent): its start and
+   * its sessions file's start and session id, the start and the file's equal as for a live pid (`startMark`: the Linux
+   * clock ticks, or on Windows the creation time in ms the file's startedAt matches).
+   */
+  const workerProof = async (args: readonly string[], startMark: string, fileStart: (file: Record<string, unknown>) => unknown, state = ''): Promise<string> => {
+    const arg = REGISTRY_READS.isCurrent ? args.find(one => one.startsWith('pid:7001|')) : undefined
+    if (arg === undefined) return ''
+    let file: Record<string, unknown> = {}
+    try {
+      file = JSON.parse((await fixtureText(`${arg.slice('pid:7001|'.length)}/sessions/7001.json`)) ?? '{}') as Record<string, unknown>
+    } catch {
+      file = {}
+    }
+    return ['A', 7001, 'claude', startMark, String(fileStart(file) ?? ''), String(file.sessionId ?? ''), ...(state === '' ? [] : [state])].join('\t') + '\n'
+  }
   /** One operation of the Node helper over the fixture: its answer's fields, or the fixed code it fails with. */
   const helperStep = async (op: string, request: Record<string, unknown>): Promise<Record<string, unknown> | string> => {
     const path = String(request.path ?? '')
@@ -203,7 +228,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
         ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
         : ''
       const gone = [...(LINUX_FIXTURE.isAliveGone ? ['\t4101\t'] : []), ...(LINUX_FIXTURE.isOrphanGone ? ['\t4999\t'] : [])]
-      return { out: PROBE_STDOUT.split('\n').filter(line => !gone.some(pid => line.includes(pid))).join('\n') + worker }
+      const proof = w.spawned && !LINUX_FIXTURE.isWorkerHidden ? await workerProof((request.args as string[] | undefined) ?? [], '123', file => file.procStart, 'S') : ''
+      return { out: PROBE_STDOUT.split('\n').filter(line => !gone.some(pid => line.includes(pid))).join('\n') + worker + proof }
     }
     // A write is recorded as what it puts in place; with `expected`, only while the fixture still holds that text.
     if (op === 'writeAtomic') {
@@ -311,7 +337,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
         : ''
       // PowerShell's own line ends.
       const probed = WINDOWS.isAliveGone ? WIN_PROBE_STDOUT.split('\n').filter(line => !line.includes('\t4101\t')).join('\n') : WIN_PROBE_STDOUT
-      return { value: { ...ok, stdout: (probed + worker).replace(/\n/g, '\r\n') } }
+      const proof = w.spawned && !WINDOWS.isWorkerHidden ? await workerProof(e.argv.slice(7).map(String), String(NOW_MS), file => file.startedAt) : ''
+      return { value: { ...ok, stdout: (probed + worker + proof).replace(/\n/g, '\r\n') } }
     }
     if (e.argv[0] === 'C:/fixture/bin/pick.exe') {
       return { value: { ...ok, stdout: pickStdout.replace(/^\/fixture/, 'C:\\fixture').replace(/\//g, '\\').replace(/\n$/, '\r\n'), exitCode: pickStdout ? 0 : 3 } }
@@ -1037,6 +1064,74 @@ describe('launch_worker', () => {
       expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
     } finally {
       LINUX_FIXTURE.isWorkerHidden = false
+    }
+  })
+
+  // The registry read back as the plugin wrote it (REGISTRY_READS): the poll that registers a late worker reads its own
+  // entry back, and its probe ran before that entry existed.
+  describe('a worker the poll registers after the launch\'s 30 s, with the registry read back as written', () => {
+    const SID_NEW = 'abcdabcd-0000-4000-8000-000000000001'
+    const PONG = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'PONG', duration_ms: 1300, num_turns: 1, total_cost_usd: 0.0025, session_id: SID_NEW })
+    const hosts = [
+      { name: 'Linux', options: OPTIONS, env: { HOME }, dir: ORCH_DIR, launch: args, runs: LAUNCH_RUNS, knobs: LINUX_FIXTURE },
+      {
+        name: 'Windows',
+        options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}`, licencePickCommand: '' },
+        env: { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' },
+        dir: `C:${ORCH_DIR}`,
+        launch: { ...args, dir: '/c/work/new', prompt_file: '/c/work/new/prompt.md' },
+        runs: `C:${LAUNCH_RUNS}`,
+        knobs: WINDOWS,
+      },
+    ] as const
+    const completions = async ($: { prompt: { submit: (e: never) => Promise<{ context?: readonly unknown[] }> } }) =>
+      ((await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)).context ?? []).filter(line => String(line).startsWith('session-control completions: '))
+
+    for (const host of hosts) {
+      test(`${host.name}: the poll that registers it does not judge it; it stays registered with its pid while it runs, no toast, no note; when it ends it is harvested once, with its outcome`, { options: host.options }, async ($, on) => {
+        REGISTRY_READS.isCurrent = true
+        host.knobs.isWorkerHidden = true
+        try {
+          const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+          on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+          await $.session.start(start(host.dir))
+          // The start's harvest (the limited worker) rides on a first prompt.
+          await completions($ as never)
+          const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+          expect(String(out.result)).toStartWith('Started in the background, but no claude process for it appeared within 30 s: it is not registered yet.')
+          const mine = () => lastRegistry(w).filter(one => one.session_id === SID_NEW)
+          const told = () => w.toasts.filter(one => one.includes(' \u00B7 new: '))
+          // The worker shows and runs on: the next poll registers it and leaves it as it is.
+          host.knobs.isWorkerHidden = false
+          await w.clock.advance(5000)
+          expect(mine()).toEqual([expect.objectContaining({ pid: 7001, result_file: `${host.runs}/20260921141320-new.json` })] as never)
+          expect(mine().some(one => 'outcome' in one || 'reported' in one)).toBe(false)
+          expect(told()).toEqual([])
+          expect(await completions($ as never)).toEqual([])
+          // The polls after it judge it by its own proof of life: running, still registered with its pid.
+          await w.clock.advance(5000)
+          await w.clock.advance(5000)
+          expect(mine()).toEqual([expect.objectContaining({ pid: 7001 })] as never)
+          expect(mine().some(one => 'outcome' in one)).toBe(false)
+          expect(told()).toEqual([])
+          // It ends with its report: harvested once, by the next poll, with the outcome its result file holds.
+          WORKER.resultText = PONG
+          host.knobs.isWorkerHidden = true
+          await w.clock.advance(5000)
+          expect(mine()).toEqual([expect.objectContaining({ reported: false, outcome: { kind: 'clean', summary: 'clean: PONG', costUsd: 0.0025 } })] as never)
+          expect(mine().some(one => 'pid' in one)).toBe(false)
+          await w.clock.advance(5000)
+          expect(told()).toEqual(['Session finished \u00B7 new: clean: PONG'])
+          const notes = await completions($ as never)
+          expect(notes.length).toBe(1)
+          expect(String(notes[0])).toStartWith('session-control completions: new: clean: PONG')
+          expect(await completions($ as never)).toEqual([])
+        } finally {
+          REGISTRY_READS.isCurrent = false
+          host.knobs.isWorkerHidden = false
+          WORKER.resultText = undefined
+        }
+      })
     }
   })
 
