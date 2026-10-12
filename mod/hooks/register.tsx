@@ -1441,8 +1441,9 @@ async function promptHarvest($: EngineInterface, status: string | undefined): Pr
 
 /**
  * The launches whose worker did not appear within LAUNCH_FIND_SEC, or whose session id the launch could not read
- * (lateLaunches): each one's new worker among the probe's facts (the launch's own match, a pid no registry entry holds),
- * registered as the launch would have registered it, its session id, name and socket read from its sessions file once.
+ * (lateLaunches): each one's new worker among the probe's facts (the launch's own match, its session name included, a pid
+ * no registry entry holds), registered as the launch would have registered it, its session id, name and socket read
+ * from its sessions file once.
  * When the worker is not among the facts or its sessions file holds no session id, the run's result file is read: one
  * that holds a session id registers the worker as a finished one (registerFromResult); else the next poll looks again.
  * A launch LATE_LAUNCH_SEC old is no longer looked for. Answers whether an entry was written, and the pids of the
@@ -2064,7 +2065,8 @@ async function spawnWorker(
     return { deny: `${PLUGIN}: ${refused.text}` }
   }
   let worker: ProcFact | undefined
-  const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model }
+  // The launch's session name tells its worker from another launch's of the same dir, config dir and model.
+  const want = { dir: args.dir, configDir: machine.workerConfigDir(verdict, own), model: args.model, name }
   // Looked for during LAUNCH_FIND_SEC by the clock from the tool's answer (a probe on Windows takes seconds), at most
   // LAUNCH_FIND_TRIES probes; each wait between them runs in a process (host.pause), never on the hook's budget.
   const searchFrom = await $.clock.now()

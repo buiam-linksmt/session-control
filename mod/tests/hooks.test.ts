@@ -69,8 +69,8 @@ const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
 // Reads a test holds until it releases them: the transcript tail of the alive worker; every append (the trace's too);
-// every Linux probe.
-const HELD: { tail: Promise<unknown> | undefined; append?: Promise<unknown>; probe?: Promise<unknown> } = { tail: undefined }
+// every Linux probe; every read of the launched worker's sessions file (sessions, with heldSessions told when one waits).
+const HELD: { tail: Promise<unknown> | undefined; append?: Promise<unknown>; probe?: Promise<unknown>; sessions?: Promise<unknown>; heldSessions?: () => void } = { tail: undefined }
 // The Linux probes running now and the most that ran at once (reset by world()).
 const PROBES = { inFlight: 0, max: 0 }
 // The CLAUDE_CONFIG_DIR the Linux probe reads from the new worker's environment ('' when it has none).
@@ -130,6 +130,11 @@ const given = (path: string, isWin: boolean) => {
 
 function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText: string | (() => string | Promise<string>) = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
   const w: World = { bash: [], powershell: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], calls: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
+  // The session name the worker's command line carries: the one the last launch that ran passed with -n.
+  let launchedName = 'w-new-260921141320'
+  const noteName = (command: unknown) => {
+    launchedName = /\s-n '?([^'\s]+)'?/.exec(String(command ?? ''))?.[1] ?? launchedName
+  }
   PROBES.inFlight = 0
   PROBES.max = 0
   // A test that answers env.get itself says so.
@@ -180,9 +185,16 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   }
   on('fs.read', ($, e) => {
     w.reads.push(seen(e.path))
+    const answer = (text: string | undefined) => {
+      if (text === undefined) throw new Error(`ENOENT ${e.path}`)
+      return { value: text }
+    }
+    if (HELD.sessions !== undefined && seen(e.path).endsWith('/sessions/7001.json')) {
+      HELD.heldSessions?.()
+      return HELD.sessions.then(() => fixtureText(e.path)).then(answer)
+    }
     const text = fixtureText(e.path)
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
-    return typeof text === 'string' ? { value: text } : text.then(value => ({ value }))
+    return typeof text === 'string' || text === undefined ? answer(text) : text.then(answer)
   })
   /** The transcript rows the tail answers: the alive worker's may be held by a test. */
   const tailRows = (path: string) => {
@@ -225,7 +237,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       }
       if (LINUX_FIXTURE.isProbeBroken) return 'IO'
       const worker = w.spawned && !LINUX_FIXTURE.isWorkerHidden
-        ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
+        ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n ${launchedName} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
         : ''
       const gone = [...(LINUX_FIXTURE.isAliveGone ? ['\t4101\t'] : []), ...(LINUX_FIXTURE.isOrphanGone ? ['\t4999\t'] : [])]
       const proof = w.spawned && !LINUX_FIXTURE.isWorkerHidden ? await workerProof((request.args as string[] | undefined) ?? [], '123', file => file.procStart, 'S') : ''
@@ -333,7 +345,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       if (WINDOWS.isProbeBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Invalid class' } }
       const placed = WINDOWS.isWorkerUnplaced ? ['', ''] : ['C:\\work\\new', WINDOWS.workerConfigDir]
       const worker = w.spawned && !WINDOWS.isWorkerHidden
-        ? ['P', 7001, 'claude', 3, ...placed, '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus -n w-new-260921141320 --settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json -- prompt'].join('\t') + '\n'
+        ? ['P', 7001, 'claude', 3, ...placed, `"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus -n ${launchedName} --settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json -- prompt`].join('\t') + '\n'
         : ''
       // PowerShell's own line ends.
       const probed = WINDOWS.isAliveGone ? WIN_PROBE_STDOUT.split('\n').filter(line => !line.includes('\t4101\t')).join('\n') : WIN_PROBE_STDOUT
@@ -350,6 +362,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (WORKER.bashAnswer !== undefined) return WORKER.bashAnswer as never
     w.bash.push(e as never)
     w.spawned = true
+    noteName((e as { command?: unknown }).command)
     return { result: 'Command running in background with ID: fixture' }
   })
   // The engine on Windows has the PowerShell tool; this build's tool table does not, hence the name as a string.
@@ -357,6 +370,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (WORKER.isPowerShellMissing) throw new Error('no tool named "PowerShell" in this session')
     w.powershell.push(e as never)
     w.spawned = true
+    noteName((e as { command?: unknown }).command)
     return { result: 'Command running in background with ID: fixture' }
   }) as never)
   on('ui.close', () => ({ value: undefined }) as never)
@@ -1130,6 +1144,84 @@ describe('launch_worker', () => {
           REGISTRY_READS.isCurrent = false
           host.knobs.isWorkerHidden = false
           WORKER.resultText = undefined
+        }
+      })
+    }
+  })
+
+  // Two launches of the same dir, config dir and model: the first one's worker never appears, so the first launch is on
+  // the late list while the second launch reads its own worker's sessions file and a poll comes.
+  describe('a launch on the late list and a later launch of the same dir, config dir and model', () => {
+    const SID_NEW = 'abcdabcd-0000-4000-8000-000000000001'
+    const hosts = [
+      { name: 'Linux', options: { ...OPTIONS, debug: true }, env: { HOME }, dir: ORCH_DIR, launch: args, configDir: '/fixture/lic/a', trace: `${LAUNCH_RUNS}/trace.log`, knobs: LINUX_FIXTURE },
+      {
+        name: 'Windows',
+        options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}`, licencePickCommand: '', debug: true },
+        env: { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' },
+        dir: `C:${ORCH_DIR}`,
+        launch: { ...args, dir: '/c/work/new', prompt_file: '/c/work/new/prompt.md' },
+        configDir: 'C:/fixture/home/.claude',
+        trace: `C:${LAUNCH_RUNS}/trace.log`,
+        knobs: WINDOWS,
+      },
+    ] as const
+    const resultOf = (answer: string) => /Result: (\S+\.json)/.exec(answer)?.[1]
+
+    for (const host of hosts) {
+      test(`${host.name}: the later launch's worker is registered once, for the later launch; the first launch never claims it and is dropped after its 10 minutes`, { options: host.options }, async ($, on) => {
+        REGISTRY_READS.isCurrent = true
+        host.knobs.isWorkerHidden = true
+        let release = () => {}
+        try {
+          const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
+          await $.session.start(start(host.dir))
+          const firstAt = w.clock.now()
+          const first = String((await $.tool.call({ tool: TOOL, ...host.launch } as never)).result)
+          expect(first).toStartWith('Started in the background, but no claude process for it appeared within 30 s: it is not registered yet.')
+          await w.clock.advance(5000)
+          await w.clock.advance(5000)
+          // The first launch's worker never ran. The second launch's worker runs; its launch is held at its sessions file
+          // while a poll comes.
+          w.spawned = false
+          host.knobs.isWorkerHidden = false
+          let isHeld = false
+          HELD.sessions = new Promise(resolve => {
+            release = () => resolve(undefined)
+          })
+          HELD.heldSessions = () => {
+            isHeld = true
+          }
+          const pending = $.tool.call({ tool: TOOL, ...host.launch } as never)
+          for (let step = 0; step < 100 && !isHeld; step++) await w.clock.settle()
+          expect(isHeld).toBe(true)
+          const polled = w.clock.advance(5000)
+          await w.clock.settle()
+          release()
+          HELD.sessions = undefined
+          await polled
+          const second = String((await pending).result)
+          expect(second).toStartWith(`Launched pid 7001, session ${SID_NEW}, config_dir ${host.configDir}, registered.`)
+          const [firstResult, secondResult] = [resultOf(first), resultOf(second)]
+          expect(firstResult === undefined || secondResult === undefined || firstResult === secondResult).toBe(false)
+          const mine = () => lastRegistry(w).filter(one => one.session_id === SID_NEW || one.pid === 7001)
+          expect(mine()).toEqual([expect.objectContaining({ pid: 7001, session_id: SID_NEW, result_file: secondResult })] as never)
+          expect(lastRegistry(w).some(one => one.result_file === firstResult)).toBe(false)
+          expect(traceOf(w, host.trace).filter(line => line.event === 'worker.registered' && line.isLate === true)).toEqual([])
+          // The first launch stays looked for until 10 minutes after it, then is dropped; nothing more is registered.
+          const dropped = () => traceOf(w, host.trace).filter(line => line.event === 'worker.missing' && line.isLookedFor === false).length
+          while (w.clock.now() < firstAt + 595_000) await w.clock.advance(5000)
+          expect(dropped()).toBe(0)
+          for (let step = 0; step < 3; step++) await w.clock.advance(5000)
+          expect(dropped()).toBe(1)
+          expect(mine()).toEqual([expect.objectContaining({ pid: 7001, session_id: SID_NEW, result_file: secondResult })] as never)
+          expect(lastRegistry(w).some(one => one.result_file === firstResult)).toBe(false)
+        } finally {
+          release()
+          HELD.sessions = undefined
+          HELD.heldSessions = undefined
+          REGISTRY_READS.isCurrent = false
+          host.knobs.isWorkerHidden = false
         }
       })
     }

@@ -68,6 +68,7 @@ import {
   ackEntries,
   findNewWindowsWorker,
   findNewWorker,
+  hasSessionName,
   isHeadless,
   isLicenceRun,
   isE2eRunDir,
@@ -1041,6 +1042,46 @@ describe('the new worker of a launch', () => {
     // A worker the probe placed wins over one it could not.
     const both = parseProcFacts([line(5, '', ''), line(6, 'C:/work/new', 'C:/Users/u/.claude')].join('\n'))
     expect(findNewWindowsWorker(both, winWant, new Set(), 10)?.pid).toBe(6)
+  })
+
+  test('with the launch\'s session name: only the worker whose command line passes that name with -n, on either host', () => {
+    const named = (pid: number, name: string, cwd = '/work/new', cfg = '/fixture/lic/a') => line(pid, cwd, cfg, `claude -p --model opus -n ${name} --settings {} --output-format json -- prompt`)
+    const two = parseProcFacts([named(1, 'w-new-260921141320'), named(2, 'w-new-260921141335')].join('\n'))
+    expect(findNewWorker(two, { ...want, name: 'w-new-260921141335' }, new Set())?.pid).toBe(2)
+    expect(findNewWorker(two, { ...want, name: 'w-new-260921141320' }, new Set())?.pid).toBe(1)
+    // A name that only starts the same, another launch's, or none on the line: not this launch's worker.
+    expect(findNewWorker(two, { ...want, name: 'w-new-2609211413' }, new Set())).toBeUndefined()
+    expect(findNewWorker(parseProcFacts(named(3, 'w-new-260921141320-2')), { ...want, name: 'w-new-260921141320' }, new Set())).toBeUndefined()
+    expect(findNewWorker(parseProcFacts(line(4, '/work/new', '/fixture/lic/a')), { ...want, name: 'w-new-260921141320' }, new Set())).toBeUndefined()
+    // Windows: the name as the word, or quoted when it holds a blank; the unplaced worker needs it too.
+    const winWant = { dir: 'C:/Work/New', configDir: 'C:/Users/u/.claude', model: 'opus', name: 'w-new-260921141320' }
+    const exe = (pid: number, name: string, cwd = 'C:\\work\\new', cfg = 'C:\\Users\\u\\.claude') => line(pid, cwd, cfg, `"C:\\bin\\claude.exe" -p --model opus -n ${name} --output-format json`)
+    expect(findNewWindowsWorker(parseProcFacts(exe(5, 'w-new-260921141320')), winWant, new Set(), 10)?.pid).toBe(5)
+    expect(findNewWindowsWorker(parseProcFacts(exe(6, 'w-new-260921141335')), winWant, new Set(), 10)).toBeUndefined()
+    expect(findNewWindowsWorker(parseProcFacts(exe(7, 'w-new-260921141335', '', '')), winWant, new Set(), 10)).toBeUndefined()
+    expect(findNewWindowsWorker(parseProcFacts(exe(8, '"my run"')), { ...winWant, name: 'my run' }, new Set(), 10)?.pid).toBe(8)
+    expect(hasSessionName("claude -p -n 'w-a' --x", 'w-a')).toBe(true)
+    expect(hasSessionName('claude -p -n w-a.b --x', 'w-a-b')).toBe(false)
+  })
+})
+
+describe('one registry entry per session', () => {
+  const entry = { title: 'new', pid: 7001, session_id: 'abcdabcd-0000-4000-8000-000000000001', cwd: '/work/new', result_file: '/r/x.json' }
+  test('a new entry whose session id the registry holds already is refused, whatever else differs; a resume merges into it', () => {
+    const one = registerEntry('[]', entry, 'new')
+    expect(one.ok).toBe(true)
+    const text = one.ok ? one.text : ''
+    const again = registerEntry(text, { ...entry, pid: 7002, result_file: '/r/y.json' }, 'new')
+    expect(again).toEqual({ ok: false, error: 'the registry holds session abcdabcd-0000-4000-8000-000000000001 already' })
+    // A finished entry's session (no pid) counts the same.
+    const finished = registerFinished('[]', entry, 'new')
+    expect(registerEntry(finished.ok ? finished.text : '', entry, 'new').ok).toBe(false)
+    expect(registerFinished(text, entry, 'new').ok).toBe(false)
+    // Another session, or an entry without a session id, is appended as before; a resume merges in place.
+    expect(registerEntry(text, { ...entry, session_id: 'ffffffff-0000-4000-8000-00000000000f' }, 'new').ok).toBe(true)
+    expect(registerEntry(text, { title: 'queued' }, 'new').ok).toBe(true)
+    const resumed = registerEntry(text, { ...entry, pid: 7003 }, 'resume')
+    expect(resumed.ok && (JSON.parse(resumed.text) as unknown[]).length).toBe(1)
   })
 })
 

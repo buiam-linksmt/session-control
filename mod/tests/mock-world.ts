@@ -263,7 +263,9 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
       const pid = 7001
       // The worker's CLAUDE_CONFIG_DIR: the one on the line, else the orchestrator's own it inherits (none: the default).
       const configDir = /CLAUDE_CONFIG_DIR='([^']*)'/.exec(command)?.[1] ?? opts.env?.CLAUDE_CONFIG_DIR ?? ''
-      world.table.procs.set(pid, { ppid: 6999, start: '777', state: 'S', comm: 'claude', claude: { cwd: world.launch.cwd, configDir, cmdline: `claude -p --model ${model} -n w-x --dangerously-skip-permissions --output-format json` } })
+      // The session name the launch passed with -n, as the process's command line shows it.
+      const name = /\s-n '([^']*)'/.exec(command)?.[1] ?? 'w-x'
+      world.table.procs.set(pid, { ppid: 6999, start: '777', state: 'S', comm: 'claude', claude: { cwd: world.launch.cwd, configDir, cmdline: `claude -p --model ${model} -n ${name} --dangerously-skip-permissions --output-format json` } })
       files.set(`${configDir === '' ? `${HOME}/.claude` : configDir}/sessions/${pid}.json`, JSON.stringify({ sessionId: world.launch.sid, procStart: '777' }))
     }
     return { result: 'Command running in background with ID: mock' }

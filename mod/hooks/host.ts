@@ -42,8 +42,8 @@ export type HostPort = {
   noteHelper(note: HelperNote): void
 }
 
-/** What a launch looks for among the probe's claude processes. */
-export type WorkerWant = { dir: string; configDir: string; model: string }
+/** What a launch looks for among the probe's claude processes: `name` is the session name the launch passed with `-n`. */
+export type WorkerWant = { dir: string; configDir: string; model: string; name?: string }
 
 /** One rotation of the trace: the file, the bytes about to go in, the files kept, the size limit and the renames. */
 export type RotatePlan = { path: string; adding: number; keep: number; maxBytes: number; moves: readonly (readonly [string, string])[] }

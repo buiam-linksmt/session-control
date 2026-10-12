@@ -1099,12 +1099,23 @@ export function slugify(title: string): string {
 }
 
 /**
+ * Whether a command line passes the session name `name` with `-n`: the word itself, or in the quotes Windows puts around
+ * an argument with a blank. A launch's name is unique per launch (launchName), so it tells two launches of the same
+ * dir, config dir and model apart.
+ */
+export function hasSessionName(cmdline: string, name: string): boolean {
+  const word = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|\\s)-n\\s+(["']?)${word}\\2(\\s|$)`).test(cmdline)
+}
+
+/**
  * The new `claude -p` worker a launch started: a headless claude in the launch dir under the launch's
- * config dir, with the launch's model, that was not there before. Undefined while it has not appeared.
+ * config dir, with the launch's model and, when `want.name` is given, the launch's session name (hasSessionName), that
+ * was not there before. Undefined while it has not appeared.
  */
 export function findNewWorker(
   facts: ProcFacts,
-  want: { dir: string; configDir: string; model: string },
+  want: { dir: string; configDir: string; model: string; name?: string },
   known: ReadonlySet<number>,
 ): ProcFact | undefined {
   const dir = want.dir.replace(/\/+$/, '')
@@ -1114,22 +1125,25 @@ export function findNewWorker(
       isHeadless(one.cmdline) &&
       one.cwd.replace(/\/+$/, '') === dir &&
       one.configDir === want.configDir &&
-      one.cmdline.includes(`--model ${want.model}`),
+      one.cmdline.includes(`--model ${want.model}`) &&
+      (want.name === undefined || hasSessionName(one.cmdline, want.name)),
   )
 }
 
 /**
  * findNewWorker on native Windows: the same match, with paths compared as Windows compares them. A claude.exe whose
  * sessions file the probe found nowhere (no cwd, no config dir) still counts when it is headless, has the launch's
- * model and is younger than the launch; its session id is then read from the launch's config dir.
+ * model (and name, when given) and is younger than the launch; its session id is then read from the launch's config dir.
  */
 export function findNewWindowsWorker(
   facts: ProcFacts,
-  want: { dir: string; configDir: string; model: string },
+  want: { dir: string; configDir: string; model: string; name?: string },
   known: ReadonlySet<number>,
   launchedSecAgo: number,
 ): ProcFact | undefined {
-  const fresh = facts.claude.filter(one => !known.has(one.pid) && isHeadless(one.cmdline) && one.cmdline.includes(`--model ${want.model}`))
+  const fresh = facts.claude.filter(
+    one => !known.has(one.pid) && isHeadless(one.cmdline) && one.cmdline.includes(`--model ${want.model}`) && (want.name === undefined || hasSessionName(one.cmdline, want.name)),
+  )
   return (
     fresh.find(one => one.cwd !== '' && isSameWinPath(one.cwd, want.dir) && isSameWinPath(one.configDir, want.configDir)) ??
     fresh.find(one => one.cwd === '' && one.configDir === '' && one.elapsedSec !== undefined && one.elapsedSec <= launchedSecAgo + 1)
@@ -1356,14 +1370,24 @@ const isEntryOrNull = (one: unknown) => one === null || (typeof one === 'object'
 /** The ids as the scripts take them: one per line of their arguments. */
 const idLines = (ids: readonly string[]) => ids.flatMap(id => id.split('\n'))
 
-/** REGISTER_SCRIPT: `new` appends the entry; `resume` merges it over every entry with its session id, dropping `reported`, `outcome` and `ended_at`. */
+/**
+ * REGISTER_SCRIPT: `new` appends the entry; `resume` merges it over every entry with its session id, dropping `reported`,
+ * `outcome` and `ended_at`. `new` refuses a session id an entry already holds (REGISTER_SCRIPT appends a second entry):
+ * a registry holds one entry per session.
+ */
 export function registerEntry(text: string, entry: SessionEntry, mode: 'new' | 'resume'): RegistryEdit {
   if (mode === 'resume' && text.trim() === '') return { ok: true, text: '' }
   const read = registryList(text)
   if (!read.ok) return read
   const fresh = jqStrings(entry) as Rec | undefined
   if (fresh === undefined) return { ok: false, error: 'the entry holds an unpaired surrogate' }
-  if (mode === 'new') return { ok: true, text: jqText([...read.list, fresh], 2) + '\n' }
+  if (mode === 'new') {
+    const sid = fresh.session_id
+    if (typeof sid === 'string' && sid !== '' && read.list.some(one => typeof one === 'object' && one !== null && jqEqual((one as Rec).session_id, sid))) {
+      return { ok: false, error: `the registry holds session ${sid} already` }
+    }
+    return { ok: true, text: jqText([...read.list, fresh], 2) + '\n' }
+  }
   if (!read.list.every(isEntryOrNull)) return NOT_AN_ENTRY
   const list = read.list.map(one => {
     if (!jqEqual((one as Rec | null)?.session_id, fresh.session_id)) return one
