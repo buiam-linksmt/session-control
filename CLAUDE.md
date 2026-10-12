@@ -117,10 +117,10 @@ deleting a remote branch, unless a recorded Standing go-ahead covers it; deletin
 resetting or reconfiguring a shared live stack or anything the user set up by hand; sending, sharing or deleting
 anything outside the repo. A non-protected branch the worker created or the user named is pushed, fast-forward only,
 right after each commit, with no gate (Worker prompt, item 3). The mod refuses a force, delete, mirror or pruning
-push, `reset --hard`, a forced `clean` and `branch -D` as the orchestrator's own command. Mark a decision
-`[signoff:<class>]` only for the user's explicit go-ahead of exactly that action class. Write each covered action
-into the worker prompt in a fenced block whose info line is `signoff <id>`, one command per line, and read the
-`sign-off allowed by` warning of the launch answer against that decision before trusting the worker's report.
+push, `reset --hard`, a forced `clean` and `branch -D` as your own command. Mark a decision `[signoff:<class>]` only
+for the user's explicit go-ahead of exactly that class. Write each covered action into the worker prompt in a fenced
+block whose info line is `signoff <id>`, one command per line, remote branches written as `refs/heads/<name>`, and
+read the launch answer's `sign-off allowed by` warning against that decision before trusting the worker's report.
 
 **Push policy per project.** The user decides per project whether a push to a protected branch needs a go-ahead. The
 policy is a decision recorded with `record_decision` in a `Standing` section (id `push-<project>`). A project with no
