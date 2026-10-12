@@ -350,6 +350,15 @@ let lateLaunches: LateLaunch[] = []
 /** The status of the last task notification (`killed`), for the next poll's harvest; taken by that harvest. */
 let notifiedStatus: string | undefined
 /**
+ * How long a prompt that carries a task notification (a worker's exit) waits for the harvest it starts, so the finished
+ * worker's completion note rides on that prompt. The wait is a pause in a process (host.pause: Linux `sleep`, the
+ * helper's `pause` on Windows), which the hook's 10 s budget does not count; past it the prompt goes on without the note,
+ * the harvest runs to its end and its note rides on the next prompt.
+ */
+const PROMPT_HARVEST_SEC = 3
+/** The refresh running now, ended when it ends: a prompt's harvest waits for it before it runs its own. */
+let refreshing: Promise<void> | undefined
+/**
  * One process probe at a time (on Windows each is a PowerShell start of seconds): whether one runs now, whether a launch
  * is looking for its worker, and until when (epoch ms) the poll rests after a probe that took longer than its interval
  * (as long again as that probe took, from its end). The poll's tick skips its refresh while any of them holds; any other
@@ -1296,6 +1305,10 @@ async function refresh($: EngineInterface, taskStatus?: string, isTick = false):
     return
   }
   isBusy = true
+  let ended = () => {}
+  refreshing = new Promise<void>(resolve => {
+    ended = resolve
+  })
   try {
     await gather($, taskStatus, isTick)
   } catch (err) {
@@ -1303,7 +1316,32 @@ async function refresh($: EngineInterface, taskStatus?: string, isTick = false):
     await showError($, String(err).slice(0, 200), await $.clock.now())
   } finally {
     isBusy = false
+    refreshing = undefined
+    ended()
   }
+}
+
+/**
+ * The harvest of a prompt that carries a task notification: a refresh with the notification's status, after the refresh
+ * running now if one runs, raced against a pause of PROMPT_HARVEST_SEC in a process. Answers whether the harvest ended
+ * first; when the pause ends first the harvest goes on behind the prompt.
+ */
+async function promptHarvest($: EngineInterface, status: string | undefined): Promise<boolean> {
+  const harvest = (async () => {
+    while (refreshing !== undefined) await refreshing
+    await refresh($, status)
+    return true
+  })().catch((err: unknown) => {
+    traceError($, 'prompt.harvest', err)
+    return true
+  })
+  const bound = hostOf($)
+    .then(machine => machine.pause(portOf($), PROMPT_HARVEST_SEC))
+    .then(
+      () => false,
+      () => false,
+    )
+  return Promise.race([harvest, bound])
 }
 
 /**
@@ -2658,6 +2696,7 @@ export const register: Register = (on, options) => {
   isUsageProbing = false
   lateLaunches = []
   notifiedStatus = undefined
+  refreshing = undefined
   isProbing = false
   isLaunchSearching = false
   pollRestUntil = 0
@@ -2723,9 +2762,11 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // The prompt is never held for the machine or the trace: no probe, registry read or git runs here, only what the polls
-  // left is handed on, and the trace's lines are written behind it (flushTrace not awaited). On Windows a refresh is a
-  // PowerShell probe of seconds, and a trace write a Node start of seconds on a loaded machine.
+  // A prompt is never held for the trace, and only a task notification's prompt for the machine: that one waits at most
+  // PROMPT_HARVEST_SEC for the harvest it starts (promptHarvest), so the finished worker's note rides on it; any other
+  // prompt runs no probe, registry read or git and hands on what the polls left. The trace's lines are written behind
+  // the prompt (flushTrace not awaited). On Windows a refresh is a PowerShell probe of seconds, and a trace write a Node
+  // start of seconds on a loaded machine.
   on('prompt.submit', async ($, e, next) => {
     trace($, 'prompt.submit', { origin: e.origin.kind })
     if (!isActive) {
@@ -2733,8 +2774,15 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     const extra: string[] = []
-    // A task notification's status (a background task killed) goes to the next poll's harvest of a finished worker.
-    if (e.origin.kind === 'task-notification') notifiedStatus = parseTaskNotification(e.text).status
+    // A task notification's status (a background task killed) goes to the harvest this prompt starts, or else to the next
+    // poll's harvest of a finished worker.
+    if (e.origin.kind === 'task-notification') {
+      const status = parseTaskNotification(e.text).status
+      notifiedStatus = status
+      const startedAt = await $.clock.now()
+      const isInTime = await promptHarvest($, status)
+      trace($, 'prompt.harvest', { isInTime, ms: (await $.clock.now()) - startedAt })
+    }
     // The completion notes the polls harvested ride on the next prompt, whatever started it.
     let notes: string[] = []
     if ((await read($, pendingNotes)).length > 0) {

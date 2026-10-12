@@ -89,14 +89,18 @@ const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320
 // Knobs of the Windows fixture: a failing registry write (the helper's writeAtomic) or probe; the config dir the probe
 // finds the new worker's sessions file in, or none (unplaced); what the PowerShell route's pid file holds (undefined:
 // there is none).
-// probeMs: how long each Windows probe takes on the fixture's clock (0: no time).
-const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false, probeMs: 0 }
+// probeMs: how long each Windows probe takes on the fixture's clock (0: no time). probeLateMs: each probe answers only
+// once the test has moved the fixture's clock that far (0: at once). isAliveGone: the alive worker 4101 has exited.
+const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false, probeMs: 0, probeLateMs: 0, isAliveGone: false }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
 // isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone: the alive worker 4101 has
 // exited (its lines left out of the probe); isOrphanGone: so has the unregistered headless claude 4999.
-// probeMs: how long each Linux probe takes on the fixture's clock (0: no time).
-const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeMs: 0 }
+// probeMs: how long each Linux probe takes on the fixture's clock (0: no time). probeLateMs: each probe answers only once
+// the test has moved the fixture's clock that far (0: at once).
+const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeMs: 0, probeLateMs: 0 }
+/** The pause a task notification's prompt races its harvest against (PROMPT_HARVEST_SEC of register.tsx), in seconds. */
+const PROMPT_HARVEST_SEC = 3
 // The orchestrator's agreed-decisions.md, when a test serves one (undefined: the file is missing).
 const DECISIONS: { text: string | undefined } = { text: undefined }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
@@ -185,6 +189,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       try {
         if (HELD.probe !== undefined) await HELD.probe
         if (LINUX_FIXTURE.probeMs > 0) await w.clock.advance(LINUX_FIXTURE.probeMs)
+        if (LINUX_FIXTURE.probeLateMs > 0) await w.clock.sleep(LINUX_FIXTURE.probeLateMs)
       } finally {
         PROBES.inFlight--
       }
@@ -221,6 +226,12 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       return { rotated: true }
     }
     if (op === 'tail') return { text: await tailRows(path), dropped: 0 }
+    // The bound of a task notification's prompt on its harvest: it ends when the test's clock gets there, as a real
+    // pause takes its time.
+    if (op === 'pause' && request.ms === PROMPT_HARVEST_SEC * 1000) {
+      await w.clock.sleep(PROMPT_HARVEST_SEC * 1000)
+      return {}
+    }
     // The wait between discovery checks on Windows: the time it waits passes on the fixture's clock, and a session file
     // the engine writes late is there after it, as after a sleep.
     if (op === 'pause') {
@@ -269,6 +280,11 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       }
       return answer({ results })
     }
+    // The bound of a task notification's prompt on its harvest (Linux): it ends when the test's clock gets there.
+    if (e.argv[0] === 'sleep' && e.argv[1] === String(PROMPT_HARVEST_SEC)) {
+      await w.clock.sleep(PROMPT_HARVEST_SEC * 1000)
+      return { value: { ...ok, stdout: '' } }
+    }
     if (e.argv[0] === 'sleep') LATE.clear()
     if (e.argv[0] === 'mkdir' || e.argv[0] === 'sleep') return { value: { ...ok, stdout: '' } }
     if (e.argv[0] === 'test' && e.argv[1] === '-e') return { value: { ...ok, stdout: '', exitCode: 1 } }
@@ -279,6 +295,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       PROBES.max = Math.max(PROBES.max, PROBES.inFlight)
       try {
         if (WINDOWS.probeMs > 0) await w.clock.advance(WINDOWS.probeMs)
+        if (WINDOWS.probeLateMs > 0) await w.clock.sleep(WINDOWS.probeLateMs)
       } finally {
         PROBES.inFlight--
       }
@@ -288,7 +305,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
         ? ['P', 7001, 'claude', 3, ...placed, '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus -n w-new-260921141320 --settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json -- prompt'].join('\t') + '\n'
         : ''
       // PowerShell's own line ends.
-      return { value: { ...ok, stdout: (WIN_PROBE_STDOUT + worker).replace(/\n/g, '\r\n') } }
+      const probed = WINDOWS.isAliveGone ? WIN_PROBE_STDOUT.split('\n').filter(line => !line.includes('\t4101\t')).join('\n') : WIN_PROBE_STDOUT
+      return { value: { ...ok, stdout: (probed + worker).replace(/\n/g, '\r\n') } }
     }
     if (e.argv[0] === 'C:/fixture/bin/pick.exe') {
       return { value: { ...ok, stdout: pickStdout.replace(/^\/fixture/, 'C:\\fixture').replace(/\//g, '\\').replace(/\n$/, '\r\n'), exitCode: pickStdout ? 0 : 3 } }
@@ -1096,7 +1114,8 @@ describe('launch_worker', () => {
       release = resolve
     })
     try {
-      const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
+      // A prompt without a task notification (a task notification's prompt starts a harvest: see the tests below).
+      const sent = await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'user' } } as never)
       // The completion the start's poll harvested rides on it; no helper call but the trace's write (a batch) was made.
       expect(sent.context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
       expect(w.calls.slice(calls).filter(one => one.op !== 'batch')).toEqual([])
@@ -1125,18 +1144,126 @@ describe('launch_worker', () => {
     await $.session.start(start(ORCH_DIR))
     expect((await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)).context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
     LINUX_FIXTURE.isAliveGone = true
+    // The prompt's own harvest outlasts its bound (its probe answers 6 s on): the prompt goes on without the note.
+    LINUX_FIXTURE.probeLateMs = 6000
     try {
       const probes = w.calls.filter(one => one.op === 'probe').length
-      const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
+      const pending = $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
+      await w.clock.advance(PROMPT_HARVEST_SEC * 1000)
+      const sent = await pending
       expect(sent.context).toBeUndefined()
-      expect(w.calls.filter(one => one.op === 'probe').length).toBe(probes)
+      // The one probe is the prompt's harvest, still running; no other was started.
+      expect(w.calls.filter(one => one.op === 'probe').length).toBe(probes + 1)
+      LINUX_FIXTURE.probeLateMs = 0
       await w.clock.advance(5000)
       expect(w.toasts).toContain('Session killed \u00B7 alive worker: killed: background task killed')
       // The poll's first tick also told its hourly reminder: a notice line after the note.
       expect((await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)).context?.[0]).toBe('session-control completions: alive worker: killed: background task killed')
     } finally {
       LINUX_FIXTURE.isAliveGone = false
+      LINUX_FIXTURE.probeLateMs = 0
     }
+  })
+
+  // A task notification's prompt runs the harvest it ran before decision mod-28's prompt fix, bounded: it waits at most
+  // PROMPT_HARVEST_SEC (a pause in a process: `sleep` on Linux, the helper's pause on Windows) for that harvest.
+  describe('a task notification\'s prompt and the harvest it starts', () => {
+    const ALIVE_RESULT = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_ALIVE ? { ...one, result_file: '/fixture/results/alive.json' } : one)))
+    const NOTE = 'session-control completions: alive worker: killed: background task killed'
+    const KILLED_TOAST = 'Session killed \u00B7 alive worker: killed: background task killed'
+    const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' }
+    const hosts = [
+      { name: 'Linux', options: { ...OPTIONS, debug: true }, dir: ORCH_DIR, env: { HOME }, knobs: LINUX_FIXTURE },
+      { name: 'Windows', options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}`, licencePickCommand: '' }, dir: `C:${ORCH_DIR}`, env: WIN_ENV, knobs: WINDOWS },
+    ] as const
+    /** A prompt submitted and not awaited: whether it has returned yet, and its answer. */
+    const submitted = ($: { prompt: { submit: (e: never) => Promise<{ context?: readonly unknown[] }> } }, text: string, kind: string) => {
+      const state: { isDone: boolean; sent: Promise<{ context?: readonly unknown[] }> } = { isDone: false, sent: Promise.resolve({}) }
+      state.sent = $.prompt.submit({ text, wait: false, origin: { kind } } as never).then(sent => {
+        state.isDone = true
+        return sent
+      })
+      return state
+    }
+    /** The bound's own pauses: Linux `sleep 3`, the helper's pause of 3000 ms on Windows. */
+    const bounds = (w: World) => w.runs.filter(argv => argv.join(' ') === `sleep ${PROMPT_HARVEST_SEC}`).length + w.calls.filter(one => one.op === 'pause' && one.request.ms === PROMPT_HARVEST_SEC * 1000).length
+
+    for (const host of hosts) {
+      test(`${host.name}: a fast harvest: the finished worker's note rides on the task notification's own prompt, which returns as soon as the harvest ends`, { options: host.options }, async ($, on) => {
+        const w = world(on, '/fixture/lic/a\n', true, ALIVE_RESULT, host.env)
+        on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+        await $.session.start(start(host.dir))
+        // The start's harvest (the limited worker) rides on a first prompt.
+        await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)
+        host.knobs.isAliveGone = true
+        try {
+          const [runs, calls, at] = [w.runs.length, w.calls.length, w.clock.now()]
+          const prompt = submitted($ as never, TASK_NOTIFICATION_KILLED, 'task-notification')
+          await w.clock.settle()
+          // Back without the clock moving: the harvest ended first.
+          expect(prompt.isDone).toBe(true)
+          expect((await prompt.sent).context).toEqual([NOTE])
+          expect(w.clock.now()).toBe(at)
+          expect(w.toasts).toContain(KILLED_TOAST)
+          // One harvest (a probe) and one bound, a pause in a process, never the engine's clock.
+          const probes = host.name === 'Linux' ? w.calls.slice(calls).filter(one => one.op === 'probe').length : w.runs.slice(runs).filter(argv => argv[0] === POWERSHELL).length
+          expect(probes).toBe(1)
+          expect(bounds(w)).toBe(1)
+          if (host.name === 'Linux') expect(traceOf(w).filter(line => line.event === 'prompt.harvest').map(line => [line.isInTime, line.ms])).toEqual([[true, 0]])
+          // The note went once: the next prompt has none.
+          expect((await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)).context ?? []).not.toContain(NOTE)
+        } finally {
+          host.knobs.isAliveGone = false
+        }
+      })
+
+      test(`${host.name}: a slow harvest holds the task notification's prompt for its 3 s bound and no longer; the prompt goes on without the note, which rides on the next prompt`, { options: host.options }, async ($, on) => {
+        const w = world(on, '/fixture/lic/a\n', true, ALIVE_RESULT, host.env)
+        on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+        await $.session.start(start(host.dir))
+        await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)
+        host.knobs.isAliveGone = true
+        // The harvest's probe answers only 8 s on.
+        host.knobs.probeLateMs = 8000
+        try {
+          const at = w.clock.now()
+          const prompt = submitted($ as never, TASK_NOTIFICATION_KILLED, 'task-notification')
+          await w.clock.advance(PROMPT_HARVEST_SEC * 1000 - 1)
+          expect(prompt.isDone).toBe(false)
+          await w.clock.advance(1)
+          // Back at the bound, 3000 ms on the clock, without the note: the harvest has not ended.
+          expect(prompt.isDone).toBe(true)
+          expect(w.clock.now() - at).toBe(PROMPT_HARVEST_SEC * 1000)
+          expect((await prompt.sent).context).toBeUndefined()
+          expect(w.toasts).not.toContain(KILLED_TOAST)
+          if (host.name === 'Linux') expect(traceOf(w).filter(line => line.event === 'prompt.harvest').map(line => [line.isInTime, line.ms])).toEqual([[false, PROMPT_HARVEST_SEC * 1000]])
+          // The harvest goes on behind the prompt and ends with its probe; its note rides on the next prompt of any origin.
+          host.knobs.probeLateMs = 0
+          await w.clock.advance(5000)
+          expect(w.toasts).toContain(KILLED_TOAST)
+          expect((await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)).context?.[0]).toBe(NOTE)
+        } finally {
+          host.knobs.isAliveGone = false
+          host.knobs.probeLateMs = 0
+        }
+      })
+    }
+
+    test('a prompt of any other origin starts no harvest and waits for nothing: no probe, no bound', { options: OPTIONS }, async ($, on) => {
+      const w = world(on, '/fixture/lic/a\n', true, ALIVE_RESULT)
+      on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+      await $.session.start(start(ORCH_DIR))
+      LINUX_FIXTURE.isAliveGone = true
+      try {
+        const [calls, runs] = [w.calls.length, w.runs.length]
+        for (const kind of ['user', 'composer', 'peer']) await $.prompt.submit({ text: 'hello', wait: false, origin: { kind } } as never)
+        expect(w.calls.slice(calls).filter(one => one.op === 'probe')).toEqual([])
+        expect(w.runs.slice(runs).filter(argv => argv[0] === 'sleep')).toEqual([])
+        expect(w.toasts).not.toContain(KILLED_TOAST)
+      } finally {
+        LINUX_FIXTURE.isAliveGone = false
+      }
+    })
   })
 
   test('the first prompt after a compaction carries the state digest, once', { options: OPTIONS }, async ($, on) => {

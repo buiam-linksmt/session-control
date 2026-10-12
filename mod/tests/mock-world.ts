@@ -234,6 +234,9 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
       const answer = helperAnswer(files, op, request, probeLines(world, (request.args as string[] | undefined) ?? []), real, new Map(), links, world.table)
       return { value: ok(JSON.stringify(answer), answer.ok === true ? 0 : 1) }
     }
+    // The bound of a task notification's prompt on its harvest (sleep 3): it ends when the test's clock gets there, as a
+    // real pause takes its time.
+    if (cmd === 'sleep' && argv[1] === '3') return world.clock.sleep(3000).then(() => ({ value: ok() }))
     if (cmd === 'mkdir' || cmd === 'sleep') return { value: ok() }
     if (cmd === 'test') {
       const path = argv[2] ?? ''
