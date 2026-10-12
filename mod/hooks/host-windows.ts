@@ -20,6 +20,13 @@ import { bashLaunchCommand, parseStopOutput, statLaunchChecks, treeOf, unstoppab
 export const START_MATCH_MS = { before: 2_000, after: 600_000 } as const
 
 /**
+ * How long one run of PROBE_PS1 may take, in milliseconds. On a Windows 11 VM it took 1.8 to 6.8 s at rest (p50 2.2 s,
+ * p95 3.0 s over 30 runs) and 2.0 to 18.5 s while the desktop app drew the panel (p50 3.4 s, p95 10.1 s over 154 runs),
+ * 11 more cut at the 20 s it had then; 60 s leaves room for a machine under more load than that.
+ */
+export const PROBE_TIMEOUT_MS = 60_000
+
+/**
  * The process probe for native Windows (Windows PowerShell 5.1), written to the runs directory and run with -File (never
  * as -Command text, whose quoting does not survive). It prints the lines the helper's Linux probe prints
  * (helper/linux.mjs), so parseProcFacts and isPidAlive read them unchanged:
@@ -439,7 +446,7 @@ export const windowsHost: Platform = {
    * process at all it would mark every worker dead. The helper's probe is Linux-only, so this one stays the adapter's.
    */
   async probe(port: HostPort, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
-    const ran = await runScript(port, 'probe.ps1', PROBE_PS1, [...probeArgs(entries), ...configDirs.map(dir => `c:${dir}`)], 20_000)
+    const ran = await runScript(port, 'probe.ps1', PROBE_PS1, [...probeArgs(entries), ...configDirs.map(dir => `c:${dir}`)], PROBE_TIMEOUT_MS)
     if (ran.exitCode !== 0) throw new Error(`the process probe failed (exit ${ran.exitCode}): ${ran.stderr.trim().slice(0, 160)}`)
     return parseProcFacts(ran.stdout.replace(/\r/g, ''))
   },

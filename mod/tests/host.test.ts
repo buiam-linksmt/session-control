@@ -15,7 +15,7 @@ import { withHelper } from '../hooks/host-helper'
 import { withPowerShellLaunch } from '../hooks/host-powershell'
 import { NEWER_MAX } from '../hooks/host-shared'
 import { posixHost } from '../hooks/host-posix'
-import { MSYS_PS_MS, PROBE_PS1, TREE_PS1, windowsHost } from '../hooks/host-windows'
+import { MSYS_PS_MS, PROBE_PS1, PROBE_TIMEOUT_MS, TREE_PS1, windowsHost } from '../hooks/host-windows'
 import { localDate } from '../hooks/store'
 import { checkInTable, helperAnswer, taskkillInTable, treeInTable } from './fake-helper'
 import type { ProcTable } from './fake-helper'
@@ -304,6 +304,19 @@ describe('host contract', () => {
       expect((await host.findNewWorker(port, facts, want, new Set(), NOW_MS))?.pid).toBe(4242)
       expect(await host.findNewWorker(port, facts, want, new Set([4242]), NOW_MS)).toBeUndefined()
       expect(await host.findNewWorker(port, facts, { ...want, model: 'sonnet' }, new Set(), NOW_MS)).toBeUndefined()
+    })
+
+    // The Windows probe is a PowerShell start of seconds (2 to 24 s seen in a desktop session under load): 60 s.
+    test(`${one.name}: the process probe's time limit`, async () => {
+      const m = machine(one.env)
+      const limits: (number | undefined)[] = []
+      const port = { ...portOf(m, runs), run: async (argv: readonly string[], init?: { stdin?: string; timeoutMs?: number }) => {
+        if (String(argv[6] ?? '').endsWith('/probe.ps1')) limits.push(init?.timeoutMs)
+        return m.run(argv, init?.stdin)
+      } }
+      await host.probe(port, [])
+      expect(limits).toEqual(one.platform === 'windows' ? [60_000] : [])
+      expect(PROBE_TIMEOUT_MS).toBe(60_000)
     })
 
     test(`${one.name}: pause waits the seconds asked`, async () => {

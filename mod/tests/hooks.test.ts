@@ -66,8 +66,11 @@ const MISSING = new Set<string>()
 const LATE = new Set<string>()
 // Paths that are there but cannot be read (over the read cap, say).
 const UNREADABLE = new Set<string>()
-// Reads a test holds until it releases them: the transcript tail of the alive worker; every append (the trace's too).
-const HELD: { tail: Promise<unknown> | undefined; append?: Promise<unknown> } = { tail: undefined }
+// Reads a test holds until it releases them: the transcript tail of the alive worker; every append (the trace's too);
+// every Linux probe.
+const HELD: { tail: Promise<unknown> | undefined; append?: Promise<unknown>; probe?: Promise<unknown> } = { tail: undefined }
+// The Linux probes running now and the most that ran at once (reset by world()).
+const PROBES = { inFlight: 0, max: 0 }
 // The CLAUDE_CONFIG_DIR the Linux probe reads from the new worker's environment ('' when it has none).
 // isInboxless: the Linux worker's sessions file has no name and no messagingSocketPath, as an older claude writes it.
 // sid: the session id the Linux worker's sessions file names (a resume keeps the resumed one).
@@ -86,12 +89,14 @@ const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320
 // Knobs of the Windows fixture: a failing registry write (the helper's writeAtomic) or probe; the config dir the probe
 // finds the new worker's sessions file in, or none (unplaced); what the PowerShell route's pid file holds (undefined:
 // there is none).
-const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false }
+// probeMs: how long each Windows probe takes on the fixture's clock (0: no time).
+const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false, probeMs: 0 }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
 // isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone: the alive worker 4101 has
 // exited (its lines left out of the probe); isOrphanGone: so has the unregistered headless claude 4999.
-const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false }
+// probeMs: how long each Linux probe takes on the fixture's clock (0: no time).
+const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeMs: 0 }
 // The orchestrator's agreed-decisions.md, when a test serves one (undefined: the file is missing).
 const DECISIONS: { text: string | undefined } = { text: undefined }
 const BIG_PROMPT = `Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`
@@ -112,6 +117,8 @@ const given = (path: string, isWin: boolean) => {
 
 function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true, registryText: string | (() => string | Promise<string>) = REGISTRY_TEXT, env: Record<string, string> = { HOME }, isEnvOwn = false): World {
   const w: World = { bash: [], powershell: [], spawned: false, writes: [], reads: [], toasts: [], runs: [], calls: [], registered: [], tools: [], clock: mock.clock(on, { now: NOW_MS }) }
+  PROBES.inFlight = 0
+  PROBES.max = 0
   // A test that answers env.get itself says so.
   if (!isEnvOwn) mock.env(on, env)
   // The engine keeps a plugin's own store (the notices' state, notices.ts): an empty one in memory.
@@ -173,6 +180,14 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   const helperStep = async (op: string, request: Record<string, unknown>): Promise<Record<string, unknown> | string> => {
     const path = String(request.path ?? '')
     if (op === 'probe') {
+      PROBES.inFlight++
+      PROBES.max = Math.max(PROBES.max, PROBES.inFlight)
+      try {
+        if (HELD.probe !== undefined) await HELD.probe
+        if (LINUX_FIXTURE.probeMs > 0) await w.clock.advance(LINUX_FIXTURE.probeMs)
+      } finally {
+        PROBES.inFlight--
+      }
       if (LINUX_FIXTURE.isProbeBroken) return 'IO'
       const worker = w.spawned && !LINUX_FIXTURE.isWorkerHidden
         ? `\nP\t7001\tclaude\t3\t/work/new\t${WORKER.linuxConfigDir}\tclaude -p --model opus -n w-new-260921141320 --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- prompt\n`
@@ -260,6 +275,13 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (e.argv[0] === 'test') return { value: { ...ok, stdout: '', exitCode: promptFileExists ? 0 : 1 } }
     if (e.argv[0] === '/fixture/bin/pick') return { value: { ...ok, stdout: pickStdout, exitCode: pickStdout ? 0 : 3 } }
     if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/probe.ps1')) {
+      PROBES.inFlight++
+      PROBES.max = Math.max(PROBES.max, PROBES.inFlight)
+      try {
+        if (WINDOWS.probeMs > 0) await w.clock.advance(WINDOWS.probeMs)
+      } finally {
+        PROBES.inFlight--
+      }
       if (WINDOWS.isProbeBroken) return { value: { ...ok, stdout: '', exitCode: 1, stderr: 'Invalid class' } }
       const placed = WINDOWS.isWorkerUnplaced ? ['', ''] : ['C:\\work\\new', WINDOWS.workerConfigDir]
       const worker = w.spawned && !WINDOWS.isWorkerHidden
@@ -3111,6 +3133,100 @@ describe('the panel on the desktop surface', () => {
       expect(rows.length).toBeGreaterThan(1)
     } finally {
       QUEUE.text = QUEUE_TEXT
+    }
+  })
+})
+
+// ---------------------------------------------------------------- the probe's limits on a slow machine (decision mod-28)
+
+describe('one probe at a time, the poll\'s rest and the tracking toast per episode', () => {
+  const LIST = 'mcp__session-control__list_sessions'
+  const TRACED = { ...OPTIONS, debug: true }
+  const probes = (w: World) => w.calls.filter(one => one.op === 'probe').length
+
+  test('a poll tick during a probe skips its refresh', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    let release = () => {}
+    HELD.probe = new Promise<void>(resolve => {
+      release = resolve
+    })
+    try {
+      const before = probes(w)
+      const first = $.tool.call({ tool: LIST } as never)
+      await w.clock.advance(5000)
+      expect(probes(w)).toBe(before + 1)
+      expect(traceOf(w).filter(line => line.event === 'poll.skip').map(line => line.isProbing)).toContain(true)
+      release()
+      HELD.probe = undefined
+      expect(String(((await first) as { result?: unknown }).result)).toStartWith('7 session rows: 1 running, ')
+      expect(PROBES.max).toBe(1)
+    } finally {
+      release()
+      HELD.probe = undefined
+    }
+  })
+
+  test('Windows: two tools at once probe one after the other, the second waiting in the helper\'s short pauses: never two probes at once', { options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}` } }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' })
+    await $.session.start(start(`C:${ORCH_DIR}`))
+    WINDOWS.probeMs = 3000
+    try {
+      const before = w.calls.length
+      const answers = await Promise.all([$.tool.call({ tool: LIST } as never), $.tool.call({ tool: LIST } as never)])
+      for (const one of answers) expect(String((one as { result?: unknown }).result)).toMatch(/^\d+ session rows: /)
+      expect(PROBES.max).toBe(1)
+      expect(w.calls.slice(before).some(one => one.op === 'pause' && one.request.ms === 250)).toBe(true)
+    } finally {
+      WINDOWS.probeMs = 0
+    }
+  })
+
+  test('after a probe longer than the poll interval the poll rests as long again from its end; then it probes as before', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    await $.session.start(start(ORCH_DIR))
+    LINUX_FIXTURE.probeMs = 12_000
+    try {
+      const before = probes(w)
+      await w.clock.advance(5000)
+      LINUX_FIXTURE.probeMs = 0
+      expect(probes(w)).toBe(before + 1)
+      const rested = traceOf(w).filter(line => line.event === 'poll.skip' && Number(line.restMs) > 0)
+      for (let step = 0; step < 2; step++) await w.clock.advance(5000)
+      expect(traceOf(w).filter(line => line.event === 'poll.skip' && Number(line.restMs) > 0).length).toBeGreaterThan(rested.length)
+      const atRestEnd = probes(w)
+      expect(atRestEnd).toBe(before + 1)
+      for (let step = 0; step < 4; step++) await w.clock.advance(5000)
+      expect(probes(w)).toBeGreaterThan(atRestEnd)
+    } finally {
+      LINUX_FIXTURE.probeMs = 0
+    }
+  })
+
+  test('a probe that fails now and then is one episode, one tracking toast; the same problem again after 10 minutes without it is toasted again', { options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}` } }, async ($, on) => {
+    const tracking = (w: World) => w.toasts.filter(text => text.startsWith('Tracking problem \u00B7 '))
+    WINDOWS.isProbeBroken = true
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' })
+      await $.session.start(start(`C:${ORCH_DIR}`))
+      expect(tracking(w)).toEqual(['Tracking problem \u00B7 Error: the process probe failed (exit 1): Invalid class'])
+      WINDOWS.isProbeBroken = false
+      await w.clock.advance(5000)
+      WINDOWS.isProbeBroken = true
+      await w.clock.advance(5000)
+      WINDOWS.isProbeBroken = false
+      await w.clock.advance(5000)
+      WINDOWS.isProbeBroken = true
+      await w.clock.advance(5000)
+      expect(tracking(w).length).toBe(1)
+      // Ten minutes and more without it: a new episode.
+      WINDOWS.isProbeBroken = false
+      for (let step = 0; step < 122; step++) await w.clock.advance(5000)
+      WINDOWS.isProbeBroken = true
+      await w.clock.advance(5000)
+      expect(tracking(w).length).toBe(2)
+    } finally {
+      WINDOWS.isProbeBroken = false
     }
   })
 })

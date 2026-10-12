@@ -350,6 +350,24 @@ let lateLaunches: LateLaunch[] = []
 /** The status of the last task notification (`killed`), for the next poll's harvest; taken by that harvest. */
 let notifiedStatus: string | undefined
 /**
+ * One process probe at a time (on Windows each is a PowerShell start of seconds): whether one runs now, whether a launch
+ * is looking for its worker, and until when (epoch ms) the poll rests after a probe that took longer than its interval
+ * (as long again as that probe took, from its end). The poll's tick skips its refresh while any of them holds; any other
+ * caller waits for a running probe to end (probe).
+ */
+let isProbing = false
+let isLaunchSearching = false
+let pollRestUntil = 0
+/** How long a caller waits for a running probe to end before it probes anyway, and the pause between its checks. */
+const PROBE_WAIT_MS = 60_000
+const PROBE_WAIT_STEP_SEC = 0.25
+/**
+ * The last tracking problem toasted and when it was last seen (epoch ms): the same problem is toasted again only once
+ * TRACKING_QUIET_MS have passed without it, so a probe that fails now and then is one episode and one toast.
+ */
+let trackingToasted: { text: string; seenAt: number } | undefined
+const TRACKING_QUIET_MS = 600_000
+/**
  * On a surface other than the terminal (the desktop app's Code tab, a phone, an editor) a plugin's newer toast takes the
  * place of its toast on show, so a notice toast raised in the same pass replaced the completion toast ("Session
  * finished" never seen). There a completion toast is read for its whole time: while one shows (toastHold, its timer),
@@ -686,12 +704,27 @@ async function ensureHelperFiles($: EngineInterface): Promise<void> {
  */
 async function probe($: EngineInterface, entries: readonly SessionEntry[], configDirs: readonly string[] = []): Promise<ProcFacts> {
   const machine = await hostOf($)
-  const isWindows = machine.platform === 'windows'
-  const extra = isWindows ? (await probeConfigDirs($).catch(() => [])).filter(dir => !configDirs.some(one => machine.isDefaultConfigDir(one, dir))) : []
-  const facts = await machine.probe(portOf($), entries, [...configDirs, ...extra])
-  if (isWindows) noteUnreadable($, facts)
-  temp ??= tempPlaces($, isWindows)
-  return { ...facts, temp: await temp }
+  // One probe at a time: a running one is waited for in short pauses, each a process (host.pause), never on the hook's
+  // own clock; past PROBE_WAIT_MS (by the clock, or by the count of pauses) this one runs anyway.
+  const waitFrom = await $.clock.now()
+  for (let step = 0; isProbing && step < PROBE_WAIT_MS / (PROBE_WAIT_STEP_SEC * 1000) && (await $.clock.now()) - waitFrom < PROBE_WAIT_MS; step++) {
+    await machine.pause(portOf($), PROBE_WAIT_STEP_SEC)
+  }
+  isProbing = true
+  const startedAt = await $.clock.now()
+  try {
+    const isWindows = machine.platform === 'windows'
+    const extra = isWindows ? (await probeConfigDirs($).catch(() => [])).filter(dir => !configDirs.some(one => machine.isDefaultConfigDir(one, dir))) : []
+    const facts = await machine.probe(portOf($), entries, [...configDirs, ...extra])
+    if (isWindows) noteUnreadable($, facts)
+    temp ??= tempPlaces($, isWindows)
+    return { ...facts, temp: await temp }
+  } finally {
+    isProbing = false
+    // A probe longer than the poll's interval rests the poll for as long again (on Windows under load).
+    const endedAt = await $.clock.now().catch(() => startedAt)
+    if (endedAt - startedAt > config.pollMs) pollRestUntil = endedAt + (endedAt - startedAt)
+  }
 }
 
 /**
@@ -1195,7 +1228,7 @@ async function gather($: EngineInterface, taskStatus: string | undefined, isTick
   }
   const rows = buildRows(entries, facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
-  noteError($, next.error)
+  noteError($, next.error, now)
   // Written only when what the panel draws changed: not for the time alone (a transcript's age, a process's age).
   if (!isSame(drawnKey(await read($, snapshot)), drawnKey(next))) await update($, snapshot, () => next)
   await pollNotices($, entries, facts, now, files, isTick, isRegistrySound(registryText), toasts)
@@ -1222,16 +1255,23 @@ function drawnKey(snap: { at: number; rows: readonly SessionRow[]; error?: strin
   return { rows, error: snap.error }
 }
 
-/** A problem is toasted once, when it first appears or changes. */
-function noteError($: EngineInterface, error: string | undefined): void {
+/**
+ * A problem is toasted once per episode: when it first appears or changes, and the same problem again only after
+ * TRACKING_QUIET_MS without it (a probe that fails now and then is one episode). Each sighting keeps its episode open.
+ */
+function noteError($: EngineInterface, error: string | undefined, nowMs: number): void {
+  if (error !== undefined && trackingToasted?.text === error && error === lastError) trackingToasted.seenAt = nowMs
   if (error === lastError) return
   lastError = error
-  if (error !== undefined) trace($, 'error', { where: 'panel', ...messageFields(error) })
-  if (error !== undefined) $.ui.toast(toastText(TOAST_TITLES.tracking, `${error}`), { timeoutMs: 10000 })
+  if (error === undefined) return
+  trace($, 'error', { where: 'panel', ...messageFields(error) })
+  const isSameEpisode = trackingToasted !== undefined && trackingToasted.text === error && nowMs - trackingToasted.seenAt < TRACKING_QUIET_MS
+  if (!isSameEpisode) $.ui.toast(toastText(TOAST_TITLES.tracking, `${error}`), { timeoutMs: 10000 })
+  trackingToasted = { text: error, seenAt: nowMs }
 }
 
 async function showError($: EngineInterface, error: string, now: number): Promise<void> {
-  noteError($, error)
+  noteError($, error, now)
   await update($, snapshot, prev => ({ at: now, rows: prev?.rows ?? [], error }))
 }
 
@@ -1250,6 +1290,11 @@ async function showNodeMissing($: EngineInterface, now: number): Promise<void> {
 
 async function refresh($: EngineInterface, taskStatus?: string, isTick = false): Promise<void> {
   if (!isActive || isBusy) return
+  // The poll's tick never starts a second probe, nor one while a launch looks for its worker or the poll rests.
+  if (isTick && (isProbing || isLaunchSearching || (await $.clock.now()) < pollRestUntil)) {
+    trace($, 'poll.skip', { isProbing, isLaunchSearching, restMs: Math.max(0, pollRestUntil - (await $.clock.now())) })
+    return
+  }
   isBusy = true
   try {
     await gather($, taskStatus, isTick)
@@ -1849,10 +1894,15 @@ async function spawnWorker(
   // Looked for during LAUNCH_FIND_SEC by the clock from the tool's answer (a probe on Windows takes seconds), at most
   // LAUNCH_FIND_TRIES probes; each wait between them runs in a process (host.pause), never on the hook's budget.
   const searchFrom = await $.clock.now()
-  for (let attempt = 0; attempt < LAUNCH_FIND_TRIES && worker === undefined && (await $.clock.now()) - searchFrom < LAUNCH_FIND_SEC * 1000; attempt++) {
-    await machine.pause(port, 2)
-    const facts = await probe($, entries, [verdict.configDir])
-    worker = await machine.findNewWorker(port, facts, want, known, launchedAt)
+  isLaunchSearching = true
+  try {
+    for (let attempt = 0; attempt < LAUNCH_FIND_TRIES && worker === undefined && (await $.clock.now()) - searchFrom < LAUNCH_FIND_SEC * 1000; attempt++) {
+      await machine.pause(port, 2)
+      const facts = await probe($, entries, [verdict.configDir])
+      worker = await machine.findNewWorker(port, facts, want, known, launchedAt)
+    }
+  } finally {
+    isLaunchSearching = false
   }
   if (worker === undefined) {
     // Started and not found yet: the poll goes on looking for it and registers it when it appears (registerLate).
@@ -2326,7 +2376,7 @@ async function activate($: EngineInterface): Promise<void> {
   startTrace($)
   // A failure here (a read-only home, say) must not stop the board: the panel then shows what it can read. Without a
   // usable Node nothing is made: the first gather shows the warning, and the tools make a missing file when they write it.
-  if (await nodeReady($).catch(() => false)) await ensureHelperFiles($).catch(err => noteError($, `helper files: ${String(err).slice(0, 120)}`))
+  if (await nodeReady($).catch(() => false)) await ensureHelperFiles($).catch(async err => noteError($, `helper files: ${String(err).slice(0, 120)}`, await $.clock.now()))
   if (!isArmed) {
     isArmed = true
     await $.tool.register({
@@ -2608,6 +2658,10 @@ export const register: Register = (on, options) => {
   isUsageProbing = false
   lateLaunches = []
   notifiedStatus = undefined
+  isProbing = false
+  isLaunchSearching = false
+  pollRestUntil = 0
+  trackingToasted = undefined
   toastHold = undefined
   heldToasts = []
   isToastHeldHere = false
