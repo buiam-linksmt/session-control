@@ -490,6 +490,23 @@ describe('host contract', () => {
         expect((await host.stopProcessTree(portOf(plain, runs), { pid: 5000, start: '100' })).notes).toEqual([])
       })
 
+      test(`${one.name}: stopProcessTree takes an MSYS process table with no row of a table (a ps.exe that exits 0 and prints garbage) as one that cannot be read, and stops what the Windows tree reaches`, async () => {
+        const m = machine(one.env)
+        seedTree(m)
+        // The worker's Git Bash sleep.exe: only the MSYS process table links it to bash 5001.
+        m.table.procs.set(5003, { ppid: 4999, start: '103', state: '', comm: 'sleep.exe', msysParent: 5001 })
+        m.table.msys = { dir: 'C:\\Program Files\\Git\\usr\\bin', ps: 'garbage' }
+        const report = await host.stopProcessTree(portOf(m, runs), { pid: 5000, start: '100' })
+        expect(report.tree.descendants.map(proc => proc.pid)).toEqual([5001, 5002])
+        expect(report.notes).toEqual([
+          'the MSYS process table of C:/Program Files/Git/usr/bin (Git Bash) could not be read: a program the worker started through Git Bash whose Windows parent has exited is not among the descendants listed, and this stop does not reach it',
+        ])
+        expect(signalsOf(report.steps)).toEqual(['5000 taskkill /T /F'])
+        expect(report.final).toEqual([5000, 5001, 5002].map(pid => ({ pid, status: 'gone', state: '' })))
+        expect([...m.table.procs.keys()].sort()).toEqual([5003, 6000])
+        expect(m.table.signals.some(sent => [5003, 6000].includes(sent.pid))).toBe(false)
+      })
+
       test(`${one.name}: stopProcessTree sends taskkill /T /F at once, and its re-checks report the seconds of the clock, never the count of checks`, async () => {
         const m = machine(one.env)
         m.table.procs.set(5000, { ppid: 1, start: '100', state: '', comm: 'claude.exe', isUnkillable: true })
@@ -841,6 +858,31 @@ describe('write-side tools through the plugin, on both platforms', () => {
       expect(String(again.deny)).toBe('session-control: nothing archived: "Archived sections" holds the summary lines of archived sections')
     })
   }
+})
+
+describe('TREE_PS1', () => {
+  test('a table with no row TREE_PS1 can read is a table it could not read: the rows of a stand-in ps.exe that prints garbage match none, every row of a real table but its header matches', () => {
+    const pattern = /-match '(\^[^']+)'/.exec(TREE_PS1)?.[1]
+    expect(pattern).toBeDefined()
+    const isRow = (row: string) => new RegExp(pattern ?? '$^').test(row)
+    // What the stand-in ps.exe of the Windows check prints in its garbage mode, with exit code 0.
+    const garbage = ['\u0001\u0002 garbage ### not a table', '      PID    PPID    PGID     WINPID', 'abc 12 34 56 78', '12 34 56', '-1 -2 -3 -4']
+    expect(garbage.filter(isRow)).toEqual([])
+    // `ps.exe -al` of a copy of Git for Windows 2.56.0 (Windows 11, the stand-in worker check).
+    const real = [
+      '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND',
+      '      548       1     548       4936  ?         197608 00:45:53 /usr/bin/ps-real',
+      '      547     545     545       9916  cons1     197608 00:45:52 /usr/bin/sleep',
+      '      542       1     542       9616  ?         197608 00:45:50 /usr/bin/bash',
+      '      544     542     542       2160  ?         197608 00:45:50 /usr/bin/sleep',
+    ]
+    expect(real.filter(isRow)).toEqual(real.slice(1))
+    // No row read: the M line of a table that could not be read, before any count of what it added.
+    const lines = TREE_PS1.split('\r\n')
+    const noRow = lines.findIndex(line => line.includes('if ($read.Count -eq 0) { [void]$out.Append("M`t-1`t$(Flat $dir)`n"); continue }'))
+    expect(noRow).toBeGreaterThan(0)
+    expect(noRow).toBeLessThan(lines.findIndex(line => line.includes('$added[$dir] = 0')))
+  })
 })
 
 /** The adapter of a platform's name, for the paths the tests place files at. */

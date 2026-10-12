@@ -149,7 +149,8 @@ export const PROBE_PS1 = [
  * the MSYS (msys-2.0.dll) or Cygwin (cygwin1.dll) runtime, that folder's ps.exe is run once, and every process whose
  * MSYS parent is a member (or one found this way), and which was created after that parent, is a descendant too: a D
  * line with state `msys` and the parent's Windows pid as its parent. An M line per folder gives how many it added
- * (`M <count> <folder>`), or -1 when its table could not be read.
+ * (`M <count> <folder>`), or -1 when its table could not be read: its ps.exe is missing or fails, or prints no row of
+ * that table (a real one lists at least that ps.exe).
  */
 export const TREE_PS1 = [
   '# session-control: the process tree of a stop and its re-checks, for Windows PowerShell 5.1 (stop_worker)',
@@ -215,14 +216,19 @@ export const TREE_PS1 = [
   '        try { if ([System.IO.File]::Exists("$dir\\ps.exe")) { $rows = @(& "$dir\\ps.exe" -al 2>$null); $code = $LASTEXITCODE } } catch { $code = -1 }',
   "        $ErrorActionPreference = 'Stop'",
   '        if ($code -ne 0) { [void]$out.Append("M`t-1`t$(Flat $dir)`n"); continue }',
-  '        $added[$dir] = 0',
-  '        # PID PPID PGID WINPID ..., after a status letter in the first column when there is one.',
+  '        # PID PPID PGID WINPID ..., after a status letter in the first column when there is one. A real table lists',
+  '        # at least the ps.exe that prints it: one with no such row was not read.',
+  '        $read = @()',
   '        foreach ($row in $rows) {',
-  "          if ([string]$row -notmatch '^\\s*(?:[A-Za-z]\\s+)?(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)(\\s|$)') { continue }",
-  '          $msysOf[[long]$Matches[4]] = "$dir|$($Matches[1])"',
-  '          $up = "$dir|$($Matches[2])"',
+  "          if ([string]$row -match '^\\s*(?:[A-Za-z]\\s+)?(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)(\\s|$)') { $read += ,@($Matches[1], $Matches[2], $Matches[4]) }",
+  '        }',
+  '        if ($read.Count -eq 0) { [void]$out.Append("M`t-1`t$(Flat $dir)`n"); continue }',
+  '        $added[$dir] = 0',
+  '        foreach ($row in $read) {',
+  '          $msysOf[[long]$row[2]] = "$dir|$($row[0])"',
+  '          $up = "$dir|$($row[1])"',
   '          if (-not $kidsOf.ContainsKey($up)) { $kidsOf[$up] = New-Object System.Collections.Generic.List[long] }',
-  '          $kidsOf[$up].Add([long]$Matches[4])',
+  '          $kidsOf[$up].Add([long]$row[2])',
   '        }',
   '      }',
   '      # Every member again, now with its MSYS children (state msys) and the Windows children of those.',

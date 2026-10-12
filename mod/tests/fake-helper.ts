@@ -100,9 +100,10 @@ export type SimProc = {
 }
 /**
  * `msys`, Windows: the folder of the MSYS process table TREE_PS1 reads (Git's usr/bin), and whether that table cannot be
- * read (its ps.exe fails).
+ * read (its ps.exe fails), or what its ps.exe does instead of printing the table (`garbage`: it exits 0 with no row of
+ * a table, which TREE_PS1 takes as a table it could not read).
  */
-export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number; msys?: { dir: string; isUnreadable?: boolean } }
+export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: { pid: number; signal: string }[]; nowMs: number; msys?: { dir: string; isUnreadable?: boolean; ps?: 'garbage' } }
 
 /**
  * The helper's processTree lines over the table (TREE_PS1's list prints the same): R or N, the G lines, the D lines
@@ -125,7 +126,7 @@ export function treeInTable(table: ProcTable, pid: number, start: string, isWind
       }
     }
     if (isWindows && table.msys !== undefined) {
-      if (table.msys.isUnreadable === true) lines.push(`M\t-1\t${table.msys.dir}`)
+      if (table.msys.isUnreadable === true || table.msys.ps === 'garbage') lines.push(`M\t-1\t${table.msys.dir}`)
       else {
         let added = 0
         for (let at = 0; at < queue.length; at++) {
