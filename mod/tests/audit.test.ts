@@ -10,6 +10,7 @@ import type { AuditInput, Finding } from '../hooks/audit'
 import { parseProcFacts } from '../hooks/core'
 import { nodeAnswer } from './fake-helper'
 import { NOW_MS, worldPath } from './fixtures'
+import { machineBase } from './mock-world'
 
 const SID_LIVE = 'a1a1a1a1-1111-4111-8111-111111111111'
 const SID_DONE = 'd0d0d0d0-2222-4222-8222-222222222222'
@@ -357,10 +358,7 @@ function world(on: On, git: Git) {
   const w = { writes: [] as string[], runs: [] as string[][] }
   const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   mock.clock(on, { now: NOW_MS })
-  mock.env(on, { HOME })
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
+  machineBase(on, { HOME })
   on('ui.toast', () => ({ value: undefined }))
   on('fs.read', ($, e) => {
     const text = files.get(worldPath(e.path))

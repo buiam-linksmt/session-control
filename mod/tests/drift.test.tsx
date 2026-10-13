@@ -14,7 +14,7 @@ import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec
 import { driftStep, freshNoticeState, noticeStoreKey, parseNoticeState } from '../hooks/notices'
 import { listInMap, nodeAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
-import { OPTIONS, ORCH, mockWorld } from './mock-world'
+import { OPTIONS, ORCH, POWERSHELL, WIN_ENV, WIN_ORCH, mockWorld, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
 import type { World } from './mock-world'
 import { echoPrompt, noticeLines, poll, seedOrch, startOrch, storeOf, toastsOf, userPrompt } from './notice-kit'
 
@@ -340,13 +340,7 @@ describe('the drift band on the mock world', () => {
 
 // ---------------------------------------------------------------- Windows
 
-const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\w\\home' }
-const WIN_ORCH = 'C:/w/orch'
 const WIN_SOURCE = 'C:/w/src/mod'
-const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-
-/** A path as the plugin gave it: on a Linux host the kit takes C:/x for a relative path after the session's directory. */
-const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
 
 /** A small Windows machine: files by their C:/ path, folders by what is under them, the plugin's folder linked to C:/w/loaded once known, Node and its helper, the probe empty. */
 function winWorld(on: On) {
@@ -356,19 +350,8 @@ function winWorld(on: On) {
     return w.root !== undefined && (one === w.root || one.startsWith(`${w.root}/`)) ? `C:/w/loaded${one.slice(w.root.length)}` : one
   }
   const isDir = (path: string) => [...w.files.keys()].some(file => file.startsWith(`${key(path)}/`))
-  mock.env(on, WIN_ENV)
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
-  on('fs.read', ($, e) => {
-    const text = w.files.get(key(e.path))
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
-    return { value: text }
-  })
-  on('fs.write', ($, e) => {
-    w.files.set(key(e.path), e.text)
-    return { value: undefined }
-  })
+  winBase(on, WIN_ENV, w.toasts)
+  winFiles(on, w.files, key)
   on('fs.exists', ($, e) => ({ value: w.files.has(key(e.path)) || isDir(e.path) }))
   on('fs.stat', ($, e) => {
     if ((e as { resolve?: boolean }).resolve === true && w.root === undefined && !given(e.path).startsWith('C:/w/')) w.root = given(e.path).replace(/\/+$/, '')
@@ -387,11 +370,6 @@ function winWorld(on: On) {
     if (e.argv[0] === 'git') return { value: { ...ok, exitCode: 128 } }
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
   })
-  on('ui.toast', ($, e) => {
-    w.toasts.push(e.text)
-    return { value: undefined }
-  })
-  on('ui.panes', () => ({ value: [] }) as never)
   return w
 }
 
@@ -403,7 +381,7 @@ describe('the drift band on a Windows machine', () => {
     w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
     w.files.set('C:/w/home/.claude/headless-sessions.json', '[]\n')
     for (const [rel, text] of Object.entries(MOD_FILES)) w.files.set(`${WIN_SOURCE}/${rel}`, text)
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     expect(w.root).toBeDefined()
     for (const [rel, text] of Object.entries(changedOne)) w.files.set(`C:/w/loaded/${rel}`, text)
     for (let gone = 0; gone < DRIFT_EVERY_SEC; gone += 5) await w.clock.advance(5000)

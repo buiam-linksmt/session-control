@@ -125,30 +125,16 @@ const FAMILY_SHAPES: Readonly<Record<string, readonly string[]>> = {
 const shapesOf = (family: string) => FAMILY_SHAPES[family] ?? []
 
 describe('the sign-off guard on 1 MB lines: each family of its patterns within the bound', () => {
-  test(`the near opening line (isNearOpen): at most ${FAMILY_MS} ms on each shape; the pattern it replaces took 4.3 s at 60 K characters of >`, () => {
-    expect(slowShapes(shapesOf('near'), line => isNearOpen(line))).toEqual({})
-  })
-
-  test(`git's options and the verbs (verbsOf): at most ${FAMILY_MS} ms on each shape; the pattern they replace never ended on git -C -C ...`, () => {
-    expect(slowShapes(shapesOf('verbs'), line => verbsOf(line))).toEqual({})
-  })
-
-  test(`the Standing parse (standingGrants: headings, fences, marked lines): at most ${FAMILY_MS} ms on each shape`, () => {
-    expect(slowShapes(shapesOf('standing'), line => standingGrants(`## Standing\n${line}`))).toEqual({})
-  })
-
-  test(`the fences and the block syntax (hasSignoffBlock): at most ${FAMILY_MS} ms on each shape`, () => {
-    expect(slowShapes(shapesOf('blocks'), line => hasSignoffBlock(`Do it.\n${line}\nReport.`))).toEqual({})
-  })
-
-  test(`the negation windows (isNegatedAt) at the end of a line: at most ${FAMILY_MS} ms on each shape`, () => {
-    expect(slowShapes(shapesOf('negation'), line => isNegatedAt(`${line} --force`, line.length + 1, line.length + 8, 0))).toEqual({})
-  })
-
-  test(`the prompt lint's patterns (promptLint of a skill test): at most ${FAMILY_MS} ms on each shape`, () => {
+  const FAMILIES: [string, string, (line: string) => unknown][] = [
+    [`the near opening line (isNearOpen): at most ${FAMILY_MS} ms on each shape; the pattern it replaces took 4.3 s at 60 K characters of >`, 'near', line => isNearOpen(line)],
+    [`git's options and the verbs (verbsOf): at most ${FAMILY_MS} ms on each shape; the pattern they replace never ended on git -C -C ...`, 'verbs', line => verbsOf(line)],
+    [`the Standing parse (standingGrants: headings, fences, marked lines): at most ${FAMILY_MS} ms on each shape`, 'standing', line => standingGrants(`## Standing\n${line}`)],
+    [`the fences and the block syntax (hasSignoffBlock): at most ${FAMILY_MS} ms on each shape`, 'blocks', line => hasSignoffBlock(`Do it.\n${line}\nReport.`)],
+    [`the negation windows (isNegatedAt) at the end of a line: at most ${FAMILY_MS} ms on each shape`, 'negation', line => isNegatedAt(`${line} --force`, line.length + 1, line.length + 8, 0)],
     // No run of `a.`: the secret scan's url pattern (secrets.ts, outside the guard) reads one in time that grows with its square.
-    expect(slowShapes(shapesOf('prompt'), line => promptLint(`skill test\n${line}`))).toEqual({})
-  })
+    [`the prompt lint's patterns (promptLint of a skill test): at most ${FAMILY_MS} ms on each shape`, 'prompt', line => promptLint(`skill test\n${line}`)],
+  ]
+  for (const [name, family, run] of FAMILIES) test(name, () => expect(slowShapes(shapesOf(family), run)).toEqual({}))
 
   for (const [at, start] of ['git push origin --delete refs/heads/', 'git push origin :refs/heads/', 'git branch -d ', 'git push --force-with-lease '].entries()) {
     test(`the block grammar (BLOCK_FORMS: the names, the remotes) after \`${start}\`: at most ${FAMILY_MS} ms on each shape`, () => {

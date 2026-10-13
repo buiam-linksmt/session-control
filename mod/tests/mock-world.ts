@@ -313,3 +313,49 @@ export function seedLiveWorker(world: World, sid: string, entry: Record<string, 
   world.files.set(`${cfg}/sessions/4101.json`, JSON.stringify({ sessionId: sid, procStart: '5000' }))
   return { title: 'live worker', pid: 4101, session_id: sid, config_dir: cfg, cwd: '/w/work', model: 'haiku', effort: 'low', result_file: `${RUNS}/live.json`, err_file: `${RUNS}/live.err`, ...entry }
 }
+
+// ---------------------------------------------------------------- what every test machine answers alike
+
+/** The environment `env`, the session's cwd and the registrations of the plugin's commands and tools. */
+export function machineBase(on: On, env: Record<string, string>): void {
+  mock.env(on, env)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
+}
+
+// ---------------------------------------------------------------- a Windows machine over a map of files
+
+export const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\w\\home' }
+export const WIN_ORCH = 'C:/w/orch'
+export const WIN_REGISTRY = 'C:/w/home/.claude/headless-sessions.json'
+export const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+/** A path as the plugin gave it: on a Linux host the kit takes C:/x for a relative path after the session's directory. */
+export const winGiven = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
+
+/** The session started in the Windows orchestrator's directory, as the engine gives it. */
+export const startWinOrch = ($: { session: { start: (e: never) => Promise<unknown> } }) => $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+
+/** What every Windows test machine answers alike: its environment, the session's cwd, the registrations, the toasts (kept in `toasts` when given) and no panes. */
+export function winBase(on: On, env: Record<string, string>, toasts?: string[]): void {
+  machineBase(on, env)
+  on('ui.toast', ($, e) => {
+    toasts?.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [] }) as never)
+}
+
+/** fs.read and fs.write over `files`, keyed by `key` of the path the hook sees. */
+export function winFiles(on: On, files: Map<string, string>, key: (path: string) => string): void {
+  on('fs.read', ($, e) => {
+    const text = files.get(key(e.path))
+    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
+    return { value: text }
+  })
+  on('fs.write', ($, e) => {
+    files.set(key(e.path), e.text)
+    return { value: undefined }
+  })
+}

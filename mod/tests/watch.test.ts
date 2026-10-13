@@ -13,7 +13,7 @@ import { REGISTRY_UNREADABLE_SEC, freshNoticeState, lockStep, noticeStoreKey, pa
 import type { LockSeen, RegistryWatch } from '../hooks/notices'
 import { nodeAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
-import { HOME, OPTIONS, ORCH, REGISTRY, mockWorld } from './mock-world'
+import { HOME, OPTIONS, ORCH, POWERSHELL, REGISTRY, WIN_ENV, WIN_ORCH, WIN_REGISTRY, mockWorld, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
 import type { World } from './mock-world'
 import { echoPrompt, noticeLines, poll, seedOrch, startOrch, storeOf, toastsOf, userPrompt } from './notice-kit'
 
@@ -310,28 +310,11 @@ describe('registry-unreadable', () => {
 
 // ---------------------------------------------------------------- Windows
 
-const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\w\\home' }
-const WIN_ORCH = 'C:/w/orch'
-const WIN_REGISTRY = 'C:/w/home/.claude/headless-sessions.json'
-const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
-
 /** A small Windows machine: files by their C:/ path, folders listed by what is under them, the probe's A lines for `alive`. */
 function winWorld(on: On, alive: number[]) {
   const w = { files: new Map<string, string>(), toasts: [] as string[], probes: [] as string[][], clock: mock.clock(on, { now: NOW_MS }) }
-  mock.env(on, WIN_ENV)
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
-  on('fs.read', ($, e) => {
-    const text = w.files.get(given(e.path))
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
-    return { value: text }
-  })
-  on('fs.write', ($, e) => {
-    w.files.set(given(e.path), e.text)
-    return { value: undefined }
-  })
+  winBase(on, WIN_ENV, w.toasts)
+  winFiles(on, w.files, given)
   on('fs.exists', ($, e) => ({ value: w.files.has(given(e.path)) }))
   on('fs.stat', ($, e) => {
     if (w.files.has(given(e.path))) return { value: { kind: 'file', size: 1, mtimeMs: NOW_MS, isLink: false } as never }
@@ -357,11 +340,6 @@ function winWorld(on: On, alive: number[]) {
     if (e.argv[0] === 'git') return { value: { ...ok, exitCode: 128 } }
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
   })
-  on('ui.toast', ($, e) => {
-    w.toasts.push(e.text)
-    return { value: undefined }
-  })
-  on('ui.panes', () => ({ value: [] }) as never)
   return w
 }
 
@@ -376,7 +354,7 @@ describe('Windows host', () => {
     w.files.set('C:/w/locks/dead.pid', '6000\r\n')
     w.files.set('C:/w/locks/alive.pid', '6100\r\n')
     w.files.set('C:/w/locks/tool.lock', jsonLock(6200, '1234'))
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     for (let gone = 0; gone < 3 * LOCK_EVERY_SEC; gone += 5) await w.clock.advance(5000)
     expect(toastsOf(w.toasts, 'lock-holder')).toEqual([`${TOAST_TITLES['lock-holder']} \u00B7 ${deadText('C:/w/locks/dead.pid', 6000)}`])
     expect(w.probes.some(args => args.includes('pid:6000|~') && args.includes('pid:6100|~'))).toBe(true)
@@ -388,7 +366,7 @@ describe('Windows host', () => {
     w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
     // Empty, not missing: a missing registry is created ([]) when the board starts.
     w.files.set(WIN_REGISTRY, '')
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     for (let gone = 0; gone < REGISTRY_UNREADABLE_SEC + 30; gone += 5) await w.clock.advance(5000)
     expect(toastsOf(w.toasts, 'registry-unreadable')).toEqual([`${TOAST_TITLES['registry-unreadable']} \u00B7 ${UNREADABLE_TEXT}`])
   })

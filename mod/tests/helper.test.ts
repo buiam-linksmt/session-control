@@ -16,6 +16,7 @@ import { posixHost } from '../hooks/host-posix'
 import { PROBE_PS1, windowsHost } from '../hooks/host-windows'
 import { helperAnswer as fakeHelper } from './fake-helper'
 import { NOW_MS, worldPath } from './fixtures'
+import { machineBase } from './mock-world'
 
 const ran = (stdout = '', exitCode = 0, stderr = '', isStdoutTruncated = false): ProcessRunResult => ({ exitCode, stdout, stderr, isStdoutTruncated, isStderrTruncated: false })
 
@@ -371,7 +372,7 @@ describe('withHelper on Linux', () => {
   })
 
   test('a batch that failed after its rotation is not made again: the trace rotated once, the problem said', async () => {
-    const sim = machine((op, request) => {
+    const sim = machine((_, request) => {
       // The rotation goes through, the append fails.
       const steps = request.ops as Request[]
       helperAnswer(sim.files, 'rotate', steps[0] ?? {})
@@ -636,6 +637,7 @@ describe('withHelper on Windows', () => {
 // ---------------------------------------------------------------- Node through the plugin on the mock engine
 
 const ORCH = '/m/orch'
+const startOrch = ($: { session: { start: (e: never) => Promise<unknown> } }) => $.session.start({ cwd: ORCH, surface: null, isInteractive: true } as never)
 const PLUGIN_OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: true }
 
 /** `isWindowsHost`: the tests run on Windows, told by the engine's paths (a /m path reaches the fs hooks as C:\m). */
@@ -652,10 +654,7 @@ function world(on: On, node: string | undefined, answering: Answering = 'real', 
     if (/^[A-Za-z]:\\/.test(path)) w.isWindowsHost = true
     return worldPath(path)
   }
-  mock.env(on, { HOME: '/m/home' })
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
+  machineBase(on, { HOME: '/m/home' })
   on('ui.toast', ($, e) => {
     w.toasts.push(e.text)
     return { value: undefined }
@@ -722,7 +721,7 @@ const TOOL_CALLS: [string, Record<string, unknown>][] = [
 describe('helper options, through the plugin', () => {
   test('auto (the default) with Node 24 on the PATH: the probe and the registry write go through the helper in the plugin\'s folder', { options: PLUGIN_OPTIONS }, async ($, on) => {
     const w = world(on, 'node')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect(nodeRuns(w)[0]).toEqual(['node', '--version'])
     const helper = nodeRuns(w).filter(argv => argv[1] !== '--version')
     expect(helper.length).toBeGreaterThan(0)
@@ -736,13 +735,13 @@ describe('helper options, through the plugin', () => {
 
   test('an unknown value is auto', { options: { ...PLUGIN_OPTIONS, helper: 'sometimes' } }, async ($, on) => {
     const w = world(on, 'node')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect(probes(w).every(argv => argv[0] === 'node')).toBe(true)
   })
 
   test('a leftover helper option (off) is ignored without an error: Node is looked for and the helper runs', { options: { ...PLUGIN_OPTIONS, helper: 'off' } }, async ($, on) => {
     const w = world(on, 'node')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect(nodeRuns(w)[0]).toEqual(['node', '--version'])
     expect(probes(w).length).toBe(1)
     expect(w.toasts).toEqual([])
@@ -751,7 +750,7 @@ describe('helper options, through the plugin', () => {
   test('without Node: one lookup, nothing tracked, the panel warning and one Node helper toast; every tool but panel_snapshot answers the fixed refusal, and nothing is written', { options: PLUGIN_OPTIONS, timeoutMs: 15_000 }, async ($, on) => {
     const w = world(on, undefined)
     w.sim.files.set('/m/home/.claude/headless-sessions.json', `${JSON.stringify([{ title: 'w', pid: 4242, session_id: SID, config_dir: '/m/cfg', cwd: '/m/work' }])}\n`)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await w.clock.advance(5000)
     await w.clock.advance(5000)
     expect(nodeRuns(w)).toEqual([['node', '--version']])
@@ -784,7 +783,7 @@ describe('helper options, through the plugin', () => {
       [`${ORCH}/agreed-decisions-archive.md`, '# Agreed decisions archive\n'],
     ])
     for (const [path, text] of seeded) w.sim.files.set(path, text)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     for (const tool of ['queue_task', 'open_point', 'record_decision', 'launch_worker', 'archive_decisions']) {
       const input = TOOL_CALLS.find(([name]) => name === tool)?.[1] ?? {}
       expect({ tool, answer: await answerOf($, tool, input) }).toEqual({ tool, answer: { text: NODE_REFUSAL, isRefused: true } })
@@ -796,7 +795,7 @@ describe('helper options, through the plugin', () => {
 
   test('with Node 20: one lookup, the same warning and refusal', { options: PLUGIN_OPTIONS }, async ($, on) => {
     const w = world(on, 'node', 'real', 'v20.18.1\n')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect(nodeRuns(w)).toEqual([['node', '--version']])
     expect(probes(w)).toEqual([])
     expect(w.toasts).toEqual([`Node helper \u00B7 session-control ${NODE_WARNING}`])
@@ -805,14 +804,14 @@ describe('helper options, through the plugin', () => {
 
   test('nodePath names the executable, a leading ~/ the home directory', { options: { ...PLUGIN_OPTIONS, nodePath: '~/node/bin/node' } }, async ($, on) => {
     const w = world(on, '/m/home/node/bin/node')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect(nodeRuns(w)[0]).toEqual(['/m/home/node/bin/node', '--version'])
     expect(probes(w).every(argv => argv[0] === '/m/home/node/bin/node')).toBe(true)
   })
 
   test('a nodePath that is not there: one lookup of it, then the warning and the refusal', { options: { ...PLUGIN_OPTIONS, nodePath: '/opt/none/node' } }, async ($, on) => {
     const w = world(on, 'node')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect(nodeRuns(w)).toEqual([['/opt/none/node', '--version']])
     expect(probes(w)).toEqual([])
     expect(w.toasts).toEqual([`Node helper \u00B7 session-control ${NODE_WARNING}`])
@@ -823,7 +822,7 @@ describe('helper options, through the plugin', () => {
   // the suite's other files run beside it, on main too; the limit is raised, the assertions are as they were.
   test('no Node at the start, installed later: the mock clock\'s ticks look again after 10 minutes, the helper takes over, one trace line per change', { options: { ...PLUGIN_OPTIONS, debug: true }, timeoutMs: 15_000 }, async ($, on) => {
     const w = world(on, 'node', 'real', null)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const versions = () => nodeRuns(w).filter(argv => argv[1] === '--version').length
     expect(versions()).toBe(1)
     // Five minutes of poll ticks: no probe, no lookup, no trace written (its lines wait for Node).
@@ -853,7 +852,7 @@ describe('helper options, through the plugin', () => {
       const answer = helperAnswer(w.sim.files, op, request)
       return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
     })
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await w.clock.advance(5000)
     const trace = (w.sim.files.get('/m/home/.claude/session-control/runs/trace.log') ?? '').trimEnd().split('\n').filter(line => line !== '').map(line => JSON.parse(line) as Record<string, unknown>)
     const lines = trace.filter(line => line.event === 'helper.failed')
@@ -864,7 +863,7 @@ describe('helper options, through the plugin', () => {
 
   test('the trace shows the helper in use: its detection line and each call by operation and path, never the request', { options: { ...PLUGIN_OPTIONS, debug: true } }, async ($, on) => {
     const w = world(on, 'node')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const text = w.sim.files.get('/m/home/.claude/session-control/runs/trace.log') ?? ''
     const trace = text.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
     expect(trace.find(line => line.event === 'helper')).toMatchObject({ isActive: true, version: 'v24.14.0' })

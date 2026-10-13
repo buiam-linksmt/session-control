@@ -298,11 +298,13 @@ describe('completion classifier', () => {
     expect(out.kind).toBe('clean')
     expect(out.costUsd).toBe(1.23)
   })
-  test('limit', () => expect(classifyResult(RESULTS.limit).kind).toBe('limit'))
-  test('login', () => expect(classifyResult(RESULTS.login).kind).toBe('login'))
-  test('chatter', () => expect(classifyResult(RESULTS.chatter).kind).toBe('chatter'))
-  test('a short answer from a short run is clean', () => expect(classifyResult(RESULTS.shortAnswer).kind).toBe('clean'))
-  test('an empty result is chatter', () => expect(classifyResult(JSON.stringify({ result: '', is_error: false })).kind).toBe('chatter'))
+  for (const [name, text, kind] of <[string, string, string][]>[
+    ['limit', RESULTS.limit, 'limit'],
+    ['login', RESULTS.login, 'login'],
+    ['chatter', RESULTS.chatter, 'chatter'],
+    ['a short answer from a short run is clean', RESULTS.shortAnswer, 'clean'],
+    ['an empty result is chatter', JSON.stringify({ result: '', is_error: false }), 'chatter'],
+  ]) test(name, () => expect(classifyResult(text).kind).toBe(kind))
   test('empty or truncated result is killed', () => {
     expect(classifyResult(RESULTS.empty).kind).toBe('killed')
     expect(classifyResult(RESULTS.truncated).kind).toBe('killed')
