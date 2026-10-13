@@ -136,6 +136,7 @@ import {
   wrapLogLine,
   formatRow,
   paneWidths,
+  cellWidth,
   launchTimeoutMs,
   mergeCompletion,
   missingPromptItems,
@@ -3297,7 +3298,12 @@ export const register: Register = (on, options) => {
     }
     const togglePoint = (id: string) => () => update($, selectedPoint, current => (current === id ? null : id))
     // A pressable row's label is padded to `fill`, its column's width: the Button is as wide as its label, so the
-    // pointer's light spans the row and not only its text.
+    // pointer's light spans the row and not only its text. A session row is padded in cells (cellWidth), so a title with
+    // wide characters does not make its label wider than the box (the Button would wrap it onto a second line).
+    const padded = (r: PRow, fill: number) => {
+      const text = r.text === '' ? ' ' : r.text
+      return r.rowIndex === undefined ? text.padEnd(fill) : text + ' '.repeat(Math.max(0, fill - cellWidth(text)))
+    }
     const rowEl = (r: PRow, fill = 0, scope?: string) =>
       r.press === undefined ? (
         <Text bold={r.bold} dimColor={r.dim} color={r.color}>
@@ -3306,7 +3312,7 @@ export const register: Register = (on, options) => {
       ) : (
         <Button
           key={r.key}
-          label={(r.text === '' ? ' ' : r.text).padEnd(fill)}
+          label={padded(r, fill)}
           plain
           dimColor={r.dim}
           hover={scope === undefined ? undefined : { scope, inverse: true }}

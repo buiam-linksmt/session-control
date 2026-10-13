@@ -5,7 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { RULES_BLOCK, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
+import { RULES_BLOCK, SESSION_COLUMNS, cellWidth, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
 import { auditFindings } from '../hooks/audit'
 import { isRegistrySound } from '../hooks/notices'
 import { PROBE_PS1 } from '../hooks/host-windows'
@@ -3938,6 +3938,41 @@ describe('the panel on the desktop surface', () => {
     } finally {
       TAIL.rows = undefined
     }
+  })
+
+  test('terminal: the session rows keep their fixed columns at every width and only the title shortens; the desktop draws the same cells whole (decision mod-33)', { options: OPTIONS }, async ($, on) => {
+    let ui = await open($, on, 'terminal', { ...PANE_PROPS, bodyColumns: 300 })
+    for (const bodyColumns of [300, 160, 90, 71, 70, 40]) {
+      if (bodyColumns !== 300) {
+        await ui.unmount()
+        ui = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, bodyColumns } as never })
+      }
+      // The rows' room: the box less its borders and the scroll bar.
+      const room = bodyColumns - 3
+      const texts = (await textsOf(ui)).map(one => one.text)
+      const header = texts.find(text => /^ {2}(title|ti\u2026)/.test(text))!
+      const labels = (await ui.findAll({ type: 'Button' })).filter(one => String(one.key).startsWith('s:')).map(one => String(one.props.label).trimEnd())
+      const orphans = texts.filter(text => text.includes('(no entry)'))
+      const rows = [...labels, ...orphans]
+      expect(rows.length).toBeGreaterThan(1)
+      for (const line of [header, ...rows]) expect(cellWidth(line)).toBeLessThanOrEqual(room)
+      if (bodyColumns >= 71) {
+        // From 71 columns the fixed columns are whole: each starts at the header's cell, the elapsed ends the row.
+        for (const name of ['sid', 'status', 'model', 'effort', 'elapsed']) expect(header.indexOf(` ${name} `.trimEnd())).toBeGreaterThan(0)
+        const at = header.indexOf('elapsed')
+        for (const line of rows) expect(line.slice(at)).toMatch(/^(\d+s|\d+m\d\ds|\d+h\d\dm|-)$/)
+        for (const line of rows) expect(line.slice(header.indexOf('status'), header.indexOf('model'))).toMatch(/^(running|orphan|finished[-a-z]*|queued) +$/)
+      } else {
+        // Narrower: the title keeps its three cells and a row wider than the room is cut at the right edge.
+        expect(header).toStartWith('  ti\u2026   sid')
+        if (bodyColumns === 40) for (const line of [header, ...rows]) expect(line).toEndWith('\u2026')
+      }
+    }
+    await ui.unmount()
+    const desk = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, bodyColumns: 40 } as never })
+    const cells = (await textsOf(desk)).map(one => one.text).filter(text => / \u00B7 /.test(text))
+    expect(cells[0]).toBe(SESSION_COLUMNS.map(column => column.header).join(' \u00B7 '))
+    for (const line of cells) expect(line).not.toContain('\u2026')
   })
 })
 

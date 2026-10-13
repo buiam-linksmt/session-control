@@ -6,7 +6,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { workerName } from '../hooks/core'
+import { cellWidth, workerName } from '../hooks/core'
 import {
   MAX_ANSWER_CHARS,
   assistantMessages,
@@ -633,6 +633,34 @@ describe('panel_snapshot', () => {
     ])
     for (const line of log) expect(line.length).toBeLessThanOrEqual(116)
     expectNoCanary(text)
+  })
+
+  test('the sessions rows at fixed columns: a long or wide title is cut, the elapsed of days and hours whole, every column at the header\'s cell (decision mod-33)', () => {
+    const row = { sid8: 'abcdef12', model: 'haiku', effort: 'medium', configDir: '/c', status: 'alive' as const }
+    const rows = [
+      { ...row, title: 'running over an hour', startedAt: NOW_SEC - 2 * 3600 - 300 },
+      { ...row, title: 'finished long ago', status: 'done' as const, startedAt: NOW_SEC - 900_000, endedAt: NOW_SEC - 600_000 },
+      { ...row, title: `a very long title ${'that keeps going '.repeat(10)}to the end`, status: 'dead' as const, startedAt: NOW_SEC - 100, endedAt: NOW_SEC - 40 },
+      { ...row, title: `\u6F22\u5B57 \u{1F680} ${'wide '.repeat(30)}`, startedAt: NOW_SEC - 5 },
+    ]
+    const text = panelSnapshotText({ snap: { at: NOW_MS, rows }, queue: [], points: [], selectedPoint: null, log: null, expanded: null, nowMs: NOW_MS })
+    const lines = text.slice(text.indexOf('SESSIONS\n') + 'SESSIONS\n'.length, text.indexOf('\n\nQUEUED WORK')).split('\n')
+    expect(lines.length).toBe(5)
+    for (const line of lines) expect(cellWidth(line)).toBeLessThanOrEqual(116)
+    const [header, ...shown] = lines as [string, ...string[]]
+    // The title column takes the room the fixed columns leave: 114 cells less 62.
+    expect(header).toBe(`  ${'title'.padEnd(52)}   sid        status                 model    effort   elapsed`)
+    const ends = shown.map(line => line.slice(line.indexOf('abcdef12')))
+    expect(ends).toEqual([
+      'abcdef12   running                haiku    medium   2h05m',
+      'abcdef12   finished               haiku    medium   83h20m',
+      'abcdef12   finished-unharvested   haiku    medium   1m00s',
+      'abcdef12   running                haiku    medium   5s',
+    ])
+    for (const line of shown) expect(cellWidth(line.slice(0, line.indexOf('abcdef12')))).toBe(header.indexOf('sid'))
+    expect(shown[2]).toStartWith('  a very long title that keeps going')
+    expect(shown[2]).toContain('\u2026   abcdef12')
+    expect(shown[3]).toStartWith('  \u6F22\u5B57 \u{1F680} wide')
   })
 })
 

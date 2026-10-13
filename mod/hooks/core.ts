@@ -286,7 +286,63 @@ export function statusLabel(status: SessionRowStatus): string {
 
 const GAP = '   '
 
-export type PaneWidths = { title: number; sid: number; status: number; model: number; effort: number }
+/** Code points of East Asian wide or fullwidth characters a terminal draws in two cells (emoji aside: Emoji_Presentation). */
+const WIDE_RANGES: readonly (readonly [number, number])[] = [
+  [0x1100, 0x115f], [0x2e80, 0x303e], [0x3041, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa4cf],
+  [0xa960, 0xa97f], [0xac00, 0xd7a3], [0xf900, 0xfaff], [0xfe10, 0xfe19], [0xfe30, 0xfe6f], [0xff00, 0xff60],
+  [0xffe0, 0xffe6], [0x1f300, 0x1f64f], [0x1f900, 0x1f9ff], [0x20000, 0x2fffd], [0x30000, 0x3fffd],
+]
+const ZERO_CELLS = /^[\p{Mn}\p{Me}\p{Cf}\p{Cc}\p{Emoji_Modifier}]$/u
+const FLAG_HALF = /^\p{Regional_Indicator}$/u
+const EMOJI = /^\p{Emoji_Presentation}$/u
+const PICTOGRAPH = /^\p{Extended_Pictographic}$/u
+/** Printable ASCII only: one cell a character, no need to look at each. */
+const PLAIN = /^[\x20-\x7e]*$/
+
+/**
+ * `text`'s code points, each with the cells a terminal gives it: two for a wide or fullwidth character, an emoji drawn
+ * as one (a pictograph followed by the emoji variation selector too) and a flag (its first regional indicator); none
+ * for a combining mark, a format or control character, a skin-tone modifier, a flag's second regional indicator and a
+ * character a zero-width joiner joins to the one before; one for any other.
+ */
+function cellsOf(text: string): [string, number][] {
+  const out: [string, number][] = []
+  let isJoined = false
+  let isFlagOpen = false
+  for (const ch of text) {
+    const code = ch.codePointAt(0) as number
+    const isFlagHalf = FLAG_HALF.test(ch)
+    let cells = 1
+    if (isJoined || ZERO_CELLS.test(ch)) cells = 0
+    else if (isFlagHalf) cells = isFlagOpen ? 0 : 2
+    else if (EMOJI.test(ch) || WIDE_RANGES.some(([from, to]) => code >= from && code <= to)) cells = 2
+    const last = out[out.length - 1]
+    if (code === 0xfe0f && last !== undefined && last[1] === 1 && PICTOGRAPH.test(last[0])) last[1] = 2
+    isFlagOpen = isFlagHalf && !isJoined && !isFlagOpen
+    isJoined = code === 0x200d
+    out.push([ch, cells])
+  }
+  return out
+}
+
+/** The width of `text` in terminal cells (cellsOf): a wide character or an emoji counts two, a combining mark none. */
+export function cellWidth(text: string): number {
+  if (PLAIN.test(text)) return text.length
+  return cellsOf(text).reduce((sum, [, cells]) => sum + cells, 0)
+}
+
+/** The longest start of `text` that fits in `cells` cells; a character never splits from the marks that follow it. */
+function headCells(text: string, cells: number): string {
+  if (PLAIN.test(text)) return text.slice(0, Math.max(0, cells))
+  let head = ''
+  let used = 0
+  for (const [ch, width] of cellsOf(text)) {
+    if (used + width > cells) break
+    head += ch
+    used += width
+  }
+  return head
+}
 
 /** A row's elapsed column at the display clock: formatAge of elapsedSeconds, `-` when there is nothing to tell. */
 export function elapsedText(row: SessionRow, clock?: ElapsedClock): string {
@@ -294,49 +350,75 @@ export function elapsedText(row: SessionRow, clock?: ElapsedClock): string {
   return sec === undefined ? '-' : formatAge(sec)
 }
 
-/** Column widths from the content, so the columns sit close; the title takes what is left. */
-export function paneWidths(rows: readonly SessionRow[], columns: number, clock?: ElapsedClock): PaneWidths {
-  const widest = (header: string, cell: (row: SessionRow) => string) =>
-    Math.max(header.length, ...rows.map(row => cell(row).length))
-  const sid = widest('sid', row => row.sid8 || '-')
-  const status = widest('status', row => statusLabel(row.status))
-  const model = widest('model', row => row.model)
-  const effort = widest('effort', row => row.effort)
-  const elapsed = widest('elapsed', row => elapsedText(row, clock))
-  const rest = sid + status + model + effort + elapsed + GAP.length * 5
-  const wanted = widest('title', row => row.title)
-  return { title: Math.max(12, Math.min(wanted, columns - rest)), sid, status, model, effort }
+/** The effort levels a worker launches with (launch_worker's effort). */
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** The model aliases the CLI names (`claude --help`); a full model name is wider, and widens its column (paneWidths). */
+const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
+/** The elapsed column's fixed width holds every formatAge text below this many seconds: 1000 hours, 41 days. */
+export const ELAPSED_FIXED_SEC = 1000 * 3600
+
+/** The width in cells of the widest of `texts`. */
+function widestOf(texts: readonly string[]): number {
+  return Math.max(...texts.map(cellWidth))
 }
 
+/**
+ * The sessions rows' columns after the title, in their order: its header, a row's cell, and its fixed width in cells,
+ * the widest text the column can hold, its header included, computed once: the session id 8 hex digits (`-` without
+ * one), the status the widest label statusLabel gives, the model the widest CLI alias, the effort the widest of EFFORTS
+ * (`?` for an entry without one), the elapsed the widest formatAge text below ELAPSED_FIXED_SEC (`59m59s` under an
+ * hour, `999h59m`). The terminal panel and panel_snapshot lay them out at these widths (paneWidths), the desktop
+ * surface joins the same cells (desktopRowLines).
+ */
+export const SESSION_COLUMNS: readonly { id: 'sid' | 'status' | 'model' | 'effort' | 'elapsed'; header: string; cell: (row: SessionRow, clock?: ElapsedClock) => string; width: number }[] = [
+  { id: 'sid', header: 'sid', cell: row => row.sid8 || '-', width: widestOf(['sid', '-', 'f'.repeat(8)]) },
+  { id: 'status', header: 'status', cell: row => statusLabel(row.status), width: widestOf(['status', ...(Object.keys(STATUS_ORDER) as SessionRowStatus[]).map(statusLabel)]) },
+  { id: 'model', header: 'model', cell: row => row.model, width: widestOf(['model', '?', ...MODEL_ALIASES]) },
+  { id: 'effort', header: 'effort', cell: row => row.effort, width: widestOf(['effort', '?', ...EFFORTS]) },
+  { id: 'elapsed', header: 'elapsed', cell: (row, clock) => elapsedText(row, clock), width: widestOf(['elapsed', '-', formatAge(59), formatAge(3599), formatAge(ELAPSED_FIXED_SEC - 1)]) },
+]
+
+/** The fewest cells the title column keeps however narrow the panel: two cells of the title and the ellipsis. */
+export const TITLE_MIN = 3
+/** The title column's width when the panel has the room and no title is wider. */
+const TITLE_FLOOR = 12
+
+export type PaneWidths = { title: number; sid: number; status: number; model: number; effort: number; elapsed: number }
+
+/**
+ * The column widths for `rows` in `columns` cells: each column of SESSION_COLUMNS at its fixed width, wider only for a
+ * row whose cell is wider (a full model name, an elapsed of 1000 hours or more), so no cell is ever cut and every row
+ * keeps the same columns; the panel's width moves none of them. The title takes the room left, up to its widest title
+ * (at least TITLE_FLOOR), and never less than TITLE_MIN: below that room the row is cut at its right edge (formatRow).
+ */
+export function paneWidths(rows: readonly SessionRow[], columns: number, clock?: ElapsedClock): PaneWidths {
+  const [sid, status, model, effort, elapsed] = SESSION_COLUMNS.map(column => Math.max(column.width, ...rows.map(row => cellWidth(column.cell(row, clock))))) as [number, number, number, number, number]
+  const room = columns - (sid + status + model + effort + elapsed) - GAP.length * SESSION_COLUMNS.length
+  const wanted = Math.max(TITLE_FLOOR, widestOf(['title', ...rows.map(row => row.title)]))
+  return { title: Math.max(TITLE_MIN, Math.min(wanted, room)), sid, status, model, effort, elapsed }
+}
+
+/** `text` in exactly `width` cells: padded with blanks, or cut with an ellipsis (cellWidth). */
 function fit(text: string, width: number): string {
-  return text.length > width ? text.slice(0, Math.max(1, width - 1)) + '…' : text.padEnd(width)
+  const head = cellWidth(text) > width ? headCells(text, Math.max(1, width - 1)) + '…' : text
+  return head + ' '.repeat(Math.max(0, width - cellWidth(head)))
 }
 
 function cut(line: string, columns: number): string {
-  return line.length > columns ? line.slice(0, Math.max(1, columns - 1)) + '…' : line
+  return cellWidth(line) > columns ? headCells(line, Math.max(1, columns - 1)) + '…' : line
 }
 
-/** One pane line for a row: title, status, model, effort, elapsed at the display clock; cut to `columns`. */
+/** One pane line for a row: title, then the cells of SESSION_COLUMNS at `widths`, the last unpadded; cut to `columns`. */
 export function formatRow(row: SessionRow, columns: number, widths: PaneWidths = paneWidths([row], columns), clock?: ElapsedClock): string {
-  return cut(
-    [
-      fit(row.title, widths.title),
-      fit(row.sid8 || '-', widths.sid),
-      fit(statusLabel(row.status), widths.status),
-      fit(row.model, widths.model),
-      fit(row.effort, widths.effort),
-      elapsedText(row, clock),
-    ].join(GAP),
-    columns,
-  )
+  const cells = SESSION_COLUMNS.map((column, i) => (i === SESSION_COLUMNS.length - 1 ? column.cell(row, clock) : fit(column.cell(row, clock), widths[column.id])))
+  return cut([fit(row.title, widths.title), ...cells].join(GAP), columns)
 }
 
 /** The pane's column header, aligned with formatRow. */
 export function formatHeader(columns: number, widths: PaneWidths): string {
-  return cut(
-    [fit('title', widths.title), fit('sid', widths.sid), fit('status', widths.status), fit('model', widths.model), fit('effort', widths.effort), 'elapsed'].join(GAP),
-    columns,
-  )
+  const cells = SESSION_COLUMNS.map((column, i) => (i === SESSION_COLUMNS.length - 1 ? column.header : fit(column.header, widths[column.id])))
+  return cut([fit('title', widths.title), ...cells].join(GAP), columns)
 }
 
 /** What separates the cells of a row on a surface that draws text in a proportional font (desktopRowText). */
@@ -350,11 +432,11 @@ const DESKTOP_SEP = ' \u00B7 '
  * own, which the surface wraps in the room it has.
  */
 export function desktopRowLines(row: SessionRow, clock?: ElapsedClock): [string, string] {
-  return [row.title, [row.sid8 || '-', statusLabel(row.status), row.model, row.effort, elapsedText(row, clock)].join(DESKTOP_SEP)]
+  return [row.title, SESSION_COLUMNS.map(column => column.cell(row, clock)).join(DESKTOP_SEP)]
 }
 
 /** The column header of desktopRowLines' rows, its two lines. */
-export const DESKTOP_HEADER: readonly [string, string] = ['title', ['sid', 'status', 'model', 'effort', 'elapsed'].join(DESKTOP_SEP)]
+export const DESKTOP_HEADER: readonly [string, string] = ['title', SESSION_COLUMNS.map(column => column.header).join(DESKTOP_SEP)]
 
 function shortDir(dir: string): string {
   const parts = dir.replace(/\/+$/, '').split('/')
@@ -744,8 +826,6 @@ export function isFinishedRun(resultText: string): boolean {
 }
 
 // ---------------------------------------------------------------- launch guard
-
-export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
 export type LaunchArgs = {
   dir: string

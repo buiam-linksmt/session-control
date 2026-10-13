@@ -55,6 +55,11 @@ import {
   holdOffset,
   formatRow,
   paneWidths,
+  SESSION_COLUMNS,
+  ELAPSED_FIXED_SEC,
+  TITLE_MIN,
+  EFFORTS,
+  cellWidth,
   isPidAlive,
   mergeCompletion,
   parseProcFacts,
@@ -78,6 +83,7 @@ import {
   isE2eRunDir,
   elapsedSeconds,
   formatAge,
+  elapsedText,
   isSameWinPath,
   isWinAbsolute,
   tailLines,
@@ -529,6 +535,152 @@ describe('pane columns', () => {
     const orphan = rows.find(row => row.status === 'orphan')!
     expect(desktopRowLines({ ...orphan, sid8: '', elapsedSec: undefined })).toEqual([orphan.title, '- \u00B7 orphan \u00B7 ? \u00B7 ? \u00B7 -'])
     for (const row of rows) for (const line of desktopRowLines(row)) expect(line).not.toMatch(/ {2}|\u2026/)
+  })
+})
+
+describe('fixed session columns (decision mod-33)', () => {
+  const FIXED = { sid: 8, status: 20, model: 6, effort: 6, elapsed: 7 }
+  // The cells the five fixed columns and their gaps take: the title has the rest.
+  const FIXED_SUM = Object.values(FIXED).reduce((sum, one) => sum + one, 0) + 3 * 5
+  /** What `line` shows from cell `cell` on (each character measured after the one before it, for a joiner or a selector). */
+  const fromCell = (line: string, cell: number) => {
+    let i = 0
+    let used = 0
+    let prev = ''
+    for (const ch of line) {
+      if (used >= cell) break
+      used += cellWidth(prev + ch) - cellWidth(prev)
+      prev = ch
+      i += ch.length
+    }
+    return line.slice(i)
+  }
+  /** The cell each fixed column starts at, for `widths`. */
+  const starts = (widths: ReturnType<typeof paneWidths>) => {
+    const out: Record<string, number> = {}
+    let at = widths.title + 3
+    for (const column of SESSION_COLUMNS) {
+      out[column.id] = at
+      at += widths[column.id] + 3
+    }
+    return out
+  }
+  const base = buildRows(REGISTRY, facts, NOW_SEC)
+  const alive = base.find(row => row.status === 'alive')!
+  const titled = (title: string) => ({ ...alive, title })
+  const DAYS = { ...alive, title: 'finished long ago', status: 'done' as const, startedAt: NOW_SEC - 900_000, endedAt: NOW_SEC - 600_000, elapsedSec: undefined }
+  const LONG = titled('a worker title long enough to pass the room any panel up to 300 columns gives it, and then some more words to be sure it is cut')
+  const WIDE = titled('\u6F22\u5B57\u306E\u30BF\u30A4\u30C8\u30EB \u{1F680} \u{1F468}\u200D\u{1F469}\u200D\u{1F467} e\u0301 \uD55C\uAD6D\uC5B4 and a long tail of plain words after the wide ones')
+  const rows = [...base, DAYS, LONG, WIDE]
+
+  test('the width table: each column as wide as the widest value it can hold, its header included, computed once', () => {
+    expect(Object.fromEntries(SESSION_COLUMNS.map(column => [column.id, column.width]))).toEqual(FIXED)
+    expect(SESSION_COLUMNS.map(column => column.header)).toEqual(['sid', 'status', 'model', 'effort', 'elapsed'])
+    const statuses = ['alive', 'dead', 'orphan', 'unreported', 'queued', 'done'].map(one => statusLabel(one as never))
+    expect(Math.max(...statuses.map(cellWidth))).toBe(FIXED.status)
+    expect(statuses).toContain('finished-unharvested')
+    expect(Math.max(...EFFORTS.map(cellWidth))).toBe(FIXED.effort)
+    expect(Math.max(...['fable', 'opus', 'sonnet', 'haiku'].map(cellWidth))).toBe(FIXED.model)
+    expect(cellWidth('ffffffff')).toBe(FIXED.sid)
+  })
+
+  test("the elapsed formatter's longest outputs: each fits the elapsed column below 1000 hours, the widest exactly", () => {
+    expect(ELAPSED_FIXED_SEC).toBe(3_600_000)
+    expect([59, 3599, 86_400 + 3599, 3 * 86_400, 99 * 3600 + 3599, ELAPSED_FIXED_SEC - 1].map(formatAge)).toEqual(['59s', '59m59s', '24h59m', '72h00m', '99h59m', '999h59m'])
+    let widest = 0
+    for (let sec = 0; sec < ELAPSED_FIXED_SEC; sec += sec < 7200 ? 1 : 59) widest = Math.max(widest, formatAge(sec).length)
+    expect(widest).toBe(FIXED.elapsed)
+    expect(cellWidth(formatAge(ELAPSED_FIXED_SEC - 1))).toBe(FIXED.elapsed)
+    // From 1000 hours the text is wider: the column widens for every row, so it is still never cut.
+    const ancient = { ...DAYS, startedAt: NOW_SEC - ELAPSED_FIXED_SEC - 60, endedAt: NOW_SEC }
+    const widths = paneWidths([...rows, ancient], 120)
+    expect(widths.elapsed).toBe(cellWidth('1000h01m'))
+    expect(formatRow(ancient, 120, widths)).toEndWith('   1000h01m')
+    expect(formatRow(DAYS, 120, widths)).toEndWith('   83h20m')
+  })
+
+  test('a title longer than the room is cut at its end with the ellipsis; the fixed columns keep their widths and the elapsed is whole', () => {
+    for (const columns of [80, 100, 140]) {
+      const widths = paneWidths(rows, columns)
+      expect(widths.title).toBe(columns - FIXED_SUM)
+      expect({ ...widths, title: 0 }).toEqual({ ...FIXED, title: 0 })
+      const line = formatRow(LONG, columns, widths)
+      expect(fromCell(line, 0).slice(0, widths.title)).toBe(LONG.title.slice(0, widths.title - 1) + '\u2026')
+      expect(cellWidth(line)).toBeLessThanOrEqual(columns)
+      expect(line).toEndWith('   2m05s')
+    }
+  })
+
+  test('a title shorter than the room is whole: the title column is as wide as the widest title (12 at least), the columns sit close after it', () => {
+    const short = [titled('short one'), titled('a little longer title')]
+    const widths = paneWidths(short, 200)
+    expect(widths.title).toBe('a little longer title'.length)
+    expect(formatRow(short[0]!, 200, widths)).toStartWith('short one' + ' '.repeat(12 + 3) + alive.sid8)
+    expect(paneWidths([titled('x')], 200).title).toBe(12)
+    // The room decides only once the widest title passes it.
+    expect(paneWidths(short, FIXED_SUM + 15).title).toBe(15)
+  })
+
+  test('wide characters and emoji in the title: two cells each (a joined family one emoji), combining marks none; the row stays in its cells', () => {
+    expect(['abc', '\u6F22\u5B57', '\u{1F680}', '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}', '\u{1F1EE}\u{1F1F9}', '\u2764\uFE0F', 'e\u0301', '\uD55C\uAD6D\uC5B4', '\uFF21'].map(cellWidth)).toEqual([3, 4, 2, 2, 2, 2, 1, 6, 2])
+    for (const columns of [70, 90, 117, 160]) {
+      const widths = paneWidths(rows, columns)
+      const line = formatRow(WIDE, columns, widths)
+      expect(cellWidth(line)).toBeLessThanOrEqual(columns)
+      const at = starts(widths)
+      expect(fromCell(line, at.sid!)).toStartWith(WIDE.sid8 + '   running')
+      expect(fromCell(line, at.elapsed!)).toBe('2m05s')
+      // Cut inside the title: never half a wide character, the ellipsis then blanks up to the column.
+      expect(cellWidth(fromCell(line, 0).slice(0, line.indexOf(WIDE.sid8)))).toBe(widths.title + 3)
+    }
+  })
+
+  test('from 20 to 300 columns: no row wider than its box; the fixed columns whole and at the same cell on every row down to the threshold, cut at the right edge below it', () => {
+    const threshold = FIXED_SUM + TITLE_MIN
+    expect(threshold).toBe(65)
+    // Each width's departures from the layout, gathered and checked once at the end (a check per cell is slow).
+    const wrong: string[] = []
+    const check = (isRight: boolean, what: string) => {
+      if (!isRight) wrong.push(what)
+    }
+    for (let columns = 20; columns <= 300; columns++) {
+      const widths = paneWidths(rows, columns)
+      const header = formatHeader(columns, widths)
+      const lines = rows.map(row => formatRow(row, columns, widths))
+      for (const line of [header, ...lines]) check(cellWidth(line) <= columns, `${columns}: wider than the box: ${line}`)
+      check(SESSION_COLUMNS.every(column => widths[column.id] === FIXED[column.id]), `${columns}: widths ${JSON.stringify(widths)}`)
+      if (columns < threshold) {
+        // Too narrow for the fixed columns and the shortest title: the title keeps its least, the row ends at the edge.
+        check(widths.title === TITLE_MIN, `${columns}: title ${widths.title}`)
+        for (const [i, line] of lines.entries()) {
+          const whole = formatRow(rows[i]!, 1000, widths)
+          const isCut = line === fromCell(whole, 0).slice(0, line.length - 1) + '\u2026' && cellWidth(line) === columns
+          check(cellWidth(whole) <= columns ? line === whole : isCut, `${columns}: not cut at the edge: ${line}`)
+        }
+        continue
+      }
+      const at = starts(widths)
+      for (const [i, line] of lines.entries()) {
+        const row = rows[i]!
+        check(fromCell(line, at.sid!).startsWith((row.sid8 || '-').padEnd(8) + '   '), `${columns}: sid moved: ${line}`)
+        check(fromCell(line, at.status!).startsWith(statusLabel(row.status).padEnd(FIXED.status) + '   '), `${columns}: status moved: ${line}`)
+        check(fromCell(line, at.model!).startsWith(row.model.padEnd(FIXED.model) + '   '), `${columns}: model moved: ${line}`)
+        check(fromCell(line, at.effort!).startsWith(row.effort.padEnd(FIXED.effort) + '   '), `${columns}: effort moved: ${line}`)
+        check(fromCell(line, at.elapsed!) === elapsedText(row), `${columns}: elapsed not whole: ${line}`)
+      }
+      check(fromCell(header, at.sid!) === 'sid        status                 model    effort   elapsed', `${columns}: header: ${header}`)
+    }
+    expect(wrong).toEqual([])
+  })
+
+  test('a model wider than its fixed width (a full model name) widens the column for every row; nothing is cut', () => {
+    const full = { ...alive, title: 'full name', model: 'claude-sonnet-5-5' }
+    const widths = paneWidths([...rows, full], 140)
+    expect(widths.model).toBe('claude-sonnet-5-5'.length)
+    const lines = [...rows, full].map(row => formatRow(row, 140, widths))
+    const at = starts(widths)
+    for (const line of lines) expect(fromCell(line, at.effort!).slice(0, 4)).toMatch(/^(high|\?   |medi|low |xhig|max )/)
+    expect(lines.at(-1)).toContain('claude-sonnet-5-5   high')
   })
 })
 
