@@ -32,6 +32,8 @@ import {
   TOAST_TITLES,
   toastText,
   wrapText,
+  wrapLogLine,
+  LOG_HANG_MIN_WIDTH,
   retireVerdict,
   buildRows,
   nextBack,
@@ -90,6 +92,7 @@ import type { LaunchArgs, LaunchFacts } from '../hooks/core'
 import { PROBE_PS1, START_MATCH_MS } from '../hooks/host-windows'
 import { freshText } from '../hooks/store'
 import { isRegistrySound } from '../hooks/notices'
+import { REDACTED } from '../hooks/trace'
 import {
   DAEMON_RESUME,
   HOME,
@@ -694,6 +697,144 @@ describe('panel layout', () => {
   test('wraps text to the width and cuts a longer word', () => {
     expect(wrapText('aaa bbb ccc ddd', 7)).toEqual(['aaa bbb', 'ccc ddd'])
     expect(wrapText('x'.repeat(20), 8)).toEqual(['xxxxxxxx', 'xxxxxxxx', 'xxxx'])
+  })
+
+  // The log box's hanging indent (decision mod-30): a wrapped tool call or tool result reads as one block.
+  describe('a log line: the hanging indent', () => {
+    /** wrapText as it was before the hanging indent, the reference a line without one must still match. */
+    const wrapBefore = (text: string, width: number): string[] => {
+      const w = Math.max(8, width)
+      const out: string[] = []
+      for (const para of text.split('\n')) {
+        let line = ''
+        for (let word of para.split(/\s+/).filter(x => x !== '')) {
+          while (word.length > w) {
+            if (line !== '') {
+              out.push(line)
+              line = ''
+            }
+            out.push(word.slice(0, w))
+            word = word.slice(w)
+          }
+          if (line === '') line = word
+          else if (line.length + 1 + word.length <= w) line += ' ' + word
+          else {
+            out.push(line)
+            line = word
+          }
+        }
+        out.push(line)
+      }
+      return out.length === 0 ? [''] : out
+    }
+    /** Every line within the width, each continuation line two blanks in, and the words of the entry kept in order. */
+    const expectHung = (entry: string, width: number) => {
+      const lines = wrapLogLine(entry, width)
+      for (const line of lines) expect(line.length).toBeLessThanOrEqual(width)
+      expect(lines[0]).toBe(wrapBefore(entry, width)[0])
+      for (const line of lines.slice(1)) expect(line === '' || (line.startsWith('  ') && !line.startsWith('   '))).toBe(true)
+      expect(lines.join('').replace(/\s+/g, '')).toBe(entry.replace(/\s+/g, ''))
+      return lines
+    }
+    /** Short pieces of text a log line holds, blanks and control characters among them. */
+    const PIECES = ['a', 'bc', 'word', 'x'.repeat(30), ' ', '  ', '\t', '\n', '\r\n', '漢字', '\u{1F600}', 'é', '\u0007', '\u001b[31m', '>', '<', '[redacted]', 'API_KEY=[redacted]']
+    const generated = (count: number): string[] => {
+      let seed = 7
+      const next = (n: number) => {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        return seed % n
+      }
+      return Array.from({ length: count }, () => Array.from({ length: next(40) }, () => PIECES[next(PIECES.length)]).join(''))
+    }
+
+    test('a wrapped tool call and tool result keep their continuation lines two columns in, under the text after the marker; the worker\'s own text wraps at column 0', () => {
+      expect(wrapLogLine(`> Bash ${'word '.repeat(12)}`, 24)).toEqual(['> Bash word word word', '  word word word word', '  word word word word', '  word'])
+      expect(wrapLogLine(`  < ${'result text '.repeat(5)}`, 24)).toEqual(['< result text result', '  text result text', '  result text result', '  text'])
+      expect(wrapLogLine('  < ERROR the command failed with a long message', 24)).toEqual(['< ERROR the command', '  failed with a long', '  message'])
+      expect(wrapLogLine('worker text '.repeat(4), 24)).toEqual(['worker text worker text', 'worker text worker text'])
+      // Only the markers the log writes: a call `> ` at column 0, a result `  < `; a `<` or `>` elsewhere is text.
+      expect(wrapLogLine(`< not a result ${'word '.repeat(6)}`, 24)).toEqual(wrapText(`< not a result ${'word '.repeat(6)}`, 24))
+      expect(wrapLogLine(`>not a call ${'word '.repeat(6)}`, 24)).toEqual(wrapText(`>not a call ${'word '.repeat(6)}`, 24))
+      expect(wrapLogLine(`a > b and c < d ${'word '.repeat(6)}`, 24)).toEqual(wrapText(`a > b and c < d ${'word '.repeat(6)}`, 24))
+      // At the snapshot's width (116) and a terminal's: the same rule.
+      expectHung(`> Bash ${'git log --oneline origin/main..HEAD && '.repeat(8)}`, 116)
+      expectHung(`  < ${'## feature/x...origin/feature/x '.repeat(10)}`, 56)
+    })
+
+    test('a log line that fits is unchanged byte for byte, and the first line of a wrapped one is as before; wrapText without a hang is as before', () => {
+      for (const line of ['> Bash git status -sb', '  < ## develop', '  < ', 'Reading the suite files.', `> ${'a'.repeat(22)}`, '  < ok'])
+        expect(wrapLogLine(line, 24)).toEqual(wrapBefore(line, 24))
+      expect(wrapLogLine('> Bash git status -sb', 116)).toEqual(['> Bash git status -sb'])
+      // A result that fit as two lines may take three: its continuation has two columns less.
+      expect(wrapBefore('  < ## develop...origin/develop', 24)).toEqual(['< ##', 'develop...origin/develop'])
+      expect(wrapLogLine('  < ## develop...origin/develop', 24)).toEqual(['< ##', '  develop...origin/devel', '  op'])
+      for (const entry of generated(400)) {
+        for (const width of [8, 20, 21, 24, 56, 116]) {
+          expect(wrapText(entry, width)).toEqual(wrapBefore(entry, width))
+          const before = wrapBefore(entry, width)
+          const after = wrapLogLine(entry, width)
+          expect(after[0]).toBe(before[0])
+          if (before.length === 1) expect(after).toEqual(before)
+          for (const marked of [`> ${entry}`, `  < ${entry}`]) {
+            const lines = wrapLogLine(marked, width)
+            expect(lines[0]).toBe(wrapBefore(marked, width)[0])
+            for (const line of lines) expect(line.length).toBeLessThanOrEqual(Math.max(8, width))
+          }
+        }
+      }
+    })
+
+    test('a word longer than the room is cut, and each piece after the first line carries the indent', () => {
+      expect(wrapLogLine(`> ${'x'.repeat(60)}`, 24)).toEqual(['>', `  ${'x'.repeat(22)}`, `  ${'x'.repeat(22)}`, `  ${'x'.repeat(16)}`])
+      expect(wrapLogLine(`  < ok ${'y'.repeat(50)}`, 24)).toEqual(['< ok', `  ${'y'.repeat(22)}`, `  ${'y'.repeat(22)}`, `  ${'y'.repeat(6)}`])
+      expectHung(`> Read /a/${'deep/'.repeat(40)}file.ts and the next words`, 30)
+    })
+
+    test(`in a box of 20 columns or less the lines wrap as before, with no indent (LOG_HANG_MIN_WIDTH ${LOG_HANG_MIN_WIDTH})`, () => {
+      expect(LOG_HANG_MIN_WIDTH).toBe(21)
+      const call = `> Bash ${'word '.repeat(12)}`
+      for (const width of [1, 8, 12, 20]) expect(wrapLogLine(call, width)).toEqual(wrapBefore(call, width))
+      expect(wrapLogLine(call, 21).slice(1).every(line => line.startsWith('  '))).toBe(true)
+    })
+
+    test('an empty entry, an entry with line breaks (each following line a continuation of it), CRLF', () => {
+      expect(wrapLogLine('', 40)).toEqual([''])
+      expect(wrapLogLine('> ', 40)).toEqual(['>'])
+      expect(wrapLogLine('  < ', 40)).toEqual(['<'])
+      expect(wrapLogLine('> Bash echo a\nb c\n\nd', 40)).toEqual(['> Bash echo a', '  b c', '', '  d'])
+      expect(wrapLogLine('  < first\r\nsecond\r\n', 40)).toEqual(['< first', '  second', ''])
+      expect(wrapLogLine('  < first\r\nsecond', 40)).toEqual(wrapLogLine('  < first\nsecond', 40))
+      expect(wrapLogLine('one\ntwo', 40)).toEqual(['one', 'two'])
+    })
+
+    test('widths are counted as before, one per UTF-16 code unit: wide characters, emoji, combining marks; a tab separates words; a control character is one character', () => {
+      expect(wrapLogLine('> Read 漢字テスト漢字 テスト漢字テスト 漢字テスト漢字テスト', 24)).toEqual(['> Read 漢字テスト漢字 テスト漢字テスト', '  漢字テスト漢字テスト'])
+      expect(wrapLogLine('> Bash echo \u{1F600}\u{1F600}\u{1F600}\u{1F600} \u{1F600}\u{1F600}\u{1F600} done and more', 24)).toEqual(['> Bash echo \u{1F600}\u{1F600}\u{1F600}\u{1F600}', '  \u{1F600}\u{1F600}\u{1F600} done and more'])
+      expect(wrapLogLine(`> ${'\u{1F600}'.repeat(15)}`, 24)).toEqual(['>', `  ${'\u{1F600}'.repeat(11)}`, `  ${'\u{1F600}'.repeat(4)}`])
+      expect(wrapLogLine('  < café cafés résumé naïve words', 24)).toEqual(['< café cafés résumé', '  naïve words'])
+      expect(wrapLogLine('> Bash\tmake\ttest\tand\tthen\tthe\tnext', 24)).toEqual(['> Bash make test and', '  then the next'])
+      expect(wrapLogLine('> echo \u0007bell \u001b[31mred\u001b[0m and more words', 24)).toEqual(['> echo \u0007bell', '  \u001b[31mred\u001b[0m and more', '  words'])
+    })
+
+    test('the redaction marker is a word like any other: whole, and on a continuation line it hangs too', () => {
+      expect(REDACTED).toBe('[redacted]')
+      expect(wrapLogLine(`  < Authorization: Bearer ${REDACTED} and API_KEY=${REDACTED} ok`, 24)).toEqual(['< Authorization: Bearer', `  ${REDACTED} and`, `  API_KEY=${REDACTED} ok`])
+      expectHung(`> Bash curl -H "Authorization: Bearer ${REDACTED}" https://example.invalid/${'path/'.repeat(10)}`, 40)
+    })
+
+    test('a 100 KB entry, and a 1 MB one, wrap in linear time: words, and one word without a blank', () => {
+      // Generous, as the test kit runs files side by side on a machine that may be busy (each takes a few ms alone).
+      const BOUND_MS = 2000
+      for (const entry of [`> Bash ${'abcdefghi '.repeat(10_000)}`, `  < ${'z'.repeat(100_000)}`, `> Bash ${'abcdefghi '.repeat(100_000)}`, `  < ${'z'.repeat(1_000_000)}`]) {
+        const started = performance.now()
+        const lines = wrapLogLine(entry, 116)
+        expect(performance.now() - started).toBeLessThan(BOUND_MS)
+        expect(lines.length).toBeGreaterThan(entry.length / 116)
+        expect(lines.every(line => line.length <= 116)).toBe(true)
+        expect(lines.slice(1).every(line => line.startsWith('  ') && !line.startsWith('   '))).toBe(true)
+        expect(lines.join('').replace(/\s+/g, '')).toBe(entry.replace(/\s+/g, ''))
+      }
+    })
   })
   test('the scrollbar thumb follows the window, and is blank when all fits', () => {
     expect(scrollbar(5, 5, 0)).toEqual([' ', ' ', ' ', ' ', ' '])

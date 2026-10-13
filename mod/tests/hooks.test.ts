@@ -70,6 +70,8 @@ const LATE = new Set<string>()
 const UNREADABLE = new Set<string>()
 // Reads a test holds until it releases them: the transcript tail of the alive worker; every append (the trace's too);
 // every Linux probe; every read of the launched worker's sessions file (sessions, with heldSessions told when one waits).
+/** The transcript rows a test puts in place of the fixture's (undefined: the fixture's two rows). */
+const TAIL: { rows: object[] | undefined } = { rows: undefined }
 const HELD: { tail: Promise<unknown> | undefined; append?: Promise<unknown>; probe?: Promise<unknown>; sessions?: Promise<unknown>; heldSessions?: () => void } = { tail: undefined }
 // The Linux probes running now and the most that ran at once (reset by world()).
 const PROBES = { inFlight: 0, max: 0 }
@@ -202,7 +204,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
   /** The transcript rows the tail answers: the alive worker's may be held by a test. */
   const tailRows = (path: string) => {
     const held = HELD.tail !== undefined && path.includes(SID_ALIVE) ? HELD.tail : undefined
-    const rows = [
+    const rows = TAIL.rows ?? [
       { type: 'assistant', message: { content: [{ type: 'text', text: 'Reading the suite files.' }, { type: 'tool_use', name: 'Bash', input: { command: 'git status -sb' } }] } },
       { type: 'user', message: { content: [{ type: 'tool_result', content: '## develop...origin/develop' }] } },
     ]
@@ -3897,6 +3899,44 @@ describe('the panel on the desktop surface', () => {
       expect(rows.length).toBeGreaterThan(1)
     } finally {
       QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('a wrapped log line hangs on the terminal: a call\'s and a result\'s continuation lines two columns in, the worker\'s text at column 0; the desktop ends each line whole, as before (decision mod-30)', { options: OPTIONS }, async ($, on) => {
+    const SAID = 'Reading the wrapper in core.ts and the two callers that draw the log box before the change.'
+    const COMMAND = 'git log --oneline origin/main..HEAD && git status -sb && git diff --stat HEAD~1'
+    const RESULT = '## feature/x...origin/feature/x [ahead 1] then the changed files: M mod/hooks/core.ts M mod/hooks/inspect.ts'
+    TAIL.rows = [
+      { type: 'assistant', message: { content: [{ type: 'text', text: SAID }, { type: 'tool_use', name: 'Bash', input: { command: COMMAND } }] } },
+      { type: 'user', message: { content: [{ type: 'tool_result', content: RESULT }] } },
+      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'git status -sb' } }] } },
+    ]
+    try {
+      // 60 columns: the log's lines wrap at 56.
+      const ui = await open($, on, 'terminal', { ...PANE_PROPS, bodyColumns: 60 })
+      await ui.press({ key: `s:${SID}` })
+      const texts = (await textsOf(ui)).map(one => one.text)
+      const from = texts.indexOf('Reading the wrapper in core.ts and the two callers that')
+      expect(texts.slice(from, from + 7)).toEqual([
+        'Reading the wrapper in core.ts and the two callers that',
+        'draw the log box before the change.',
+        '> Bash git log --oneline origin/main..HEAD && git status',
+        '  -sb && git diff --stat HEAD~1',
+        '< ## feature/x...origin/feature/x [ahead 1] then the',
+        '  changed files: M mod/hooks/core.ts M',
+        '> Bash git status -sb',
+      ])
+      await ui.unmount()
+      const desk = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, bodyColumns: 60 } as never })
+      const log = (await textsOf(desk)).filter(one => one.wrap === 'truncate-end')
+      expect(log).toEqual([
+        { text: SAID, wrap: 'truncate-end' },
+        { text: `> Bash ${COMMAND}`, wrap: 'truncate-end' },
+        { text: `  < ${RESULT}`, wrap: 'truncate-end' },
+        { text: '> Bash git status -sb', wrap: 'truncate-end' },
+      ])
+    } finally {
+      TAIL.rows = undefined
     }
   })
 })

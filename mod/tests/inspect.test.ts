@@ -16,6 +16,7 @@ import {
   isUnder,
   lastReport,
   matchSession,
+  panelSnapshotText,
   plainText,
   redactCounted,
   sessionWritesText,
@@ -612,6 +613,26 @@ describe('panel_snapshot', () => {
     expect(text).toContain('API_KEY=[redacted]')
     expectNoCanary(text)
     void w
+  })
+
+  test('a wrapped log line hangs: a call\'s and a result\'s continuation two columns in, the worker\'s text at column 0, a line that fits as before; redacted before the wrap (decision mod-30)', () => {
+    const call = `> Bash ${'git log --oneline origin/main..HEAD && '.repeat(4)}true`
+    const result = `  < password=${CANARIES.password} ${'## feature/x...origin/feature/x '.repeat(5)}`
+    const said = 'The worker explains what it found in the suite. '.repeat(4)
+    const text = panelSnapshotText({ snap: { at: NOW_MS, rows: [] }, queue: [], points: [], selectedPoint: null, log: { title: 'long worker', lines: [call, result, said, '> Bash git status -sb', '  < ok'] }, expanded: null, nowMs: NOW_MS })
+    const log = text.slice(text.indexOf('\nLOG long worker\n') + '\nLOG long worker\n'.length, text.indexOf('\n\nQUEUED WORK')).split('\n')
+    expect(log).toEqual([
+      '> Bash git log --oneline origin/main..HEAD && git log --oneline origin/main..HEAD && git log --oneline',
+      '  origin/main..HEAD && git log --oneline origin/main..HEAD && true',
+      '< password=[redacted] ## feature/x...origin/feature/x ## feature/x...origin/feature/x ##',
+      '  feature/x...origin/feature/x ## feature/x...origin/feature/x ## feature/x...origin/feature/x',
+      'The worker explains what it found in the suite. The worker explains what it found in the suite. The worker explains',
+      'what it found in the suite. The worker explains what it found in the suite.',
+      '> Bash git status -sb',
+      '< ok',
+    ])
+    for (const line of log) expect(line.length).toBeLessThanOrEqual(116)
+    expectNoCanary(text)
   })
 })
 

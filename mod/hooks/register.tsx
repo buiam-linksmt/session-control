@@ -133,6 +133,7 @@ import {
   TOAST_TITLES,
   toastText,
   wrapText,
+  wrapLogLine,
   formatRow,
   paneWidths,
   launchTimeoutMs,
@@ -3416,7 +3417,7 @@ export const register: Register = (on, options) => {
       const logRows: PRow[] = view.lines.flatMap(line => {
         const dim = line.startsWith('  <') || line.startsWith('>')
         if (isDesktop) return [{ text: line, dim, wrap: 'truncate-end' as const }]
-        const wrapped = wrapText(line, width).slice(0, 2)
+        const wrapped = wrapLogLine(line, width).slice(0, 2)
         return wrapped.map(text => ({ text, dim }))
       })
       if (logRows.length === 0) logRows.push({ text: 'Waiting for output.', dim: true })

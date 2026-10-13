@@ -7,7 +7,7 @@
 // Every answer is bounded.
 
 import type { SessionEntry, SessionRow, SessionRowStatus, SessionSnapshot } from '../types'
-import { classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, isGeneratedName, paneWidths, statusLabel, rowStatus, winPath, wrapText } from './core'
+import { classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, isGeneratedName, paneWidths, statusLabel, rowStatus, winPath, wrapLogLine, wrapText } from './core'
 import type { PresentedPoint, ProcFacts, QueuedTask } from './core'
 import type { NewerFiles } from './host'
 import { REDACTED, redact } from './trace'
@@ -570,7 +570,7 @@ export function panelSnapshotText(input: {
   if (rows.length > MAX_ROWS) out.push(`  (${rows.length - MAX_ROWS} more rows not shown)`)
   if (input.log !== null) {
     out.push('', `LOG ${oneLine(input.log.title, 100)}`)
-    const lines = input.log.lines.slice(-40).flatMap(line => wrapText(clean(line), width).slice(0, 2))
+    const lines = input.log.lines.slice(-40).flatMap(line => wrapLogLine(clean(line), width).slice(0, 2))
     out.push(...(lines.length === 0 ? ['Waiting for output.'] : lines))
   }
   out.push('', 'QUEUED WORK')

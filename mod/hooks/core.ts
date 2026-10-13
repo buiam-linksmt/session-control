@@ -1939,31 +1939,52 @@ export function holdOffset(offset: number, by: number, contentRows: number, body
 
 // --- panel layout: fixed sections, own scrolling, scrollbars ---------------
 
-/** Word-wrap `text` into lines of at most `width` characters; a word longer than the width is cut. */
-export function wrapText(text: string, width: number): string[] {
+/**
+ * Word-wrap `text` into lines of at most `width` characters; a word longer than the width is cut. With `hang`, every
+ * line after the first (the lines after a line break in `text` included) starts with that many blanks and is wrapped to
+ * the width less them, so no line is longer than the width; an empty line stays empty. Linear in the text's length.
+ */
+export function wrapText(text: string, width: number, hang = 0): string[] {
   const w = Math.max(8, width)
+  const indent = hang > 0 ? Math.min(Math.floor(hang), w - 1) : 0
+  const pad = ' '.repeat(indent)
   const out: string[] = []
+  // The room of the line being built: the whole width for the first line, less the indent for the lines after it.
+  const room = () => (out.length === 0 ? w : w - indent)
+  const push = (line: string) => out.push(out.length === 0 || line === '' ? line : pad + line)
   for (const para of text.split('\n')) {
     let line = ''
-    for (let word of para.split(/\s+/).filter(x => x !== '')) {
-      while (word.length > w) {
-        if (line !== '') {
-          out.push(line)
-          line = ''
-        }
-        out.push(word.slice(0, w))
-        word = word.slice(w)
+    for (const word of para.split(/\s+/).filter(x => x !== '')) {
+      if (line !== '' && line.length + 1 + word.length <= room()) {
+        line += ' ' + word
+        continue
       }
-      if (line === '') line = word
-      else if (line.length + 1 + word.length <= w) line += ' ' + word
-      else {
-        out.push(line)
-        line = word
+      if (line !== '') push(line)
+      // A word longer than the room is cut piece by piece, each piece as long as the room of the line it starts.
+      let at = 0
+      while (word.length - at > room()) {
+        const cut = room()
+        push(word.slice(at, at + cut))
+        at += cut
       }
+      line = at === 0 ? word : word.slice(at)
     }
-    out.push(line)
+    push(line)
   }
   return out.length === 0 ? [''] : out
+}
+
+/** The narrowest log box whose wrapped entries get a hanging indent: in a box of 20 columns or less the two columns stay text. */
+export const LOG_HANG_MIN_WIDTH = 21
+
+/**
+ * A log line as the terminal panel and panel_snapshot wrap it: a tool call (`> `) or a tool result (`  < `, whose leading
+ * blanks wrapText drops) keeps its continuation lines under the text after the marker, two blanks in; the worker's own
+ * text, and any line in a box narrower than LOG_HANG_MIN_WIDTH, wraps as wrapText does. A line that fits is unchanged.
+ * The desktop ends each log line at its own width (one row per line), so it has no continuation line to indent.
+ */
+export function wrapLogLine(line: string, width: number): string[] {
+  return wrapText(line, width, width >= LOG_HANG_MIN_WIDTH && /^(?:> | {2}< )/.test(line) ? 2 : 0)
 }
 
 export function clampOffset(offset: number, total: number, visible: number): number {
