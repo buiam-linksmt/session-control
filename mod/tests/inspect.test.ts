@@ -1,7 +1,6 @@
-// The read-only inspection tools (list_sessions, read_result, worker_tail, session_writes, panel_snapshot) through the
-// plugin on the mock engine, over a simulated machine: files in a map with their mtimes, the probe's output, the
-// transcript tails and the listing answered from that map. No real registry, transcript or /proc. The pure parts of
-// hooks/inspect.ts are tested on their own at the end.
+// The read-only inspection tools through the plugin over a simulated machine (files in a map with their mtimes, the
+// probe's output, transcript tails): no real registry, transcript or /proc. The pure parts of hooks/inspect.ts are
+// tested on their own at the end.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'

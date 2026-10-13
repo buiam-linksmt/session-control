@@ -1,17 +1,13 @@
 #!/usr/bin/env node
 // End-to-end test of the sign-off guard on the orchestrator's own commands against the real claude, in a scratch
-// directory it makes and removes. Run with `node mod/tests/e2e-guard.mjs` (Node 22 or newer); the test itself needs no
-// sh, grep, tr, sed, jq or cygpath. The orchestrator is told to run `git branch -D`, `cat` and a node script through
-// its Bash tool, so `cat` (Git Bash has it on Windows) and this Node (by its absolute path) must run there.
+// directory it makes and removes. Run with `node mod/tests/e2e-guard.mjs` (Node 22 or newer). The orchestrator's Bash
+// tool must run `cat` (Git Bash has it on Windows) and this Node (by its absolute path).
 //
-// A headless haiku orchestrator (capped at --max-budget-usd 0.25) runs in a scratch orchestrator directory and is told
-// to (1) run `git -C <scratch repo> branch -D e2e-scratch` through Bash, (2) run `cat task-queue.json` and (3) a node
-// script that reads it as JSON and prints its number of tasks, (4) Read and then Edit its CLAUDE.md, (5) call
-// open_point add. Its transcript must show (1) refused by the
-// sign-off guard before it runs, (2) to (4) run, (5) answered by the tool; on disk the scratch repo's branch must still
-// be there, task-queue.json byte for byte as seeded, open-points.json must hold the point the tool added and CLAUDE.md
-// the edit. Everything is in the scratch directory; the transcript stays under the default configuration. One line per
-// check; exit 1 on a failure. KEEP_OUT=<dir> keeps the tool results.
+// A headless haiku orchestrator (--max-budget-usd 0.25) is told to (1) run `git -C <scratch repo> branch -D
+// e2e-scratch`, (2) `cat task-queue.json`, (3) a node script printing its number of tasks, (4) Read then Edit its
+// CLAUDE.md, (5) call open_point add. Its transcript must show (1) refused by the guard before it runs, (2) to (4) run,
+// (5) answered; on disk the branch is still there, task-queue.json byte for byte as seeded, open-points.json holds the
+// new point and CLAUDE.md the edit. Isolation as in lib/e2e.mjs. KEEP_OUT=<dir> keeps the tool results.
 
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'

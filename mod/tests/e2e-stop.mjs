@@ -1,29 +1,20 @@
 #!/usr/bin/env node
-// Run with `node mod/tests/e2e-stop.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
-// needed.
+// Run with `node mod/tests/e2e-stop.mjs` (Node 22 or newer), from any directory.
 //
 // End-to-end test of stop_worker against the real claude, in a scratch directory it makes and removes. A headless haiku
-// orchestrator (capped at --max-budget-usd 0.25) launches one haiku worker through launch_worker whose task is to run
-// foreground `sleep 20` calls for a few minutes, waits in the foreground until the scratch registry shows the worker
-// alive with a `sleep` below it (the tree is recorded from /proc at that moment, with each start time), calls stop_worker
-// on it, then on an unknown id and on a finished entry (both refused), and answers. From outside, /proc must show the
-// worker pid and every process of its tree gone (or its pid with another start), while a bystander sleep of this script,
-// the orchestrator itself and every other claude process alive before the stop are still there. The proof text the
-// tool answered is read from the orchestrator's transcript and checked, and kept for the report with KEEP_OUT=<dir>.
-// Everything the mod reads or writes is in the scratch directory (registry, helper files, runs directory, trace); the
-// real registry is never touched and the licence picker option is empty: the worker inherits the default
-// configuration, where both transcripts stay. Linux /proc or native Windows is required: elsewhere the run
-// fails at once. One line per check; exit 1 on a failure. Only this run's own processes are ever signalled: the
-// worker's tree as recorded, each only while it still has its recorded start, and the bystander likewise.
+// orchestrator (--max-budget-usd 0.25) launches one haiku worker running foreground `sleep 20` calls, waits until the
+// scratch registry shows it alive with a `sleep` below it (the tree and each start time are recorded then), calls
+// stop_worker on it, then on an unknown id and on a finished entry (both refused). From outside, the worker and its
+// whole tree must be gone (or the pid reused with another start), while a bystander sleep of this script, the
+// orchestrator and every other claude alive before the stop stay. The proof text is read from the orchestrator's
+// transcript (kept with KEEP_OUT=<dir>). Isolation as in lib/e2e.mjs. Linux /proc or native Windows is required. Only
+// this run's own processes are ever signalled, each only while it still has its recorded start.
 //
-// On native Windows the same run reads Win32_Process through Windows PowerShell (winProcs of lib/e2e.mjs; a start is
-// the creation time in epoch ms, as the mod's own scripts compute it) for the tree, the outside watch and every check
-// after the stop; the bystander is a node.exe of this script. The worker's `sleep 20` runs through Git Bash: an MSYS
-// sleep.exe whose Windows parent (the fork that exec'd it) has exited, so it is in no Windows tree; it is recorded by
-// its command line (`...sleep.exe" 20`) and a start after the worker's, never through the MSYS process table the mod
-// reads, and its end is checked like the rest of the tree. The stop's proof is checked in its Windows words
-// (taskkill /T /F at once, the creation-time Abort check, the MSYS table note). The orchestrator's Bash tool needs Git
-// Bash (CLAUDE_CODE_GIT_BASH_PATH where Claude Code does not find it).
+// On native Windows every process read goes through Win32_Process (winProcs of lib/e2e.mjs, starts in epoch ms as the
+// mod computes them); the bystander is a node.exe. The worker's `sleep 20` is an MSYS sleep.exe whose Windows parent
+// (the fork that exec'd it) has exited, so it is in no Windows tree: it is recognised by its command line
+// (`...sleep.exe" 20`) and a start after the worker's. The proof is checked in its Windows words (taskkill /T /F at
+// once, the creation-time Abort check, the MSYS table note). The Bash tool needs Git Bash (CLAUDE_CODE_GIT_BASH_PATH).
 
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -83,11 +74,9 @@ BYSTANDER_START = IS_WINDOWS ? (winProcs().get(BYSTANDER)?.start ?? '') : startO
 const BYSTANDER_NAME = IS_WINDOWS ? 'node.exe' : 'sleep'
 
 /**
- * The wait of step 2 on Windows, written to wait-alive.mjs (see below) and run by the orchestrator's Bash tool: the
- * registry's `e2e sleeper` pid alive with a sleep below it, then its tree, the claude.exe processes and the worker pid,
- * as the Linux wait records them. The tree is the worker's Windows tree (each child created after its parent: a dead
- * parent's pid may name another process now) and the MSYS sleep.exe of its Git Bash, told by its command line and by a
- * start after the worker's, since its Windows parent has exited.
+ * The wait of step 2 on Windows (written to wait-alive.mjs, run by the orchestrator's Bash tool): records what the Linux
+ * wait records. A child counts only when created after its parent (a dead parent's pid may name another process now);
+ * the MSYS sleep.exe is added by command line and start (see the header).
  */
 function waitAliveOnWindows(reg, out, { jqPick, winProcs, readFileSync, writeFileSync, join }) {
   const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
@@ -138,10 +127,9 @@ function waitAliveOnWindows(reg, out, { jqPick, winProcs, readFileSync, writeFil
   console.log(`worker pid ${pid} is alive with ${rec.length} processes in its tree, a sleep among them`)
 }
 
-// Waits until the worker is alive with a sleep below it, then records its tree (pid, start, name per line), the claude
-// processes alive at that moment, and prints the worker's pid. A pid of the tree whose start cannot be read when it is
-// recorded has ended meanwhile: it is no member of the tree and goes to tree-dropped.txt instead. The worker itself
-// must still have its start, or the wait fails. On Windows the same records come from waitAliveOnWindows.
+// Waits until the worker is alive with a sleep below it, then records its tree (pid, start, name), the claude processes
+// alive then, and prints the worker's pid. A tree pid whose start cannot be read has ended meanwhile: it goes to
+// tree-dropped.txt, not the tree. The worker itself must still have its start, or the wait fails.
 const WAIT_ON_WINDOWS = [
   "import { readFileSync, writeFileSync } from 'node:fs'",
   "import { join } from 'node:path'",
@@ -187,12 +175,10 @@ fs.writeFileSync(join(S, 'instruction.txt'),
   `5. Call mcp__session-control__stop_worker with session_id "${FIN}".\n` +
   'Then answer with one line: done.\n')
 
-// The worker's descendants seen from outside after the tree was recorded, until the orchestrator has ended: about three
-// times a second /proc is read, and a process whose parent is a member is a member (the members to start from: every
-// recorded or already seen pid that still has its start). The new members go to treeSeen (pid to start). A recorded or
-// seen pid found with another start (another process now has the pid) goes to treeReused ("pid start"). A signal of the
-// proof to a pid outside the recorded tree is excused only when this watch saw that pid in the tree, a child the worker
-// spawned after the recording, and the signalled process had the start the watch saw (see lateOk).
+// The worker's descendants seen from outside after the recording, until the orchestrator ends: /proc about three times
+// a second, a process whose parent is a member (with its start unchanged) is a member. New members go to treeSeen (pid to
+// start); a member pid found with another start goes to treeReused. A signal to a pid outside the recorded tree is
+// excused only for a child this watch saw, with the start it saw (lateOk).
 const treeSeen = new Map()
 const treeReused = new Set()
 const watchTree = () => {
@@ -213,11 +199,9 @@ const watchTree = () => {
   for (const p of members) if (!recorded.has(p) && !treeSeen.has(p)) treeSeen.set(p, stat.get(p).start)
   for (const [p, st] of [...recorded, ...treeSeen]) if (stat.has(p) && stat.get(p).start !== st) treeReused.add(`${p} ${stat.get(p).start}`)
 }
-// The same watch on Windows, from one Win32_Process snapshot every 2 s (a PowerShell start takes about a second): a
-// process whose parent is a member and which was created after it is a member, and so is a later MSYS sleep.exe of the
-// worker's Git Bash (`...sleep.exe" 20`, created after the worker, the worker still alive), whose Windows parent has
-// exited. A child that comes and goes between two snapshots is not seen: a signal to it counts as stray (a failure,
-// never a pass).
+// The same watch on Windows, one Win32_Process snapshot every 2 s (a PowerShell start takes about a second); members as
+// in the wait (created after their parent, plus the MSYS sleep.exe). A child that comes and goes between two snapshots
+// is not seen: a signal to it counts as stray (a failure, never a pass).
 const watchTreeOnWindows = () => {
   const lines = linesOf(readOr(join(S, 'tree-before.txt'))).map(l => l.split(' ')).filter(([p, st]) => p && st)
   const recorded = new Map(lines.map(([p, st]) => [p, st]))
@@ -307,12 +291,10 @@ check('stop', IS_WINDOWS ? `Abort check after: dead: no process has pid ${WPID}.
 check('stop', `Result: pid ${WPID} is dead`, 'the result')
 check('stop', 'Surviving descendants: none.', 'no survivor')
 check('stop', 'The registry is unchanged', 'no registry field written')
-// Every signal went to a pid of the tree recorded before the stop, or to a child the worker spawned after the recording
-// that the outside watch saw in its tree (such a pid is not required dead either); any other pid is a stray signal.
-// A late pid counts by its start, not its number alone (lateOk): the watch saw it with a start and never saw that pid
-// with another, the signal was not sent before that start (the start's wall time from btime and the clock ticks, 2 s
-// allowed for btime's whole seconds; on Windows the start is that wall time in ms, 2 s allowed alike), and the pid is
-// gone now or still has that start.
+// Every signal went to a pid of the recorded tree, or to a later child the outside watch saw (not required dead
+// either); any other pid is a stray signal. A late pid counts by its start, not its number (lateOk): the watch saw it
+// with one start only, the signal was not sent before that start (wall time from btime and clock ticks, 2 s allowed for
+// btime's whole seconds; on Windows the start in ms, 2 s alike), and the pid is gone now or still has that start.
 const stopLines = linesOf(readOr(outPath('stop')))
 const treePids = new Set(treeBefore.map(l => l.split(' ')[0]))
 // Where the checks below read a process's start now: /proc, or one Win32_Process snapshot taken after the run.
@@ -357,9 +339,9 @@ if (LEFT.length === 0) pass(`${WHERE}: the worker pid and every process of its t
 else fail(`${WHERE}: still there: ${LEFT.join(' ')}`)
 if (startNow(BYSTANDER) === BYSTANDER_START) pass(`${WHERE}: the bystander ${BYSTANDER_NAME} ${BYSTANDER} of this script is untouched`)
 else fail(`${WHERE}: the bystander ${BYSTANDER_NAME} of this script is untouched`)
-// The orchestrator (the claude this script started) has ended by itself. Any other claude process alive before the
-// stop is still there, or it was another session's run that ended on its own: it is named with the first three words
-// of its command line as read before the stop (never its prompt), and no signal of the proof went to it (checked above).
+// The orchestrator has ended by itself. Any other claude alive before the stop is still there, or ended on its own
+// (another session's run): it is named by the first three words of its command line (never its prompt), and no signal
+// went to it (checked above).
 const claudeBefore = linesOf(readOr(join(S, 'claude-before.txt')))
 const MISSING = claudeBefore
   .map(l => [l.split(' ')[0], l.split(' ')[1], l.split(' ').slice(2).join(' ')])

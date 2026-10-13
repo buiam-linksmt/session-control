@@ -1,10 +1,9 @@
 // The host interface: one contract run against the Host withHelper makes of each adapter, and the one platform choice.
 //
-// The machine is simulated once (files in a map, Node and its helper over them, the commands the adapters still run
-// answered as that system would) and stands beneath the plugins as the mock engine's fs, process and env hooks. The
-// contract calls the hosts over a HostPort on that same machine: the kit's test `$` has no fs or process noun, and an inline plugin runs in a realm
-// of its own, so a port over a plugin's `$` cannot be handed to the test. The selection tests go through the plugin
-// itself, on the mock engine.
+// The machine is simulated once (files in a map, Node and its helper over them, the adapters' remaining commands) and
+// stands beneath the plugins as the mock engine's fs, process and env hooks. The contract calls the hosts over a HostPort
+// on that same machine: the kit's test `$` has no fs or process noun, and an inline plugin runs in a realm of its own,
+// so a port over a plugin's `$` cannot be handed to the test. The selection tests go through the plugin itself.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { FsStat, On } from 'claude-code'

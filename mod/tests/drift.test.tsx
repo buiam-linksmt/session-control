@@ -1,9 +1,7 @@
-// The loaded-mod drift band (decision win-35, drift.ts) through the plugin on the mock world: the loaded plugin's
-// folder against the source mod folder, by the Node helper's hashTree, the band above the prompt, its one toast and
-// notice line, the 5-minute rhythm, what is never compared, the source missing, the helper and Node missing, the notices
-// option, modSource off, and a small Windows machine. The kit loads the plugin from the real mod
-// folder ($.plugin.root): its first check finds that folder, which each test then links to /w/loaded on the mock world
-// (or C:/w/loaded on the Windows one) and fills with the loaded copy.
+// The loaded-mod drift band (decision win-35, drift.ts) through the plugin on the mock world and a small Windows
+// machine: the loaded plugin's folder against the source mod folder by the helper's hashTree. The kit loads the plugin
+// from the real mod folder ($.plugin.root): its first check finds that folder, which each test then links to /w/loaded
+// (C:/w/loaded on Windows) and fills with the loaded copy.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'

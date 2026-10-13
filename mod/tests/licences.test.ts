@@ -1,7 +1,6 @@
-// The licence tools through the plugin on the mock engine: list_licences over a simulated machine (mock-world.ts on
-// Linux, a small machine of its own for Windows), with directory listings and the presence of the two files of a
-// licence; the licence files hold canaries that must reach no answer and no trace, since the tools never open them.
-// The pure parts of hooks/licences.ts are tested on their own at the end.
+// The licence tools through the plugin on a simulated machine (mock-world.ts on Linux, a small one for Windows). The
+// licence files hold canaries that must reach no answer and no trace, since the tools never open them. The pure parts
+// of hooks/licences.ts are tested on their own at the end.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'

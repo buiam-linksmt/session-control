@@ -1,7 +1,6 @@
-// turn_digest (digest.ts) through the plugin on the mock world: the first call from the mod's load, a second call that
-// has nothing new, what each section takes (completions, orphans, stalls, ready tasks, aged points, the notices by kind,
-// unacknowledged peer messages), the state line, the 40-line bound, the redaction, the notices option off, a reload of
-// the mod, and that the call writes no file (its time goes to $.store).
+// turn_digest (digest.ts) through the plugin on the mock world: the first call reports from the mod's load, a second
+// has nothing new, each section, the 40-line bound and the redaction; the call writes no file (its time goes to
+// $.store).
 
 import { describe, expect, test } from 'claude-code/testing'
 

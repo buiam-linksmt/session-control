@@ -1,20 +1,15 @@
 #!/usr/bin/env node
-// Run with `node mod/tests/e2e-lint.mjs` (Node 22 or newer), from any directory; the test itself needs no sh, grep, tr,
-// sed, jq or cygpath. The orchestrator is told to run a heredoc and `git push --force` through its Bash tool, because
-// those commands are what the guards are tested on.
+// Run with `node mod/tests/e2e-lint.mjs` (Node 22 or newer), from any directory. The orchestrator runs a heredoc and
+// `git push --force` through its Bash tool, because those commands are what the guards are tested on.
 //
 // End-to-end test of the T3b checks against the real claude, in a scratch directory it makes and removes. A headless
-// haiku orchestrator (capped at --max-budget-usd 0.30) runs in a scratch orchestrator directory and is told to
-// (1) launch_worker with a prompt that has a force-push step: refused by the sign-off guard, nothing launched;
-// (2) launch_worker with a prompt that holds a secret canary: refused naming the kind and the line, never the value;
-// (3) launch_worker with a prompt that says "never force-push": launched (one tiny haiku worker that replies PONG), and
-// wait for its outcome in the foreground; (4) run a Bash heredoc that names task-queue.json only in its body: it runs;
-// (5) run `git push --force` itself: refused by the sign-off guard; (6) call read_result on a seeded finished session
-// whose result holds a canary token: its answer ends with the `secret scan:` line, and the canary is in no answer. The
-// canaries are joined at run time, so this file holds no string in a token's shape. Everything is in the scratch directory; both transcripts stay under the
-// default configuration. One line per check; exit 1 on a failure. KEEP_OUT=<dir> keeps the tool results. The worker
-// left running at the end (a claude whose working directory is the scratch work folder) is looked for in /proc on
-// Linux only.
+// haiku orchestrator (--max-budget-usd 0.30) is told to (1) launch_worker with a force-push step: refused by the
+// sign-off guard, nothing launched; (2) launch_worker with a secret canary: refused naming the kind and the line, never
+// the value; (3) launch_worker saying "never force-push": launched (a PONG worker), waited for; (4) a Bash heredoc
+// naming task-queue.json only in its body: it runs; (5) `git push --force`: refused; (6) read_result on a seeded session
+// whose result holds a canary: the answer ends with the `secret scan:` line and the canary is in no answer. The canaries
+// are joined at run time, so this file holds no string in a token's shape. Isolation as in lib/e2e.mjs. KEEP_OUT=<dir>
+// keeps the tool results. A worker left running (cwd the scratch work folder) is looked for in /proc on Linux only.
 
 import * as fs from 'node:fs'
 import {

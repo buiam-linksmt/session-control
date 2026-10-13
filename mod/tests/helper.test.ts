@@ -1,8 +1,6 @@
-// The Node helper behind the host interface (hooks/host-helper.ts): its answers read, each operation sent as one
-// request, a failed call answered as the operation's own failure with nothing falling back, every operation refused
-// with one fixed text while no usable Node is found, the batch's order, Node looked for once and again later, and the
-// nodePath option and a missing Node through the plugin. The helper itself is tested by tests/helper.test.mjs under
-// `node --test`; here it is simulated over a map of files.
+// The Node helper behind the host interface (hooks/host-helper.ts): each operation one request, a failure answered as
+// the operation's own with nothing falling back, every operation refused with one fixed text while no usable Node is
+// found. The helper itself is tested by tests/helper.test.mjs under `node --test`; here it is simulated over a map.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On, ProcessRunResult } from 'claude-code'

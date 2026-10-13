@@ -1,11 +1,7 @@
 // The work of the sign-off guard grows with the length of a line, not with its square (README, Sign-off guard): each
-// family of its patterns on 1 MB adversarial lines within a generous bound, where the near opening line, git's options
-// before a verb and the negation windows and clauses took seconds or never ended before; the near opening line test
-// against the pattern it replaces, on 100000 generated lines and the near-miss lines of signoff.test.ts; the verbs
-// against the pattern they replace; isNegatedAt against its reading slice by slice; and the launch of a 1 MB prompt
-// of `>`, refused by the size cap as on main, and launched as a skill test. The quoted parts (quotedSpans) and the
-// whole guard on 1 MB lines of opening marks with no closing one, of every quote pair, and quotedSpans against the
-// pattern it replaces, on generated lines.
+// family of its patterns on 1 MB adversarial lines within a generous bound (the near opening line, git's options before
+// a verb and the negation windows took seconds or never ended with the patterns they replace), and each rewritten
+// matcher against the pattern it replaces on generated lines, so the speed-up changed no verdict.
 
 import { describe, expect, test } from 'claude-code/testing'
 

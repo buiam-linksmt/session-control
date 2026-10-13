@@ -1,8 +1,6 @@
 // The lock-holder notice (decision win-27, locks.ts) and the registry-unreadable notice (notices.ts, registryStep)
-// through the plugin on the mock world and a small Windows machine, on the mocked clock: alive, dead, unreadable and odd
-// holders, both lock formats (the generic one and the JSON one of a real project's lock tool), the re-arming, the
-// option off by default, the notices option off, and that no lock is ever written; an unsound registry told once per
-// episode after 5 minutes, re-armed by a sound read, while the registry-based notices stay frozen.
+// through the plugin on the mock world and a small Windows machine, on the mocked clock. Both lock formats are covered
+// (the generic one and the JSON one of a real project's lock tool), and no lock is ever written.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'

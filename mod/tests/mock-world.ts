@@ -1,10 +1,8 @@
 // A Linux machine for tests that drive the whole plugin through the mock engine: files in a map (with symbolic links),
-// the processes of a simulated table (claude workers among them), Node 24 on the PATH and the Node helper's operations
-// run over the same map and table (fake-helper.ts), its probe included (its P, A and T lines computed from the table,
-// the sessions files and the transcripts in the map); the Linux adapter's own commands (test, mkdir, sleep) answered as
-// the system would. With `isHelper` false Node is not found. Every write to the machine is recorded with how it was
-// made, so a test can see what the plugin wrote. The helper's probeUsage answers from `usage` per config directory.
-// Not a test file itself: stop.test.ts, guard.test.ts and the notice, licence, drift and digest tests use it.
+// a simulated process table (claude workers among them), Node 24 on the PATH with the helper's operations, probe
+// included, run over the same map and table (fake-helper.ts), and the Linux adapter's own commands (test, mkdir, sleep).
+// With `isHelper` false Node is not found. Every write is recorded with how it was made, so a test can see what the
+// plugin wrote. probeUsage answers from `usage` per config directory.
 
 import { mock } from 'claude-code/testing'
 import type { FsStat, On } from 'claude-code'
@@ -46,8 +44,8 @@ export type World = {
   passed: { tool: string; input: Record<string, unknown> }[]
   /**
    * Where the next launch's worker runs: its cwd and the session id its sessions file names. With `isFound` its command
-   * line carries the model as the shell hands it on (unquoted), so the launch finds the worker and registers it; without,
-   * the line keeps the quotes and the launch answers that no worker appeared (what the older tests rely on).
+   * line carries the model unquoted, as the shell hands it on, so the launch finds and registers the worker; without, the
+   * quotes stay and the launch answers that no worker appeared (what the older tests rely on).
    */
   launch: { cwd: string; sid: string; isFound?: boolean }
   /**

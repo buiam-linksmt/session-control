@@ -1,12 +1,9 @@
-// The sign-off guard (README, Sign-off guard): the launch_worker prompt that instructs a force-push, a remote branch or
-// tag deletion, reset --hard, a forced clean or branch -D as a step is refused, a sentence that says not to do it passes
-// (the negation window, both ways), a push to main or develop warns, and a skill test is not exempt; the orchestrator's
-// own Bash and PowerShell commands that run one of those git actions are refused in its own session, nowhere else. The
-// fix-up's rule: the window counted from the token, governing no and without, gates, negated lists, past forms, short
-// flags only after git, quoted examples, and the mirror and pruning pushes, each form both ways. A signoff block: each
-// line form of its two classes and each refused neighbour, the checker's bypass families inside and outside a block, the
-// block's syntax, the Standing lookup, the decisions file not read, the warning and the trace; a decision id in prose
-// lifts nothing (the checker's 202 cited cases), and a prompt without a block gets main's verdicts.
+// The sign-off guard (README, Sign-off guard): a launch_worker prompt that instructs a force-push, a remote branch or
+// tag deletion, reset --hard, a forced clean or branch -D as a step is refused, a sentence that says not to do it
+// passes (the negation window, both ways), a push to main or develop warns, a skill test is not exempt; the
+// orchestrator's own Bash and PowerShell commands running one are refused in its own session only. Each form is tested
+// both ways. A signoff block lifts a refusal only for the line forms its grammar takes; a decision id in prose lifts
+// nothing (the checker's 202 cited cases), and a prompt without a block gets main's verdicts.
 
 import { describe, expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'

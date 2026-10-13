@@ -1,8 +1,7 @@
-// The poll-based notices (notices.ts) through the plugin and as pure functions: orphan, stall, queue-ready,
-// unit-complete, compliance-due, open-point-age, retire-due and repo-state; each one's debounce and re-arming on the
-// mocked clock, a reload that fires nothing again, the notices option off, the one-line wording, the toast title per
-// kind, the orchestrator's own process, and the Windows host. The machine is mock-world.ts (Linux) or the small Windows
-// world below; the plugin's store is a map of the test's own, so a test can read what a load left and seed the next.
+// The poll-based notices (notices.ts) through the plugin and as pure functions: each kind's debounce and re-arming on
+// the mocked clock, a reload that fires nothing again, the wording and the toast title per kind. The machine is
+// mock-world.ts (Linux) or the small Windows world below; the plugin's store is a map of the test's own, so a test can
+// read what a load left and seed the next.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'

@@ -993,13 +993,12 @@ test('probeUsage parser: an ambiguous or out-of-range percent, or one off its la
 })
 
 /**
- * A fake `claude` first on the PATH, in a scratch folder: it records its arguments, cwd, CLAUDE_CONFIG_DIR and what it
- * read on stdin, and answers by the last component of CLAUDE_CONFIG_DIR (`inherited` when unset): `ok` and `inherited`
- * the recorded text of a licence, `login` a login prompt, `slow` five seconds of nothing (its pid written first),
- * `empty` nothing, `fail` an API error, `long` the text and then 2 MB more, `garbage` a text with no window. Three
- * start a grandchild first (`sleep GRANDCHILD_SLEEP`, its pid in rec-<name>.pid), which holds the output open:
- * `grandchild` then becomes a sleep itself (its pid in rec-grandchild-parent.pid), `linger` prints the text and exits, `floodgc`
- * prints the text and 2 MB more.
+ * A fake `claude` first on the PATH: it records its arguments, cwd, CLAUDE_CONFIG_DIR and stdin, and answers by the last
+ * component of CLAUDE_CONFIG_DIR (`inherited` when unset): `ok`/`inherited` a licence's recorded text, `login` a login
+ * prompt, `slow` five seconds of nothing (its pid written first), `empty` nothing, `fail` an API error, `long` the text
+ * plus 2 MB, `garbage` a text with no window. Three first start a grandchild that holds the output open (`sleep
+ * GRANDCHILD_SLEEP`, pid in rec-<name>.pid): `grandchild` then becomes a sleep itself (pid in rec-grandchild-parent.pid),
+ * `linger` prints the text and exits, `floodgc` prints the text plus 2 MB.
  */
 /** The sleep a fake claude's grandchild runs: an odd length, so a cleanup can tell the test's own throwaway by its command line. */
 const GRANDCHILD_SLEEP = '27.31'

@@ -1,8 +1,7 @@
 // The secret scan of worker results (secrets.ts, decision win-22): the detector on canaries of every kind and on what
-// must stay readable (git shas in git context, UUIDs, generated names, a sha256sum line, long paths, placeholders),
-// the trailing `secret scan:` line of read_result, worker_tail, the completion notes and turn_digest, and the one
-// secret-in-result notice per entry through the plugin on the mock world, with the notices option off too. Every canary
-// is an invented string.
+// must stay readable (git shas in git context, UUIDs, generated names, a sha256sum line, long paths, placeholders), the
+// trailing `secret scan:` line of each reader, and the one secret-in-result notice per entry. Every canary is an
+// invented string.
 
 import { describe, expect, test } from 'claude-code/testing'
 

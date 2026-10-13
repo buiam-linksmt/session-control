@@ -105,10 +105,8 @@ const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320
 const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false, probeMs: 0, probeLateMs: 0, isAliveGone: false }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
-// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone: the alive worker 4101 has
-// exited (its lines left out of the probe); isOrphanGone: so has the unregistered headless claude 4999.
-// probeMs: how long each Linux probe takes on the fixture's clock (0: no time). probeLateMs: each probe answers only once
-// the test has moved the fixture's clock that far (0: at once).
+// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone, probeMs, probeLateMs: as
+// in WINDOWS; isOrphanGone: the unregistered headless claude 4999 has exited too.
 const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeMs: 0, probeLateMs: 0 }
 // The registry as a real file (both fixtures): with isCurrent a read answers the text the plugin last wrote there (the
 // seed the test gave until its first write), and the probe asked for the launched worker's pid (7001, while it runs)
@@ -482,28 +480,10 @@ describe('tool surface', () => {
   test('the six tools keep their names, descriptions and schemas', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await boot($)
-    // The first six as they were; feature/inspect-tools registers its read-only tools after them (the full list:
-    // the next test).
+    // The first six as they were; later tools come after them (the full list: the next test).
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
-    // Changed on purpose by feature/inspect-tools: six read-only inspection tools (list_sessions, read_result,
-    // worker_tail, session_writes, panel_snapshot, audit_state) are registered after the six; the six were unchanged
-    // (6072:68e1b3f1, this line's value before that change).
-    // Changed on purpose again by feature/write-tools (9499:ccae8712 before): close_worker (11029:39536527) and
-    // archive_decisions (11909:ac870414) are registered after audit_state, then launch_worker's schema and description
-    // grow (prompt, section, rules; dir, model, effort and title optional for a resume). Every other tool is
-    // unchanged: the next test pins each.
-    // Changed on purpose again by feature/stop-guard (13443:c93b222a before): stop_worker (1129:9b87c2b9) is registered
-    // after archive_decisions; every tool before it keeps its own pin (the next test), record_decision included.
-    // Changed on purpose again by feature/drift-digest (14573:6cee2b74 before): turn_digest is registered after
-    // stop_worker; every tool before it keeps its own pin (the next test).
-    // Changed on purpose again by feature/licence-tools (15209:9b0c2251 before): list_licences (604:8cb60265) is
-    // registered after turn_digest; every tool before it keeps its own pin (the next test).
-    // Changed on purpose again by feature/licence-tools (15814:a639e0f9 before): probe_licence_usage (872:606c21ff) is
-    // registered after list_licences; every tool before it keeps its own pin (the next test).
-    // Changed on purpose again by feature/licence-tools (16687:1371ae1b before): launch_worker's schema gains config_dir
-    // and its description a sentence (2916:5bd96840 to 3506:a5214540); every other tool keeps its own pin.
-    // Changed on purpose again by feature/node-only (17277:e069d42b before): the status description of queue_task says
-    // the panel shows queued tasks only (702:d743828c to 723:d470f87e); every other tool keeps its own pin.
+    // The whole tool surface in one pin: it moves only on purpose, together with the per-tool pin of the next test,
+    // which names the tool that changed (each past move and its old value is in git log).
     expect(fingerprint(JSON.stringify(w.tools))).toBe('17298:d6106e35')
   })
 
@@ -525,30 +505,21 @@ describe('tool surface', () => {
       'audit_state',
       'close_worker',
       'archive_decisions',
-      // Added on purpose by feature/stop-guard, after archive_decisions: every tool before it is unchanged.
+      // A new tool goes last, so every tool before it keeps its place and its pin.
       'stop_worker',
-      // Added on purpose by feature/drift-digest, after stop_worker: every tool before it is unchanged.
       'turn_digest',
-      // Added on purpose by feature/licence-tools, after turn_digest: every tool before it is unchanged.
       'list_licences',
-      // Added on purpose by feature/licence-tools, after list_licences: every tool before it is unchanged.
       'probe_licence_usage',
     ])
-    // Each tool's own pin. Unchanged since before feature/write-tools, byte for byte: the five of the first six after
-    // launch_worker (together 4689:d2b85bc0) and the six inspection tools (together 3428:1484e7b6). The first six
-    // were 6072:68e1b3f1 together while launch_worker was 1382:a077d922; feature/write-tools moved launch_worker's on
-    // purpose (its new parameters) and added the two write-side tools.
-    // feature/licence-tools moved launch_worker's on purpose (config_dir; 2916:5bd96840 before) and added the two
-    // licence tools.
-    // feature/node-only moved queue_task's on purpose (its status description), and with it the group pin of the five.
+    // Each tool's own pin, so a change to one tool's name, description or schema shows which tool moved; a pin moves
+    // only on purpose.
     const pins = Object.fromEntries(w.tools.map(tool => [tool.name, fingerprint(JSON.stringify(tool))]))
     expect(pins).toEqual({
       launch_worker: '3506:a5214540',
       acknowledge_workers: '875:8ed174c7',
       retire_workers: '1530:18bbed4e',
       open_point: '932:ad93390e',
-      // Moved on purpose by feature/node-only (702:d743828c before): its status description says the panel shows
-      // queued tasks only, running work being a session.
+      // Its status description says the panel shows queued tasks only, running work being a session.
       queue_task: '723:d470f87e',
       record_decision: '644:568b5ef',
       list_sessions: '564:8e142ecb',
@@ -560,14 +531,11 @@ describe('tool surface', () => {
       close_worker: '1529:9741bcb0',
       archive_decisions: '879:39a97972',
       stop_worker: '1129:9b87c2b9',
-      // Added on purpose by feature/drift-digest.
       turn_digest: '635:cbba99b4',
-      // Added on purpose by feature/licence-tools.
       list_licences: '604:8cb60265',
       probe_licence_usage: '872:606c21ff',
     })
-    // The five after launch_worker hold queue_task, so feature/node-only moved this one with it (4689:d2b85bc0 before);
-    // the other four keep their own pins above.
+    // Group pins: the five after launch_worker (queue_task among them) and the six inspection tools.
     expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4710:7d7306c')
     expect(fingerprint(JSON.stringify(w.tools.slice(6, 12)))).toBe('3428:1484e7b6')
   })
@@ -612,8 +580,7 @@ describe('session-control board', () => {
   test('session.start registers, gathers with one probe call, gathers the rows', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await boot($, ORCH_DIR + '/')
-    // The command and the first six tools, as before feature/inspect-tools; the read-only tools registered after them
-    // are pinned by 'tool surface > the registered tool names, in order'.
+    // The command and the first six tools; the later ones are pinned by 'tool surface > the registered tool names, in order'.
     expect(w.registered.slice(0, 7)).toEqual(['/session-control', 'launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     const probes = w.calls.filter(one => one.op === 'probe')
     expect(probes.length).toBe(1)
@@ -2340,8 +2307,8 @@ describe('platform', () => {
   const NODE_LOOKUP = ['node', '--version']
   const RUNS = `${HOME}/.claude/session-control/runs`
   /**
-   * The commands the Linux flow runs: as recorded before the Windows branches existed (the jq calls aside), with the
-   * probe, the registry's rename and the cleared log's append now the helper's, and the lookup of Node first.
+   * The commands the Linux flow runs (the jq calls aside): the lookup of Node first, then the probe, the registry's
+   * rename and the cleared log's append through the helper.
    */
   const LINUX = [
     NODE_LOOKUP,
@@ -3556,7 +3523,7 @@ describe('a log whose session leaves the registry', () => {
 describe('launch_worker: inline prompt, decisions section, rules block, resume fill', () => {
   const RUNS = `${HOME}/.claude/session-control/runs`
   const BASE = `${RUNS}/20260921141320-new`
-  // The prompt file is named by the launch's unique session name (a resume adds its launch time), no longer by the title and the second.
+  // The prompt file is named by the launch's unique session name (a resume adds its launch time).
   const OWN = `${RUNS}/w-new-260921141320.prompt.md`
   const fresh = { dir: '/work/new', model: 'opus', effort: 'high', title: 'new' }
   /** A prompt that carries the three items the launch guard checks. */

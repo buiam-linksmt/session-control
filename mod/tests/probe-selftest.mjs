@@ -2,13 +2,12 @@
 // Run with `node mod/tests/probe-selftest.mjs` (Node 22 or newer), from any directory; it prints one `ok` line per part
 // and stops with exit 1 at the first failed check.
 //
-// Runs the Node helper's probe (`node mod/helper/host.mjs probe`, as the mod runs it) on the live /proc against a
-// fixture config dir: a transcript with a known mtime and a sessions file whose procStart matches this process. Then
-// REGISTER_SCRIPT, CLEAR_SCRIPT and ACK_SCRIPT of hooks/core.ts (the jq reference of the registry edits) on scratch
-// registries and against the differential cases of REGISTRY_GOLDEN in tests/fixtures.ts, the <Button> shape of
-// hooks/register.tsx, and the helper's append and rotate of a log. The registry scripts are sh scripts that call jq,
-// and the probe reads /proc: this runs on Linux and WSL, and on native Windows prints one `skipped` line with the reason
-// and exits 0. It removes every scratch directory it made. Only the Node standard library is used.
+// Runs the Node helper's probe (`node mod/helper/host.mjs probe`) on the live /proc against a fixture config dir (a
+// transcript with a known mtime, a sessions file whose procStart matches this process); REGISTER_SCRIPT, CLEAR_SCRIPT
+// and ACK_SCRIPT of hooks/core.ts (the jq reference of the registry edits) on scratch registries and REGISTRY_GOLDEN of
+// tests/fixtures.ts; the <Button> shape of hooks/register.tsx; the helper's append and rotate of a log. The registry
+// scripts need sh and jq and the probe reads /proc, so on native Windows it prints `skipped` and exits 0. Every scratch
+// directory goes at the end. Only the Node standard library is used.
 
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -206,9 +205,8 @@ try {
   }
   console.log('append-selftest: ok')
 
-  // --- the helper's rotate keeps three trace files: .1 moves to .2 (the oldest goes), the trace becomes .1. It reads the
-  // size itself, so of several processes that found the trace too big only the first rotates; a missing trace is no
-  // failure.
+  // --- the helper's rotate keeps three trace files (.1 moves to .2, the trace becomes .1). It reads the size itself, so
+  // of several processes that found the trace too big only the first rotates; a missing trace is no failure.
   const rotateDir = fs.mkdtempSync(join(tmpdir(), 'session-rotate-'))
   const rotateRequest = (trace, maxBytes, adding) => ({ path: trace, adding, maxBytes, moves: [[`${trace}.1`, `${trace}.2`], [trace, `${trace}.1`]] })
   const rotateRun = (trace, maxBytes, adding) => {

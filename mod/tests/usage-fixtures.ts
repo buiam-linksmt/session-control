@@ -1,10 +1,9 @@
-// The text `claude -p /usage --no-session-persistence` prints, as test fixtures of the usage reader of the helper
-// (helper/usage.mjs: helper.test.mjs requires it to give each case its answer, and the plugin's tests answer for the
-// simulated helper with the answer of the case that holds the text). The recorded ones are real outputs of Claude Code 2.1.296 on Linux,
-// byte for byte (non-ASCII characters escaped): a subscription licence in the default config directory, a secondary one
-// through CLAUDE_CONFIG_DIR, and a config directory with no login. They hold no account identity (no email, name or
-// organisation appears in the text). The others are written by hand for the forms the parser must also read. Data only,
-// no import: node runs this file as it is (type stripping) for the helper's tests.
+// The text `claude -p /usage --no-session-persistence` prints, as fixtures of the helper's usage reader
+// (helper/usage.mjs: helper.test.mjs requires each case's answer of it; the plugin's tests answer for the simulated
+// helper with the same answers). The recorded ones are real outputs of Claude Code 2.1.296 on Linux, byte for byte
+// (non-ASCII escaped): a subscription licence in the default config directory, a secondary one through
+// CLAUDE_CONFIG_DIR, and a config directory with no login; they hold no account identity. The others are hand-written
+// forms the parser must also read. Data only, no import: node runs this file as it is (type stripping).
 
 export const USAGE_FIXTURES: Record<string, string> = {
   recordedMain: "You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 12% used \u00b7 resets Oct 11, 11:20am (Europe/Budapest)\nCurrent week (all models): 41% used \u00b7 resets Oct 16, 1pm (Europe/Budapest)\nCurrent week (Fable): 0% used \u00b7 resets Oct 16, 1pm (Europe/Budapest)\n\nWhat's contributing to your limits usage?\nApproximate, based on local sessions on this machine \u2014 does not include other devices or claude.ai. Behaviors are independent characteristics, not a breakdown.\n\nLast 24h \u00b7 4811 requests \u00b7 222 sessions\n  81% of your usage was at >150k context\n  22% of your usage was while 4+ sessions ran in parallel\n  18% of your usage came from subagent-heavy sessions\n  18% of your usage came from sessions active for 8+ hours\n  Top skills: /plugin-authoring 4%\n\nLast 7d \u00b7 16008 requests \u00b7 405 sessions\n  81% of your usage was at >150k context\n  37% of your usage came from subagent-heavy sessions\n  34% of your usage came from sessions active for 8+ hours\n  23% of your usage was while 4+ sessions ran in parallel\n  Top skills: /plugin-authoring 1%, /docx 1%\n  Top subagents: general-purpose 5%, workflow-subagent 1%\n  Top MCP servers: playwright-windows 2%\n",
@@ -135,9 +134,9 @@ export const USAGE_CASES: UsageCase[] = [
 /**
  * A window's label with no percent after it, where it may stand or further down before the next label: that window is
  * missing (null), never PARSE; the other window is read, and a later label of the same window may still give it. With
- * neither window the answer is the code of a text with no window. The `mixed:` cases are texts of the shuffled mixes
- * the helper's tests once ran through both parsers (seed 7, 300 rounds of lines of USAGE_CASES; seed 11, 500 rounds of
- * the good and refused forms), one per outcome class those 800 texts fell into, each answer read from usage.mjs.
+ * neither window the answer is the code of a text with no window. The `mixed:` cases keep one text per outcome class of
+ * 800 shuffled mixes (seed 7, 300 rounds of USAGE_CASES lines; seed 11, 500 rounds of the good and refused forms), each
+ * answer read from usage.mjs.
  */
 export const USAGE_MISSING_CASES: UsageCase[] = [
   { name: 'the session label alone, no percent anywhere after it: the session missing, the week read', stdout: `${WEEK}\nCurrent session\n  Resets 6pm (Europe/Rome)\n`, expect: { ok: true, five: null, seven: MAIN.seven } },

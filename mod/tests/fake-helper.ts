@@ -22,9 +22,8 @@ export function standInDigest(text: string): string {
 }
 
 /**
- * What the helper's probeUsage answers for a text `claude -p /usage` printed: the answer the recorded and written cases
- * of usage-fixtures.ts give it (helper.test.mjs proves the helper's reader gives each case that answer). A text no case
- * holds is an error of the test.
+ * What the helper's probeUsage answers for a text `claude -p /usage` printed: the answer its case in usage-fixtures.ts
+ * gives (helper.test.mjs proves the real reader agrees). A text no case holds is an error of the test.
  */
 export function usageAnswerOf(stdout: string, stderr = '', exitCode = 0): UsageExpect {
   const found = USAGE_CASES.find(one => one.stdout === stdout && (one.stderr ?? '') === stderr && (one.exitCode ?? 0) === exitCode)
@@ -101,10 +100,8 @@ export type SimProc = {
   isUnkillable?: boolean
 }
 /**
- * Windows: the folder of an MSYS process table TREE_PS1 reads (Git's usr/bin), and whether that table cannot be read
- * (its ps.exe fails), or what its ps.exe does instead of printing the table (`garbage`: it exits 0 with no row of a
- * table, which TREE_PS1 takes as a table it could not read; `hang`: it gives no answer, and TREE_PS1 ends it at its
- * limit and reads no table).
+ * Windows: the folder of an MSYS process table TREE_PS1 reads (Git's usr/bin), and whether its ps.exe fails, or does
+ * instead: `garbage` (exit 0 with no row, taken as a table not read) or `hang` (no answer; TREE_PS1 ends it at its limit).
  */
 export type MsysTable = { dir: string; isUnreadable?: boolean; ps?: 'garbage' | 'hang' }
 /** `msys`, Windows: the MSYS process table, or the tables, TREE_PS1 reads, in the order it reads them. */
@@ -112,9 +109,8 @@ export type ProcTable = { procs: Map<number, SimProc>; own: number[]; signals: {
 
 /**
  * The helper's processTree lines over the table (TREE_PS1's list prints the same): R or N, the G lines, the D lines
- * breadth first. `isWindows`: TREE_PS1's own part after them, the table's MSYS process tables (`table.msys`) read for
- * the programs started through Git Bash (an M line with -1, or -2 for a ps.exe that hangs, per table not read; a D line
- * with state msys per process whose MSYS parent is a member and which started after it), then an M line per table read.
+ * breadth first. `isWindows` adds TREE_PS1's MSYS part: per table not read an M line with -1 (-2 for a hung ps.exe), a
+ * D line with state msys per process whose MSYS parent is a member and started after it, then an M line per table read.
  */
 export function treeInTable(table: ProcTable, pid: number, start: string, isWindows = false): string {
   const root = table.procs.get(pid)

@@ -1,23 +1,15 @@
 #!/usr/bin/env node
-// Run with `node mod/tests/e2e-tools.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
-// needed.
+// Run with `node mod/tests/e2e-tools.mjs` (Node 22 or newer), from any directory.
 //
-// End-to-end test of the six read-only inspection tools of the session-control mod against the real claude, in a
-// scratch directory it makes and removes. It seeds a scratch registry with three finished sessions (a clean one with
-// its result file; a chatter one whose result file says "Done." and whose transcript holds the real report; one whose
-// cwd is the scratch root, which holds the orchestrator directory and the registry), their transcripts under a scratch
-// config directory, run files, a queue with one stale task, one fine task and one task waiting on free text, an open
-// point raised ten days ago, a decisions section and two backups of one kind. A headless haiku orchestrator (capped
-// at --max-budget-usd 0.25) is asked to call each tool once and to answer with their outputs verbatim; each output is
-// then read from the orchestrator's own transcript and checked against the seeded data, and no output, no answer and no
-// trace line may hold the canary secret. The orchestrator itself is no orphan row: its cwd is the orch directory of an
-// e2e scratch directory under the temporary directory; the other live claude processes of the machine show as they are
-// and are never touched.
-// Everything the mod reads or writes is in the scratch directory (registry, helper files, runs directory, trace); the
-// real registry, helper files and runs directory are never touched, and the licence picker option is empty. The
-// orchestrator runs under the default configuration (this process's CLAUDE_CONFIG_DIR, else ~/.claude): its
-// transcript stays there. One line per check; exit 1 on a failure. KEEP_OUT=<dir> copies the six outputs there before
-// the scratch directory goes.
+// End-to-end test of the six read-only inspection tools against the real claude, in a scratch directory it makes and
+// removes. It seeds a registry with three finished sessions (a clean one; a chatter one whose result file says "Done."
+// while its transcript holds the real report; one whose cwd is the scratch root, which holds the orchestrator directory
+// and the registry), their transcripts, run files, a queue (one stale, one fine, one waiting on free text), an open
+// point raised ten days ago, a decisions section and two backups of one kind. A headless haiku orchestrator
+// (--max-budget-usd 0.25) calls each tool once; each output is read from its transcript and checked against the seeded
+// data, and no output, answer or trace line may hold the canary secret. The orchestrator is no orphan row (its cwd is
+// an e2e scratch directory); other live claude processes show as they are and are never touched. Isolation as in
+// lib/e2e.mjs. KEEP_OUT=<dir> keeps the six outputs.
 
 import * as fs from 'node:fs'
 import { sep } from 'node:path'
