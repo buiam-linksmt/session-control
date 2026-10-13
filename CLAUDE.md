@@ -505,7 +505,9 @@ exactly as a completion is.
 only as these rules allow: `orphan`, `lock-holder`, `registry-unreadable`, `secret-in-result`, `mod-drift`:
 an open point; `stall`: `worker_tail`, then Follow up or Abort; `queue-ready`: Rule 7; `compliance-due`: the
 compliance check; `unit-complete`, `retire-due`, `repo-state`: `audit_state` (Helper files);
-`open-point-age`: nothing beyond the point.
+`open-point-age`: nothing beyond the point. A notice is orchestrator housekeeping: handle it silently, never
+relay it to the user or ask them to run a command for it. Write a queue task's `waits_for` with the session id
+(or name) of the work it waits for, so `retire-due` has nothing to flag.
 
 **Numbered items and reminders.** Every item of a message that needs an answer carries a number, so a
 reply can cite it; a number in a reply refers to the numbering of my last message unless the reply says
