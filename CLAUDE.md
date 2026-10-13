@@ -122,7 +122,7 @@ for the user's explicit go-ahead of exactly that class. Write each covered actio
 block whose info line is `signoff <id>`, one command per line, remote branches written as `refs/heads/<name>`, and
 read the launch answer's `sign-off allowed by` warning against that decision before trusting the worker's report.
 A branch fully merged into its target (remote and local, `branch -d`) is deleted as routine cleanup right after
-its merge, with no question, under the Standing decision `merged-branches-cleanup`; an unmerged branch is never covered.
+its merge, with no question, under the Standing decision `signoff-merged-branches`; an unmerged branch is never covered.
 
 **Push policy per project.** The user decides per project whether a push to a protected branch needs a go-ahead. The
 policy is a decision recorded with `record_decision` in a `Standing` section (id `push-<project>`). A project with no
