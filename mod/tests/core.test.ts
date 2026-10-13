@@ -541,7 +541,7 @@ describe('pane columns', () => {
 })
 
 describe('fixed session columns (decision mod-33)', () => {
-  const FIXED = { sid: 8, status: 20, model: 6, effort: 6, elapsed: 7 }
+  const FIXED = { sid: 8, status: 20, model: 21, effort: 6, elapsed: 7 }
   // The cells the five fixed columns and their gaps take: the title has the rest.
   const FIXED_SUM = Object.values(FIXED).reduce((sum, one) => sum + one, 0) + 3 * 5
   /** What `line` shows from cell `cell` on (each character measured after the one before it, for a joiner or a selector). */
@@ -582,22 +582,23 @@ describe('fixed session columns (decision mod-33)', () => {
     expect(Math.max(...statuses.map(cellWidth))).toBe(FIXED.status)
     expect(statuses).toContain('finished-unharvested')
     expect(Math.max(...EFFORTS.map(cellWidth))).toBe(FIXED.effort)
-    expect(Math.max(...['fable', 'opus', 'sonnet', 'haiku'].map(cellWidth))).toBe(FIXED.model)
+    // The widest full model name of the engine's current models, with the context suffix.
+    expect(Math.max(...['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'].map(name => cellWidth(name + '[1m]')))).toBe(FIXED.model)
     expect(cellWidth('ffffffff')).toBe(FIXED.sid)
   })
 
-  test("the elapsed formatter's longest outputs: each fits the elapsed column below 1000 hours, the widest exactly", () => {
+  test("the elapsed formatter's longest outputs: each fits the elapsed column below 1000 hours, the widest exactly; a longer one is cut in its cell", () => {
     expect(ELAPSED_FIXED_SEC).toBe(3_600_000)
     expect([59, 3599, 86_400 + 3599, 3 * 86_400, 99 * 3600 + 3599, ELAPSED_FIXED_SEC - 1].map(formatAge)).toEqual(['59s', '59m59s', '24h59m', '72h00m', '99h59m', '999h59m'])
     let widest = 0
     for (let sec = 0; sec < ELAPSED_FIXED_SEC; sec += sec < 7200 ? 1 : 59) widest = Math.max(widest, formatAge(sec).length)
     expect(widest).toBe(FIXED.elapsed)
     expect(cellWidth(formatAge(ELAPSED_FIXED_SEC - 1))).toBe(FIXED.elapsed)
-    // From 1000 hours the text is wider: the column widens for every row, so it is still never cut.
+    // From 1000 hours the text is wider: it is cut in its cell with the ellipsis, and the column keeps its width.
     const ancient = { ...DAYS, startedAt: NOW_SEC - ELAPSED_FIXED_SEC - 60, endedAt: NOW_SEC }
     const widths = paneWidths([...rows, ancient], 120)
-    expect(widths.elapsed).toBe(cellWidth('1000h01m'))
-    expect(formatRow(ancient, 120, widths)).toEndWith('   1000h01m')
+    expect(widths.elapsed).toBe(FIXED.elapsed)
+    expect(formatRow(ancient, 120, widths)).toEndWith('   1000h0\u2026')
     expect(formatRow(DAYS, 120, widths)).toEndWith('   83h20m')
   })
 
@@ -625,7 +626,7 @@ describe('fixed session columns (decision mod-33)', () => {
 
   test('wide characters and emoji in the title: two cells each (a joined family one emoji), combining marks none; the row stays in its cells', () => {
     expect(['abc', '\u6F22\u5B57', '\u{1F680}', '\u{1F468}\u200D\u{1F469}\u200D\u{1F467}', '\u{1F1EE}\u{1F1F9}', '\u2764\uFE0F', 'e\u0301', '\uD55C\uAD6D\uC5B4', '\uFF21'].map(cellWidth)).toEqual([3, 4, 2, 2, 2, 2, 1, 6, 2])
-    for (const columns of [70, 90, 117, 160]) {
+    for (const columns of [80, 90, 117, 160]) {
       const widths = paneWidths(rows, columns)
       const line = formatRow(WIDE, columns, widths)
       expect(cellWidth(line)).toBeLessThanOrEqual(columns)
@@ -639,7 +640,7 @@ describe('fixed session columns (decision mod-33)', () => {
 
   test('from 20 to 300 columns: no row wider than its box; the fixed columns whole and at the same cell on every row down to the threshold, cut at the right edge below it', () => {
     const threshold = FIXED_SUM + TITLE_MIN
-    expect(threshold).toBe(65)
+    expect(threshold).toBe(80)
     // Each width's departures from the layout, gathered and checked once at the end (a check per cell is slow).
     const wrong: string[] = []
     const check = (isRight: boolean, what: string) => {
@@ -670,19 +671,45 @@ describe('fixed session columns (decision mod-33)', () => {
         check(fromCell(line, at.effort!).startsWith(row.effort.padEnd(FIXED.effort) + '   '), `${columns}: effort moved: ${line}`)
         check(fromCell(line, at.elapsed!) === elapsedText(row), `${columns}: elapsed not whole: ${line}`)
       }
-      check(fromCell(header, at.sid!) === 'sid        status                 model    effort   elapsed', `${columns}: header: ${header}`)
+      check(fromCell(header, at.sid!) === 'sid        status                 model                   effort   elapsed', `${columns}: header: ${header}`)
     }
     expect(wrong).toEqual([])
   })
 
-  test('a model wider than its fixed width (a full model name) widens the column for every row; nothing is cut', () => {
-    const full = { ...alive, title: 'full name', model: 'claude-sonnet-5-5' }
-    const widths = paneWidths([...rows, full], 140)
-    expect(widths.model).toBe('claude-sonnet-5-5'.length)
-    const lines = [...rows, full].map(row => formatRow(row, 140, widths))
+  test('the widths are the same for no row, one short row and rows long in every column: no column follows its rows', () => {
+    const short = { ...alive, title: 'x', sid8: 'ab', model: 'm', effort: 'lo', status: 'queued' as const, elapsedSec: 1 }
+    const long = { ...alive, title: LONG.title, sid8: 'ffffffffff', model: 'global.anthropic.claude-sonnet-4-5-20250929-v1:0', effort: 'unbounded-effort', status: 'dead' as const, startedAt: 0, endedAt: NOW_SEC }
+    for (const columns of [20, 90, 300]) {
+      const fixed = [[], [short], [long, long]].map(set => paneWidths(set, columns)).map(widths => SESSION_COLUMNS.map(column => widths[column.id]))
+      expect(fixed).toEqual([Object.values(FIXED), Object.values(FIXED), Object.values(FIXED)])
+    }
+    // No row shows the widest status: the status column keeps its 20 cells.
+    const running = paneWidths([alive], 200)
+    expect(running.status).toBe(FIXED.status)
+    expect(formatHeader(200, running)).toContain('status                 model')
+  })
+
+  test('a value longer than its column is cut in its cell with the ellipsis and never widens it; the next column starts where it did', () => {
+    const long = { ...alive, title: 'long cells', sid8: 'ffffffffff', model: 'claude-sonnet-4-5-20250929[1m]', effort: 'unbounded-effort', startedAt: undefined, elapsedSec: ELAPSED_FIXED_SEC * 500 }
+    const widths = paneWidths([...rows, long], 200)
+    expect(SESSION_COLUMNS.map(column => widths[column.id])).toEqual(Object.values(FIXED))
+    const line = formatRow(long, 200, widths)
     const at = starts(widths)
-    for (const line of lines) expect(fromCell(line, at.effort!).slice(0, 4)).toMatch(/^(high|\?   |medi|low |xhig|max )/)
-    expect(lines.at(-1)).toContain('claude-sonnet-5-5   high')
+    expect(fromCell(line, at.sid!).slice(0, 11)).toBe('fffffff\u2026   ')
+    expect(fromCell(line, at.model!).slice(0, 24)).toBe('claude-sonnet-4-5-20\u2026   ')
+    expect(fromCell(line, at.effort!).slice(0, 9)).toBe('unbou\u2026   ')
+    expect(fromCell(line, at.elapsed!)).toBe('500000\u2026')
+    for (const row of rows) expect(fromCell(formatRow(row, 200, widths), at.elapsed!)).toBe(elapsedText(row))
+  })
+
+  test('the model column holds the widest full model name whole, the cells after it in place', () => {
+    const full = { ...alive, title: 'full name', model: 'claude-sonnet-5-5[1m]' }
+    const widths = paneWidths([...rows, full], 140)
+    expect(widths.model).toBe('claude-sonnet-5-5[1m]'.length)
+    const line = formatRow(full, 140, widths)
+    expect(line).toContain('   claude-sonnet-5-5[1m]   high     2m05s')
+    expect(fromCell(line, starts(widths).effort!)).toBe('high     2m05s')
+    expect(formatRow({ ...full, model: 'claude-opus-5-5' }, 140, widths)).toContain('   claude-opus-5-5         high     2m05s')
   })
 })
 

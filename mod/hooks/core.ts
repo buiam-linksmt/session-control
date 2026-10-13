@@ -353,9 +353,15 @@ export function elapsedText(row: SessionRow, clock?: ElapsedClock): string {
 /** The effort levels a worker launches with (launch_worker's effort). */
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
-/** The model aliases the CLI names (`claude --help`); a full model name is wider, and widens its column (paneWidths). */
-const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
-/** The elapsed column's fixed width holds every formatAge text below this many seconds: 1000 hours, 41 days. */
+/**
+ * The full names of the current models (the engine's model list, `claude-<family>-<version>`), each also with the context
+ * suffix MODEL_CONTEXT_SUFFIX: the model column holds the widest whole, `claude-sonnet-5-5[1m]`. An older dated snapshot
+ * name or a cloud provider's model id is wider and is cut in its cell (fit).
+ */
+const MODEL_NAMES = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']
+/** The context-window suffix a model name may carry (`--model sonnet[1m]`). */
+const MODEL_CONTEXT_SUFFIX = '[1m]'
+/** The elapsed column's fixed width holds every formatAge text below this many seconds (1000 hours, 41 days); a longer one is cut in its cell. */
 export const ELAPSED_FIXED_SEC = 1000 * 3600
 
 /** The width in cells of the widest of `texts`. */
@@ -366,15 +372,16 @@ function widestOf(texts: readonly string[]): number {
 /**
  * The sessions rows' columns after the title, in their order: its header, a row's cell, and its fixed width in cells,
  * the widest text the column can hold, its header included, computed once: the session id 8 hex digits (`-` without
- * one), the status the widest label statusLabel gives, the model the widest CLI alias, the effort the widest of EFFORTS
- * (`?` for an entry without one), the elapsed the widest formatAge text below ELAPSED_FIXED_SEC (`59m59s` under an
- * hour, `999h59m`). The terminal panel and panel_snapshot lay them out at these widths (paneWidths), the desktop
- * surface joins the same cells (desktopRowLines).
+ * one), the status the widest label statusLabel gives, the model the widest of MODEL_NAMES with its context suffix, the
+ * effort the widest of EFFORTS (`?` for an entry without one), the elapsed the widest formatAge text below
+ * ELAPSED_FIXED_SEC (`59m59s` under an hour, `999h59m`). The widths never depend on the rows: a longer value is cut in
+ * its cell with an ellipsis. The terminal panel and panel_snapshot lay the cells out at these widths (paneWidths), the
+ * desktop surface joins the same cells whole (desktopRowLines).
  */
 export const SESSION_COLUMNS: readonly { id: 'sid' | 'status' | 'model' | 'effort' | 'elapsed'; header: string; cell: (row: SessionRow, clock?: ElapsedClock) => string; width: number }[] = [
   { id: 'sid', header: 'sid', cell: row => row.sid8 || '-', width: widestOf(['sid', '-', 'f'.repeat(8)]) },
   { id: 'status', header: 'status', cell: row => statusLabel(row.status), width: widestOf(['status', ...(Object.keys(STATUS_ORDER) as SessionRowStatus[]).map(statusLabel)]) },
-  { id: 'model', header: 'model', cell: row => row.model, width: widestOf(['model', '?', ...MODEL_ALIASES]) },
+  { id: 'model', header: 'model', cell: row => row.model, width: widestOf(['model', '?', ...MODEL_NAMES, ...MODEL_NAMES.map(name => name + MODEL_CONTEXT_SUFFIX)]) },
   { id: 'effort', header: 'effort', cell: row => row.effort, width: widestOf(['effort', '?', ...EFFORTS]) },
   { id: 'elapsed', header: 'elapsed', cell: (row, clock) => elapsedText(row, clock), width: widestOf(['elapsed', '-', formatAge(59), formatAge(3599), formatAge(ELAPSED_FIXED_SEC - 1)]) },
 ]
@@ -387,13 +394,13 @@ const TITLE_FLOOR = 12
 export type PaneWidths = { title: number; sid: number; status: number; model: number; effort: number; elapsed: number }
 
 /**
- * The column widths for `rows` in `columns` cells: each column of SESSION_COLUMNS at its fixed width, wider only for a
- * row whose cell is wider (a full model name, an elapsed of 1000 hours or more), so no cell is ever cut and every row
- * keeps the same columns; the panel's width moves none of them. The title takes the room left, up to its widest title
- * (at least TITLE_FLOOR), and never less than TITLE_MIN: below that room the row is cut at its right edge (formatRow).
+ * The column widths for `rows` in `columns` cells: each column of SESSION_COLUMNS at its fixed width, whatever the rows
+ * hold and however wide the panel, so the columns start at the same cells on every row and in every drawing. The title
+ * takes the room left, up to its widest title (at least TITLE_FLOOR), and never less than TITLE_MIN: below that room
+ * the row is cut at its right edge (formatRow). `_clock` is no longer read: no width depends on the elapsed text.
  */
-export function paneWidths(rows: readonly SessionRow[], columns: number, clock?: ElapsedClock): PaneWidths {
-  const [sid, status, model, effort, elapsed] = SESSION_COLUMNS.map(column => Math.max(column.width, ...rows.map(row => cellWidth(column.cell(row, clock))))) as [number, number, number, number, number]
+export function paneWidths(rows: readonly SessionRow[], columns: number, _clock?: ElapsedClock): PaneWidths {
+  const [sid, status, model, effort, elapsed] = SESSION_COLUMNS.map(column => column.width) as [number, number, number, number, number]
   const room = columns - (sid + status + model + effort + elapsed) - GAP.length * SESSION_COLUMNS.length
   const wanted = Math.max(TITLE_FLOOR, widestOf(['title', ...rows.map(row => row.title)]))
   return { title: Math.max(TITLE_MIN, Math.min(wanted, room)), sid, status, model, effort, elapsed }
@@ -409,9 +416,17 @@ function cut(line: string, columns: number): string {
   return cellWidth(line) > columns ? headCells(line, Math.max(1, columns - 1)) + '…' : line
 }
 
-/** One pane line for a row: title, then the cells of SESSION_COLUMNS at `widths`, the last unpadded; cut to `columns`. */
+/** The last column's cell: unpadded, cut with an ellipsis when it is longer than its width. */
+function fitLast(text: string, width: number): string {
+  return cellWidth(text) > width ? fit(text, width) : text
+}
+
+/**
+ * One pane line for a row: title, then the cells of SESSION_COLUMNS at `widths`, each cut in its cell when longer, the
+ * last unpadded; cut to `columns`.
+ */
 export function formatRow(row: SessionRow, columns: number, widths: PaneWidths = paneWidths([row], columns), clock?: ElapsedClock): string {
-  const cells = SESSION_COLUMNS.map((column, i) => (i === SESSION_COLUMNS.length - 1 ? column.cell(row, clock) : fit(column.cell(row, clock), widths[column.id])))
+  const cells = SESSION_COLUMNS.map((column, i) => (i === SESSION_COLUMNS.length - 1 ? fitLast(column.cell(row, clock), widths[column.id]) : fit(column.cell(row, clock), widths[column.id])))
   return cut([fit(row.title, widths.title), ...cells].join(GAP), columns)
 }
 

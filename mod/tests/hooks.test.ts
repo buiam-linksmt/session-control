@@ -3911,7 +3911,7 @@ describe('the panel on the desktop surface', () => {
 
   test('terminal: the session rows keep their fixed columns at every width and only the title shortens; the desktop draws the same cells whole (decision mod-33)', { options: OPTIONS }, async ($, on) => {
     let ui = await open($, on, 'terminal', { ...PANE_PROPS, bodyColumns: 300 })
-    for (const bodyColumns of [300, 160, 90, 71, 70, 40]) {
+    for (const bodyColumns of [300, 160, 90, 86, 85, 40]) {
       if (bodyColumns !== 300) {
         await ui.unmount()
         ui = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, bodyColumns } as never })
@@ -3925,8 +3925,8 @@ describe('the panel on the desktop surface', () => {
       const rows = [...labels, ...orphans]
       expect(rows.length).toBeGreaterThan(1)
       for (const line of [header, ...rows]) expect(cellWidth(line)).toBeLessThanOrEqual(room)
-      if (bodyColumns >= 71) {
-        // From 71 columns the fixed columns are whole: each starts at the header's cell, the elapsed ends the row.
+      if (bodyColumns >= 86) {
+        // From 86 columns the fixed columns are whole: each starts at the header's cell, the elapsed ends the row.
         for (const name of ['sid', 'status', 'model', 'effort', 'elapsed']) expect(header.indexOf(` ${name} `.trimEnd())).toBeGreaterThan(0)
         const at = header.indexOf('elapsed')
         for (const line of rows) expect(line.slice(at)).toMatch(/^(\d+s|\d+m\d\ds|\d+h\d\dm|-)$/)

@@ -644,14 +644,14 @@ describe('panel_snapshot', () => {
     expect(lines.length).toBe(5)
     for (const line of lines) expect(cellWidth(line)).toBeLessThanOrEqual(116)
     const [header, ...shown] = lines as [string, ...string[]]
-    // The title column takes the room the fixed columns leave: 114 cells less 62.
-    expect(header).toBe(`  ${'title'.padEnd(52)}   sid        status                 model    effort   elapsed`)
+    // The title column takes the room the fixed columns leave: 114 cells less 77.
+    expect(header).toBe(`  ${'title'.padEnd(37)}   sid        status                 model                   effort   elapsed`)
     const ends = shown.map(line => line.slice(line.indexOf('abcdef12')))
     expect(ends).toEqual([
-      'abcdef12   running                haiku    medium   2h05m',
-      'abcdef12   finished               haiku    medium   83h20m',
-      'abcdef12   finished-unharvested   haiku    medium   1m00s',
-      'abcdef12   running                haiku    medium   5s',
+      'abcdef12   running                haiku                   medium   2h05m',
+      'abcdef12   finished               haiku                   medium   83h20m',
+      'abcdef12   finished-unharvested   haiku                   medium   1m00s',
+      'abcdef12   running                haiku                   medium   5s',
     ])
     for (const line of shown) expect(cellWidth(line.slice(0, line.indexOf('abcdef12')))).toBe(header.indexOf('sid'))
     expect(shown[2]).toStartWith('  a very long title that keeps going')
