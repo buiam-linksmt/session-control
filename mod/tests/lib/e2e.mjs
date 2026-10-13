@@ -2,7 +2,10 @@
 // headless orchestrator's start and wait, the reading of its transcript, and the process checks. The Node standard
 // library only: no sh, grep, tr, sed, jq or cygpath, so a script runs on Windows without Git Bash. The /proc checks are
 // Linux-only; elsewhere they print a `skip` line, and no process that is not this run's own throwaway is ever
-// signalled. Node 22 or newer.
+// signalled. Node 22 or newer. Every script keeps all the mod reads or writes (registry, helper files, runs directory,
+// trace) in its scratch directory with an empty licence picker (scratchSettings, or e2e-smoke's own settings), so the
+// real ones are never touched and the sessions inherit the default configuration (CLAUDE_CONFIG_DIR, else ~/.claude),
+// where their transcripts stay. One line per check; exit 1 on a failure.
 
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -59,10 +62,8 @@ export function isExecutable(path) {
 /** A path as claude and the mod take it: C:/... on Windows, unchanged elsewhere. */
 export const native = path => (IS_WINDOWS ? path.replaceAll('\\', '/') : path)
 /**
- * A path as the mod prints one it made itself (a config dir it found, a file a listing gives, a folder it flags): on
- * Windows the C:/... form it stores (winPath of hooks/core.ts: / separators, an upper-case drive letter, no doubled or
- * trailing separator); elsewhere unchanged. A path the mod prints from the registry or a transcript keeps the form it
- * was written in there.
+ * A path as the mod prints one it made itself: on Windows the C:/... form winPath (hooks/core.ts) stores, elsewhere
+ * unchanged. A path the mod prints from the registry or a transcript keeps the form it was written in.
  */
 export function shown(path) {
   if (!IS_WINDOWS) return path
@@ -245,9 +246,8 @@ export function startOf(pid) {
 }
 export const comm = pid => readOr(`/proc/${pid}/comm`).replace(/\n$/, '')
 /**
- * Every process of the machine from Win32_Process, in one Windows PowerShell call: pid (a string) to its parent's pid,
- * name, creation time in epoch milliseconds (the arithmetic of the mod's PROBE_PS1 and TREE_PS1, so a start compares
- * with the starts stop_worker reports) and command line. Windows only; an empty map when the call fails.
+ * Every process from Win32_Process in one PowerShell call: pid to parent pid, name, start in epoch ms (PROBE_PS1's
+ * arithmetic, so it compares with the starts stop_worker reports) and command line. Empty map when the call fails.
  */
 export function winProcs() {
   const script =
@@ -296,11 +296,9 @@ export function signal(pid, sig = 'SIGTERM') {
 }
 
 /**
- * The first three processes other than this one and its parent whose command line
- * or working directory names the directory, as `<pid> <command line>`, with ` (cwd <dir>)` after it when the working
- * directory names it. Only those two pids are left out, never a process by its name: every other process of this run
- * that is still there is reported. /proc on Linux (command line and working directory); elsewhere the command lines
- * only, through ps on POSIX and Win32_Process through PowerShell on Windows.
+ * The first three processes other than this one and its parent whose command line or working directory names the
+ * directory, as `<pid> <command line>[ (cwd <dir>)]`. Only those two pids are left out, never a process by its name, so
+ * every leftover of this run is reported. The working directory is read on Linux only (/proc).
  */
 export function processesNaming(dir) {
   let rows = []
@@ -324,11 +322,9 @@ export function processesNaming(dir) {
 }
 
 /**
- * A script's KEEP_OUT copies, as `mkdir -p <keep> && cp <files> <keep>/` makes them, then each further
- * cp. `steps` are cp calls: `{ files }` into the folder, `{ files: [file], name }` to a name of its own there. A cp
- * copies what it can and goes on; a failure (the folder not made, a file missing or unreadable) never ends the run.
- * With `quiet` false each failure is said on stderr, as by cp without 2>/dev/null. Answers whether every step copied
- * everything (the shell's `&&` after the cp).
+ * A script's KEEP_OUT copies (`mkdir -p <keep> && cp ...`). `steps` are cp calls: `{ files }` into the folder, `{ files:
+ * [file], name }` to a name of its own. A failure never ends the run; with `quiet` false it is said on stderr. Answers
+ * whether every step copied everything.
  */
 export function keepOut(keep, steps, quiet = true) {
   const say = text => quiet || fs.writeSync(2, text + '\n')
@@ -479,10 +475,9 @@ export const toolUses = entries =>
   entries.filter(e => e?.type === 'assistant').flatMap(e => (Array.isArray(e.message?.content) ? e.message.content : [])).filter(c => c?.type === 'tool_use')
 /**
  * The answer to a tool call as jq -r prints it: each tool_result of that id, its content (a string, or its text parts
- * joined by newlines), each followed by a newline; with `marked` each starts with OK or ERROR and a newline. Where jq
- * stops with an error (a tool_result without content, or with a null, a number or a boolean as its content; a part that
- * is no object; a text that is an object or an array), the rest of that transcript line gives nothing, as in jq, which
- * goes on with the next line: a call whose only answer has no content has no answer.
+ * joined by newlines) plus a newline; with `marked` each starts with OK or ERROR and a newline. Where jq stops with an
+ * error (content missing or a scalar, a part no object, a text an object or array) the rest of that transcript line
+ * gives nothing, as in jq: a call whose only answer has no content has no answer.
  */
 export function resultText(entries, id, marked = false) {
   let text = ''
@@ -531,11 +526,10 @@ function jqContent(content) {
 /** A value as jq -r prints it: a string as it is, anything else as JSON (an object or an array indented by two). */
 const jqRaw = value => (typeof value === 'string' ? value : isObject(value) || Array.isArray(value) ? JSON.stringify(value, null, 2) : JSON.stringify(value))
 /**
- * `jq -r '(.[] | select(.title == "<title>")).<path> // <alt>' <registry>` as a shell's $(...) holds it: the value at
- * the path (keys, as `.outcome.kind`) of every entry with that title, those that are neither null nor false, one per
- * line; `alt` when there is none. Where jq stops with an error (a registry that is missing, no JSON, null or a scalar;
- * an entry that is no object; a path through a scalar) the values before it stand and `alt` is not given. Two entries
- * with the title give two lines, which no single value equals.
+ * `jq -r '(.[] | select(.title == "<title>")).<path> // <alt>' <registry>` as $(...) holds it: the non-null, non-false
+ * values at the path (as `outcome.kind`) of every entry with that title, one per line, else `alt`. Where jq stops with
+ * an error (registry missing or no array/object, an entry no object, a path through a scalar) the values before it
+ * stand and `alt` is not given. Two entries with the title give two lines, which no single value equals.
  */
 export function jqPick(registry, title, path, alt = '') {
   const items = registry === undefined ? undefined : jqEach(registry)

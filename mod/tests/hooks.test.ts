@@ -3,6 +3,7 @@
 // test's own hooks from fixtures: no real registry, /proc or licence picker.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { RULES_BLOCK, SESSION_COLUMNS, cellWidth, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
@@ -28,6 +29,7 @@ import {
   TASK_NOTIFICATION_KILLED,
   WIN_PROBE_STDOUT,
 } from './fixtures'
+import { echoPrompt } from './notice-kit'
 
 const PICKER = '/fixture/bin/pick --need {need}'
 const OPTIONS = { orchestratorDir: ORCH_DIR, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, licencePickCommand: PICKER }
@@ -103,10 +105,8 @@ const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320
 const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false, probeMs: 0, probeLateMs: 0, isAliveGone: false }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
-// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone: the alive worker 4101 has
-// exited (its lines left out of the probe); isOrphanGone: so has the unregistered headless claude 4999.
-// probeMs: how long each Linux probe takes on the fixture's clock (0: no time). probeLateMs: each probe answers only once
-// the test has moved the fixture's clock that far (0: at once).
+// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone, probeMs, probeLateMs: as
+// in WINDOWS; isOrphanGone: the unregistered headless claude 4999 has exited too.
 const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeMs: 0, probeLateMs: 0 }
 // The registry as a real file (both fixtures): with isCurrent a read answers the text the plugin last wrote there (the
 // seed the test gave until its first write), and the probe asked for the launched worker's pid (7001, while it runs)
@@ -389,6 +389,12 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
 }
 
 const start = (cwd: string, isInteractive = true) => ({ cwd, surface: null, isInteractive })
+/** The session started in `cwd` (the orchestrator's directory by default). */
+const boot = ($: Engine, cwd = ORCH_DIR) => $.session.start(start(cwd))
+/** A launch_worker call with `input` after the tool's name. */
+const launchTool = ($: Engine, input: object) => $.tool.call({ tool: TOOL, ...input } as never)
+/** The /session-control command with `args`. */
+const runCommand = ($: Engine, args: string) => $.command.run({ command: 'session-control', args } as never)
 /** The registry as the plugin last wrote it. */
 const lastRegistry = (w: World) => JSON.parse(w.writes.filter(one => fixture(one.path) === REGISTRY_PATH).at(-1)?.text ?? '[]') as Record<string, unknown>[]
 const PANE_PROPS = { title: 'Session control', isFocused: false, bodyColumns: 120, placement: 'dock', scroll: { offset: 0, bodyRows: 36 } }
@@ -421,7 +427,7 @@ const pinned = (argv: readonly string[]) => argv.map(one => (one.endsWith('/help
 describe('scope', () => {
   test('a no-op outside the orchestrator dir', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start('/work/elsewhere'))
+    await boot($, '/work/elsewhere')
     expect(w.runs.length).toBe(0)
     expect(w.registered).toEqual(['/session-control'])
   })
@@ -434,30 +440,30 @@ describe('scope', () => {
       return { value: { isPlaced: true } } as never
     })
     on('ui.panes', () => ({ value: isUp ? [{ id: 'session-control' }] : [] }) as never)
-    await $.session.start(start('/work/elsewhere'))
+    await boot($, '/work/elsewhere')
     expect(w.runs.length).toBe(0)
-    const opened = await $.command.run({ command: 'session-control', args: '' } as never)
+    const opened = await runCommand($, '')
     expect(opened.text).toBe('Session-control panel opened.')
     expect(w.registered).toContain('launch_worker')
     const runs = w.runs.length
-    const hidden = await $.command.run({ command: 'session-control', args: '' } as never)
+    const hidden = await runCommand($, '')
     expect(hidden.text).toBe('Session-control panel hidden, session-control stays on.')
     // Still on: the board's tools stay registered once and a prompt notification would still be handled.
     expect(w.registered.filter(name => name === 'launch_worker').length).toBe(1)
     expect(w.runs.length).toBeGreaterThanOrEqual(runs)
     isUp = false
-    const again = await $.command.run({ command: 'session-control', args: '' } as never)
+    const again = await runCommand($, '')
     expect(again.text).toBe('Session-control panel opened.')
     expect(w.registered.filter(name => name === 'launch_worker').length).toBe(1)
   })
   test('without the orchestratorDir option the board starts where CLAUDE.md is the orchestrator, and the command refuses elsewhere', { options: { registryPath: '~/.claude/headless-sessions.json', completionWrites: true } }, async ($, on) => {
     const w = world(on)
     stubPanel(on)
-    await $.session.start(start('/work/elsewhere'))
+    await boot($, '/work/elsewhere')
     expect(w.registered).toEqual(['/session-control'])
-    const refused = await $.command.run({ command: 'session-control', args: '' } as never)
+    const refused = await runCommand($, '')
     expect(refused.text).toContain('not an orchestrator directory')
-    await $.session.start(start('/work/orch/'))
+    await boot($, '/work/orch/')
     expect(w.registered).toContain('launch_worker')
     expect(w.writes.some(one => one.path === '/work/orch/open-points.json')).toBe(true)
   })
@@ -473,35 +479,17 @@ function fingerprint(text: string): string {
 describe('tool surface', () => {
   test('the six tools keep their names, descriptions and schemas', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    // The first six as they were; feature/inspect-tools registers its read-only tools after them (the full list:
-    // the next test).
+    await boot($)
+    // The first six as they were; later tools come after them (the full list: the next test).
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
-    // Changed on purpose by feature/inspect-tools: six read-only inspection tools (list_sessions, read_result,
-    // worker_tail, session_writes, panel_snapshot, audit_state) are registered after the six; the six were unchanged
-    // (6072:68e1b3f1, this line's value before that change).
-    // Changed on purpose again by feature/write-tools (9499:ccae8712 before): close_worker (11029:39536527) and
-    // archive_decisions (11909:ac870414) are registered after audit_state, then launch_worker's schema and description
-    // grow (prompt, section, rules; dir, model, effort and title optional for a resume). Every other tool is
-    // unchanged: the next test pins each.
-    // Changed on purpose again by feature/stop-guard (13443:c93b222a before): stop_worker (1129:9b87c2b9) is registered
-    // after archive_decisions; every tool before it keeps its own pin (the next test), record_decision included.
-    // Changed on purpose again by feature/drift-digest (14573:6cee2b74 before): turn_digest is registered after
-    // stop_worker; every tool before it keeps its own pin (the next test).
-    // Changed on purpose again by feature/licence-tools (15209:9b0c2251 before): list_licences (604:8cb60265) is
-    // registered after turn_digest; every tool before it keeps its own pin (the next test).
-    // Changed on purpose again by feature/licence-tools (15814:a639e0f9 before): probe_licence_usage (872:606c21ff) is
-    // registered after list_licences; every tool before it keeps its own pin (the next test).
-    // Changed on purpose again by feature/licence-tools (16687:1371ae1b before): launch_worker's schema gains config_dir
-    // and its description a sentence (2916:5bd96840 to 3506:a5214540); every other tool keeps its own pin.
-    // Changed on purpose again by feature/node-only (17277:e069d42b before): the status description of queue_task says
-    // the panel shows queued tasks only (702:d743828c to 723:d470f87e); every other tool keeps its own pin.
+    // The whole tool surface in one pin: it moves only on purpose, together with the per-tool pin of the next test,
+    // which names the tool that changed (each past move and its old value is in git log).
     expect(fingerprint(JSON.stringify(w.tools))).toBe('17298:d6106e35')
   })
 
   test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     expect(w.tools.map(tool => tool.name)).toEqual([
       'launch_worker',
       'acknowledge_workers',
@@ -517,30 +505,21 @@ describe('tool surface', () => {
       'audit_state',
       'close_worker',
       'archive_decisions',
-      // Added on purpose by feature/stop-guard, after archive_decisions: every tool before it is unchanged.
+      // A new tool goes last, so every tool before it keeps its place and its pin.
       'stop_worker',
-      // Added on purpose by feature/drift-digest, after stop_worker: every tool before it is unchanged.
       'turn_digest',
-      // Added on purpose by feature/licence-tools, after turn_digest: every tool before it is unchanged.
       'list_licences',
-      // Added on purpose by feature/licence-tools, after list_licences: every tool before it is unchanged.
       'probe_licence_usage',
     ])
-    // Each tool's own pin. Unchanged since before feature/write-tools, byte for byte: the five of the first six after
-    // launch_worker (together 4689:d2b85bc0) and the six inspection tools (together 3428:1484e7b6). The first six
-    // were 6072:68e1b3f1 together while launch_worker was 1382:a077d922; feature/write-tools moved launch_worker's on
-    // purpose (its new parameters) and added the two write-side tools.
-    // feature/licence-tools moved launch_worker's on purpose (config_dir; 2916:5bd96840 before) and added the two
-    // licence tools.
-    // feature/node-only moved queue_task's on purpose (its status description), and with it the group pin of the five.
+    // Each tool's own pin, so a change to one tool's name, description or schema shows which tool moved; a pin moves
+    // only on purpose.
     const pins = Object.fromEntries(w.tools.map(tool => [tool.name, fingerprint(JSON.stringify(tool))]))
     expect(pins).toEqual({
       launch_worker: '3506:a5214540',
       acknowledge_workers: '875:8ed174c7',
       retire_workers: '1530:18bbed4e',
       open_point: '932:ad93390e',
-      // Moved on purpose by feature/node-only (702:d743828c before): its status description says the panel shows
-      // queued tasks only, running work being a session.
+      // Its status description says the panel shows queued tasks only, running work being a session.
       queue_task: '723:d470f87e',
       record_decision: '644:568b5ef',
       list_sessions: '564:8e142ecb',
@@ -552,14 +531,11 @@ describe('tool surface', () => {
       close_worker: '1529:9741bcb0',
       archive_decisions: '879:39a97972',
       stop_worker: '1129:9b87c2b9',
-      // Added on purpose by feature/drift-digest.
       turn_digest: '635:cbba99b4',
-      // Added on purpose by feature/licence-tools.
       list_licences: '604:8cb60265',
       probe_licence_usage: '872:606c21ff',
     })
-    // The five after launch_worker hold queue_task, so feature/node-only moved this one with it (4689:d2b85bc0 before);
-    // the other four keep their own pins above.
+    // Group pins: the five after launch_worker (queue_task among them) and the six inspection tools.
     expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4710:7d7306c')
     expect(fingerprint(JSON.stringify(w.tools.slice(6, 12)))).toBe('3428:1484e7b6')
   })
@@ -570,7 +546,7 @@ describe('fresh environment', () => {
     for (const file of ['open-points.json', 'task-queue.json']) MISSING.add(`${ORCH_DIR}/${file}`)
     const w = world(on)
     try {
-      await $.session.start(start(ORCH_DIR))
+      await boot($)
       const created = (file: string) => w.writes.find(one => one.path === `${ORCH_DIR}/${file}`)?.text
       expect(JSON.parse(created('open-points.json') ?? '{}')).toMatchObject({ points: [] })
       expect(JSON.parse(created('task-queue.json') ?? '{}')).toEqual({ tasks: [] })
@@ -588,9 +564,9 @@ describe('errors', () => {
   test('an unreadable registry is toasted once and the panel shows the warning in the sessions box', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, 'not json')
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     expect(w.toasts.filter(text => text.startsWith('Tracking problem \u00B7 ')).length).toBe(1)
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await runCommand($, '')
     expect(w.toasts.filter(text => text.startsWith('Tracking problem \u00B7 ')).length).toBe(1)
     const ui = await mountPane($)
     const all = String(((await ui.findAll({}))[0] as { text?: string }).text ?? '')
@@ -603,9 +579,8 @@ describe('errors', () => {
 describe('session-control board', () => {
   test('session.start registers, gathers with one probe call, gathers the rows', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR + '/'))
-    // The command and the first six tools, as before feature/inspect-tools; the read-only tools registered after them
-    // are pinned by 'tool surface > the registered tool names, in order'.
+    await boot($, ORCH_DIR + '/')
+    // The command and the first six tools; the later ones are pinned by 'tool surface > the registered tool names, in order'.
     expect(w.registered.slice(0, 7)).toEqual(['/session-control', 'launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     const probes = w.calls.filter(one => one.op === 'probe')
     expect(probes.length).toBe(1)
@@ -615,8 +590,8 @@ describe('session-control board', () => {
   test('/session-control side opens one panel: sessions, queued work, open points, in that order', { options: OPTIONS }, async ($, on) => {
     world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    const ran = await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    const ran = await runCommand($, 'side')
     expect(ran.text).toBe('Session-control panel opened.')
     const ui = await $.ui.mount({
       plugin: 'session-control',
@@ -641,8 +616,8 @@ describe('session-control board', () => {
   test('clicking a session opens its output box, clicking it again closes it', { options: OPTIONS }, async ($, on) => {
     world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     const ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeUndefined()
     await ui.press({ key: 's:aaaaaaaa-1111-4111-8111-111111111111' })
@@ -656,7 +631,7 @@ describe('session-control board', () => {
 describe('completion', () => {
   test('a dead worker is classified, merged in place once, and toasted', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const regWrites = () => w.writes.filter(one => one.path === REGISTRY_PATH)
     expect(regWrites().length).toBe(1)
     const after = JSON.parse(regWrites()[0]!.text) as Record<string, unknown>[]
@@ -681,7 +656,7 @@ describe('completion', () => {
   ] as const) {
     test(`a completion toast carries its type as the title: ${title}`, { options: OPTIONS }, async ($, on) => {
       const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT.replace('/fixture/results/limit.json', `/fixture/results/${result}.json`))
-      await $.session.start(start(ORCH_DIR))
+      await boot($)
       expect(w.toasts).toEqual([`${title} \u00B7 limited worker: ${summary}`])
     })
   }
@@ -689,21 +664,21 @@ describe('completion', () => {
   test('a clean report quoting the login message is clean; the err file is read and a login there is a login', { options: OPTIONS }, async ($, on) => {
     const quoting = REGISTRY_TEXT.replace('/fixture/results/limit.json', '/fixture/results/designReport.json')
     const w = world(on, '/fixture/lic/a\n', true, quoting)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     expect(w.toasts[0]).toStartWith('Session finished · limited worker: clean: ')
     expect(w.reads).not.toContain('/fixture/results/login.err')
   })
   test('the err file of the entry decides a login when the run did not succeed', { options: OPTIONS }, async ($, on) => {
     const withErr = REGISTRY_TEXT.replace('"result_file": "/fixture/results/limit.json"', '"result_file": "/fixture/results/maxTurns.json",\n    "err_file": "/fixture/results/login.err"')
     const w = world(on, '/fixture/lic/a\n', true, withErr)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     expect(w.reads).toContain('/fixture/results/login.err')
     expect(w.toasts).toEqual(['Login needed · limited worker: login: licence needs a re-login'])
   })
   test('the err file of the entry does not turn a successful run into a login', { options: OPTIONS }, async ($, on) => {
     const withErr = REGISTRY_TEXT.replace('"result_file": "/fixture/results/limit.json"', '"result_file": "/fixture/results/designReport.json",\n    "err_file": "/fixture/results/login.err"')
     const w = world(on, '/fixture/lic/a\n', true, withErr)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     expect(w.toasts[0]).toStartWith('Session finished · limited worker: clean: ')
     const entry = lastRegistry(w).find(one => one.session_id === SID_DEAD)
     expect((entry?.outcome as { kind?: string }).kind).toBe('clean')
@@ -713,8 +688,8 @@ describe('completion', () => {
 
   test('the report check adds one line to the completion notice of a clean report without the git reads; the toast and the outcome stay', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT.replace('/fixture/results/limit.json', '/fixture/results/clean.json'))
-    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-    await $.session.start(start(ORCH_DIR))
+    echoPrompt(on)
+    await boot($)
     expect(w.toasts).toEqual(['Session finished · limited worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.'])
     const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
     expect(sent.context).toEqual([
@@ -726,8 +701,8 @@ describe('completion', () => {
   })
   test('a real report with both reads gets no report-check line', { options: OPTIONS }, async ($, on) => {
     world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT.replace('/fixture/results/limit.json', '/fixture/results/probeReport.json'))
-    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-    await $.session.start(start(ORCH_DIR))
+    echoPrompt(on)
+    await boot($)
     const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
     expect(sent.context?.length).toBe(1)
     expect(String(sent.context?.[0])).not.toContain('report check')
@@ -735,15 +710,15 @@ describe('completion', () => {
 
   test('with completionWrites off nothing is written, the toast still shows', { options: { ...OPTIONS, completionWrites: false } }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     expect(w.writes.filter(one => one.path === REGISTRY_PATH).length).toBe(0)
     expect(w.toasts.length).toBe(1)
   })
 
   test('a task notification carries the pending completion to the model once', { options: OPTIONS }, async ($, on) => {
     world(on)
-    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-    await $.session.start(start(ORCH_DIR))
+    echoPrompt(on)
+    await boot($)
     const first = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
     expect(first.context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
     const second = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
@@ -756,8 +731,8 @@ describe('launch_worker', () => {
 
   test('passes the guards, runs the worker in the background, finds its pid and registers it', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    const ran = await $.tool.call({ tool: TOOL, ...args } as never)
+    await boot($)
+    const ran = await launchTool($, args)
     expect(String(ran.result)).toContain('Launched pid 7001')
     expect(String(ran.result)).toContain('session abcdabcd-0000-4000-8000-000000000001')
     expect(w.bash.length).toBe(1)
@@ -777,18 +752,18 @@ describe('launch_worker', () => {
 
   test('every launch has a unique session name and accepts messages from other sessions', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.tool.call({ tool: TOOL, ...args } as never)
+    await boot($)
+    await launchTool($, args)
     expect(String(w.bash[0]?.command)).toContain(`claude -p --model 'opus' -n 'w-new-260921141320' --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions`)
     // A second launch in the same second gets another name.
-    await $.tool.call({ tool: TOOL, ...args, dir: '/work/new' } as never)
+    await launchTool($, { ...args, dir: '/work/new' })
     expect(String(w.bash[1]?.command)).toContain(`-n 'w-new-260921141320-2' --settings`)
   })
 
   test('the registry records the session name and the messaging socket from the worker sessions file', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...args } as never)
+    await boot($)
+    const out = await launchTool($, args)
     expect(String(out.result)).toContain('registered. Name: w-new-260921141320; socket: /run/user/1000/cc-socks/7001.sock. Result: ')
     expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, name: 'w-new-260921141320', socket_path: '/run/user/1000/cc-socks/7001.sock', started_at: NOW_MS / 1000 })
   })
@@ -797,8 +772,8 @@ describe('launch_worker', () => {
     WORKER.isInboxless = true
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.result)).toContain('registered. Name: w-new-260921141320; socket: none.')
       const entry = lastRegistry(w).at(-1) as Record<string, unknown>
       expect(entry).toMatchObject({ pid: 7001, session_id: 'abcdabcd-0000-4000-8000-000000000001', name: 'w-new-260921141320' })
@@ -814,8 +789,8 @@ describe('launch_worker', () => {
     WORKER.linuxConfigDir = ''
     try {
       const w = world(on, '')
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.result)).toContain(`Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${HOME}/.claude, registered.`)
       expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
       expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
@@ -830,8 +805,8 @@ describe('launch_worker', () => {
     WORKER.linuxConfigDir = '/fixture/lic/own'
     try {
       const w = world(on, '', true, REGISTRY_TEXT, { HOME, CLAUDE_CONFIG_DIR: '/fixture/lic/own' })
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.result)).toContain('config_dir /fixture/lic/own, registered.')
       expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
       expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: '/fixture/lic/own' })
@@ -849,10 +824,10 @@ describe('launch_worker', () => {
     WORKER.bashAnswer = { deny: 'Permission to use Bash has been denied by the auto mode classifier.' }
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
+      await boot($)
       const before = lastRegistry(w).length
       const probesBefore = w.calls.filter(one => one.op === 'probe').length
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      const out = await launchTool($, args)
       expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: Permission to use Bash has been denied by the auto mode classifier.${ALLOW_HINT}`)
       // No wait: the launch's own check before the call, and one probe after it for a worker with the launch's name,
       // which finds none (the launch never ran).
@@ -873,8 +848,8 @@ describe('launch_worker', () => {
     WORKER.bashAnswer = { isError: true, result: 'Error: spawn failed', text: 'Error: spawn failed' }
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.deny)).toBe(`session-control: the Bash tool answered the launch with an error: Error: spawn failed${ALLOW_HINT}`)
       expect(w.runs.some(argv => argv[0] === 'sleep')).toBe(false)
       expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
@@ -918,9 +893,9 @@ describe('launch_worker', () => {
           WORKER.isAnsweredAfterRun = true
           try {
             const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-            await $.session.start(start(host.dir))
+            await boot($, host.dir)
             const before = probes(w)
-            const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+            const out = await launchTool($, host.launch)
             expect(out.deny).toBeUndefined()
             expect(String(out.result)).toBe(
               `Launched pid 7001, session ${SID_NEW}, config_dir ${host.configDir}, registered. Name: w-new-260921141320; socket: ${host.socket}. ` +
@@ -940,9 +915,9 @@ describe('launch_worker', () => {
         WORKER.bashAnswer = { deny: 'refused by a hook' }
         try {
           const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-          await $.session.start(start(host.dir))
+          await boot($, host.dir)
           const before = probes(w)
-          const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+          const out = await launchTool($, host.launch)
           expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: refused by a hook${ALLOW_HINT}`)
           // The launch's own check before the call and the one probe after it; no wait.
           expect(probes(w) - before).toBe(2)
@@ -980,10 +955,10 @@ describe('launch_worker', () => {
         DECISIONS.text = BLOCK_DECISIONS
         try {
           const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-          await $.session.start(start(host.dir))
+          await boot($, host.dir)
           const decisionReads = () => w.reads.filter(path => fixture(path) === `${ORCH_DIR}/agreed-decisions.md`).length
           const readsBefore = decisionReads()
-          const launch = (prompt: string) => $.tool.call({ tool: TOOL, ...host.launch, prompt } as never)
+          const launch = (prompt: string) => launchTool($, { ...host.launch, prompt })
           const DELETION = 'refused by the sign-off guard: the prompt instructs a remote branch or tag deletion'
           for (const [prompt, start] of [
             [`${HEAD}\n${LINES.join('\n')}`, `${DELETION} on line 2, a remote branch or tag deletion on line 3 as a step for the worker;`],
@@ -1028,8 +1003,8 @@ describe('launch_worker', () => {
     const w = world(on)
     // Its input is the call's envelope (the tool and its arguments), as a settings hook's PreToolUse sees it.
     on('classic.PreToolUse', ($, e) => (String((e as { tool?: unknown }).tool) === 'Bash' ? { deny: 'blocked by a PreToolUse hook' } : {}))
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...args } as never)
+    await boot($)
+    const out = await launchTool($, args)
     expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: blocked by a PreToolUse hook${ALLOW_HINT}`)
     expect(w.bash.length).toBe(0)
     expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
@@ -1039,11 +1014,11 @@ describe('launch_worker', () => {
     WORKER.bashAnswer = { deny: `x${'y'.repeat(700)}` }
     try {
       world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: x${'y'.repeat(499)}${ALLOW_HINT}`)
       WORKER.bashAnswer = { deny: '  ' }
-      const empty = await $.tool.call({ tool: TOOL, ...args } as never)
+      const empty = await launchTool($, args)
       expect(String(empty.deny)).toBe(`session-control: the Bash tool refused the launch: no reason given${ALLOW_HINT}`)
     } finally {
       WORKER.bashAnswer = undefined
@@ -1054,8 +1029,8 @@ describe('launch_worker', () => {
     WORKER.isBashMissing = true
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.deny)).toStartWith('session-control: the worker could not be started through the Bash tool (')
       // The engine's reason in the brackets (the kit's own wording for a failed call).
       expect(String(out.deny)).toMatch(/Bash tool \(.+\); nothing/)
@@ -1075,8 +1050,8 @@ describe('launch_worker', () => {
       WORKER.linuxConfigDir = ''
       try {
         const w = world(on, '', true, underHome)
-        await $.session.start(start(ORCH_DIR))
-        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        await boot($)
+        expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
         expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
         expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}'`)
       } finally {
@@ -1085,15 +1060,15 @@ describe('launch_worker', () => {
     })
     test('without a picker, of an entry under another directory, sets it', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
       const w = world(on, '')
-      await $.session.start(start(ORCH_DIR))
-      expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+      await boot($)
+      expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
       expect(String(w.bash[0]?.command)).toContain(`CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume '${SID_UNREPORTED}'`)
     })
     test('keeps the entry name; an entry without one gets a fresh name', { options: OPTIONS }, async ($, on) => {
       const named = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? { ...one, name: 'w-first-run-260901080000' } : one)))
       const w = world(on, '/fixture/lic/a\n', true, named)
-      await $.session.start(start(ORCH_DIR))
-      expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+      await boot($)
+      expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
       expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}' -n 'w-first-run-260901080000' --settings '{"crossSessionInbound":"accept"}' --dangerously`)
     })
     test('sets the new run\'s started_at and drops the previous run\'s ended_at', { options: OPTIONS }, async ($, on) => {
@@ -1101,8 +1076,8 @@ describe('launch_worker', () => {
       WORKER.sid = SID_UNREPORTED
       try {
         const w = world(on, '/fixture/lic/a\n', true, timed)
-        await $.session.start(start(ORCH_DIR))
-        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        await boot($)
+        expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
         const entry = lastRegistry(w).find(one => one.session_id === SID_UNREPORTED) as Record<string, unknown>
         expect(entry).toMatchObject({ pid: 7001, started_at: NOW_MS / 1000 })
         expect('ended_at' in entry).toBe(false)
@@ -1115,8 +1090,8 @@ describe('launch_worker', () => {
       WORKER.sid = SID_UNREPORTED
       try {
         const w = world(on, '/fixture/lic/a\n', true, stale)
-        await $.session.start(start(ORCH_DIR))
-        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        await boot($)
+        expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
         // The name is the one the sessions file holds (the engine's own), the fixture's here.
         expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ pid: 7001, name: 'w-new-260921141320', socket_path: '/run/user/1000/cc-socks/7001.sock' })
       } finally {
@@ -1128,8 +1103,8 @@ describe('launch_worker', () => {
       WORKER.isInboxless = true
       try {
         const w = world(on, '/fixture/lic/a\n', true, stale)
-        await $.session.start(start(ORCH_DIR))
-        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        await boot($)
+        expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
         expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ pid: 7001, name: 'w-first-run-260901080000', socket_path: null })
       } finally {
         WORKER.isInboxless = false
@@ -1138,16 +1113,16 @@ describe('launch_worker', () => {
     })
     test('of an entry without a name: a fresh unique name', { options: OPTIONS }, async ($, on) => {
       const w = world(on, '/fixture/lic/a\n')
-      await $.session.start(start(ORCH_DIR))
-      expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+      await boot($)
+      expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
       expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}' -n 'w-new-260921141320' --settings`)
     })
     test('with a picker, of an entry under the default directory, sets it as before', { options: OPTIONS }, async ($, on) => {
       WORKER.linuxConfigDir = `${HOME}/.claude`
       try {
         const w = world(on, '/fixture/lic/a\n', true, underHome)
-        await $.session.start(start(ORCH_DIR))
-        expect(String((await $.tool.call({ tool: TOOL, ...resume } as never)).result)).toContain('Launched pid 7001')
+        await boot($)
+        expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
         expect(String(w.bash[0]?.command)).toContain(`CLAUDE_CONFIG_DIR='${HOME}/.claude'`)
         expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
       } finally {
@@ -1158,10 +1133,10 @@ describe('launch_worker', () => {
 
   test('a session file that appears late is still read, and the worker is registered', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     LATE.add('/fixture/lic/a/sessions/7001.json')
     try {
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      const out = await launchTool($, args)
       expect(String(out.result)).toContain('Launched pid 7001')
       expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(true)
     } finally {
@@ -1174,9 +1149,9 @@ describe('launch_worker', () => {
     LINUX_FIXTURE.isWorkerHidden = true
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
+      await boot($)
       const before = lastRegistry(w).length
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      const out = await launchTool($, args)
       expect(String(out.result)).toBe(
         'Started in the background, but no claude process for it appeared within 30 s: it is not registered yet. ' +
           "Check it with list_sessions: while it runs unregistered it is an orphan row (cwd /work/new); the mod's poll registers it as soon as it finds it " +
@@ -1217,8 +1192,8 @@ describe('launch_worker', () => {
     LINUX_FIXTURE.isWorkerHidden = true
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.result)).toContain('it is not registered yet')
       for (let step = 0; step < 121; step++) await w.clock.advance(5000)
       LINUX_FIXTURE.isWorkerHidden = false
@@ -1255,11 +1230,11 @@ describe('launch_worker', () => {
         host.knobs.isWorkerHidden = true
         try {
           const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-          on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-          await $.session.start(start(host.dir))
+          echoPrompt(on)
+          await boot($, host.dir)
           // The start's harvest (the limited worker) rides on a first prompt.
           await completions($ as never)
-          const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+          const out = await launchTool($, host.launch)
           expect(String(out.result)).toStartWith('Started in the background, but no claude process for it appeared within 30 s: it is not registered yet.')
           const mine = () => lastRegistry(w).filter(one => one.session_id === SID_NEW)
           const told = () => w.toasts.filter(one => one.includes(' \u00B7 new: '))
@@ -1323,9 +1298,9 @@ describe('launch_worker', () => {
         let release = () => {}
         try {
           const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-          await $.session.start(start(host.dir))
+          await boot($, host.dir)
           const firstAt = w.clock.now()
-          const first = String((await $.tool.call({ tool: TOOL, ...host.launch } as never)).result)
+          const first = String((await launchTool($, host.launch)).result)
           expect(first).toStartWith('Started in the background, but no claude process for it appeared within 30 s: it is not registered yet.')
           await w.clock.advance(5000)
           await w.clock.advance(5000)
@@ -1340,7 +1315,7 @@ describe('launch_worker', () => {
           HELD.heldSessions = () => {
             isHeld = true
           }
-          const pending = $.tool.call({ tool: TOOL, ...host.launch } as never)
+          const pending = launchTool($, host.launch)
           for (let step = 0; step < 100 && !isHeld; step++) await w.clock.settle()
           expect(isHeld).toBe(true)
           const polled = w.clock.advance(5000)
@@ -1441,14 +1416,14 @@ describe('launch_worker', () => {
 
       test(`${host.name}: its result file holds the session id: registered at once as a finished entry, harvested once, one completion note, sound and audited as any finished worker`, { options: host.options }, async ($, on) => {
         const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-        on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-        await $.session.start(start(host.dir))
+        echoPrompt(on)
+        await boot($, host.dir)
         // The start's harvest (the limited worker) rides on a first prompt.
         await userPrompt($ as never)
         MISSING.add(host.sessions)
         WORKER.resultText = FINISHED
         try {
-          const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+          const out = await launchTool($, host.launch)
           const endedSec = Math.floor(w.clock.now() / 1000)
           expect(String(out.result)).toBe(
             `Worker pid 7001 started and ended before its sessions file could be read: session ${SID_NEW} (from its result file), config_dir ${host.configDir}, registered as finished, outcome clean. ` +
@@ -1490,11 +1465,11 @@ describe('launch_worker', () => {
       ] as const) {
         test(`${host.name}: ${what}: not registered, the answer names both files and what the poll does; the poll registers it once a file holds the session id`, { options: host.options }, async ($, on) => {
           const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-          await $.session.start(start(host.dir))
+          await boot($, host.dir)
           MISSING.add(host.sessions)
           WORKER.resultText = text
           try {
-            const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+            const out = await launchTool($, host.launch)
             expect(String(out.result)).toBe(
               'Worker pid 7001 started but its session id could not be read; registry NOT written. ' +
                 `Neither its sessions file (${host.sessionsShown}) nor its result file (${result}) holds a session id yet. ` +
@@ -1536,10 +1511,10 @@ describe('launch_worker', () => {
 
       test(`${host.name}: a sessions file read in time decides as before, whatever the result file holds: the launch's own answer and entry`, { options: host.options }, async ($, on) => {
         const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-        await $.session.start(start(host.dir))
+        await boot($, host.dir)
         WORKER.resultText = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'PONG', session_id: 'ffffffff-0000-4000-8000-00000000000f' })
         try {
-          const out = await $.tool.call({ tool: TOOL, ...host.launch } as never)
+          const out = await launchTool($, host.launch)
           expect(String(out.result)).toBe(
             `Launched pid 7001, session ${SID_NEW}, config_dir ${host.configDir}, registered. ` +
               `Name: w-new-260921141320; socket: ${host.socket ?? 'none'}. Result: ${result}; errors: ${err}.`,
@@ -1571,8 +1546,8 @@ describe('launch_worker', () => {
     MISSING.add(REGISTRY_PATH)
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.result)).toContain('registered')
       expect(lastRegistry(w)).toEqual([expect.objectContaining({ pid: 7001, cwd: '/work/new' })] as never)
     } finally {
@@ -1584,10 +1559,10 @@ describe('launch_worker', () => {
     UNREADABLE.add(REGISTRY_PATH)
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
+      await boot($)
       // The fixture's `test -e` answers every file as missing, so activation's own helper-file creation is not counted.
       const before = w.writes.length
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      const out = await launchTool($, args)
       expect(String(out.result)).toContain('registry write FAILED: the registry cannot be read')
       expect(w.writes.slice(before).some(one => one.path.startsWith(REGISTRY_PATH))).toBe(false)
     } finally {
@@ -1595,31 +1570,23 @@ describe('launch_worker', () => {
     }
   })
 
-  test('refuses the orchestrator dir as cwd', { options: OPTIONS }, async ($, on) => {
-    world(on)
-    await $.session.start(start(ORCH_DIR))
-    const ran = await $.tool.call({ tool: TOOL, ...args, dir: ORCH_DIR } as never)
-    expect(String(ran.deny)).toContain('orchestrator dir')
-  })
-
-  test('refuses an empty licence pick', { options: OPTIONS }, async ($, on) => {
-    world(on, '')
-    await $.session.start(start(ORCH_DIR))
-    const ran = await $.tool.call({ tool: TOOL, ...args } as never)
-    expect(String(ran.deny)).toContain('no licence has room')
-  })
-
-  test('refuses a resume of a live session', { options: OPTIONS }, async ($, on) => {
-    world(on)
-    await $.session.start(start(ORCH_DIR))
-    const ran = await $.tool.call({ tool: TOOL, ...args, resume_sid: SID_ALIVE } as never)
-    expect(String(ran.deny)).toContain('pid 4101')
-  })
+  for (const [name, pick, input, denied] of <[string, string | undefined, object, string][]>[
+    ['refuses the orchestrator dir as cwd', undefined, { ...args, dir: ORCH_DIR }, 'orchestrator dir'],
+    ['refuses an empty licence pick', '', args, 'no licence has room'],
+    ['refuses a resume of a live session', undefined, { ...args, resume_sid: SID_ALIVE }, 'pid 4101'],
+  ]) {
+    test(name, { options: OPTIONS }, async ($, on) => {
+      world(on, pick)
+      await boot($)
+      const ran = await launchTool($, input)
+      expect(String(ran.deny)).toContain(denied)
+    })
+  }
 
   test('the report check sends a faulty report back once, and passes a clean one', { options: OPTIONS }, async ($, on) => {
     world(on)
     on('classic.Stop', () => ({}))
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const stop = (answer: string, again = false) =>
       ({ hook_event_name: 'Stop', stop_hook_active: again, last_assistant_message: answer, session_id: 's', transcript_path: '/t', cwd: ORCH_DIR }) as never
     const bad = await $.classic.Stop(stop('It is not a bug, but a feature.'))
@@ -1630,16 +1597,16 @@ describe('launch_worker', () => {
 
   test('launch_worker refuses a prompt without the checklist items', { options: OPTIONS }, async ($, on) => {
     world(on)
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...args, prompt_file: '/work/new/thin.md' } as never)
+    await boot($)
+    const out = await launchTool($, { ...args, prompt_file: '/work/new/thin.md' })
     expect(JSON.stringify(out)).toContain('the prompt lacks')
   })
 
   test('a prompt runs no probe, no registry read and no git, and does not wait for the trace: a trace write that hangs holds no prompt', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
     const w = world(on)
     on('classic.PostCompact', () => ({}))
-    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-    await $.session.start(start(ORCH_DIR))
+    echoPrompt(on)
+    await boot($)
     const [calls, reads, runs] = [w.calls.length, w.reads.length, w.runs.length]
     let release = () => {}
     HELD.append = new Promise<void>(resolve => {
@@ -1672,8 +1639,8 @@ describe('launch_worker', () => {
   test('a task notification\'s status goes to the next poll\'s harvest, whose note rides on the next prompt of any origin', { options: OPTIONS }, async ($, on) => {
     const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_ALIVE ? { ...one, result_file: '/fixture/results/alive.json' } : one)))
     const w = world(on, '/fixture/lic/a\n', true, registry)
-    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-    await $.session.start(start(ORCH_DIR))
+    echoPrompt(on)
+    await boot($)
     expect((await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)).context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
     LINUX_FIXTURE.isAliveGone = true
     // The prompt's own harvest outlasts its bound (its probe answers 6 s on): the prompt goes on without the note.
@@ -1723,8 +1690,8 @@ describe('launch_worker', () => {
     for (const host of hosts) {
       test(`${host.name}: a fast harvest: the finished worker's note rides on the task notification's own prompt, which returns as soon as the harvest ends`, { options: host.options }, async ($, on) => {
         const w = world(on, '/fixture/lic/a\n', true, ALIVE_RESULT, host.env)
-        on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-        await $.session.start(start(host.dir))
+        echoPrompt(on)
+        await boot($, host.dir)
         // The start's harvest (the limited worker) rides on a first prompt.
         await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)
         host.knobs.isAliveGone = true
@@ -1751,8 +1718,8 @@ describe('launch_worker', () => {
 
       test(`${host.name}: a slow harvest holds the task notification's prompt for its 3 s bound and no longer; the prompt goes on without the note, which rides on the next prompt`, { options: host.options }, async ($, on) => {
         const w = world(on, '/fixture/lic/a\n', true, ALIVE_RESULT, host.env)
-        on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-        await $.session.start(start(host.dir))
+        echoPrompt(on)
+        await boot($, host.dir)
         await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)
         host.knobs.isAliveGone = true
         // The harvest's probe answers only 8 s on.
@@ -1783,8 +1750,8 @@ describe('launch_worker', () => {
 
     test('a prompt of any other origin starts no harvest and waits for nothing: no probe, no bound', { options: OPTIONS }, async ($, on) => {
       const w = world(on, '/fixture/lic/a\n', true, ALIVE_RESULT)
-      on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-      await $.session.start(start(ORCH_DIR))
+      echoPrompt(on)
+      await boot($)
       LINUX_FIXTURE.isAliveGone = true
       try {
         const [calls, runs] = [w.calls.length, w.runs.length]
@@ -1833,9 +1800,9 @@ describe('launch_worker', () => {
         REGISTRY_READS.isCurrent = true
         try {
           const w = world(on, '/fixture/lic/a\n', true, ALIVE_CLEAN, host.env)
-          on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-          await $.session.start(start(host.dir))
-          expect(String((await $.tool.call({ tool: TOOL, ...host.launch } as never)).result)).toStartWith('Launched pid 7001')
+          echoPrompt(on)
+          await boot($, host.dir)
+          expect(String((await launchTool($, host.launch)).result)).toStartWith('Launched pid 7001')
           await w.clock.advance(5000)
           // A notification of a task this load did not start, then one of the launch's own task: each prompt's harvest
           // fails (the probe cannot run).
@@ -1861,9 +1828,9 @@ describe('launch_worker', () => {
         try {
           // The alive worker has no result written either: only the status tells the two apart.
           const w = world(on, '/fixture/lic/a\n', true, ALIVE_UNWRITTEN, host.env)
-          on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-          await $.session.start(start(host.dir))
-          expect(String((await $.tool.call({ tool: TOOL, ...host.launch } as never)).result)).toStartWith('Launched pid 7001')
+          echoPrompt(on)
+          await boot($, host.dir)
+          expect(String((await launchTool($, host.launch)).result)).toStartWith('Launched pid 7001')
           await w.clock.advance(5000)
           // Both workers end; the notification names the launch's task: killed, with no result written.
           host.knobs.isAliveGone = true
@@ -1885,9 +1852,9 @@ describe('launch_worker', () => {
           REGISTRY_READS.isCurrent = true
           try {
             const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-            on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-            await $.session.start(start(host.dir))
-            expect(String((await $.tool.call({ tool: TOOL, ...host.launch } as never)).result)).toStartWith('Launched pid 7001')
+            echoPrompt(on)
+            await boot($, host.dir)
+            expect(String((await launchTool($, host.launch)).result)).toStartWith('Launched pid 7001')
             await w.clock.advance(5000)
             WORKER.resultText = resultText
             host.knobs.isWorkerHidden = true
@@ -1904,8 +1871,8 @@ describe('launch_worker', () => {
   test('the first prompt after a compaction carries the state digest, once', { options: OPTIONS }, async ($, on) => {
     world(on)
     on('classic.PostCompact', () => ({}))
-    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-    await $.session.start(start(ORCH_DIR))
+    echoPrompt(on)
+    await boot($)
     const stop = { hook_event_name: 'PostCompact', trigger: 'auto', compact_summary: 's', session_id: 's', transcript_path: '/t', cwd: ORCH_DIR }
     await $.classic.PostCompact(stop as never)
     const first = await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)
@@ -1918,10 +1885,10 @@ describe('launch_worker', () => {
   test('the ledger opens on a model send to a peer and closes on its reply', { options: OPTIONS }, async ($, on) => {
     world(on)
     on('classic.PostCompact', () => ({}))
-    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
+    echoPrompt(on)
     on('session.send', () => ({ isDelivered: true }) as never)
     on('session.receive', (_$, e) => ({ text: e.text }))
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     await $.session.send({ to: 'obsidian-manager', text: 'Update the note', origin: { kind: 'model' } } as never)
     await $.classic.PostCompact({ hook_event_name: 'PostCompact', trigger: 'auto', compact_summary: 's', session_id: 's', transcript_path: '/t', cwd: ORCH_DIR } as never)
     const open = await $.prompt.submit({ text: 'go', wait: false, origin: { kind: 'user' } } as never)
@@ -1936,8 +1903,8 @@ describe('launch_worker', () => {
   test('clicking an open point shows its description; clicking the title hides it; the description is not clickable', { options: OPTIONS }, async ($, on) => {
     world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     const ui = await mountPane($)
     const all = async () => String(((await ui.findAll({}))[0] as { text?: string }).text)
     expect(await all()).not.toContain('Detail one')
@@ -1958,8 +1925,8 @@ describe('launch_worker', () => {
   test('queued work is a bullet list', { options: OPTIONS }, async ($, on) => {
     world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     const ui = await mountPane($)
     expect(await ui.find({ type: 'Text', text: /^\u2022 Queued one$/ })).toBeDefined()
   })
@@ -1967,8 +1934,8 @@ describe('launch_worker', () => {
   test('retire_workers removes a finished clean session on request and refuses the rest; typing a prompt removes nothing', { options: OPTIONS }, async ($, on) => {
     const finished = { title: 'finished clean', session_id: 'f1f1f1f1-0000-4000-8000-000000000001', config_dir: '/fixture/lic/a', reported: false, outcome: { kind: 'clean', summary: 'clean: done' } }
     const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), finished]))
-    on('prompt.submit', ($, e) => ({ text: e.text, context: e.context }))
-    await $.session.start(start(ORCH_DIR))
+    echoPrompt(on)
+    await boot($)
     // The cleared log is written before the registry, so a log write marks a removal.
     const clears = () => w.writes.filter(one => one.path.endsWith('/cleared.jsonl'))
     await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)
@@ -1993,7 +1960,7 @@ describe('launch_worker', () => {
     const queued = { ...stuck(5, 'limit'), session_id: 'Queued o-0000-4000-8000-000000000005' }
     const setup = async (on: Parameters<typeof world>[0], $: Parameters<Parameters<typeof test>[2]>[0]) => {
       const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login, limit, killed, kept, queued]))
-      await $.session.start(start(ORCH_DIR))
+      await boot($)
       return w
     }
     const retire = async ($: Parameters<Parameters<typeof test>[2]>[0], input: object) =>
@@ -2053,7 +2020,7 @@ describe('launch_worker', () => {
 
   test('open_point and record_decision edit the helper files, back them up first, and report a refusal', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const added = await $.tool.call({ tool: 'mcp__session-control__open_point', action: 'add', id: 'fresh', title: 'T', detail: 'D', recommendation: 'R' } as never)
     expect(String(added.result)).toContain('open-points.json: added fresh.')
     const backup = w.writes.find(one => one.path.includes('/backups/open-points-before-open-point-'))
@@ -2067,7 +2034,7 @@ describe('launch_worker', () => {
   test('acknowledge_workers marks a finished session acknowledged, kept on request, and refuses a live one', { options: OPTIONS }, async ($, on) => {
     const finished = { title: 'finished clean', session_id: 'f2f2f2f2-0000-4000-8000-000000000002', config_dir: '/fixture/lic/a', reported: false, outcome: { kind: 'clean', summary: 'clean: done' } }
     const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), finished]))
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const acks = () => w.writes.filter(one => one.path === REGISTRY_PATH)
     const before = acks().length
     const out = await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['f2f2f2f2', 'aaaaaaaa'], keep: true } as never)
@@ -2082,8 +2049,8 @@ describe('launch_worker', () => {
   test('seated inline the panel is one box behind tabs, at most 11 rows, and a tab switches the box', { options: OPTIONS }, async ($, on) => {
     world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     const ui = await $.ui.mount({
       plugin: 'session-control',
       surface: 'terminal',
@@ -2126,8 +2093,8 @@ describe('the queued work section', () => {
     try {
       world(on)
       stubPanel(on)
-      await $.session.start(start(ORCH_DIR))
-      await $.command.run({ command: 'session-control', args: 'side' } as never)
+      await boot($)
+      await runCommand($, 'side')
       const textOf = async (ui: Awaited<ReturnType<typeof mountPane>>) => String(((await ui.findAll({}))[0] as { text?: string }).text)
       const inline = await $.ui.mount({
         plugin: 'session-control',
@@ -2175,8 +2142,8 @@ describe('expanding a section', () => {
   const open = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On) => {
     world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     return mountPane($)
   }
 
@@ -2253,22 +2220,22 @@ describe('expanding a section', () => {
       return { value: { isPlaced: true } } as never
     })
     on('ui.panes', () => ({ value: isUp ? [{ id: 'session-control' }] : [] }) as never)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     const ui = await mountPane($)
     await ui.press({ key: 'x:points' })
     expect(await layoutOf(ui)).toEqual(EXPANDED.points)
-    expect((await $.command.run({ command: 'session-control', args: 'side' } as never)).text).toBe('Session-control panel hidden, session-control stays on.')
+    expect((await runCommand($, 'side')).text).toBe('Session-control panel hidden, session-control stays on.')
     await ui.unmount()
     isUp = false
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await runCommand($, 'side')
     const again = await mountPane($)
     expect(await layoutOf(again)).toEqual(THREE)
     await again.press({ key: 'x:queue' })
     // The engine's close mark closes the pane without the command: the next show still starts collapsed.
     await again.unmount()
     isUp = false
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await runCommand($, 'side')
     expect(await layoutOf(await mountPane($))).toEqual(THREE)
   })
 })
@@ -2290,8 +2257,8 @@ describe('row hover', () => {
   const open = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On, props = PANE_PROPS) => {
     world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     return $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: props as never })
   }
 
@@ -2327,8 +2294,8 @@ describe('platform', () => {
   const args = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
   /** A launch, an acknowledgement and a retirement, the helper shown as <helper>. */
   const flow = async ($: Parameters<Parameters<typeof test>[2]>[0], w: World) => {
-    await $.session.start(start(ORCH_DIR))
-    expect(String((await $.tool.call({ tool: TOOL, ...args } as never)).result)).toContain('Launched pid 7001')
+    await boot($)
+    expect(String((await launchTool($, args)).result)).toContain('Launched pid 7001')
     expect(String((await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['cccccccc'] } as never)).result)).toContain('Acknowledged: cccccccc.')
     expect(String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['dddddddd'] } as never)).result)).toContain('Retired: dddddddd.')
     return w.runs.map(pinned)
@@ -2340,8 +2307,8 @@ describe('platform', () => {
   const NODE_LOOKUP = ['node', '--version']
   const RUNS = `${HOME}/.claude/session-control/runs`
   /**
-   * The commands the Linux flow runs: as recorded before the Windows branches existed (the jq calls aside), with the
-   * probe, the registry's rename and the cleared log's append now the helper's, and the lookup of Node first.
+   * The commands the Linux flow runs (the jq calls aside): the lookup of Node first, then the probe, the registry's
+   * rename and the cleared log's append through the helper.
    */
   const LINUX = [
     NODE_LOOKUP,
@@ -2420,13 +2387,15 @@ describe('platform', () => {
   })
 
   const WINDOWS_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' }
+  /** The Windows machine of the fixture, with `pick` the licence picker's output. */
+  const winWorld = (on: On, pick = '/fixture/lic/a\n') => world(on, pick, true, REGISTRY_TEXT, WINDOWS_ENV)
   const WIN_OPTIONS = { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}` }
   const WIN_REGISTRY = `C:${REGISTRY_PATH}`
   const WIN_RUNS = `C:${RUNS}`
 
   test('Windows: home is the profile folder in native form, and the registry write goes through the helper in that form', { options: WIN_OPTIONS }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    const w = winWorld(on)
+    await boot($, `C:${ORCH_DIR}`)
     expect(w.calls.filter(one => one.op === 'writeAtomic').map(one => one.request.path)).toContain(WIN_REGISTRY)
     expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
     // No POSIX tool is started for the files: the missing ones are written through $.fs, which makes their directories.
@@ -2435,9 +2404,9 @@ describe('platform', () => {
   })
 
   test('Windows: the probe is PROBE_PS1 run as a file, with the registry\'s pids and transcripts', { options: WIN_OPTIONS }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    const w = winWorld(on)
     stubPanel(on)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    await boot($, `C:${ORCH_DIR}`)
     // Node first (the probe runs only once it is found), then the probe, which also looks for sessions files under the
     // discovered licences (here the default one alone).
     expect(w.runs[0]).toEqual(['node', '--version'])
@@ -2446,14 +2415,14 @@ describe('platform', () => {
     expect(w.runs.filter(argv => argv[0] === 'sh')).toEqual([])
     // The dead worker is harvested, the live one shows as running with its elapsed time.
     expect(w.toasts).toEqual(['Usage limit reached \u00B7 limited worker: limit: rate limit hit'])
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await runCommand($, '')
     const all = String(((await (await mountPane($)).findAll({}))[0] as { text?: string }).text ?? '')
     expect(all).toMatch(/alive worker\s+aaaaaaaa\s+running\s+opus\s+high\s+2m/)
   })
 
   test('Windows, the trace on: a poll tick with a failing probe writes its lines through the helper', { options: { ...WIN_OPTIONS, debug: true } }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    const w = winWorld(on)
+    await boot($, `C:${ORCH_DIR}`)
     const trace = `${WIN_RUNS}/trace.log`
     expect(traceOf(w, trace)[0]).toMatchObject({ event: 'session.start', platform: 'windows' })
     WINDOWS.isProbeBroken = true
@@ -2482,8 +2451,8 @@ describe('platform', () => {
   test('Windows: a probe that fails is an error on the panel, and no worker is taken for dead', { options: WIN_OPTIONS }, async ($, on) => {
     WINDOWS.isProbeBroken = true
     try {
-      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
+      const w = winWorld(on)
+      await boot($, `C:${ORCH_DIR}`)
       expect(w.toasts).toEqual(['Tracking problem \u00B7 Error: the process probe failed (exit 1): Invalid class'])
       expect(w.writes.some(one => fixture(one.path).startsWith(REGISTRY_PATH))).toBe(false)
     } finally {
@@ -2506,9 +2475,9 @@ describe('platform', () => {
   const NO_PICKER = { ...WIN_OPTIONS, licencePickCommand: '' }
 
   test('Windows: a launch given /c/ paths runs native paths, no POSIX tool, finds the worker and registers it', { options: NO_PICKER }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
+    const out = await settled(w, launchTool($, winArgs))
     expect(String(out.result)).toBe(
       `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${WIN_HOME_CLAUDE}, registered. ` +
         `Name: w-new-260921141320; socket: none. ` +
@@ -2542,11 +2511,11 @@ describe('platform', () => {
   test('Windows: the waits between the discovery checks are the helper\'s pause, never the engine\'s clock; a worker not seen in 30 s is answered as started, and the poll registers it when it shows', { options: NO_PICKER }, async ($, on) => {
     WINDOWS.isWorkerHidden = true
     try {
-      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
+      const w = winWorld(on, '')
+      await boot($, `C:${ORCH_DIR}`)
       const before = w.calls.length
       // No settled(): nothing in the launch waits on the mocked clock.
-      const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+      const out = await launchTool($, winArgs)
       expect(String(out.result)).toBe(
         'Started in the background, but no claude process for it appeared within 30 s: it is not registered yet. ' +
           "Check it with list_sessions: while it runs unregistered it is an orphan row (cwd C:/work/new); the mod's poll registers it as soon as it finds it " +
@@ -2581,8 +2550,8 @@ describe('platform', () => {
     WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
     try {
       const w = world(on, '', true, REGISTRY_TEXT, { ...WINDOWS_ENV, CLAUDE_CONFIG_DIR: 'C:\\fixture\\lic\\a\\' })
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await settled(w, launchTool($, winArgs))
       expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered.')
       expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
       expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: 'C:/fixture/lic/a' })
@@ -2594,9 +2563,9 @@ describe('platform', () => {
   test('Windows: without a Bash tool (Git Bash not found) the refusal says how to give the engine Git Bash', { options: NO_PICKER }, async ($, on) => {
     WORKER.isBashMissing = true
     try {
-      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+      const w = winWorld(on, '')
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await launchTool($, winArgs)
       expect(String(out.deny)).toContain('nothing was launched. On Windows Claude Code offers the Bash tool only when it finds Git Bash: start the orchestrator with CLAUDE_CODE_GIT_BASH_PATH set to Git\\bin\\bash.exe.')
       expect(w.bash.length).toBe(0)
     } finally {
@@ -2624,9 +2593,9 @@ describe('platform', () => {
   const PS_SETTINGS = '--settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json'
 
   test('Windows, launchRoute powershell: the worker starts through the PowerShell tool, Start-Process with the prompt on standard input; found and registered as by the Bash route', { options: PS_OPTIONS }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
+    const out = await settled(w, launchTool($, winArgs))
     expect(String(out.result)).toBe(
       `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${WIN_HOME_CLAUDE}, registered. ` +
         `Name: w-new-260921141320; socket: none. ` +
@@ -2658,9 +2627,9 @@ describe('platform', () => {
   test('Windows, launchRoute powershell, with a picker: CLAUDE_CONFIG_DIR is set to the picked dir before Start-Process', { options: { ...WIN_OPTIONS, launchRoute: 'powershell', licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
     WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
     try {
-      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      const w = winWorld(on)
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await settled(w, launchTool($, winArgs))
       expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered')
       expect(w.powershell[0]?.command).toBe(psCommand("$env:CLAUDE_CONFIG_DIR = 'C:/fixture/lic/a'", `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`))
       expect(w.bash).toEqual([])
@@ -2674,8 +2643,8 @@ describe('platform', () => {
     WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\b'
     try {
       const w = world(on, '', true, registry, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs, resume_sid: SID_DEAD } as never))
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await settled(w, launchTool($, { ...winArgs, resume_sid: SID_DEAD }))
       expect(String(out.result)).toContain(`Launched pid 7001, session ${SID_DEAD}, config_dir C:/fixture/lic/b`)
       expect(w.powershell[0]?.command).toBe(psCommand("$env:CLAUDE_CONFIG_DIR = 'C:/fixture/lic/b'", `-p --model opus --resume ${SID_DEAD} -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`))
     } finally {
@@ -2684,10 +2653,10 @@ describe('platform', () => {
   })
 
   test('Windows, launchRoute powershell: a runs directory with blanks and a quote, and a title with quotes, stay single PowerShell strings', { options: { ...PS_OPTIONS, runsDir: "C:/fixture/my runs/it's here" } }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
     const title = `fix "the" parser's 'bug'`
-    const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs, title } as never))
+    const out = await settled(w, launchTool($, { ...winArgs, title }))
     expect(String(out.result)).toContain('Launched pid 7001')
     const base = "C:/fixture/my runs/it''s here/20260921141320-fix-the-parser-s-bug"
     expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-fix-the-parser-s-bug-260921141320 ${PS_SETTINGS}`, base))
@@ -2699,10 +2668,10 @@ describe('platform', () => {
   test('Windows, launchRoute powershell, without a PowerShell tool: a clear refusal, nothing launched, no fall back to Bash', { options: PS_OPTIONS }, async ($, on) => {
     WORKER.isPowerShellMissing = true
     try {
-      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
+      const w = winWorld(on, '')
+      await boot($, `C:${ORCH_DIR}`)
       const before = lastRegistry(w).length
-      const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+      const out = await launchTool($, winArgs)
       // The engine's own reason sits in the brackets (the kit's differs from the engine's).
       expect(String(out.deny)).toStartWith('session-control: the worker could not be started through the PowerShell tool (')
       expect(String(out.deny)).toEndWith(
@@ -2718,10 +2687,10 @@ describe('platform', () => {
   })
 
   test('Windows: an inline prompt goes to a prompt file of the mod in the native runs directory, the Bash route reads it, the entry records it', { options: NO_PICKER }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
     const { prompt_file: _file, ...inline } = winArgs
-    const out = await settled(w, $.tool.call({ tool: TOOL, ...inline, prompt: 'Reply PONG.' } as never))
+    const out = await settled(w, launchTool($, { ...inline, prompt: 'Reply PONG.' }))
     const own = `${WIN_RUNS}/w-new-260921141320.prompt.md`
     expect(String(out.result)).toEndWith(`errors: ${WIN_RUNS}/20260921141320-new.err. Prompt: ${own} (written by the mod; rules block appended).`)
     expect(w.writes.filter(one => one.path === own).map(one => one.text)).toEqual([`Reply PONG.\n\n${RULES_BLOCK}\n`])
@@ -2733,29 +2702,29 @@ describe('platform', () => {
   })
 
   test('Windows: an inline prompt that starts like a POSIX path is refused, as a prompt file would be, and nothing is written', { options: NO_PICKER }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
     const { prompt_file: _file, ...inline } = winArgs
-    const out = await $.tool.call({ tool: TOOL, ...inline, prompt: '/c/work/x: wait in the foreground, git status -sb, no attribution' } as never)
+    const out = await launchTool($, { ...inline, prompt: '/c/work/x: wait in the foreground, git status -sb, no attribution' })
     expect(String(out.deny)).toContain('Git Bash rewrites an argument that starts like a POSIX path')
     expect(w.writes.some(one => one.path.endsWith('.prompt.md'))).toBe(false)
   })
 
   test('Windows, launchRoute powershell: an inline prompt goes to standard input from the prompt file of the mod', { options: PS_OPTIONS }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
     const { prompt_file: _file, ...inline } = winArgs
-    const out = await settled(w, $.tool.call({ tool: TOOL, ...inline, prompt: 'Goal: x. Wait in the foreground. Report git status -sb. No attribution.' } as never))
+    const out = await settled(w, launchTool($, { ...inline, prompt: 'Goal: x. Wait in the foreground. Report git status -sb. No attribution.' }))
     const own = `${WIN_RUNS}/w-new-260921141320.prompt.md`
     expect(String(out.result)).toContain(`Prompt: ${own} (written by the mod).`)
     expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`, 'C:/work/new', own))
   })
 
   test('Windows, launchRoute powershell: a prompt file or runs directory with brackets is refused before anything runs', { options: { ...PS_OPTIONS, licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    const w = winWorld(on)
+    await boot($, `C:${ORCH_DIR}`)
     const runs = w.runs.length
-    const out = await $.tool.call({ tool: TOOL, ...winArgs, prompt_file: '/c/work/new/[draft] prompt.md' } as never)
+    const out = await launchTool($, { ...winArgs, prompt_file: '/c/work/new/[draft] prompt.md' })
     expect(String(out.deny)).toBe(
       'session-control: refused: on the PowerShell launch route Start-Process reads the prompt file and the run files as wildcard patterns, and Windows PowerShell 5.1 and PowerShell 7 ' +
         'cannot both be given a path with [, ] or a backtick: the prompt file C:/work/new/[draft] prompt.md; move it to a path without them, or set the launchRoute option to bash',
@@ -2766,9 +2735,9 @@ describe('platform', () => {
   })
 
   test('Windows, launchRoute powershell: a runs directory with brackets is refused too; the Bash route takes it', { options: { ...PS_OPTIONS, runsDir: 'C:/fixture/runs [old]' } }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
+    const out = await launchTool($, winArgs)
     expect(String(out.deny)).toContain('cannot both be given a path with [, ] or a backtick: the runs directory C:/fixture/runs [old]; move it')
     expect(w.powershell.length).toBe(0)
   })
@@ -2776,9 +2745,9 @@ describe('platform', () => {
   test('Windows, launchRoute powershell: a pid file naming another pid is said in the answer; the probe\'s pid is the one registered', { options: PS_OPTIONS }, async ($, on) => {
     WINDOWS.pidFileText = '7002\r\n'
     try {
-      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      const w = winWorld(on, '')
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await settled(w, launchTool($, winArgs))
       expect(String(out.result)).toEndWith(`errors: ${WIN_RUNS}/20260921141320-new.err. The launch's pid file names pid 7002, not the one the probe found.`)
       expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001 })
     } finally {
@@ -2789,9 +2758,9 @@ describe('platform', () => {
   test('Windows, launchRoute powershell: no pid file (not written yet, or unreadable) changes nothing', { options: PS_OPTIONS }, async ($, on) => {
     WINDOWS.pidFileText = undefined
     try {
-      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      const w = winWorld(on, '')
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await settled(w, launchTool($, winArgs))
       expect(String(out.result)).toEndWith(`errors: ${WIN_RUNS}/20260921141320-new.err.`)
       expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001 })
     } finally {
@@ -2800,18 +2769,18 @@ describe('platform', () => {
   })
 
   test('Windows, launchRoute powershell, the trace on: the start names the route; the worker line says whether the pid file agrees', { options: { ...PS_OPTIONS, debug: true } }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
+    await settled(w, launchTool($, winArgs))
     const lines = traceOf(w, `${WIN_RUNS}/trace.log`)
     expect((lines.find(line => line.event === 'session.start') as { options?: Record<string, unknown> }).options?.launchRoute).toBe('powershell')
     expect(lines.find(line => line.event === 'worker.found')).toMatchObject({ pid: 7001, pidFile: 'same' })
   })
 
   test('Windows: a launchRoute other than powershell is the Bash route', { options: { ...NO_PICKER, launchRoute: 'pwsh' } }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
+    await settled(w, launchTool($, winArgs))
     expect(w.powershell).toEqual([])
     expect(String(w.bash[0]?.command)).toStartWith(`cd 'C:/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' `)
     expect(w.reads.some(path => path.endsWith('.pid'))).toBe(false)
@@ -2820,9 +2789,9 @@ describe('platform', () => {
   test('Windows: a new claude.exe whose sessions file the probe found nowhere is still the worker', { options: NO_PICKER }, async ($, on) => {
     WINDOWS.isWorkerUnplaced = true
     try {
-      const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs } as never))
+      const w = winWorld(on, '')
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await settled(w, launchTool($, winArgs))
       expect(String(out.result)).toContain('Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001')
       expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, cwd: 'C:/work/new', config_dir: WIN_HOME_CLAUDE })
     } finally {
@@ -2833,9 +2802,9 @@ describe('platform', () => {
   test('Windows: a picker named by absolute path runs, and its answer is taken in native form', { options: { ...WIN_OPTIONS, licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
     WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
     try {
-      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
-      const out = await settled(w, $.tool.call({ tool: TOOL, ...winArgs, need: 25 } as never))
+      const w = winWorld(on)
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await settled(w, launchTool($, { ...winArgs, need: 25 }))
       expect(w.runs).toContainEqual(['C:/fixture/bin/pick.exe', '--need', '25'])
       expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered')
       expect(String(w.bash[0]?.command)).toContain("CLAUDE_CONFIG_DIR='C:/fixture/lic/a'")
@@ -2845,38 +2814,38 @@ describe('platform', () => {
   })
 
   test('Windows: a picker by bare name is refused before anything runs', { options: { ...WIN_OPTIONS, licencePickCommand: 'pick --need {need}' } }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    const out = await $.tool.call({ tool: TOOL, ...winArgs } as never)
+    const w = winWorld(on)
+    await boot($, `C:${ORCH_DIR}`)
+    const out = await launchTool($, winArgs)
     expect(String(out.deny)).toBe('session-control: refused: on Windows the licence picker command must start with the absolute path of an executable (C:/.../picker.exe), not "pick"')
     expect(w.runs.some(argv => argv[0] === 'pick')).toBe(false)
     expect(w.bash.length).toBe(0)
   })
 
   test('Windows: a prompt too long for the command line is refused, a POSIX path too', { options: NO_PICKER }, async ($, on) => {
-    const w = world(on, '', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    const big = await $.tool.call({ tool: TOOL, ...winArgs, prompt_file: '/c/work/new/big.md' } as never)
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
+    const big = await launchTool($, { ...winArgs, prompt_file: '/c/work/new/big.md' })
     expect(String(big.deny)).toContain(`it has ${BIG_PROMPT.length}, the limit is 30000`)
-    const posix = await $.tool.call({ tool: TOOL, ...winArgs, dir: '/tmp/new' } as never)
+    const posix = await launchTool($, { ...winArgs, dir: '/tmp/new' })
     expect(String(posix.deny)).toBe('session-control: dir must be absolute (on Windows /c/... or C:/...)')
-    const gone = await $.tool.call({ tool: TOOL, ...winArgs, dir: '/c/work/gone' } as never)
+    const gone = await launchTool($, { ...winArgs, dir: '/c/work/gone' })
     expect(String(gone.deny)).toBe('session-control: refused: directory C:/work/gone does not exist')
     expect(w.bash.length).toBe(0)
   })
 
   test('Windows: an empty prompt file is told by $.fs.stat', { options: NO_PICKER }, async ($, on) => {
     const w = world(on, '', false, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    expect(String((await $.tool.call({ tool: TOOL, ...winArgs } as never)).deny)).toBe('session-control: refused: prompt file C:/work/new/prompt.md is missing or empty')
+    await boot($, `C:${ORCH_DIR}`)
+    expect(String((await launchTool($, winArgs)).deny)).toBe('session-control: refused: prompt file C:/work/new/prompt.md is missing or empty')
     expect(w.bash.length).toBe(0)
   })
 
   test('Windows: a session\'s output box reads its transcript through the helper', { options: WIN_OPTIONS }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
+    const w = winWorld(on)
     stubPanel(on)
-    await $.session.start(start(`C:${ORCH_DIR}`))
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await boot($, `C:${ORCH_DIR}`)
+    await runCommand($, '')
     const ui = await mountPane($)
     await ui.press({ key: `s:${SID_ALIVE}` })
     expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
@@ -2892,7 +2861,7 @@ describe('platform', () => {
     UNREADABLE.add(log)
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
+      await boot($)
       expect(await retireDone($)).toBe('Retired: dddddddd.')
       // One append of the helper, which never reads the log.
       expect(w.calls.filter(one => one.op === 'append')).toEqual([{ op: 'append', request: { path: log, text: `${doneLine}\n` } }])
@@ -2909,8 +2878,8 @@ describe('platform', () => {
     const log = `${WIN_RUNS}/cleared.jsonl`
     UNREADABLE.add(fixture(log))
     try {
-      const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-      await $.session.start(start(`C:${ORCH_DIR}`))
+      const w = winWorld(on)
+      await boot($, `C:${ORCH_DIR}`)
       expect(await retireDone($)).toBe('Retired: dddddddd.')
       expect(w.calls.filter(one => one.op === 'append')).toEqual([{ op: 'append', request: { path: log, text: `${doneLine}\n` } }])
       expect(w.writes.filter(one => one.path === log).map(one => one.text)).toEqual([`${doneLine}\n`])
@@ -2924,7 +2893,7 @@ describe('platform', () => {
   test('Windows: a reviewed retire logs the original outcome and the reason through the helper', { options: WIN_OPTIONS }, async ($, on) => {
     const login = { title: 'stuck login', session_id: '57575751-0000-4000-8000-000000000001', config_dir: 'C:/fixture/lic/a', reported: true, outcome: { kind: 'login', summary: 'login: old label' } }
     const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login]), WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    await boot($, `C:${ORCH_DIR}`)
     const out = String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['57575751'], reviewed: { '57575751': 'wrong label' } } as never)).result)
     expect(out).toBe('Retired: 57575751. Retired with review: 57575751 (was login: wrong label).')
     const text = w.writes.filter(one => one.path === `${WIN_RUNS}/cleared.jsonl`).map(one => one.text).join('')
@@ -2934,13 +2903,13 @@ describe('platform', () => {
 
   test('Windows: a HOME that Git Bash handed on (/c/...) is home, in native form', { options: WIN_OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { ...WINDOWS_ENV, USERPROFILE: 'C:\\Users\\other', HOME: '/c/fixture/home' })
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    await boot($, `C:${ORCH_DIR}`)
     expect(w.calls.some(one => one.op === 'writeAtomic' && one.request.path === WIN_REGISTRY)).toBe(true)
   })
 
   test('Windows: a registry write the helper fails is said in the answer, and nothing writes the registry another way', { options: WIN_OPTIONS }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, WINDOWS_ENV)
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    const w = winWorld(on)
+    await boot($, `C:${ORCH_DIR}`)
     WINDOWS.isMoveBroken = true
     try {
       const before = w.writes.length
@@ -2969,8 +2938,8 @@ describe('debug trace', () => {
 
   test('a launch: the call, the probe, the checks, the verdict, the worker and its registration, the answer', { options: TRACED }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...args } as never)
+    await boot($)
+    const out = await launchTool($, args)
     const stamp = new Date(NOW_MS).toISOString().replace(/[-:T]/g, '').slice(0, 14)
     const sid = 'abcdabcd-0000-4000-8000-000000000001'
     expect(from(bare(traceOf(w)), 'tool.call')).toEqual([
@@ -3000,8 +2969,8 @@ describe('debug trace', () => {
     WORKER.linuxConfigDir = ''
     try {
       const w = world(on, '')
-      await $.session.start(start(ORCH_DIR))
-      await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      await launchTool($, args)
       const lines = bare(traceOf(w))
       expect((lines.find(one => one.event === 'session.start') as { options?: { licencePickCommand?: string } }).options?.licencePickCommand).toBe('empty')
       expect(lines.find(one => one.event === 'tool.call')).toEqual({ event: 'tool.call', tool: 'launch_worker', ...called })
@@ -3015,7 +2984,7 @@ describe('debug trace', () => {
 
   test('the start: platform, options and the activation, no environment', { options: TRACED }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SECRET_THING: ['sk', 'should-never-appear-1234'].join('-') })
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const [first] = bare(traceOf(w))
     expect(first).toEqual({
       event: 'session.start',
@@ -3040,8 +3009,8 @@ describe('debug trace', () => {
 
   test('a refused launch: the verdict with its reason, and the refusal the model gets', { options: TRACED }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.tool.call({ tool: TOOL, ...args, dir: ORCH_DIR } as never)
+    await boot($)
+    await launchTool($, { ...args, dir: ORCH_DIR })
     expect(from(bare(traceOf(w)), 'tool.call')).toEqual([
       { event: 'tool.call', tool: 'launch_worker', ...called, dir: ORCH_DIR },
       PROBE,
@@ -3055,7 +3024,7 @@ describe('debug trace', () => {
 
   test('a retire: the verdict, the cleared-log append by size, the registry write, the answer', { options: TRACED }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['dddddddd'] } as never)
     const doneLine = JSON.stringify(JSON.parse(REGISTRY_TEXT).find((one: { session_id?: string }) => one.session_id === SID_DONE))
     expect(from(bare(traceOf(w)), 'tool.call')).toEqual([
@@ -3076,8 +3045,8 @@ describe('debug trace', () => {
     DECISIONS.text = '# Agreed decisions\n\n## Secret unit heading\nsu-1. x\n'
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      await $.tool.call({ tool: TOOL, dir: '/work/new', model: 'opus', effort: 'high', title: 'new', prompt: 'Reply PONG about the zebra-canary.', section: 'Secret unit heading', rules: true } as never)
+      await boot($)
+      await launchTool($, { dir: '/work/new', model: 'opus', effort: 'high', title: 'new', prompt: 'Reply PONG about the zebra-canary.', section: 'Secret unit heading', rules: true })
       await $.tool.call({ tool: 'mcp__session-control__archive_decisions', sections: ['Secret unit heading'] } as never)
       await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: ['dddddddd'], keep: true } as never)
       const lines = from(bare(traceOf(w)), 'tool.call')
@@ -3099,7 +3068,7 @@ describe('debug trace', () => {
   test('a reviewed retire: the guard line names the original outcome and the reason, the call line keeps free text out', { options: TRACED }, async ($, on) => {
     const login = { title: 'stuck login', session_id: '57575751-0000-4000-8000-000000000001', config_dir: '/fixture/lic/a', reported: true, outcome: { kind: 'login', summary: 'login: old label' } }
     const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login]))
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['57575751'], reviewed: { '57575751': 'wrong label' } } as never)
     const events = from(bare(traceOf(w)), 'tool.call')
     expect(events[0]).toEqual({ event: 'tool.call', tool: 'retire_workers', session_ids: ['57575751'] })
@@ -3110,8 +3079,8 @@ describe('debug trace', () => {
   test('a poll tick with a failing probe: the tick, the failed run, the error caught, the warning; renders are counted', { options: TRACED }, async ($, on) => {
     const w = world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await boot($)
+    await runCommand($, '')
     const ui = await mountPane($)
     await ui.findAll({})
     LINUX_FIXTURE.isProbeBroken = true
@@ -3136,7 +3105,7 @@ describe('debug trace', () => {
 
   test('SESSION_CONTROL_DEBUG=1 switches it on; otherwise nothing is written and no trace command runs', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SESSION_CONTROL_DEBUG: '1' })
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     expect(traceOf(w)[0]?.event).toBe('session.start')
   })
 
@@ -3148,7 +3117,7 @@ describe('debug trace', () => {
       isAsked = true
       throw new Error('the environment cannot be read')
     })
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     expect(isAsked).toBe(true)
     expect(w.registered).toContain('launch_worker')
     expect(w.writes.some(one => one.path.includes('trace.log'))).toBe(false)
@@ -3163,7 +3132,7 @@ describe('debug trace', () => {
   ] as const) {
     test(`outside the orchestrator directory nothing is traced and no runs directory is made: ${name}`, { options }, async ($, on) => {
       const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, env)
-      await $.session.start(start('/work/new'))
+      await boot($, '/work/new')
       expect(w.runs).toEqual([])
       expect(w.writes).toEqual([])
       expect(w.registered).toEqual(['/session-control'])
@@ -3173,9 +3142,9 @@ describe('debug trace', () => {
   test('/session-control turns the board on elsewhere: the trace starts there, with the start line', { options: TRACED }, async ($, on) => {
     const w = world(on)
     stubPanel(on)
-    await $.session.start(start('/work/elsewhere'))
+    await boot($, '/work/elsewhere')
     expect(w.writes.some(one => one.path === TRACE)).toBe(false)
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await runCommand($, '')
     const [first, second] = bare(traceOf(w))
     expect(first).toMatchObject({ event: 'session.start', cwd: '/work/elsewhere', isOrchestratorDir: false })
     expect(second).toEqual({ event: 'command.run', command: 'session-control' })
@@ -3183,8 +3152,8 @@ describe('debug trace', () => {
 
   test('off by default: no trace file, no trace command', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SESSION_CONTROL_DEBUG: '0' })
-    await $.session.start(start(ORCH_DIR))
-    await $.tool.call({ tool: TOOL, ...args } as never)
+    await boot($)
+    await launchTool($, args)
     expect(w.writes.some(one => one.path.includes('trace.log'))).toBe(false)
     expect(w.runs.some(isTraceRun)).toBe(false)
   })
@@ -3193,8 +3162,8 @@ describe('debug trace', () => {
     LINUX_FIXTURE.isAppendBroken = true
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      const out = await launchTool($, args)
       expect(String(out.result)).toContain('Launched pid 7001')
       expect(w.toasts.filter(text => text.includes('debug trace cannot be written'))).toEqual([
         'Debug trace failed \u00B7 the debug trace cannot be written (/fixture/home/.claude/session-control/runs/trace.log cannot be appended to (READ_ONLY)); the mod goes on without it',
@@ -3208,8 +3177,8 @@ describe('debug trace', () => {
     LINUX_FIXTURE.traceSize = TRACE_MAX_BYTES - 10
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      await $.tool.call({ tool: TOOL, ...args } as never)
+      await boot($)
+      await launchTool($, args)
       const steps = (one: { request: Record<string, unknown> }) => one.request.ops as Record<string, unknown>[]
       const rotations = w.calls.filter(one => one.op === 'batch' && steps(one).some(step => step.op === 'rotate'))
       // The helper reads the size again itself: it gets the limit and the bytes about to go in, then the append follows
@@ -3246,8 +3215,8 @@ describe('seconds tick', () => {
       pane.asked++
       return { value: pane.isUp ? [{ id: 'session-control', title: 'Session control', isShown: pane.isShown, isFocused: false, isPlaced: true }] : [] } as never
     })
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await boot($)
+    await runCommand($, '')
     return { w, pane, ui: await mountPane($) }
   }
 
@@ -3269,14 +3238,14 @@ describe('seconds tick', () => {
     const { w, pane, ui } = await setup($, on)
     await w.clock.advance(1000)
     expect(await elapsedOf(ui, SID_ALIVE)).toBe('43s')
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await runCommand($, '')
     pane.isUp = false
     const asked = pane.asked
     await w.clock.advance(3000)
     // No tick asked for the panes after the hide (the poll at 5 s has not come).
     expect(pane.asked).toBe(asked)
     expect(await elapsedOf(ui, SID_ALIVE)).toBe('43s')
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await runCommand($, '')
     await w.clock.advance(1000)
     expect(await elapsedOf(ui, SID_ALIVE)).toBe('47s')
   })
@@ -3313,8 +3282,8 @@ describe('seconds tick', () => {
       pane.asked++
       return { value: [{ id: 'session-control', title: 'Session control', isShown: true, isFocused: false, isPlaced: true }] } as never
     })
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: '' } as never)
+    await boot($)
+    await runCommand($, '')
     const ui = await mountPane($)
     await w.clock.advance(5000)
     return { w, pane, ui }
@@ -3391,8 +3360,8 @@ describe('a log whose session leaves the registry', () => {
       return reg.hold === undefined ? text : reg.hold.then(() => text)
     })
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     const ui = await mountPane($)
     await ui.press({ key: `s:${SID}` })
     expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
@@ -3542,11 +3511,11 @@ describe('a log whose session leaves the registry', () => {
 
   test('a session retired while the panel is hidden leaves nothing selected when the panel is shown again', { options: OPTIONS }, async ($, on) => {
     const { w, reg, ui } = await setup($, on)
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await runCommand($, 'side')
     await ui.unmount()
     reg.text = without(SID)
     await w.clock.advance(5000)
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await runCommand($, 'side')
     expect(await boxesOf(await mountPane($))).toEqual(THREE)
   })
 })
@@ -3554,7 +3523,7 @@ describe('a log whose session leaves the registry', () => {
 describe('launch_worker: inline prompt, decisions section, rules block, resume fill', () => {
   const RUNS = `${HOME}/.claude/session-control/runs`
   const BASE = `${RUNS}/20260921141320-new`
-  // The prompt file is named by the launch's unique session name (a resume adds its launch time), no longer by the title and the second.
+  // The prompt file is named by the launch's unique session name (a resume adds its launch time).
   const OWN = `${RUNS}/w-new-260921141320.prompt.md`
   const fresh = { dir: '/work/new', model: 'opus', effort: 'high', title: 'new' }
   /** A prompt that carries the three items the launch guard checks. */
@@ -3577,8 +3546,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
 
   test('the old launch, without the new parameters: the command, the answer and the entry as before, byte for byte', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt_file: '/work/new/prompt.md' } as never)
+    await boot($)
+    const out = await launchTool($, { ...fresh, prompt_file: '/work/new/prompt.md' })
     expect(String(out.result)).toBe(
       `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir /fixture/lic/a, registered. Name: w-new-260921141320; socket: /run/user/1000/cc-socks/7001.sock. Result: ${BASE}.json; errors: ${BASE}.err.`,
     )
@@ -3605,8 +3574,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
 
   test('an inline prompt that carries the items: written as given to a prompt file of the mod in the runs directory, launched from it, recorded', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL } as never)
+    await boot($)
+    const out = await launchTool($, { ...fresh, prompt: FULL })
     expect(String(out.result)).toEndWith(`Result: ${BASE}.json; errors: ${BASE}.err. Prompt: ${OWN} (written by the mod).`)
     expect(ownPrompt(w)).toBe(FULL)
     expect(String(w.bash[0]?.command)).toContain(`-- "$(cat '${OWN}')" > '${BASE}.json' 2> '${BASE}.err'`)
@@ -3618,11 +3587,11 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
 
   test('two launches of the same title in the same second write prompt files of their own: the path is the session name, unique per launch; neither overwrites the other', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const first = `${FULL} First.`
     const second = `${FULL} Second.`
-    await $.tool.call({ tool: TOOL, ...fresh, prompt: first } as never)
-    await $.tool.call({ tool: TOOL, ...fresh, prompt: second } as never)
+    await launchTool($, { ...fresh, prompt: first })
+    await launchTool($, { ...fresh, prompt: second })
     const written = w.writes.filter(one => one.path.endsWith('.prompt.md'))
     expect(written.map(one => one.path)).toEqual([`${RUNS}/w-new-260921141320.prompt.md`, `${RUNS}/w-new-260921141320-2.prompt.md`])
     expect(written.map(one => one.text)).toEqual([first, second])
@@ -3631,8 +3600,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
 
   test('an inline prompt that lacks the items gets the rules block once, and then passes the guard', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: 'Reply PONG.' } as never)
+    await boot($)
+    const out = await launchTool($, { ...fresh, prompt: 'Reply PONG.' })
     expect(String(out.result)).toEndWith(`Prompt: ${OWN} (written by the mod; rules block appended).`)
     expect(ownPrompt(w)).toBe(`Reply PONG.\n\n${RULES_BLOCK}\n`)
     expect(missingPromptItems(ownPrompt(w) ?? '')).toEqual([])
@@ -3644,8 +3613,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
 
   test('rules false: an inline prompt that lacks the items is refused as a prompt file would be, and nothing is written', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: 'Reply PONG.', rules: false } as never)
+    await boot($)
+    const out = await launchTool($, { ...fresh, prompt: 'Reply PONG.', rules: false })
     expect(String(out.deny)).toContain('the prompt lacks: foreground wait')
     expect(ownPrompt(w)).toBeUndefined()
     expect(w.bash.length).toBe(0)
@@ -3653,8 +3622,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
 
   test('a skill test gets no rules block, as the guard exempts it', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
-    const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: 'skill test: run the procedure and report.' } as never)
+    await boot($)
+    const out = await launchTool($, { ...fresh, prompt: 'skill test: run the procedure and report.' })
     expect(String(out.result)).toEndWith(`Prompt: ${OWN} (written by the mod).`)
     expect(ownPrompt(w)).toBe('skill test: run the procedure and report.')
   })
@@ -3663,8 +3632,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
     DECISIONS.text = DECISIONS_TEXT
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL, section: 'Parser unit (user, 2026-10-11)' } as never)
+      await boot($)
+      const out = await launchTool($, { ...fresh, prompt: FULL, section: 'Parser unit (user, 2026-10-11)' })
       expect(String(out.result)).toEndWith(`Prompt: ${OWN} (written by the mod; section "Parser unit (user, 2026-10-11)" appended).`)
       expect(ownPrompt(w)).toBe(`${FULL}\n\n## Binding decisions (section Parser unit (user, 2026-10-11))\n\nparser-1. Keep the grammar.\nparser-2. No new dependency.\n`)
       expect(lastRegistry(w).at(-1)).toMatchObject({ prompt_file: OWN, section: 'Parser unit (user, 2026-10-11)' })
@@ -3677,8 +3646,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
     DECISIONS.text = DECISIONS_TEXT
     try {
       const w = world(on)
-      await $.session.start(start(ORCH_DIR))
-      const out = await $.tool.call({ tool: TOOL, ...fresh, prompt_file: '/work/new/thin.md', section: 'Parser unit (user, 2026-10-11)' } as never)
+      await boot($)
+      const out = await launchTool($, { ...fresh, prompt_file: '/work/new/thin.md', section: 'Parser unit (user, 2026-10-11)' })
       expect(String(out.result)).toEndWith(`(written by the mod; section "Parser unit (user, 2026-10-11)" appended; rules block appended).`)
       expect(ownPrompt(w)).toBe(`Just do the work.\n\n## Binding decisions (section Parser unit (user, 2026-10-11))\n\nparser-1. Keep the grammar.\nparser-2. No new dependency.\n\n${RULES_BLOCK}\n`)
       expect(String(w.bash[0]?.command)).toContain(`"$(cat '${OWN}')"`)
@@ -3690,17 +3659,17 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
 
   test('section refusals: a heading the file lacks, a missing decisions file, a prompt file that cannot be read; nothing written or started', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     DECISIONS.text = DECISIONS_TEXT
     try {
-      const unknown = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL, section: 'Parser unit' } as never)
+      const unknown = await launchTool($, { ...fresh, prompt: FULL, section: 'Parser unit' })
       expect(String(unknown.deny)).toBe('session-control: refused: agreed-decisions.md has no section "Parser unit"; nothing was launched')
-      const unread = await $.tool.call({ tool: TOOL, ...fresh, prompt_file: '/work/new/prompt.md', section: 'Parser unit (user, 2026-10-11)' } as never)
+      const unread = await launchTool($, { ...fresh, prompt_file: '/work/new/prompt.md', section: 'Parser unit (user, 2026-10-11)' })
       expect(String(unread.deny)).toBe('session-control: refused: the prompt file /work/new/prompt.md cannot be read, so the section cannot be appended; nothing was launched')
     } finally {
       DECISIONS.text = undefined
     }
-    const missing = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL, section: 'Parser unit (user, 2026-10-11)' } as never)
+    const missing = await launchTool($, { ...fresh, prompt: FULL, section: 'Parser unit (user, 2026-10-11)' })
     expect(String(missing.deny)).toBe('session-control: refused: agreed-decisions.md cannot be read; nothing was launched')
     expect(w.writes.some(one => one.path.endsWith('.prompt.md'))).toBe(false)
     expect(w.bash.length).toBe(0)
@@ -3708,24 +3677,24 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
 
   test('exactly one of prompt and prompt_file: both, or neither, is refused before anything runs', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const runs = w.runs.length
-    const both = await $.tool.call({ tool: TOOL, ...fresh, prompt: FULL, prompt_file: '/work/new/prompt.md' } as never)
+    const both = await launchTool($, { ...fresh, prompt: FULL, prompt_file: '/work/new/prompt.md' })
     expect(String(both.deny)).toBe('session-control: refused: give exactly one of prompt and prompt_file, not both')
-    const neither = await $.tool.call({ tool: TOOL, ...fresh } as never)
+    const neither = await launchTool($, fresh)
     expect(String(neither.deny)).toBe('session-control: refused: give exactly one of prompt and prompt_file')
-    const blank = await $.tool.call({ tool: TOOL, ...fresh, prompt: '   ' } as never)
+    const blank = await launchTool($, { ...fresh, prompt: '   ' })
     expect(String(blank.deny)).toBe('session-control: refused: prompt is empty')
     expect(w.runs.length).toBe(runs)
   })
 
   test('a fresh launch without model, effort, title or dir is refused as before', { options: OPTIONS }, async ($, on) => {
     world(on)
-    await $.session.start(start(ORCH_DIR))
-    expect(String((await $.tool.call({ tool: TOOL, dir: '/work/new', prompt: FULL, effort: 'high', title: 't' } as never)).deny)).toBe('session-control: model is required')
-    expect(String((await $.tool.call({ tool: TOOL, dir: '/work/new', prompt: FULL, model: 'opus', title: 't' } as never)).deny)).toContain('effort is required')
-    expect(String((await $.tool.call({ tool: TOOL, dir: '/work/new', prompt: FULL, model: 'opus', effort: 'high' } as never)).deny)).toBe('session-control: title is required')
-    expect(String((await $.tool.call({ tool: TOOL, prompt: FULL, model: 'opus', effort: 'high', title: 't' } as never)).deny)).toBe('session-control: dir must be absolute')
+    await boot($)
+    expect(String((await launchTool($, { dir: '/work/new', prompt: FULL, effort: 'high', title: 't' })).deny)).toBe('session-control: model is required')
+    expect(String((await launchTool($, { dir: '/work/new', prompt: FULL, model: 'opus', title: 't' })).deny)).toContain('effort is required')
+    expect(String((await launchTool($, { dir: '/work/new', prompt: FULL, model: 'opus', effort: 'high' })).deny)).toBe('session-control: title is required')
+    expect(String((await launchTool($, { prompt: FULL, model: 'opus', effort: 'high', title: 't' })).deny)).toBe('session-control: dir must be absolute')
   })
 
   describe('a resume', () => {
@@ -3736,8 +3705,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
       WORKER.sid = SID_UNREPORTED
       try {
         const w = world(on, '/fixture/lic/a\n', true, registry)
-        await $.session.start(start(ORCH_DIR))
-        const out = await $.tool.call({ tool: TOOL, resume_sid: SID_UNREPORTED, prompt: `${FULL} Continue.` } as never)
+        await boot($)
+        const out = await launchTool($, { resume_sid: SID_UNREPORTED, prompt: `${FULL} Continue.` })
         expect(String(out.result)).toEndWith('From the entry: dir, model, effort, title.')
         expect(String(w.bash[0]?.command)).toStartWith(`cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='medium' claude -p --model 'opus' --resume '${SID_UNREPORTED}' -n 'w-parser-work-260920100000'`)
         expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ title: 'parser work', cwd: '/work/new', model: 'opus', effort: 'medium', pid: 7001 })
@@ -3751,8 +3720,8 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
       WORKER.sid = SID_UNREPORTED
       try {
         const w = world(on, '/fixture/lic/a\n', true, registry)
-        await $.session.start(start(ORCH_DIR))
-        const out = await $.tool.call({ tool: TOOL, resume_sid: SID_UNREPORTED, prompt: FULL, effort: 'max', title: 'parser again' } as never)
+        await boot($)
+        const out = await launchTool($, { resume_sid: SID_UNREPORTED, prompt: FULL, effort: 'max', title: 'parser again' })
         expect(String(out.result)).toEndWith('From the entry: dir, model.')
         expect(String(w.bash[0]?.command)).toStartWith(`cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='max' claude -p --model 'opus' --resume '${SID_UNREPORTED}'`)
         expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ title: 'parser again', effort: 'max' })
@@ -3762,10 +3731,10 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
     })
     test('of an entry without those fields, or of an unknown id, is refused as before', { options: OPTIONS }, async ($, on) => {
       world(on)
-      await $.session.start(start(ORCH_DIR))
+      await boot($)
       // The fixture's unreported entry has no cwd, model or effort.
-      expect(String((await $.tool.call({ tool: TOOL, resume_sid: SID_UNREPORTED, prompt: FULL } as never)).deny)).toBe('session-control: model is required')
-      const unknown = await $.tool.call({ tool: TOOL, resume_sid: '99999999-0000-4000-8000-000000000009', prompt: FULL, dir: '/work/new', model: 'opus', effort: 'high', title: 't' } as never)
+      expect(String((await launchTool($, { resume_sid: SID_UNREPORTED, prompt: FULL })).deny)).toBe('session-control: model is required')
+      const unknown = await launchTool($, { resume_sid: '99999999-0000-4000-8000-000000000009', prompt: FULL, dir: '/work/new', model: 'opus', effort: 'high', title: 't' })
       expect(String(unknown.deny)).toBe('session-control: no registry entry for 99999999-0000-4000-8000-000000000009')
     })
   })
@@ -3791,7 +3760,7 @@ describe('close_worker', () => {
 
   test('keep false is acknowledge_workers then retire_workers: their answers one after the other, their writes', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, registry)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const out = await $.tool.call({ tool: CLOSE, session_ids: ids, reviewed } as never)
     expect(String(out.result)).toBe(EXPECTED)
     const after = lastRegistry(w)
@@ -3803,7 +3772,7 @@ describe('close_worker', () => {
 
   test('the same two calls made one by one answer the same text', { options: OPTIONS }, async ($, on) => {
     world(on, '/fixture/lic/a\n', true, registry)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const acked = await $.tool.call({ tool: ACK, session_ids: ids } as never)
     const retired = await $.tool.call({ tool: RETIRE, session_ids: ids, reviewed } as never)
     expect(`${String(acked.result)} ${String(retired.result)}`).toBe(EXPECTED)
@@ -3811,7 +3780,7 @@ describe('close_worker', () => {
 
   test('keep true only acknowledges and keeps; reviewed is then not used, and said so', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, registry)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const out = await $.tool.call({ tool: CLOSE, session_ids: ['f1f1f1f1'], keep: true } as never)
     expect(String(out.result)).toBe('Acknowledged and kept: f1f1f1f1.')
     expect(lastRegistry(w).find(one => one.session_id === finished.session_id)).toMatchObject({ reported: true, keep: true })
@@ -3822,7 +3791,7 @@ describe('close_worker', () => {
 
   test('the retire refusals stay: an outcome that needs a resume without reviewed; the acknowledgement still happens', { options: OPTIONS }, async ($, on) => {
     world(on, '/fixture/lic/a\n', true, registry)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     const out = await $.tool.call({ tool: CLOSE, session_ids: ['57575751'] } as never)
     expect(String(out.result)).toBe('Acknowledged: 57575751. Retired: none. Refused: 57575751 (outcome login needs a resume).')
   })
@@ -3840,8 +3809,8 @@ describe('the panel on the desktop surface', () => {
   const open = async ($: Parameters<Parameters<typeof test>[2]>[0], on: On, surface: 'terminal' | 'desktop', props: Record<string, unknown> = NARROW) => {
     world(on)
     stubPanel(on)
-    await $.session.start(start(ORCH_DIR))
-    await $.command.run({ command: 'session-control', args: 'side' } as never)
+    await boot($)
+    await runCommand($, 'side')
     return $.ui.mount({ plugin: 'session-control', surface, component: 'Pane', requestId: 'session-control', props: props as never })
   }
   /** Every Text drawn, with its wrap prop. */
@@ -3985,7 +3954,7 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
 
   test('a poll tick during a probe skips its refresh', { options: TRACED }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     let release = () => {}
     HELD.probe = new Promise<void>(resolve => {
       release = resolve
@@ -4008,7 +3977,7 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
 
   test('Windows: two tools at once probe one after the other, the second waiting in the helper\'s short pauses: never two probes at once', { options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}` } }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' })
-    await $.session.start(start(`C:${ORCH_DIR}`))
+    await boot($, `C:${ORCH_DIR}`)
     WINDOWS.probeMs = 3000
     try {
       const before = w.calls.length
@@ -4023,7 +3992,7 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
 
   test('after a probe longer than the poll interval the poll rests as long again from its end; then it probes as before', { options: TRACED }, async ($, on) => {
     const w = world(on)
-    await $.session.start(start(ORCH_DIR))
+    await boot($)
     LINUX_FIXTURE.probeMs = 12_000
     try {
       const before = probes(w)
@@ -4047,7 +4016,7 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
     WINDOWS.isProbeBroken = true
     try {
       const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' })
-      await $.session.start(start(`C:${ORCH_DIR}`))
+      await boot($, `C:${ORCH_DIR}`)
       expect(tracking(w)).toEqual(['Tracking problem \u00B7 Error: the process probe failed (exit 1): Invalid class'])
       WINDOWS.isProbeBroken = false
       await w.clock.advance(5000)

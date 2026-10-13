@@ -1,19 +1,13 @@
 #!/usr/bin/env node
-// Run with `node mod/tests/e2e-digest.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
-// needed.
+// Run with `node mod/tests/e2e-digest.mjs` (Node 22 or newer), from any directory.
 //
-// End-to-end test of turn_digest against the real claude, in a scratch directory it makes and removes. It seeds a
-// scratch registry with one worker whose recorded pid is gone and whose result file is a clean report (the first poll
-// harvests it), a queue task waiting for that worker, and an open point raised ten days ago. A headless haiku
-// orchestrator (capped at --max-budget-usd 0.25) calls turn_digest twice in a row and answers with both outputs; each
-// output is read from the orchestrator's own transcript: the first reports from the mod's load (the completion, the
-// ready task, the aged point, the notices by kind, the state line), the second has nothing new; no output and no trace
-// line holds the canary secret seeded in the worker's title, and the tool wrote no file.
-// Everything the mod reads or writes is in the scratch directory (registry, helper files, runs directory, trace); the
-// real registry, helper files and runs directory are never touched, and the licence picker option is empty. The
-// orchestrator runs under the default configuration (this process's CLAUDE_CONFIG_DIR, else ~/.claude): its
-// transcript stays there. One line per check; exit 1 on a failure. KEEP_OUT=<dir> copies the two outputs there before
-// the scratch directory goes.
+// End-to-end test of turn_digest against the real claude, in a scratch directory it makes and removes. It seeds one
+// worker whose pid is gone and whose result file is a clean report (the first poll harvests it), a queue task waiting
+// for it, and an open point raised ten days ago. A headless haiku orchestrator (--max-budget-usd 0.25) calls
+// turn_digest twice; read from its transcript, the first output reports from the mod's load (the completion, the ready
+// task, the aged point, the notices by kind, the state line), the second has nothing new; no output or trace line
+// holds the canary seeded in the worker's title, and the tool wrote no file. Isolation as in lib/e2e.mjs.
+// KEEP_OUT=<dir> keeps the two outputs.
 
 import * as fs from 'node:fs'
 import {

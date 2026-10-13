@@ -2,29 +2,20 @@
 // Run with `node mod/tests/windows-selftest.mjs` (Node 22 or newer); it prints one `ok` (or `skipped`) line per part and
 // stops with exit 1 at the first failed check. Only the Node standard library is used.
 //
-// Where it runs: from WSL, where Windows PowerShell is reachable through interop (paths converted with wslpath, the
-// Windows programs started from Linux); and natively on Windows (process.platform win32),
-// where it starts powershell.exe, cmd.exe, Git Bash's bash.exe and node.exe directly and uses Windows paths as they
-// are. Without powershell.exe it prints `skipped`.
+// Where it runs: from WSL, reaching Windows PowerShell through interop (paths converted with wslpath); and natively on
+// Windows, where it starts powershell.exe, cmd.exe, Git Bash's bash.exe and node.exe directly. Without powershell.exe
+// it prints `skipped`.
 //
-// Extracts the Windows PowerShell scripts the mod runs (PROBE_PS1 and TREE_PS1 of hooks/host-windows.ts), writes them
-// to a scratch directory on the Windows side and runs them through powershell.exe, the way the mod runs them on native
-// Windows (absolute path, -File); it also runs the launch line in Git Bash and the PowerShell launch route's command.
-// It proves the scripts' own behaviour on this host's PowerShell and file system only: not what the Windows engine
-// passes them, nor a real claude.exe. The scratch directory is a new folder under SC_WIN_SCRATCH (a Windows path) or
-// under the Windows %TEMP%, and is removed at the end.
+// Runs the mod's Windows PowerShell scripts (PROBE_PS1 and TREE_PS1 of hooks/host-windows.ts) from a scratch directory
+// through powershell.exe as the mod does (absolute path, -File), the launch line in Git Bash and the PowerShell launch
+// route's command. It proves the scripts' own behaviour on this host's PowerShell and file system only: not what the
+// Windows engine passes them, nor a real claude.exe. The scratch directory is a new folder under SC_WIN_SCRATCH (a
+// Windows path) or the Windows %TEMP%, removed at the end.
 //
-// Its last parts copy the Node helper (mod/helper/*.mjs) to the scratch directory and run its file operations with the
-// Windows node.exe (SC_WIN_NODE, else C:\Program Files\nodejs\node.exe from WSL and the node.exe running this test on
-// native Windows), as the mod does on native Windows: rename over an existing file (also while another process holds
-// it open), append, remove (a junction and a folder refused with regularOnly), the tail of a 3 MB UTF-8 file with CRLF
-// line ends and non-ASCII text, filesNewerThan over a scratch tree with a .git folder and a junction out of it (the
-// junction neither followed nor listed), hashTree over two copies of a mod folder (the SHA-256 of each file against
-// Node's own, a junction in hooks neither followed nor hashed, the generated .claude-plugin/types and tests left out,
-// the fixed codes), and a batch of 20 operations, with the time per batch; then probeUsage's process shape: claude.exe
-// looked up on a PATH of one scratch folder without a shell (a copy of node.exe stands in, so no claude starts), a
-// claude.cmd alone and an empty PATH answered NO_CLAUDE; then the stop of stop_worker on a throwaway node.exe tree of
-// its own. Without that node.exe those parts print `skipped`.
+// Its last parts run the Node helper (a copy of mod/helper/*.mjs) with the Windows node.exe (SC_WIN_NODE, else C:\Program
+// Files\nodejs\node.exe from WSL, the running node.exe natively), as the mod does on native Windows: the file
+// operations, probeUsage's process shape and the stop of stop_worker on a throwaway node.exe tree, each described at
+// its part. Without that node.exe those parts print `skipped`.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -191,8 +182,8 @@ try {
   ;[code, out, err] = run('junction.ps1', JUNCTION_PS1, toWin(join(work, 'rr-junction'), '\\'), toWin(join(work, 'rr-out'), '\\'))
   check(code === 0, [code, err])
 
-  // The tree the helper's listing of the files written after a time runs over: a junction out of it (made with New-Item,
-  // no admin right needed), a .git folder, files written before and after the time.
+  // The tree filesNewerThan runs over: a junction out of it (as above), a .git folder, files written before and after
+  // the time.
   const T = 1_790_000_000
   const stamp = (name, sec, text = 'x') => {
     fs.mkdirSync(dirname(join(work, name)), { recursive: true })
@@ -210,9 +201,8 @@ try {
   check(exists(join(work, 'newer', 'j', 'secret.txt')), 'the junction does not lead out of the tree')
   const wantNewer = [['a.txt', (T + 30) * 1000], ['caf\u{e9}.txt', (T + 25) * 1000], ['sub [1]/b b.txt', (T + 20) * 1000]]
 
-  // --- PROBE_PS1, with its process name swapped to powershell.exe: a sleeping powershell.exe of this test's own
-  // plays the worker, and fake sessions files under the scratch directory play the engine's. This verifies the
-  // script's own arithmetic and output only, never a real claude.exe or a real sessions file.
+  // --- PROBE_PS1, its process name swapped to powershell.exe: a sleeping powershell.exe of this test plays the worker
+  // and fake sessions files play the engine's, so only the script's own arithmetic and output are verified.
   let probe = constant('PROBE_PS1')
   check(count(probe, "$name = 'claude.exe'") === 1)
   probe = probe.replaceAll("$name = 'claude.exe'", "$name = 'powershell.exe'")
@@ -293,11 +283,11 @@ try {
     await live.wait(60)
   }
 
-  // --- the launch line in Git Bash, the Bash tool's shell on Windows, with claude() a node.exe that echoes what it
-  // gets: no claude starts. The line has the shape buildLaunchArgv returns (pinned by its golden tests); this checks
-  // what Git Bash makes of it: cd into a path with a blank and a quote, CLAUDE_CONFIG_DIR as written, the -n name and
-  // the --settings JSON reaching the program as single arguments with their double quotes, $(cat) of the
-  // prompt, the redirections, and which prompts MSYS rewrites (MSYS_PROMPTS in tests/fixtures.ts).
+  // --- the launch line in Git Bash (the Bash tool's shell on Windows), claude() a node.exe that echoes what it gets.
+  // The line's shape is pinned by buildLaunchArgv's golden tests; this checks what Git Bash makes of it: cd into a path
+  // with a blank and a quote, CLAUDE_CONFIG_DIR as written, the -n name and the --settings JSON as single arguments with
+  // their double quotes, $(cat) of the prompt, the redirections, and which prompts MSYS rewrites (MSYS_PROMPTS in
+  // tests/fixtures.ts).
   const where = exe => runText([PS, '-NoProfile', '-NonInteractive', '-Command', `(Get-Command ${exe} -ErrorAction SilentlyContinue).Source`], { timeout: 60, cwd: work }).stdout.trim()
 
   const git = where('git.exe')
@@ -336,15 +326,12 @@ try {
     console.log(`windows-launch-selftest: ok (${prompts.length} prompts through Git Bash)`)
   }
 
-  // --- the PowerShell launch route (the launchRoute option at powershell): the command rendered by the real
-  // powershellLaunchCommand of hooks/host-powershell.ts (the node running this test loads the TypeScript itself), then
-  // run as a script by Windows PowerShell 5.1 and by PowerShell 7, as the engine's PowerShell tool would run it.
-  // node.exe with a stub script stands in for claude.exe: the test swaps `Get-Command claude.exe` for `Get-Command
-  // node.exe` and puts the stub's path first in the argument string, and checks no claude.exe is left in the text before
-  // anything runs. The stub prints its argv, working directory, the two variables and its pid as JSON on stdout (with
-  // the prompt it read, so the result file holds non-ASCII text), copies its stdin byte for byte to a file, writes a
-  // line to stderr and exits with the code it is given. The only process cmdlets are the command's own Start-Process and
-  // Get-Command.
+  // --- the PowerShell launch route (launchRoute powershell): the command rendered by the real powershellLaunchCommand
+  // (hooks/host-powershell.ts, loaded as TypeScript by this node), run as a script by Windows PowerShell 5.1 and by
+  // PowerShell 7 as the engine's PowerShell tool would. A node.exe stub stands in for claude.exe (`Get-Command
+  // claude.exe` swapped for `node.exe`, the stub's path first in the arguments; no claude.exe may be left in the text
+  // before anything runs). The stub prints its argv, cwd, the two variables, its pid and the prompt it read (non-ASCII
+  // text in the result file), copies its stdin byte for byte to a file, writes to stderr and exits with the code given.
   const linuxNode = process.execPath
   const shells = [['Windows PowerShell 5.1', PS]]
   const pwsh = which('pwsh.exe')
@@ -603,11 +590,10 @@ try {
     check(answer.total === 3 && answer.files.length === 1, answer)
     ;[answer] = helper('filesNewerThan', { dir: w('no such folder'), since: T, max: 1 })
     check(pyEqual(answer, { ok: false, code: 'NOT_FOUND' }), answer)
-    // hashTree (the drift band): two copies of a mod folder that differ in one file; the SHA-256 of each file as
-    // Node computes it over the same bytes with each CRLF folded to LF (line ends do not count; a file with a NUL
-    // byte keeps its bytes; non-ASCII kept); a junction in hooks out of the folder (made
-    // with New-Item, no admin right) neither followed nor hashed; .claude-plugin/types, tests and a nested folder
-    // never; paths relative with / on Windows too; a missing root and a bad request are fixed codes.
+    // hashTree (the drift band): two copies of a mod folder differing in one file; each file's SHA-256 against Node's over
+    // the same bytes with CRLF folded to LF (a file with a NUL byte keeps its bytes); a junction in hooks neither followed
+    // nor hashed; .claude-plugin/types, tests and a nested folder never; paths relative with /; a missing root and a bad
+    // request are fixed codes.
     const modFiles = {
       'hooks/register.tsx': 'export const register = 1\r\n// caf\u{e9} \u{2615}\r\n',
       'hooks/core.ts': 'export const core = 1\n',
@@ -675,12 +661,10 @@ try {
       check(stepAnswer.ok === true, stepAnswer)
       singleMs.push(took)
     }
-    // probeUsage on Windows, its process shape only, with no claude: a launcher run by the same node.exe gives the
-    // helper a PATH of one scratch folder. There a copy of node.exe named claude.exe stands in for claude: the
-    // helper must find it by the PATH without a shell, and node.exe refuses the probe's arguments (bad option, exit
-    // 9), which the helper answers as the fixed code FAILED with no text. A folder holding only a claude.cmd (an npm
-    // shim) is NO_CLAUDE, since no shell runs it; an empty folder is NO_CLAUDE. The PATH never holds the folder of a
-    // real claude.exe, so none can start. The usage text itself is parsed alike on every platform (helper.test.mjs).
+    // probeUsage on Windows, its process shape only: the helper gets a PATH of one scratch folder where a copy of node.exe
+    // named claude.exe must be found without a shell; node.exe refuses the probe's arguments (exit 9), answered as the
+    // fixed code FAILED. A folder with only a claude.cmd (an npm shim, no shell runs it) or none is NO_CLAUDE. No real
+    // claude.exe is ever on that PATH. The usage text is parsed alike everywhere (helper.test.mjs).
     const fakeDir = join(work, 'fake claude')
     const cmdDir = join(work, 'cmd only')
     const emptyDir = join(work, 'no claude')
@@ -721,11 +705,10 @@ try {
       `the same 20 as single helper runs ${ms(singleMs.reduce((a, b) => a + b, 0))} ms in all (median ${ms(median(singleMs))} ms each); ${IS_WINDOWS ? 'timed natively on Windows' : 'timed from WSL through interop'})`)
   }
 
-  // --- the stop of stop_worker on Windows: TREE_PS1 lists a throwaway node.exe tree (a parent that started one
-  // child), then taskkill.exe through cmd.exe stops it the way the Windows adapter does: /T /F at once (a console
-  // process without a window refuses taskkill without /F), then the re-checks by TREE_PS1's check for up to 3 s. A
-  // second node.exe outside the tree must survive, a start that is not the process's own reads as gone, and the listing
-  // names this script's own ancestors. No claude starts.
+  // --- the stop of stop_worker on Windows: TREE_PS1 lists a throwaway node.exe tree (parent and one child), then
+  // taskkill.exe through cmd.exe stops it as the Windows adapter does: /T /F at once (a console process without a window
+  // refuses taskkill without /F), re-checked by TREE_PS1 for up to 3 s. A node.exe outside the tree must survive, a start
+  // that is not the process's own reads as gone, and the listing names this script's own ancestors.
   nodeWin = process.env.SC_WIN_NODE || (IS_WINDOWS ? process.execPath : 'C:\\Program Files\\nodejs\\node.exe')
   node = toWsl(nodeWin)
   if (!exists(node)) {
@@ -810,10 +793,9 @@ try {
     }
   }
 } finally {
-  // A process of the test (a node.exe just stopped, a PowerShell) can still hold the folder for a moment on Windows
-  // (EBUSY): the removal is tried again for up to about 4 seconds (8 tries, each waiting 100 ms longer). A folder that
-  // still cannot go is said and fails the run, never in place of an error the run already threw, which goes on to be
-  // reported as it was.
+  // A process of the test (a node.exe just stopped, a PowerShell) can hold the folder a moment longer on Windows (EBUSY):
+  // the removal is retried for about 4 s (8 tries, each waiting 100 ms longer). A folder that still cannot go fails the
+  // run, but never replaces an error the run already threw.
   try {
     fs.rmSync(work, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 })
   } catch (err) {

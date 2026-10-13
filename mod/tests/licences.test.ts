@@ -1,7 +1,6 @@
-// The licence tools through the plugin on the mock engine: list_licences over a simulated machine (mock-world.ts on
-// Linux, a small machine of its own for Windows), with directory listings and the presence of the two files of a
-// licence; the licence files hold canaries that must reach no answer and no trace, since the tools never open them.
-// The pure parts of hooks/licences.ts are tested on their own at the end.
+// The licence tools through the plugin on a simulated machine (mock-world.ts on Linux, a small one for Windows). The
+// licence files hold canaries that must reach no answer and no trace, since the tools never open them. The pure parts
+// of hooks/licences.ts are tested on their own at the end.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
@@ -32,9 +31,9 @@ import type { Licence } from '../hooks/licences'
 import { NOTICE_PREFIX } from '../hooks/notices'
 import { nodeAnswer, usageAnswerOf } from './fake-helper'
 import { NOW_MS } from './fixtures'
-import { HOME, OPTIONS, ORCH, REGISTRY, RUNS, mockWorld, seedLiveWorker } from './mock-world'
+import { HOME, OPTIONS, ORCH, POWERSHELL, REGISTRY, RUNS, WIN_ENV, WIN_ORCH, WIN_REGISTRY, mockWorld, seedLiveWorker, startWinOrch, winBase, winGiven as given } from './mock-world'
 import type { World } from './mock-world'
-import { echoPrompt, noticeLines, storeOf, userPrompt } from './notice-kit'
+import { echoPrompt, noticeLines, startOrch, storeOf, userPrompt } from './notice-kit'
 import { USAGE_FIXTURES } from './usage-fixtures'
 
 const tool = (name: string) => `mcp__session-control__${name}`
@@ -94,7 +93,7 @@ describe('list_licences', () => {
     const world = mockWorld(on)
     seed(world)
     seedLicences(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const text = await answerOf($, 'list_licences')
     expect(text.split('\n')).toEqual([
       '4 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
@@ -111,7 +110,7 @@ describe('list_licences', () => {
   test('the default directory is listed even with neither file; its .claude.json may be the home one', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seed(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect((await answerOf($, 'list_licences')).split('\n').slice(0, 2)).toEqual([
       '1 licence (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
       `- default | config_dir ${CLAUDE} | source default | logged_in no | sessions 1 live, 1 in all`,
@@ -126,7 +125,7 @@ describe('list_licences', () => {
     const world = mockWorld(on, { env: { CLAUDE_CONFIG_DIR: `${CLAUDE}/second` } })
     seed(world)
     seedLicences(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const lines = (await answerOf($, 'list_licences')).split('\n')
     expect(lines.slice(1, 4)).toEqual([
       `- default | config_dir ${CLAUDE}/second | source default | logged_in yes | sessions 0 live, 1 in all`,
@@ -139,7 +138,7 @@ describe('list_licences', () => {
     const world = mockWorld(on)
     seed(world)
     seedLicences(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await answerOf($, 'list_licences')
     const listed = world.listed.length
     licence(world, `${CLAUDE}/third`)
@@ -159,7 +158,7 @@ describe('list_licences', () => {
     const world = mockWorld(on)
     seed(world)
     seedLicences(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const before = await answerOf($, 'list_licences')
     for (const path of world.files.keys()) if (path.endsWith('/.credentials.json') || path.endsWith('/.claude.json')) world.unreadable.add(path)
     await world.clock.advance(SCAN_CACHE_MS + 1000)
@@ -197,7 +196,7 @@ describe('list_licences', () => {
     world.links.set(`${HOME}/.claude-broken/.credentials.json`, '/w/store/missing-c.json')
     world.links.set(`${HOME}/.claude-broken/.claude.json`, '/w/store/missing-a.json')
     for (const path of [...world.files.keys()]) if (path.includes('.credentials.json') || path.includes('.claude.json') || path.startsWith('/w/store/')) world.unreadable.add(path)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const text = await answerOf($, 'list_licences')
     expect(text.split('\n').slice(0, 3)).toEqual([
       '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
@@ -218,7 +217,7 @@ describe('list_licences', () => {
     world.links.set('/w/lic/linked', '/w/elsewhere/real')
     world.links.set(`${CLAUDE}/linkedchild`, '/w/elsewhere/real')
     world.links.set(`${HOME}/.claude-linked`, '/w/elsewhere/real')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const lines = (await answerOf($, 'list_licences')).split('\n')
     expect(lines.slice(0, 3)).toEqual([
       '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
@@ -244,7 +243,7 @@ describe('list_licences', () => {
       entry(7, `${HOME}/./.claude/`),
     ]
     world.files.set(REGISTRY, `${JSON.stringify(entries, null, 2)}\n`)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect((await answerOf($, 'list_licences')).split('\n')).toEqual([
       '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
       `- default | config_dir ${CLAUDE} | source default | logged_in yes | sessions 0 live, 1 in all`,
@@ -258,7 +257,7 @@ describe('list_licences', () => {
     seed(world)
     licence(world, CLAUDE)
     world.files.set(REGISTRY, '{ not json')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const lines = (await answerOf($, 'list_licences')).split('\n')
     expect(lines[1]).toBe(`- default | config_dir ${CLAUDE} | source default | logged_in yes | sessions ? live, ? in all`)
     expect(lines[2]?.startsWith('The registry cannot be read (registry is not JSON')).toBe(true)
@@ -268,7 +267,7 @@ describe('list_licences', () => {
     const world = mockWorld(on)
     seed(world)
     seedLicences(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await answerOf($, 'list_licences')
     const trace = world.files.get(`${RUNS}/trace.log`) ?? ''
     const lines = trace.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
@@ -306,7 +305,7 @@ describe('probe_licence_usage', () => {
   test('every discovered licence, one after the other: the two windows or the code; the default a launch inherits probed without CLAUDE_CONFIG_DIR', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seedUsage(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const text = await answerOf($, 'probe_licence_usage')
     expect(text.split('\n')).toEqual([
       'Usage of 3 licences (3 probed now, 0 from the cache): highest five_hour 42% (second), highest seven_day 41% (default).',
@@ -328,7 +327,7 @@ describe('probe_licence_usage', () => {
   test('kept 60 s per licence (a failed probe 15 s): a call within answers from memory with its age and says cached', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seedUsage(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await answerOf($, 'probe_licence_usage')
     await world.clock.advance(USAGE_FAIL_CACHE_MS + 1000)
     const again = (await answerOf($, 'probe_licence_usage')).split('\n')
@@ -349,7 +348,7 @@ describe('probe_licence_usage', () => {
     seedUsage(world)
     licence(world, '/w/lic/undiscovered')
     world.usage.set('/w/lic/undiscovered', MAIN)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     expect((await answerOf($, 'probe_licence_usage', { config_dir: `${CLAUDE}/second/` })).split('\n').slice(0, 2)).toEqual([
       'Usage of 1 licence (1 probed now, 0 from the cache): highest five_hour 42% (second), highest seven_day 5% (second).',
       `- second (config_dir ${CLAUDE}/second) | ${SECOND_ROW} | age_seconds 0 | cached no`,
@@ -368,7 +367,7 @@ describe('probe_licence_usage', () => {
     licence(world, `${CLAUDE}/fourth`)
     world.usage.set(`${CLAUDE}/fourth`, SECOND)
     world.usageKnobs.stepMs = 15_000
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const lines = (await answerOf($, 'probe_licence_usage')).split('\n')
     expect(lines[0]).toBe('Usage of 2 licences (2 probed now, 0 from the cache): highest five_hour 42% (second), highest seven_day 41% (default).')
     expect(lines).toContain('2 more not probed: call again (fourth, .claude-work).')
@@ -391,7 +390,7 @@ describe('probe_licence_usage', () => {
       started = resolve
     })
     world.usageKnobs.onRun = () => started()
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const first = answerOf($, 'probe_licence_usage')
     await isStarted
     const second = (await answerOf($, 'probe_licence_usage')).split('\n')
@@ -410,7 +409,7 @@ describe('probe_licence_usage', () => {
     echoPrompt(on)
     seedUsage(world)
     world.usageKnobs.linger = true
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await answerOf($, 'probe_licence_usage')
     expect([...world.table.procs.values()].filter(proc => proc.claude?.cmdline === 'claude -p /usage --no-session-persistence').length).toBe(3)
     for (let gone = 0; gone < 180; gone += 5) await world.clock.advance(5000)
@@ -425,7 +424,7 @@ describe('probe_licence_usage', () => {
   test('with the Node helper: the same answer through its probeUsage, one helper process per licence', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on, { isHelper: true })
     seedUsage(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const text = await answerOf($, 'probe_licence_usage')
     expect(text.split('\n')[1]).toBe(`- default (config_dir ${CLAUDE}) | ${MAIN_ROW} | age_seconds 0 | cached no`)
     expect(world.usageRuns.map(run => [run.via, run.isInherited])).toEqual([
@@ -440,7 +439,7 @@ describe('probe_licence_usage', () => {
     seedUsage(world)
     world.usage.delete('inherited')
     world.usage.set(`${CLAUDE}/second`, 'timeout')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const lines = (await answerOf($, 'probe_licence_usage')).split('\n')
     expect(lines.slice(1, 3)).toEqual([`- default (config_dir ${CLAUDE}) | error NO_CLAUDE | age_seconds 0 | cached no`, `- second (config_dir ${CLAUDE}/second) | error TIMEOUT | age_seconds 0 | cached no`])
     expect(lines[0]).toBe('Usage of 3 licences (3 probed now, 0 from the cache): highest five_hour -, highest seven_day -.')
@@ -451,7 +450,7 @@ describe('probe_licence_usage', () => {
   test('the debug trace: the call, each probe by directory and route, the answer as a length; never a figure or the text', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
     const world = mockWorld(on)
     seedUsage(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await answerOf($, 'probe_licence_usage', { config_dir: 'second' })
     const trace = world.files.get(`${RUNS}/trace.log`) ?? ''
     const lines = trace.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
@@ -488,7 +487,7 @@ describe("launch_worker's config_dir", () => {
   test('an explicit config_dir wins over the picker: the picker is not run, the worker runs under it, the registry records it', { options: PICK_OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seedLaunch(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const text = await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: 'second' })
     expect(text).toContain(`config_dir ${CLAUDE}/second, registered.`)
     expect(text).toContain(' Licence: second (config_dir given; the licence picker was not run).')
@@ -504,7 +503,7 @@ describe("launch_worker's config_dir", () => {
   test('without config_dir the launch is as before: the picker chooses, its directory is on the line and in the registry, no licence note', { options: PICK_OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seedLaunch(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const text = await answerOf($, 'launch_worker', LAUNCH)
     expect(pickerRuns(world)).toEqual([['/w/bin/pick', '--need', '40']])
     expect(launchCommands(world)[0]).toContain(`CLAUDE_CONFIG_DIR='${HOME}/.claude-work' `)
@@ -517,7 +516,7 @@ describe("launch_worker's config_dir", () => {
     const world = mockWorld(on)
     seedLaunch(world)
     licence(world, '/w/lic/undiscovered')
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const before = world.files.get(REGISTRY)
     const written = world.written.length
     for (const asked of ['/w/lic/undiscovered', `${CLAUDE}/half`, 'nobody']) {
@@ -534,7 +533,7 @@ describe("launch_worker's config_dir", () => {
   test('the default directory given explicitly: no CLAUDE_CONFIG_DIR on the line, as a launch without a picker runs there; the registry records it', { options: PICK_OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seedLaunch(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const text = await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: `${CLAUDE}/` })
     expect(text).toContain(`config_dir ${CLAUDE}, registered.`)
     expect(launchCommands(world)[0]?.includes('CLAUDE_CONFIG_DIR')).toBe(false)
@@ -546,7 +545,7 @@ describe("launch_worker's config_dir", () => {
     const world = mockWorld(on)
     seedLaunch(world)
     world.usage.set(`${CLAUDE}/second`, { stdout: 'Current session: 95% used \u00b7 resets 6pm (Europe/Rome)\nCurrent week (all models): 91% used \u00b7 resets Oct 14, 9am (Europe/Rome)\n' })
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await answerOf($, 'probe_licence_usage', { config_dir: 'second' })
     await world.clock.advance(20_000)
     const warned = await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: 'second' })
@@ -567,7 +566,7 @@ describe("launch_worker's config_dir", () => {
     world.files.set(REGISTRY, `${JSON.stringify([entry], null, 2)}\n`)
     world.files.set(`${CLAUDE}/second/projects/-w-work/${SID_RESUME}.jsonl`, '{}\n')
     world.launch.sid = SID_RESUME
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     const resume = { resume_sid: SID_RESUME, prompt: 'Continue the work.' }
     expect(await answerOf($, 'launch_worker', { ...resume, config_dir: 'default' })).toBe(
       `session-control: refused: a resume runs under its entry's own config_dir (${CLAUDE}/second), not ${CLAUDE}; nothing was launched`,
@@ -588,7 +587,7 @@ describe("launch_worker's config_dir", () => {
   test('the debug trace names the config_dir given and the refusal, never anything of a licence file', { options: { ...PICK_OPTIONS, debug: true } }, async ($, on) => {
     const world = mockWorld(on)
     seedLaunch(world)
-    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    await startOrch($)
     await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: 'nobody' })
     await answerOf($, 'launch_worker', { ...LAUNCH, config_dir: 'second' })
     const trace = world.files.get(`${RUNS}/trace.log`) ?? ''
@@ -601,12 +600,6 @@ describe("launch_worker's config_dir", () => {
 
 // ---------------------------------------------------------------- Windows
 
-const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\w\\home' }
-const WIN_ORCH = 'C:/w/orch'
-const WIN_REGISTRY = 'C:/w/home/.claude/headless-sessions.json'
-const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
-
 /**
  * A small Windows machine: files by their C:/ path (case kept as given), folders listed by what is under them, Node and
  * its helper (whose probeUsage answers the recorded text's answer, and records each request), a process probe that
@@ -614,10 +607,7 @@ const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z
  */
 function winWorld(on: On, env: Record<string, string> = {}) {
   const w = { files: new Map<string, string>(), links: new Map<string, string>(), runs: [] as string[][], usageRequests: [] as Record<string, unknown>[], clock: mock.clock(on, { now: NOW_MS }), probeOut: '' }
-  mock.env(on, { ...WIN_ENV, ...env })
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
+  winBase(on, { ...WIN_ENV, ...env })
   const key = (path: string) => given(path).toLowerCase()
   const find = (path: string) => [...w.files.entries()].find(([one]) => one.toLowerCase() === key(path))
   on('fs.read', ($, e) => {
@@ -664,8 +654,6 @@ function winWorld(on: On, env: Record<string, string> = {}) {
     if (node !== undefined) return { value: node }
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
   })
-  on('ui.toast', () => ({ value: undefined }))
-  on('ui.panes', () => ({ value: [] }) as never)
   return w
 }
 
@@ -681,7 +669,7 @@ describe('list_licences on Windows', () => {
       w.files.set(`${dir}/.claude.json`, configText())
     }
     w.files.set('C:/w/home/.claude/projects/x.jsonl', '')
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     const text = await answerOf($, 'list_licences')
     expect(text.split('\n')).toEqual([
       '4 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
@@ -715,7 +703,7 @@ describe('list_licences on Windows', () => {
     w.files.set('C:/w/home/.claude-Broken/notes.txt', 'x')
     w.links.set('C:/w/home/.claude-Broken/.credentials.json', 'C:/w/store/gone.json')
     w.links.set('C:/w/home/.claude-Broken/.claude.json', 'C:/w/store/gone.json')
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     const text = await answerOf($, 'list_licences')
     expect(text.split('\n')).toEqual([
       '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
@@ -734,7 +722,7 @@ describe('list_licences on Windows', () => {
       w.files.set(`${dir}/.credentials.json`, credentialsText())
       w.files.set(`${dir}/.claude.json`, configText())
     }
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     expect((await answerOf($, 'list_licences')).split('\n')).toEqual([
       '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
       '- default | config_dir C:/w/home/.claude | source default | logged_in yes | sessions 0 live, 0 in all',
@@ -751,7 +739,7 @@ describe('list_licences on Windows', () => {
       w.files.set(`${dir}/.credentials.json`, credentialsText())
       w.files.set(`${dir}/.claude.json`, configText())
     }
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     const text = await answerOf($, 'probe_licence_usage')
     expect(text.split('\n').slice(1, 3)).toEqual([`- default (config_dir C:/w/home/.claude) | ${MAIN_ROW} | age_seconds 0 | cached no`, `- Second (config_dir C:/w/home/.claude/Second) | ${MAIN_ROW} | age_seconds 0 | cached no`])
     expect(w.usageRequests).toEqual([{ configDir: 'C:/w/home/.claude', isInherited: true }, { configDir: 'C:/w/home/.claude/Second' }])
@@ -775,7 +763,7 @@ describe('the process probe on Windows', () => {
     seedLicences(w)
     // What PROBE_PS1 prints for a headless claude whose sessions file it found under the licence Second.
     w.probeOut = `P\t4242\tclaude\t9\tC:/w/work\tC:/w/home/.claude/Second\t${HEADLESS}\r\n`
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     const text = await answerOf($, 'list_sessions')
     expect(text).toContain('- orphan (no registry entry) | pid 4242 | age 9s | cwd C:/w/work | config_dir C:/w/home/.claude/Second')
     const probes = w.runs.filter(argv => argv[0] === POWERSHELL && String(argv[6] ?? '').endsWith('/probe.ps1'))
@@ -793,7 +781,7 @@ describe('the process probe on Windows', () => {
     const unreadable = 'P\t4343\tclaude\t9\t\t\t\r\n'
     const headless = `P\t4242\tclaude\t9\tC:/w/work\t\t${HEADLESS}\r\n`
     w.probeOut = unreadable + headless
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     const first = await answerOf($, 'list_sessions')
     expect(first).toContain('| pid 4242 |')
     expect(first).not.toContain('pid 4343')

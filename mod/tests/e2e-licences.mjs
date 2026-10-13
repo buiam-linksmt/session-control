@@ -1,22 +1,17 @@
 #!/usr/bin/env node
-// Run with `node mod/tests/e2e-licences.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
-// needed.
+// Run with `node mod/tests/e2e-licences.mjs` (Node 22 or newer), from any directory.
 //
-// End-to-end test of the licence tools of the session-control mod against the real claude and the real licences of
-// this machine, in a scratch directory it makes and removes. A headless haiku orchestrator (capped at --max-budget-usd
-// 0.30) runs in a scratch orchestrator directory and is told to (1) list_licences; (2) probe_licence_usage of every
-// licence; (3) the same again, which answers from the cache; (4) probe_licence_usage of a directory that is no licence:
-// refused; (5) launch_worker with a config_dir that is no licence: refused with the discovered names; (6) launch_worker
-// with the explicit config_dir of the main licence (E2E_MAIN_DIR, else ~/.claude) and a prompt that replies PONG, and
-// wait for its outcome in the foreground. The licences the tool must find are computed here the same way, by the
-// presence of .credentials.json and .claude.json only (a stat, never an open): no licence file is ever opened by this
-// script or the mod. The probes run `claude -p /usage --no-session-persistence` under each licence (no model turn);
-// they read and change nothing of the licences beyond what the CLI itself does. Every tool answer, the final answer and
-// the debug trace are checked for an `@` and for the identity strings given in E2E_IDENTITY (comma separated, never
-// written in this file), and afterwards no `claude -p /usage --no-session-persistence` process may remain (read from
-// /proc on Linux; elsewhere that check prints `skip`). Everything the mod writes is in the scratch directory; the
-// orchestrator's transcript stays under this process's configuration (CLAUDE_CONFIG_DIR, else ~/.claude), the worker's
-// under the main licence. One line per check; exit 1 on a failure. KEEP_OUT=<dir> keeps the tool answers.
+// End-to-end test of the licence tools against the real claude and this machine's real licences, in a scratch
+// directory it makes and removes. A headless haiku orchestrator (--max-budget-usd 0.30) is told to (1) list_licences;
+// (2) probe_licence_usage of every licence; (3) the same again, from the cache; (4) probe a directory that is no
+// licence: refused; (5) launch_worker with a config_dir that is no licence: refused with the discovered names;
+// (6) launch_worker under the main licence (E2E_MAIN_DIR, else ~/.claude) with a PONG prompt, and wait for it. The
+// expected licences are found here by the presence of .credentials.json and .claude.json (a stat, never an open): no
+// licence file is ever opened by this script or the mod. The probes run `claude -p /usage --no-session-persistence`
+// (no model turn) and change nothing beyond what the CLI itself does. Every answer and the trace are checked for an `@`
+// and for the identity strings in E2E_IDENTITY (comma separated, never written in this file); afterwards no probe
+// process may remain (/proc on Linux, else `skip`). Isolation as in lib/e2e.mjs; the worker's transcript stays under
+// the main licence. KEEP_OUT=<dir> keeps the tool answers.
 
 import * as fs from 'node:fs'
 import {

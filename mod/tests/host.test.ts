@@ -1,10 +1,9 @@
 // The host interface: one contract run against the Host withHelper makes of each adapter, and the one platform choice.
 //
-// The machine is simulated once (files in a map, Node and its helper over them, the commands the adapters still run
-// answered as that system would) and stands beneath the plugins as the mock engine's fs, process and env hooks. The
-// contract calls the hosts over a HostPort on that same machine: the kit's test `$` has no fs or process noun, and an inline plugin runs in a realm
-// of its own, so a port over a plugin's `$` cannot be handed to the test. The selection tests go through the plugin
-// itself, on the mock engine.
+// The machine is simulated once (files in a map, Node and its helper over them, the adapters' remaining commands) and
+// stands beneath the plugins as the mock engine's fs, process and env hooks. The contract calls the hosts over a HostPort
+// on that same machine: the kit's test `$` has no fs or process noun, and an inline plugin runs in a realm of its own,
+// so a port over a plugin's `$` cannot be handed to the test. The selection tests go through the plugin itself.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { FsStat, On } from 'claude-code'
@@ -134,6 +133,9 @@ function mount(on: On, m: Machine): void {
   on('fs.stat', ($, e) => ({ value: m.stat(at(e.path)) }))
   on('process.run', ($, e) => ({ value: m.run(e.argv, e.init?.stdin) }))
 }
+
+/** The session started in `cwd`. */
+const startIn = ($: { session: { start: (e: never) => Promise<unknown> } }, cwd: string) => $.session.start({ cwd, surface: null, isInteractive: true } as never)
 
 /** A HostPort on the machine, as register.tsx's port is on the engine (untraced). */
 function portOf(m: Machine, runsDir: string, notes: string[] = []): HostPort {
@@ -646,7 +648,7 @@ describe('host selection', () => {
       on('command.register', ($, e) => ({ value: { command: e.name } }))
       on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
       on('ui.toast', () => ({ value: undefined }))
-      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      await startIn($, orch)
       // Linux: the helper's probe; Windows: PROBE_PS1 (the helper probes Linux only).
       const probes = m.runs.filter(argv => (argv[0] === NODE && argv[2] === 'probe') || String(argv[6]).endsWith('/probe.ps1'))
       expect(probes.length).toBeGreaterThan(0)
@@ -701,7 +703,7 @@ describe('write-side tools through the plugin, on both platforms', () => {
       put(m, `${runs}/20260921-a.pid`, '4242\r\n')
       put(m, `${runs}/20260921-a.prompt.md`, 'Reply PONG.')
       put(m, `${runs}/20260921-e.json`, result(1, 1))
-      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      await startIn($, orch)
       const out = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [SID_A, SID_E] } as never)) as { result?: unknown }
       expect(String(out.result)).toBe(`Retired: aaaa0001, eeee0005. Run files deleted from ${runs}: aaaa0001 (20260921-a.json, 20260921-a.pid, 20260921-a.prompt.md).`)
       for (const gone of ['20260921-a.json', '20260921-a.pid', '20260921-a.prompt.md']) expect(get(m, `${runs}/${gone}`)).toBeUndefined()
@@ -736,7 +738,7 @@ describe('write-side tools through the plugin, on both platforms', () => {
       put(m, `${runs}/20260921-e.json`, result(1, 1))
       put(m, `${p.root}/elsewhere/d.json`, result(2, 2))
       put(m, transcriptA, '{"type":"user"}\n')
-      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      await startIn($, orch)
       const out = (await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: [SID_A, SID_B, SID_D, SID_E] } as never)) as { result?: unknown }
       expect(String(out.result)).toBe(
         'Acknowledged: aaaa0001, bbbb0002, dddd0004, eeee0005. Retired: aaaa0001, bbbb0002, dddd0004, eeee0005. ' +
@@ -766,7 +768,7 @@ describe('write-side tools through the plugin, on both platforms', () => {
       put(m, `${runs}/20260921-a.json`, result(0.3, 30))
       put(m, `${runs}/20260921-a.err`, 'Please run /login\n')
       put(m, `${runs}/20260921-b.json`, result(0.4, 40))
-      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      await startIn($, orch)
       const reviewed = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [SID_A], reviewed: { aaaa0001: 'the run succeeded' } } as never)) as { result?: unknown }
       expect(String(reviewed.result)).toBe(`Retired: aaaa0001. Retired with review: aaaa0001 (was login: the run succeeded). Run files deleted from ${runs}: aaaa0001 (20260921-a.json, 20260921-a.err).`)
       const kept = (await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: [SID_B], keep: true } as never)) as { result?: unknown }
@@ -819,7 +821,7 @@ describe('write-side tools through the plugin, on both platforms', () => {
       file(`${runs}/adir/inner`)
       file(`${runs}/g.json`)
       file(`${runs}/g.err`)
-      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      await startIn($, orch)
       const outcome = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [NORMAL, DOTS, FOLDER, LINK, NESTED, SHARED, LOGIN] } as never)) as { result?: unknown }
       const answer = String(outcome.result)
       const short = (id: string) => id.slice(0, 8)
@@ -872,7 +874,7 @@ describe('write-side tools through the plugin, on both platforms', () => {
       const sectionA = '## Unit A (user, 2026-09-20)\nunita-1. Keep the grammar.\t(tab kept)\nunita-2. No new dependency; trailing blanks stay.   \n\n'
       put(m, `${orch}/agreed-decisions.md`, decisions)
       put(m, `${orch}/task-queue.json`, JSON.stringify({ tasks: [{ id: 'q-b', status: 'queued', title: 'Follow-up on feature/unit-b' }, { id: 'q-a', status: 'done', title: 'Unit A (user, 2026-09-20) done' }] }))
-      await $.session.start({ cwd: orch, surface: null, isInteractive: true })
+      await startIn($, orch)
       const archive = (sections: string[]) => $.tool.call({ tool: 'mcp__session-control__archive_decisions', sections } as never) as Promise<{ result?: unknown; deny?: unknown }>
       // All or nothing: B is named by a queued task (by its branch), so A is not archived either.
       const refused = await archive(['Unit A (user, 2026-09-20)', 'Unit B - branch feature/unit-b', 'Standing', 'Unit C'])

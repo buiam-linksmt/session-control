@@ -1,8 +1,7 @@
-// The poll-based notices (notices.ts) through the plugin and as pure functions: orphan, stall, queue-ready,
-// unit-complete, compliance-due, open-point-age, retire-due and repo-state; each one's debounce and re-arming on the
-// mocked clock, a reload that fires nothing again, the notices option off, the one-line wording, the toast title per
-// kind, the orchestrator's own process, and the Windows host. The machine is mock-world.ts (Linux) or the small Windows
-// world below; the plugin's store is a map of the test's own, so a test can read what a load left and seed the next.
+// The poll-based notices (notices.ts) through the plugin and as pure functions: each kind's debounce and re-arming on
+// the mocked clock, a reload that fires nothing again, the wording and the toast title per kind. The machine is
+// mock-world.ts (Linux) or the small Windows world below; the plugin's store is a map of the test's own, so a test can
+// read what a load left and seed the next.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
@@ -45,7 +44,7 @@ import type { Notice, NoticeKind } from '../hooks/notices'
 import { localDate } from '../hooks/store'
 import { nodeAnswer } from './fake-helper'
 import { E2E_CWDS, NOW_MS, RESULTS } from './fixtures'
-import { HOME, OPTIONS, ORCH, REGISTRY, RUNS, mockWorld, seedLiveWorker } from './mock-world'
+import { HOME, OPTIONS, ORCH, POWERSHELL, REGISTRY, RUNS, WIN_ENV, WIN_ORCH, WIN_REGISTRY, mockWorld, seedLiveWorker, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
 import type { World } from './mock-world'
 
 const NOW_SEC = NOW_MS / 1000
@@ -1039,33 +1038,15 @@ describe('the notices option', () => {
 
 // ---------------------------------------------------------------- Windows
 
-const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\w\\home' }
-const WIN_ORCH = 'C:/w/orch'
-const WIN_REGISTRY = 'C:/w/home/.claude/headless-sessions.json'
 const WIN_OPTIONS = { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, helper: 'off' }
-const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-
-/** A path as the plugin gave it: on a Linux host the kit takes C:/x for a relative path after the session's directory. */
-const given = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
 
 type WinWorld = { files: Map<string, string>; toasts: string[]; probe: string[]; clock: World['clock'] }
 
 /** The Windows machine: files by their C:/ path, the probe's lines as PROBE_PS1 prints them, the file script answering ok. */
 function winWorld(on: On, probe: string[]): WinWorld {
   const w: WinWorld = { files: new Map(), toasts: [], probe, clock: mock.clock(on, { now: NOW_MS }) }
-  mock.env(on, WIN_ENV)
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
-  on('fs.read', ($, e) => {
-    const text = w.files.get(given(e.path))
-    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
-    return { value: text }
-  })
-  on('fs.write', ($, e) => {
-    w.files.set(given(e.path), e.text)
-    return { value: undefined }
-  })
+  winBase(on, WIN_ENV, w.toasts)
+  winFiles(on, w.files, given)
   on('fs.exists', ($, e) => ({ value: w.files.has(given(e.path)) }))
   on('fs.stat', ($, e) => {
     if (w.files.has(given(e.path))) return { value: { kind: 'file', size: 1, mtimeMs: NOW_MS, isLink: false } as never }
@@ -1082,11 +1063,6 @@ function winWorld(on: On, probe: string[]): WinWorld {
     if (e.argv[0] === 'git') return { value: { ...ok, exitCode: 128, stdout: '' } }
     throw new Error(`unexpected command ${e.argv.join(' ')}`)
   })
-  on('ui.toast', ($, e) => {
-    w.toasts.push(e.text)
-    return { value: undefined }
-  })
-  on('ui.panes', () => ({ value: [] }) as never)
   return w
 }
 
@@ -1105,7 +1081,7 @@ describe('Windows host', () => {
     w.files.set(WIN_REGISTRY, '[]\n')
     w.files.set('C:/w/home/.claude/sessions/5555.json', JSON.stringify({ pid: 5555, sessionId: OTHER_SID, startedAt: NOW_MS - 600_000 }))
     w.files.set('C:/w/home/.claude/sessions/3000.json', JSON.stringify({ pid: 3000, sessionId: OWN_SID, startedAt: NOW_MS - 900_000 }))
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     for (let step = 0; step < 5; step++) await w.clock.advance(5000)
     expect(winNoticeToasts(w)).toEqual([])
     await w.clock.advance(5000)
@@ -1127,7 +1103,7 @@ describe('Windows host', () => {
     ownSession(on)
     w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
     w.files.set(WIN_REGISTRY, '[]\n')
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     for (let step = 0; step < 18; step++) await w.clock.advance(5000)
     // The one notice state of the load, under the key of its Windows orchestrator directory.
     const keys = [...store.keys()].filter(key => key.startsWith('notices:'))
@@ -1150,7 +1126,7 @@ describe('Windows host', () => {
     storeOf(on)
     w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
     w.files.set(WIN_REGISTRY, JSON.stringify([{ title: 'win worker', pid: 4101, session_id: SID_LIVE, config_dir: 'C:/w/home/.claude', cwd: 'C:/work/a', model: 'haiku', effort: 'low' }]))
-    await $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+    await startWinOrch($)
     expect(winNoticeToasts(w)).toEqual([`Session stalled \u00B7 worker "win worker" (session ${SID_LIVE.slice(0, 8)}) is alive but its transcript has not been written for 17 min; look at it with worker_tail`])
     for (let step = 0; step < 6; step++) await w.clock.advance(5000)
     expect(winNoticeToasts(w).length).toBe(1)

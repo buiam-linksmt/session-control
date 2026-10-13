@@ -1,6 +1,5 @@
-// What the tests of the notices added by feature/drift-digest share (drift.test.tsx, watch.test.ts, digest.test.ts):
-// the plugin's $.store as a map of the test's own, the orchestrator seeded on the mock world, the poll run on the mocked
-// clock, the notice lines a prompt carried. Not a test file itself.
+// What drift.test.tsx, watch.test.ts and digest.test.ts share: the plugin's $.store as the test's own map, the
+// orchestrator seeded on the mock world, the poll on the mocked clock, the notice lines a prompt carried. Not a test file.
 
 import type { On } from 'claude-code'
 

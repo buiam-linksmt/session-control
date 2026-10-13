@@ -1,10 +1,8 @@
 // A Linux machine for tests that drive the whole plugin through the mock engine: files in a map (with symbolic links),
-// the processes of a simulated table (claude workers among them), Node 24 on the PATH and the Node helper's operations
-// run over the same map and table (fake-helper.ts), its probe included (its P, A and T lines computed from the table,
-// the sessions files and the transcripts in the map); the Linux adapter's own commands (test, mkdir, sleep) answered as
-// the system would. With `isHelper` false Node is not found. Every write to the machine is recorded with how it was
-// made, so a test can see what the plugin wrote. The helper's probeUsage answers from `usage` per config directory.
-// Not a test file itself: stop.test.ts, guard.test.ts and the notice, licence, drift and digest tests use it.
+// a simulated process table (claude workers among them), Node 24 on the PATH with the helper's operations, probe
+// included, run over the same map and table (fake-helper.ts), and the Linux adapter's own commands (test, mkdir, sleep).
+// With `isHelper` false Node is not found. Every write is recorded with how it was made, so a test can see what the
+// plugin wrote. probeUsage answers from `usage` per config directory.
 
 import { mock } from 'claude-code/testing'
 import type { FsStat, On } from 'claude-code'
@@ -46,8 +44,8 @@ export type World = {
   passed: { tool: string; input: Record<string, unknown> }[]
   /**
    * Where the next launch's worker runs: its cwd and the session id its sessions file names. With `isFound` its command
-   * line carries the model as the shell hands it on (unquoted), so the launch finds the worker and registers it; without,
-   * the line keeps the quotes and the launch answers that no worker appeared (what the older tests rely on).
+   * line carries the model unquoted, as the shell hands it on, so the launch finds and registers the worker; without, the
+   * quotes stay and the launch answers that no worker appeared (what the older tests rely on).
    */
   launch: { cwd: string; sid: string; isFound?: boolean }
   /**
@@ -312,4 +310,50 @@ export function seedLiveWorker(world: World, sid: string, entry: Record<string, 
   world.table.procs.set(4103, { ppid: 4102, start: '5002', state: 'S', comm: 'sleep' })
   world.files.set(`${cfg}/sessions/4101.json`, JSON.stringify({ sessionId: sid, procStart: '5000' }))
   return { title: 'live worker', pid: 4101, session_id: sid, config_dir: cfg, cwd: '/w/work', model: 'haiku', effort: 'low', result_file: `${RUNS}/live.json`, err_file: `${RUNS}/live.err`, ...entry }
+}
+
+// ---------------------------------------------------------------- what every test machine answers alike
+
+/** The environment `env`, the session's cwd and the registrations of the plugin's commands and tools. */
+export function machineBase(on: On, env: Record<string, string>): void {
+  mock.env(on, env)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
+}
+
+// ---------------------------------------------------------------- a Windows machine over a map of files
+
+export const WIN_ENV = { OS: 'Windows_NT', USERPROFILE: 'C:\\w\\home' }
+export const WIN_ORCH = 'C:/w/orch'
+export const WIN_REGISTRY = 'C:/w/home/.claude/headless-sessions.json'
+export const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+
+/** A path as the plugin gave it: on a Linux host the kit takes C:/x for a relative path after the session's directory. */
+export const winGiven = (path: string) => path.replace(/\\/g, '/').replace(/^.*?(?=[A-Za-z]:\/)/, '')
+
+/** The session started in the Windows orchestrator's directory, as the engine gives it. */
+export const startWinOrch = ($: { session: { start: (e: never) => Promise<unknown> } }) => $.session.start({ cwd: 'C:\\w\\orch', surface: null, isInteractive: true } as never)
+
+/** What every Windows test machine answers alike: its environment, the session's cwd, the registrations, the toasts (kept in `toasts` when given) and no panes. */
+export function winBase(on: On, env: Record<string, string>, toasts?: string[]): void {
+  machineBase(on, env)
+  on('ui.toast', ($, e) => {
+    toasts?.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.panes', () => ({ value: [] }) as never)
+}
+
+/** fs.read and fs.write over `files`, keyed by `key` of the path the hook sees. */
+export function winFiles(on: On, files: Map<string, string>, key: (path: string) => string): void {
+  on('fs.read', ($, e) => {
+    const text = files.get(key(e.path))
+    if (text === undefined) throw new Error(`ENOENT ${e.path}`)
+    return { value: text }
+  })
+  on('fs.write', ($, e) => {
+    files.set(key(e.path), e.text)
+    return { value: undefined }
+  })
 }

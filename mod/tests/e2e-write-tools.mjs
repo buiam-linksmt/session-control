@@ -1,24 +1,15 @@
 #!/usr/bin/env node
-// Run with `node mod/tests/e2e-write-tools.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or
-// cygpath is needed.
+// Run with `node mod/tests/e2e-write-tools.mjs` (Node 22 or newer), from any directory.
 //
-// End-to-end test of the write-side tools of the session-control mod against the real claude, in a scratch directory
-// it makes and removes. A headless haiku orchestrator (capped at --max-budget-usd 0.25) launches one tiny haiku worker
-// ("reply PONG") through launch_worker with an inline prompt, a decisions section and the default rules, waits for it
-// in the foreground, closes it with close_worker, retires three hostile registry entries (a result file that is a
-// symbolic link out of the runs folder, one named through a `..` path, one named through a symbolic link to a folder)
-// with retire_workers, calls archive_decisions on a scratch decisions file with two sections (one named by a queue task:
-// refused; one free: archived) and calls list_sessions. Each tool's output is read from the orchestrator's own
-// transcript and checked against the seeded data; the prompt file the mod wrote is copied the moment the worker's
-// outcome is in the registry and checked for the section text and one rules block; the run files the retire deleted,
-// the files the hostile entries name and the symbolic links (all outside the runs folder, all still there with their
-// content), the archive, the summary line and the backup are checked on disk.
-// Everything the mod reads or writes is in the scratch directory (registry, helper files, runs directory, trace); the
-// real registry, helper files and runs directory are never touched, and the licence picker option is empty: the worker
-// inherits the default configuration (this process's CLAUDE_CONFIG_DIR, else ~/.claude), where both transcripts stay.
-// The symbolic links need a system that lets this process make them (Linux). One line per
-// check; exit 1 on a failure. KEEP_OUT=<dir> copies the outputs, the prompt copy and the answer there before the
-// scratch directory goes.
+// End-to-end test of the write-side tools against the real claude, in a scratch directory it makes and removes. A
+// headless haiku orchestrator (--max-budget-usd 0.25) launches a tiny haiku worker ("reply PONG") with an inline prompt,
+// a decisions section and the default rules, waits for it, closes it with close_worker, retires three hostile entries
+// (a result file that is a symbolic link out of the runs folder, one named through `..`, one through a linked folder),
+// calls archive_decisions on two sections (one named by a queue task: refused; one free: archived) and list_sessions.
+// Each output is read from the orchestrator's transcript; the prompt file is copied as soon as the outcome is in the
+// registry and checked for the section text and one rules block; on disk the retired run files must be gone and every
+// file and link outside the runs folder still there with its content. Isolation as in lib/e2e.mjs. The symbolic links
+// need Linux. KEEP_OUT=<dir> keeps the outputs, the prompt copy and the answer.
 
 import * as fs from 'node:fs'
 import {
@@ -85,9 +76,8 @@ writeJson(REG, [
   hostile(H3, 'hostile folder', { err_file: `${RUNS}/hostile-dir/secret3.txt` }),
 ])
 
-// Once the worker's outcome is in the registry: a copy of the prompt file the mod wrote and the runs directory's
-// listing, before close_worker deletes the run files. The script finds the registry, the scratch directory and the runs
-// directory beside itself.
+// Once the worker's outcome is in the registry: a copy of the prompt file and the runs directory's listing, taken
+// before close_worker deletes the run files. The script finds its paths beside itself.
 fs.writeFileSync(join(S, 'wait-outcome.mjs'),
   "import { copyFileSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'\n" +
   "import { dirname, join } from 'node:path'\n" +

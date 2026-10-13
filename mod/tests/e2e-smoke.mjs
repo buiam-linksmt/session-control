@@ -1,22 +1,15 @@
 #!/usr/bin/env node
-// Run with `node mod/tests/e2e-smoke.mjs` (Node 22 or newer), from any directory; no sh, grep, tr, sed, jq or cygpath is
-// needed.
+// Run with `node mod/tests/e2e-smoke.mjs` (Node 22 or newer), from any directory.
 //
-// End-to-end smoke test of the session-control mod against the real claude, in a scratch directory it makes and
-// removes: (a) one headless haiku orchestrator launches one haiku worker through launch_worker and waits for it in the
-// foreground, and the worker's launch line, session name, messaging socket and registry entry are checked; (b) where
-// tmux exists, an interactive claude opens the panel with /session-control (no model call).
-// Everything goes to the scratch directory (registry, runs directory, trace); the real registry, helper files and runs
-// directory are never touched, and the licence picker option is empty: the worker gets no CLAUDE_CONFIG_DIR and
-// inherits the default configuration (this process's CLAUDE_CONFIG_DIR, else ~/.claude), which the registry records.
-// A few cents of haiku (the orchestrator is capped at USD 0.25). One line per check; exit 1 on a failure.
-// KEEP_TRACE=<file> copies the trace there before the scratch directory goes. Where Node 22 or newer is on the PATH the
-// trace must show the Node helper in use and no helper.failed line. HIDE_NODE=1 starts both claude sessions with every
-// PATH directory that holds node left out: the mod needs Node, so launch_worker must answer its fixed refusal, nothing
-// may be launched, registered or traced, and the interactive panel must show the warning that Node is missing. The
-// orchestrator's foreground wait runs a node script of this test by the absolute path of the node running it, so it
-// needs no node on that PATH. The launch line and the socket are read from /proc (Linux); elsewhere those checks print
-// `skip`. The interactive part needs tmux; without it it prints `skip`.
+// End-to-end smoke test of the mod against the real claude, in a scratch directory it makes and removes: (a) a headless
+// haiku orchestrator launches one haiku worker and waits for it in the foreground; the worker's launch line, session
+// name, messaging socket and registry entry are checked; (b) where tmux exists, an interactive claude opens the panel
+// with /session-control (no model call). Everything goes to the scratch directory and the licence picker is empty, so
+// the worker inherits the default configuration, which the registry records. A few cents (capped at USD 0.25).
+// KEEP_TRACE=<file> keeps the trace. With Node 22+ on the PATH the trace must show the Node helper and no helper.failed.
+// HIDE_NODE=1 drops every PATH directory holding node: launch_worker must answer its fixed refusal, nothing may be
+// launched, registered or traced, and the panel must warn that Node is missing; the foreground wait still runs, by the
+// absolute path of this node. Launch line and socket come from /proc (Linux), else `skip`; no tmux, `skip`.
 
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -222,12 +215,9 @@ if (!HELPER_WANTED) {
 }
 const SID = HELPER_WANTED ? field('session_id') : ''
 if (HELPER_WANTED) {
-  // Whether the registry entry had the worker's pid while it ran. A haiku worker can live about a second, and the
-  // completion drops the pid from the entry, so the registry sampled every 0.2 s above can still miss it: the trace
-  // proves the same thing on its own. Its worker.found line records the pid the probe found for the new worker, and its
-  // worker.registered line the pid of the entry just written, with isRegistered true and the entry's session id; the two
-  // pids equal and that session id the registry's own mean the entry held that live pid. At least one of the two proofs
-  // is required; neither found fails the check.
+  // Whether the registry entry had the worker's pid while it ran. A haiku worker can live about a second and the
+  // completion drops the pid, so the 0.2 s sampling can miss it; the trace proves it on its own: worker.found's pid equal
+  // to worker.registered's (isRegistered true, the registry's session id). At least one of the two proofs is required.
   const TRACE_FOUND = firstMatch(traceText(), /"event":"worker\.found","pid":([0-9]*)/)
   const TRACE_REG = firstMatch(
     traceLines().filter(l => l.includes('"event":"worker.registered"') && l.includes('"isRegistered":true') && l.includes(`"sessionId":"${SID}"`)).join('\n'),

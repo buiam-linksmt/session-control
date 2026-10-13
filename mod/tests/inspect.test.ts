@@ -1,7 +1,6 @@
-// The read-only inspection tools (list_sessions, read_result, worker_tail, session_writes, panel_snapshot) through the
-// plugin on the mock engine, over a simulated machine: files in a map with their mtimes, the probe's output, the
-// transcript tails and the listing answered from that map. No real registry, transcript or /proc. The pure parts of
-// hooks/inspect.ts are tested on their own at the end.
+// The read-only inspection tools through the plugin over a simulated machine (files in a map with their mtimes, the
+// probe's output, transcript tails): no real registry, transcript or /proc. The pure parts of hooks/inspect.ts are
+// tested on their own at the end.
 
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
@@ -28,7 +27,7 @@ import {
 import { REDACTED, redact } from '../hooks/trace'
 import { helperAnswer } from './fake-helper'
 import { NOW_MS, NOW_SEC, worldPath } from './fixtures'
-import { OPTIONS as WORLD_OPTIONS, ORCH as WORLD_ORCH, REGISTRY as WORLD_REGISTRY, mockWorld } from './mock-world'
+import { OPTIONS as WORLD_OPTIONS, ORCH as WORLD_ORCH, REGISTRY as WORLD_REGISTRY, machineBase, mockWorld } from './mock-world'
 
 const HOME = '/m/home'
 const ORCH = '/m/work/orch'
@@ -170,10 +169,7 @@ function world(on: On, registry: object[] = REGISTRY): World {
   const w: World = { files, mtimes, writes: [], runs: [], calls: [], unreadable: new Set() }
   const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   mock.clock(on, { now: NOW_MS })
-  mock.env(on, { HOME })
-  on('session.start', ($, e) => ({ cwd: e.cwd }))
-  on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('tool.register', ($, e) => ({ value: { tool: tool(e.name) } }))
+  machineBase(on, { HOME })
   on('ui.toast', () => ({ value: undefined }))
   on('fs.read', ($, e) => {
     const text = files.get(worldPath(e.path))

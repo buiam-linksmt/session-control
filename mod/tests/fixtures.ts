@@ -173,12 +173,11 @@ export const TASK_NOTIFICATION_KILLED =
 
 /**
  * Differential cases of the registry edits (registerEntry, removeEntries, ackEntries), shared with
- * tests/probe-selftest.mjs, which runs REGISTER_SCRIPT, CLEAR_SCRIPT and ACK_SCRIPT under sh and jq on the same
- * inputs: the text between the markers is plain JSON, which that script parses. `registry` null is a missing file.
- * `expect` is the TypeScript side (`text`, the cleared `log`, or `refused`; `unchanged` for a missing file that
- * nothing writes) and, without `old`, the jq side too, byte for byte. `old` names where the jq side differs on
- * purpose: its own `text` and `log`, `fails` (non-zero exit, registry untouched), or `sameValue` (the same JSON
- * value written another way).
+ * tests/probe-selftest.mjs, which runs the jq scripts on the same inputs: the text between the markers is plain JSON,
+ * which that script parses. `registry` null is a missing file. `expect` is the TypeScript side (`text`, the cleared
+ * `log`, or `refused`; `unchanged` for a missing file nothing writes) and, without `old`, the jq side too, byte for
+ * byte. `old` is where the jq side differs on purpose: its own `text` and `log`, `fails` (non-zero exit, registry
+ * untouched), or `sameValue` (the same JSON value written another way).
  */
 export type RegistryGolden = {
   name: string
