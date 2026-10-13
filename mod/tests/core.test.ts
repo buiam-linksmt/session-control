@@ -58,6 +58,8 @@ import {
   SESSION_COLUMNS,
   ELAPSED_FIXED_SEC,
   TITLE_MIN,
+  MODEL_FAMILIES,
+  modelFamily,
   EFFORTS,
   cellWidth,
   isPidAlive,
@@ -541,7 +543,7 @@ describe('pane columns', () => {
 })
 
 describe('fixed session columns (decision mod-33)', () => {
-  const FIXED = { sid: 8, status: 20, model: 21, effort: 6, elapsed: 7 }
+  const FIXED = { sid: 8, status: 20, model: 9, effort: 6, elapsed: 7 }
   // The cells the five fixed columns and their gaps take: the title has the rest.
   const FIXED_SUM = Object.values(FIXED).reduce((sum, one) => sum + one, 0) + 3 * 5
   /** What `line` shows from cell `cell` on (each character measured after the one before it, for a joiner or a selector). */
@@ -582,8 +584,8 @@ describe('fixed session columns (decision mod-33)', () => {
     expect(Math.max(...statuses.map(cellWidth))).toBe(FIXED.status)
     expect(statuses).toContain('finished-unharvested')
     expect(Math.max(...EFFORTS.map(cellWidth))).toBe(FIXED.effort)
-    // The widest full model name of the engine's current models, with the context suffix.
-    expect(Math.max(...['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'].map(name => cellWidth(name + '[1m]')))).toBe(FIXED.model)
+    // The widest family name of the providers' list.
+    expect(Math.max(...MODEL_FAMILIES.flatMap(one => one.families).map(cellWidth))).toBe(FIXED.model)
     expect(cellWidth('ffffffff')).toBe(FIXED.sid)
   })
 
@@ -640,7 +642,7 @@ describe('fixed session columns (decision mod-33)', () => {
 
   test('from 20 to 300 columns: no row wider than its box; the fixed columns whole and at the same cell on every row down to the threshold, cut at the right edge below it', () => {
     const threshold = FIXED_SUM + TITLE_MIN
-    expect(threshold).toBe(80)
+    expect(threshold).toBe(70)
     // Each width's departures from the layout, gathered and checked once at the end (a check per cell is slow).
     const wrong: string[] = []
     const check = (isRight: boolean, what: string) => {
@@ -667,11 +669,11 @@ describe('fixed session columns (decision mod-33)', () => {
         const row = rows[i]!
         check(fromCell(line, at.sid!).startsWith((row.sid8 || '-').padEnd(8) + '   '), `${columns}: sid moved: ${line}`)
         check(fromCell(line, at.status!).startsWith(statusLabel(row.status).padEnd(FIXED.status) + '   '), `${columns}: status moved: ${line}`)
-        check(fromCell(line, at.model!).startsWith(row.model.padEnd(FIXED.model) + '   '), `${columns}: model moved: ${line}`)
+        check(fromCell(line, at.model!).startsWith(modelFamily(row.model).padEnd(FIXED.model) + '   '), `${columns}: model moved: ${line}`)
         check(fromCell(line, at.effort!).startsWith(row.effort.padEnd(FIXED.effort) + '   '), `${columns}: effort moved: ${line}`)
         check(fromCell(line, at.elapsed!) === elapsedText(row), `${columns}: elapsed not whole: ${line}`)
       }
-      check(fromCell(header, at.sid!) === 'sid        status                 model                   effort   elapsed', `${columns}: header: ${header}`)
+      check(fromCell(header, at.sid!) === 'sid        status                 model       effort   elapsed', `${columns}: header: ${header}`)
     }
     expect(wrong).toEqual([])
   })
@@ -690,26 +692,59 @@ describe('fixed session columns (decision mod-33)', () => {
   })
 
   test('a value longer than its column is cut in its cell with the ellipsis and never widens it; the next column starts where it did', () => {
-    const long = { ...alive, title: 'long cells', sid8: 'ffffffffff', model: 'claude-sonnet-4-5-20250929[1m]', effort: 'unbounded-effort', startedAt: undefined, elapsedSec: ELAPSED_FIXED_SEC * 500 }
+    const long = { ...alive, title: 'long cells', sid8: 'ffffffffff', model: 'my-custom-local-model', effort: 'unbounded-effort', startedAt: undefined, elapsedSec: ELAPSED_FIXED_SEC * 500 }
     const widths = paneWidths([...rows, long], 200)
     expect(SESSION_COLUMNS.map(column => widths[column.id])).toEqual(Object.values(FIXED))
     const line = formatRow(long, 200, widths)
     const at = starts(widths)
     expect(fromCell(line, at.sid!).slice(0, 11)).toBe('fffffff\u2026   ')
-    expect(fromCell(line, at.model!).slice(0, 24)).toBe('claude-sonnet-4-5-20\u2026   ')
+    expect(fromCell(line, at.model!).slice(0, 12)).toBe('my-custo\u2026   ')
     expect(fromCell(line, at.effort!).slice(0, 9)).toBe('unbou\u2026   ')
     expect(fromCell(line, at.elapsed!)).toBe('500000\u2026')
     for (const row of rows) expect(fromCell(formatRow(row, 200, widths), at.elapsed!)).toBe(elapsedText(row))
   })
 
-  test('the model column holds the widest full model name whole, the cells after it in place', () => {
-    const full = { ...alive, title: 'full name', model: 'claude-sonnet-5-5[1m]' }
-    const widths = paneWidths([...rows, full], 140)
-    expect(widths.model).toBe('claude-sonnet-5-5[1m]'.length)
-    const line = formatRow(full, 140, widths)
-    expect(line).toContain('   claude-sonnet-5-5[1m]   high     2m05s')
-    expect(fromCell(line, starts(widths).effort!)).toBe('high     2m05s')
-    expect(formatRow({ ...full, model: 'claude-opus-5-5' }, 140, widths)).toContain('   claude-opus-5-5         high     2m05s')
+  test('the model column shows the family a model value names: an alias, a full id, a cloud or router id, another provider\'s id', () => {
+    const cases: [string, string][] = [
+      ['opus', 'opus'], ['sonnet[1m]', 'sonnet'], ['claude-sonnet-5-5', 'sonnet'], ['claude-opus-5-5[1m]', 'opus'], ['claude-fable-5-1', 'fable'], ['claude-haiku-5-5', 'haiku'],
+      ['us.anthropic.claude-sonnet-4-5-20250929-v1:0', 'sonnet'], ['claude-sonnet-4-5@20250929', 'sonnet'], ['anthropic/claude-sonnet-4.5', 'sonnet'],
+      ['deepseek-v3', 'deepseek'], ['deepseek-ai/DeepSeek-R1', 'deepseek'], ['qwen3-coder', 'qwen'], ['qwen2.5-coder-32b', 'qwen'], ['kimi-k2', 'kimi'], ['moonshotai/kimi-k2-instruct', 'kimi'],
+      ['gpt-5', 'gpt'], ['gpt-4o', 'gpt'], ['codex-mini-latest', 'codex'], ['o3-mini', 'o3'], ['gemini-2.5-pro', 'gemini'], ['gemma3', 'gemma'], ['glm-4.6', 'glm'],
+      ['mistral-large', 'mistral'], ['codestral-2501', 'codestral'], ['devstral-small', 'devstral'], ['grok-4', 'grok'], ['meta-llama/Llama-3.3-70B-Instruct', 'llama'],
+      ['minimax-m2', 'minimax'], ['command-r-plus', 'command'], ['amazon.nova-pro-v1:0', 'nova'], ['phi-4', 'phi'], ['nemotron-nano', 'nemotron'],
+      // No family: the value as it is (the column cuts it).
+      ['opusplan', 'opusplan'], ['default', 'default'], ['?', '?'], ['my-custom-local-model', 'my-custom-local-model'],
+    ]
+    expect(cases.map(([model]) => [model, modelFamily(model)])).toEqual(cases)
+  })
+
+  test('the model column is as wide as the widest family name, 9 cells: the widest whole, a longer value cut with the ellipsis', () => {
+    const families = MODEL_FAMILIES.flatMap(one => one.families)
+    expect(families.filter(name => name.length === 9).sort()).toEqual(['codestral', 'magistral', 'ministral', 'starcoder'])
+    expect(['deepseek', 'devstral', 'nemotron', 'mistral', 'minimax'].map(name => [name, cellWidth(name)])).toEqual([['deepseek', 8], ['devstral', 8], ['nemotron', 8], ['mistral', 7], ['minimax', 7]])
+    for (const one of MODEL_FAMILIES) expect(one.source).not.toBe('')
+    const widths = paneWidths(rows, 140)
+    const at = starts(widths)
+    expect(fromCell(formatRow({ ...alive, model: 'magistral-medium-2506' }, 140, widths), at.model!)).toBe('magistral   high     2m05s')
+    expect(fromCell(formatRow({ ...alive, model: 'claude-opus-5-5[1m]' }, 140, widths), at.model!)).toBe('opus        high     2m05s')
+    expect(fromCell(formatRow({ ...alive, model: 'opusplan' }, 140, widths), at.model!)).toBe('opusplan    high     2m05s')
+    expect(fromCell(formatRow({ ...alive, model: 'my-custom-local-model' }, 140, widths), at.model!)).toBe('my-custo\u2026   high     2m05s')
+  })
+
+  test('the title keeps 5 cells, the header `title` whole, before the row is cut at its right edge: the threshold is 70 cells, a panel of 76 columns', () => {
+    expect(TITLE_MIN).toBe(5)
+    expect(FIXED_SUM + TITLE_MIN).toBe(70)
+    for (const columns of [70, 69, 60, 30]) {
+      const widths = paneWidths(rows, columns)
+      expect(widths.title).toBe(5)
+      expect(formatHeader(columns, widths)).toStartWith('title   sid        status')
+      expect(formatRow(LONG, columns, widths)).toStartWith('a wo\u2026   ' + LONG.sid8)
+    }
+    // At 70 every column is whole; one cell less and the elapsed column is the first cut.
+    expect(formatRow(LONG, 70, paneWidths(rows, 70))).toEndWith('   2m05s')
+    expect(formatHeader(70, paneWidths(rows, 70))).toEndWith('   elapsed')
+    expect(formatHeader(69, paneWidths(rows, 69))).toEndWith('   elaps\u2026')
+    expect(paneWidths(rows, 71).title).toBe(6)
   })
 })
 

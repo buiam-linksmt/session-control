@@ -3911,7 +3911,7 @@ describe('the panel on the desktop surface', () => {
 
   test('terminal: the session rows keep their fixed columns at every width and only the title shortens; the desktop draws the same cells whole (decision mod-33)', { options: OPTIONS }, async ($, on) => {
     let ui = await open($, on, 'terminal', { ...PANE_PROPS, bodyColumns: 300 })
-    for (const bodyColumns of [300, 160, 90, 86, 85, 40]) {
+    for (const bodyColumns of [300, 160, 90, 76, 75, 40]) {
       if (bodyColumns !== 300) {
         await ui.unmount()
         ui = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, bodyColumns } as never })
@@ -3919,21 +3919,21 @@ describe('the panel on the desktop surface', () => {
       // The rows' room: the box less its borders and the scroll bar.
       const room = bodyColumns - 3
       const texts = (await textsOf(ui)).map(one => one.text)
-      const header = texts.find(text => /^ {2}(title|ti\u2026)/.test(text))!
+      const header = texts.find(text => /^ {2}title/.test(text))!
       const labels = (await ui.findAll({ type: 'Button' })).filter(one => String(one.key).startsWith('s:')).map(one => String(one.props.label).trimEnd())
       const orphans = texts.filter(text => text.includes('(no entry)'))
       const rows = [...labels, ...orphans]
       expect(rows.length).toBeGreaterThan(1)
       for (const line of [header, ...rows]) expect(cellWidth(line)).toBeLessThanOrEqual(room)
-      if (bodyColumns >= 86) {
-        // From 86 columns the fixed columns are whole: each starts at the header's cell, the elapsed ends the row.
+      if (bodyColumns >= 76) {
+        // From 76 columns the fixed columns are whole: each starts at the header's cell, the elapsed ends the row.
         for (const name of ['sid', 'status', 'model', 'effort', 'elapsed']) expect(header.indexOf(` ${name} `.trimEnd())).toBeGreaterThan(0)
         const at = header.indexOf('elapsed')
         for (const line of rows) expect(line.slice(at)).toMatch(/^(\d+s|\d+m\d\ds|\d+h\d\dm|-)$/)
         for (const line of rows) expect(line.slice(header.indexOf('status'), header.indexOf('model'))).toMatch(/^(running|orphan|finished[-a-z]*|queued) +$/)
       } else {
-        // Narrower: the title keeps its three cells and a row wider than the room is cut at the right edge.
-        expect(header).toStartWith('  ti\u2026   sid')
+        // Narrower: the title keeps its five cells and a row wider than the room is cut at the right edge.
+        expect(header).toStartWith('  title   sid')
         if (bodyColumns === 40) for (const line of [header, ...rows]) expect(line).toEndWith('\u2026')
       }
     }

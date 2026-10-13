@@ -354,13 +354,57 @@ export function elapsedText(row: SessionRow, clock?: ElapsedClock): string {
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
 /**
- * The full names of the current models (the engine's model list, `claude-<family>-<version>`), each also with the context
- * suffix MODEL_CONTEXT_SUFFIX: the model column holds the widest whole, `claude-sonnet-5-5[1m]`. An older dated snapshot
- * name or a cloud provider's model id is wider and is cut in its cell (fit).
+ * The model family names the model column shows, per provider, with where each provider publishes its model names: an
+ * entry's model is whatever launch_worker was given (`--model`: an alias or a full id, of Anthropic or of another
+ * provider behind a compatible endpoint), and the column shows its family (modelFamily). The widest family sets the
+ * column's width: `codestral`, `magistral`, `ministral` and `starcoder`, 9 cells.
  */
-const MODEL_NAMES = ['claude-fable-5-1', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']
-/** The context-window suffix a model name may carry (`--model sonnet[1m]`). */
-const MODEL_CONTEXT_SUFFIX = '[1m]'
+export const MODEL_FAMILIES: readonly { provider: string; source: string; families: readonly string[] }[] = [
+  { provider: 'Anthropic', source: 'claude --help and the engine model list', families: ['fable', 'opus', 'sonnet', 'haiku'] },
+  { provider: 'OpenAI', source: 'platform.openai.com/docs/models', families: ['gpt', 'codex', 'o1', 'o3', 'o4'] },
+  { provider: 'Google', source: 'ai.google.dev/gemini-api/docs/models', families: ['gemini', 'gemma'] },
+  { provider: 'DeepSeek', source: 'api-docs.deepseek.com', families: ['deepseek'] },
+  { provider: 'Alibaba', source: 'Alibaba Cloud Model Studio (Qwen)', families: ['qwen', 'qwq'] },
+  { provider: 'Moonshot AI', source: 'platform.moonshot.ai', families: ['kimi', 'moonshot'] },
+  { provider: 'Zhipu AI', source: 'docs.z.ai', families: ['glm', 'chatglm', 'codegeex'] },
+  { provider: 'Mistral AI', source: 'docs.mistral.ai/getting-started/models', families: ['mistral', 'mixtral', 'codestral', 'devstral', 'magistral', 'ministral', 'pixtral', 'voxtral'] },
+  { provider: 'Meta', source: 'llama.com', families: ['llama'] },
+  { provider: 'xAI', source: 'docs.x.ai', families: ['grok'] },
+  { provider: 'MiniMax', source: 'platform.minimax.io', families: ['minimax'] },
+  { provider: 'Cohere', source: 'docs.cohere.com', families: ['command', 'aya'] },
+  { provider: 'Amazon', source: 'Amazon Bedrock model ids', families: ['nova', 'titan'] },
+  { provider: 'Microsoft', source: 'Phi models on Azure AI Foundry', families: ['phi'] },
+  { provider: 'Nvidia', source: 'build.nvidia.com', families: ['nemotron'] },
+  { provider: 'IBM', source: 'ibm.com/granite', families: ['granite'] },
+  { provider: 'AI21 Labs', source: 'docs.ai21.com', families: ['jamba'] },
+  { provider: 'Baidu', source: 'ERNIE model list', families: ['ernie'] },
+  { provider: 'Tencent', source: 'Hunyuan model list', families: ['hunyuan'] },
+  { provider: 'ByteDance', source: 'Doubao and Seed model lists', families: ['doubao', 'seed'] },
+  { provider: 'Perplexity', source: 'docs.perplexity.ai', families: ['sonar'] },
+  { provider: 'BigCode', source: 'huggingface.co/bigcode', families: ['starcoder'] },
+  { provider: '01.AI', source: 'Yi model list', families: ['yi'] },
+  { provider: 'StepFun', source: 'Step model list', families: ['step'] },
+  { provider: 'Shanghai AI Lab', source: 'InternLM model list', families: ['internlm'] },
+  { provider: 'Baichuan', source: 'Baichuan model list', families: ['baichuan'] },
+  { provider: 'TII', source: 'Falcon model list', families: ['falcon'] },
+  { provider: 'Ai2', source: 'OLMo model list', families: ['olmo'] },
+]
+const FAMILY_NAMES = MODEL_FAMILIES.flatMap(one => one.families)
+
+/**
+ * The family a model value names, for the model column: the value in lower case is split at every character that is
+ * not a letter or a digit, and the first part that is a family name, or a family name followed by a version number
+ * (`qwen3`, `gpt4o`, `llama3`), gives the family. A vendor or brand part before it is passed over (`claude-opus-5-5[1m]`
+ * opus, `us.anthropic.claude-sonnet-4-5-20250929-v1:0` sonnet, `moonshotai/kimi-k2` kimi, `deepseek-v3` deepseek).
+ * A value that names no family (`opusplan`, `default`, `?`) is shown as it is, and cut by the column's width.
+ */
+export function modelFamily(model: string): string {
+  for (const part of model.toLowerCase().split(/[^a-z0-9]+/)) {
+    const family = FAMILY_NAMES.find(name => part === name || (part.startsWith(name) && /^\d/.test(part.slice(name.length))))
+    if (family !== undefined) return family
+  }
+  return model
+}
 /** The elapsed column's fixed width holds every formatAge text below this many seconds (1000 hours, 41 days); a longer one is cut in its cell. */
 export const ELAPSED_FIXED_SEC = 1000 * 3600
 
@@ -372,7 +416,7 @@ function widestOf(texts: readonly string[]): number {
 /**
  * The sessions rows' columns after the title, in their order: its header, a row's cell, and its fixed width in cells,
  * the widest text the column can hold, its header included, computed once: the session id 8 hex digits (`-` without
- * one), the status the widest label statusLabel gives, the model the widest of MODEL_NAMES with its context suffix, the
+ * one), the status the widest label statusLabel gives, the model the widest family of MODEL_FAMILIES (modelFamily), the
  * effort the widest of EFFORTS (`?` for an entry without one), the elapsed the widest formatAge text below
  * ELAPSED_FIXED_SEC (`59m59s` under an hour, `999h59m`). The widths never depend on the rows: a longer value is cut in
  * its cell with an ellipsis. The terminal panel and panel_snapshot lay the cells out at these widths (paneWidths), the
@@ -381,13 +425,13 @@ function widestOf(texts: readonly string[]): number {
 export const SESSION_COLUMNS: readonly { id: 'sid' | 'status' | 'model' | 'effort' | 'elapsed'; header: string; cell: (row: SessionRow, clock?: ElapsedClock) => string; width: number }[] = [
   { id: 'sid', header: 'sid', cell: row => row.sid8 || '-', width: widestOf(['sid', '-', 'f'.repeat(8)]) },
   { id: 'status', header: 'status', cell: row => statusLabel(row.status), width: widestOf(['status', ...(Object.keys(STATUS_ORDER) as SessionRowStatus[]).map(statusLabel)]) },
-  { id: 'model', header: 'model', cell: row => row.model, width: widestOf(['model', '?', ...MODEL_NAMES, ...MODEL_NAMES.map(name => name + MODEL_CONTEXT_SUFFIX)]) },
+  { id: 'model', header: 'model', cell: row => modelFamily(row.model), width: widestOf(['model', '?', ...FAMILY_NAMES]) },
   { id: 'effort', header: 'effort', cell: row => row.effort, width: widestOf(['effort', '?', ...EFFORTS]) },
   { id: 'elapsed', header: 'elapsed', cell: (row, clock) => elapsedText(row, clock), width: widestOf(['elapsed', '-', formatAge(59), formatAge(3599), formatAge(ELAPSED_FIXED_SEC - 1)]) },
 ]
 
-/** The fewest cells the title column keeps however narrow the panel: two cells of the title and the ellipsis. */
-export const TITLE_MIN = 3
+/** The fewest cells the title column keeps however narrow the panel: the header `title`, or four cells of a title and the ellipsis. */
+export const TITLE_MIN = 5
 /** The title column's width when the panel has the room and no title is wider. */
 const TITLE_FLOOR = 12
 
