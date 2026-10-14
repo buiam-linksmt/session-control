@@ -778,8 +778,11 @@ describe('retire-due: each free-text wait told once', () => {
   })
 
   let leftByLoad: unknown
+  // A poll every 20 minutes in the two tests below: each tick is a whole refresh, so the first test's 12 hours are 36
+  // ticks (665 with a poll a minute, over 5 s under load); an hour is three ticks, so each hourly check falls on one.
+  const POLL_SEC = 1200
 
-  test('through the poll: told once over 6 hours, again after its text changes, a task added later alone, a removed and re-added task again; no free text in the store', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+  test('through the poll: told once over 6 hours, again after its text changes, a task added later alone, a removed and re-added task again; no free text in the store', { options: { ...OPTIONS, pollSeconds: POLL_SEC } }, async ($, on) => {
     const canary = ['wait', Date.now().toString(36), 'marker'].join('-')
     const own = { ...steps, waits_for: `the ${canary} release` }
     const world = mockWorld(on)
@@ -787,26 +790,26 @@ describe('retire-due: each free-text wait told once', () => {
     echoPrompt(on)
     seed(world, { entries: [kept], queue: [groups, own] })
     await start($)
-    await poll(world, 60, 60)
+    await poll(world, POLL_SEC, POLL_SEC)
     expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps'])])
     expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: retire-due: ${stale(['q-groups', 'q-steps'])}`])
-    await poll(world, 6 * 3600, 60)
+    await poll(world, 6 * 3600, POLL_SEC)
     expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps'])])
     expect(noticeLines(await userPrompt($))).toEqual([])
     expect(JSON.stringify(store.get(KEY))).not.toContain(canary)
     setQueue(world, [groups, { ...own, waits_for: `the ${canary} release, then the merge` }])
-    await poll(world, 120, 60)
+    await poll(world, POLL_SEC, POLL_SEC)
     expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps']), toast(['q-steps'])])
     const later = { id: 'q-later', status: 'queued', title: 'Added later', waits_for: 'the customer answer' }
     setQueue(world, [groups, { ...own, waits_for: `the ${canary} release, then the merge` }, later])
-    await poll(world, 3600, 60)
+    await poll(world, 3600, POLL_SEC)
     expect(noticeToasts(world).slice(2)).toEqual([toast(['q-later'])])
     setQueue(world, [{ ...own, waits_for: `the ${canary} release, then the merge` }, later])
-    await poll(world, 120, 60)
+    await poll(world, POLL_SEC, POLL_SEC)
     setQueue(world, [{ ...own, waits_for: `the ${canary} release, then the merge` }, later, groups])
-    await poll(world, 3600, 60)
+    await poll(world, 3600, POLL_SEC)
     expect(noticeToasts(world).slice(3)).toEqual([toast(['q-groups'])])
-    await poll(world, 3 * 3600, 60)
+    await poll(world, 3 * 3600, POLL_SEC)
     expect(noticeToasts(world).length).toBe(4)
     const left = store.get(KEY) as { freeWaits?: string[] }
     expect(JSON.stringify(left)).not.toContain(canary)
@@ -815,7 +818,7 @@ describe('retire-due: each free-text wait told once', () => {
     leftByLoad = left
   })
 
-  test('a fresh load with the store the last one left, two hours later: nothing is told again', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+  test('a fresh load with the store the last one left, two hours later: nothing is told again', { options: { ...OPTIONS, pollSeconds: POLL_SEC } }, async ($, on) => {
     expect(leftByLoad).toBeDefined()
     const world = mockWorld(on)
     storeOf(on, { [KEY]: leftByLoad })
@@ -825,7 +828,7 @@ describe('retire-due: each free-text wait told once', () => {
     seed(world, { entries: [kept], queue: [groups, { id: 'q-later', status: 'queued', title: 'Added later', waits_for: 'the customer answer' }] })
     await world.clock.advance(2 * HOUR_MS)
     await start($)
-    await poll(world, 2 * 3600, 60)
+    await poll(world, 2 * 3600, POLL_SEC)
     expect(noticeToasts(world)).toEqual([])
     expect(noticeLines(await userPrompt($))).toEqual([])
   })
