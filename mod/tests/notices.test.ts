@@ -778,9 +778,10 @@ describe('retire-due: each free-text wait told once', () => {
   })
 
   let leftByLoad: unknown
-  // A poll every 20 minutes in the two tests below: each tick is a whole refresh, so the first test's 12 hours are 36
-  // ticks (665 with a poll a minute, over 5 s under load); an hour is three ticks, so each hourly check falls on one.
-  const POLL_SEC = 1200
+  // A poll an hour in the two tests below: each tick is a whole refresh, so the first test's 14 hours are 14 ticks (665
+  // with a poll a minute, over 5 s under load); an hour is one tick, so each hourly check falls on one. The look
+  // interval is pinned by the test after them, on a poll a minute; its own load is paid for by the ticks saved here.
+  const POLL_SEC = 3600
 
   test('through the poll: told once over 6 hours, again after its text changes, a task added later alone, a removed and re-added task again; no free text in the store', { options: { ...OPTIONS, pollSeconds: POLL_SEC } }, async ($, on) => {
     const canary = ['wait', Date.now().toString(36), 'marker'].join('-')
@@ -831,6 +832,23 @@ describe('retire-due: each free-text wait told once', () => {
     await poll(world, 2 * 3600, POLL_SEC)
     expect(noticeToasts(world)).toEqual([])
     expect(noticeLines(await userPrompt($))).toEqual([])
+  })
+
+  // The hourly poll above lets any look interval up to an hour pass; a poll a minute pins it, from a stored state
+  // whose last notice is an hour back (no hour of ticks to get there): the look of the first tick tells nothing.
+  test('through a poll a minute, an hour after the last notice: a changed wait text is told within two minutes (the findings looked at once a minute)', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    const state = freshNoticeState()
+    expect(stepAt(state, [groups, steps], NOW_MS)).toHaveLength(1)
+    const world = mockWorld(on)
+    storeOf(on, { [KEY]: state })
+    seed(world, { entries: [kept], queue: [groups, steps] })
+    await world.clock.advance(HOUR_MS)
+    await start($)
+    await poll(world, 60, 60)
+    expect(noticeToasts(world)).toEqual([])
+    setQueue(world, [groups, { ...steps, waits_for: 'mod steps 1 to 5 complete' }])
+    await poll(world, 120, 60)
+    expect(noticeToasts(world)).toEqual([toast(['q-steps'])])
   })
 
   test('the notices option off: never told, nothing stored', { options: { ...OPTIONS, pollSeconds: 60, notices: 'off' } }, async ($, on) => {
