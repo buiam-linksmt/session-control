@@ -851,6 +851,25 @@ describe('retire-due: each free-text wait told once', () => {
     expect(noticeToasts(world)).toEqual([toast(['q-steps'])])
   })
 
+  // The look at the hour prunes on its own; within the hour only the poll's own prune forgets a dropped task. Ticks at
+  // 58 minutes (dropped: forgotten), 59 and 60 (re-added, then the look): told again.
+  test('through a poll a minute, a told task dropped within the hour after the notice: forgotten at the next tick and told again once re-added (the free waits pruned on every poll)', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    const state = freshNoticeState()
+    expect(stepAt(state, [groups, steps], NOW_MS)).toHaveLength(1)
+    const world = mockWorld(on)
+    const store = storeOf(on, { [KEY]: state })
+    seed(world, { entries: [kept], queue: [groups, steps] })
+    await world.clock.advance(HOUR_MS - 180_000)
+    await start($)
+    setQueue(world, [groups])
+    await poll(world, 60, 60)
+    expect((store.get(KEY) as { freeWaits?: string[] }).freeWaits).toEqual([waitKey('q-groups', groups.waits_for)])
+    expect(noticeToasts(world)).toEqual([])
+    setQueue(world, [groups, steps])
+    await poll(world, 120, 60)
+    expect(noticeToasts(world)).toEqual([toast(['q-steps'])])
+  })
+
   test('the notices option off: never told, nothing stored', { options: { ...OPTIONS, pollSeconds: 60, notices: 'off' } }, async ($, on) => {
     const world = mockWorld(on)
     const store = storeOf(on)
