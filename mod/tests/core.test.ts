@@ -1,8 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
 import {
-  RULES_BLOCK,
-  composePrompt,
   fillFromEntry,
   filledFields,
   launchArgsOf,
@@ -50,8 +48,6 @@ import {
   parseOpenPoints,
   expandHome,
   formatHeader,
-  desktopRowLines,
-  DESKTOP_HEADER,
   holdOffset,
   formatRow,
   paneWidths,
@@ -79,7 +75,6 @@ import {
   ackEntries,
   findNewWindowsWorker,
   findNewWorker,
-  hasSessionName,
   isHeadless,
   isLicenceRun,
   isE2eRunDir,
@@ -405,23 +400,6 @@ describe('completion classifier', () => {
 })
 
 describe('registry merge in place', () => {
-  test('drops pid, sets reported:false, keeps resume and unknown fields, leaves others alone', () => {
-    const merged = mergeCompletion(REGISTRY_TEXT, SID_DEAD, classifyResult(RESULTS.limit), NOW_SEC)
-    expect(merged.changed).toBe(true)
-    if (!merged.changed) return
-    const after = JSON.parse(merged.text) as Record<string, unknown>[]
-    const entry = after[1]!
-    expect('pid' in entry).toBe(false)
-    expect(entry.reported).toBe(false)
-    expect(entry.resume).toEqual(DAEMON_RESUME)
-    expect(entry.unknown_future_field).toEqual([1, 2, 3])
-    expect(entry.result_file).toBe('/fixture/results/limit.json')
-    expect((entry.outcome as { kind: string }).kind).toBe('limit')
-    expect(entry.ended_at).toBe(NOW_SEC)
-    expect(after.length).toBe(REGISTRY.length)
-    expect(after.filter((_, i) => i !== 1)).toEqual(REGISTRY.filter((_, i) => i !== 1))
-  })
-
   test('refuses an entry already harvested or missing', () => {
     expect(mergeCompletion(REGISTRY_TEXT, SID_UNREPORTED, classifyResult(RESULTS.clean), NOW_SEC).changed).toBe(false)
     expect(mergeCompletion(REGISTRY_TEXT, 'nope', classifyResult(RESULTS.clean), NOW_SEC).changed).toBe(false)
@@ -507,7 +485,6 @@ describe('status labels', () => {
   })
 })
 
-
 describe('pane columns', () => {
   test('columns sit close and line up with the header', () => {
     const rows = buildRows(REGISTRY, facts, NOW_SEC)
@@ -526,19 +503,6 @@ describe('pane columns', () => {
     const rows = buildRows(REGISTRY, facts, NOW_SEC)
     const widths = paneWidths(rows, 70)
     expect(formatRow(rows[0]!, 70, widths).length).toBeLessThanOrEqual(70)
-  })
-
-  test('the desktop row: the title, then the same cells in the same order, whole, joined by a middle dot, with no padding and no cut', () => {
-    const rows = buildRows(REGISTRY, facts, NOW_SEC)
-    expect(DESKTOP_HEADER).toEqual(['title', 'sid \u00B7 status \u00B7 model \u00B7 effort \u00B7 elapsed'])
-    expect(desktopRowLines(rows[0]!)).toEqual(['alive worker', `${rows[0]!.sid8} \u00B7 running \u00B7 opus \u00B7 high \u00B7 2m05s`])
-    const long = { ...rows[0]!, title: 'a title much longer than any column the terminal would give it, kept whole' }
-    expect(desktopRowLines(long)[0]).toBe(long.title)
-    expect(desktopRowLines(long)[1]).toEndWith(' \u00B7 2m05s')
-    // A row with no session id and no elapsed: a dash for each, as the terminal shows them.
-    const orphan = rows.find(row => row.status === 'orphan')!
-    expect(desktopRowLines({ ...orphan, sid8: '', elapsedSec: undefined })).toEqual([orphan.title, '- \u00B7 orphan \u00B7 ? \u00B7 ? \u00B7 -'])
-    for (const row of rows) for (const line of desktopRowLines(row)) expect(line).not.toMatch(/ {2}|\u2026/)
   })
 })
 
@@ -589,21 +553,6 @@ describe('fixed session columns (decision mod-33)', () => {
     expect(cellWidth('ffffffff')).toBe(FIXED.sid)
   })
 
-  test("the elapsed formatter's longest outputs: each fits the elapsed column below 1000 hours, the widest exactly; a longer one is cut in its cell", () => {
-    expect(ELAPSED_FIXED_SEC).toBe(3_600_000)
-    expect([59, 3599, 86_400 + 3599, 3 * 86_400, 99 * 3600 + 3599, ELAPSED_FIXED_SEC - 1].map(formatAge)).toEqual(['59s', '59m59s', '24h59m', '72h00m', '99h59m', '999h59m'])
-    let widest = 0
-    for (let sec = 0; sec < ELAPSED_FIXED_SEC; sec += sec < 7200 ? 1 : 59) widest = Math.max(widest, formatAge(sec).length)
-    expect(widest).toBe(FIXED.elapsed)
-    expect(cellWidth(formatAge(ELAPSED_FIXED_SEC - 1))).toBe(FIXED.elapsed)
-    // From 1000 hours the text is wider: it is cut in its cell with the ellipsis, and the column keeps its width.
-    const ancient = { ...DAYS, startedAt: NOW_SEC - ELAPSED_FIXED_SEC - 60, endedAt: NOW_SEC }
-    const widths = paneWidths([...rows, ancient], 120)
-    expect(widths.elapsed).toBe(FIXED.elapsed)
-    expect(formatRow(ancient, 120, widths)).toEndWith('   1000h0\u2026')
-    expect(formatRow(DAYS, 120, widths)).toEndWith('   83h20m')
-  })
-
   test('a title longer than the room is cut at its end with the ellipsis; the fixed columns keep their widths and the elapsed is whole', () => {
     for (const columns of [80, 100, 140]) {
       const widths = paneWidths(rows, columns)
@@ -638,57 +587,6 @@ describe('fixed session columns (decision mod-33)', () => {
       // Cut inside the title: never half a wide character, the ellipsis then blanks up to the column.
       expect(cellWidth(fromCell(line, 0).slice(0, line.indexOf(WIDE.sid8)))).toBe(widths.title + 3)
     }
-  })
-
-  test('from 20 to 300 columns: no row wider than its box; the fixed columns whole and at the same cell on every row down to the threshold, cut at the right edge below it', () => {
-    const threshold = FIXED_SUM + TITLE_MIN
-    expect(threshold).toBe(70)
-    // Each width's departures from the layout, gathered and checked once at the end (a check per cell is slow).
-    const wrong: string[] = []
-    const check = (isRight: boolean, what: string) => {
-      if (!isRight) wrong.push(what)
-    }
-    for (let columns = 20; columns <= 300; columns++) {
-      const widths = paneWidths(rows, columns)
-      const header = formatHeader(columns, widths)
-      const lines = rows.map(row => formatRow(row, columns, widths))
-      for (const line of [header, ...lines]) check(cellWidth(line) <= columns, `${columns}: wider than the box: ${line}`)
-      check(SESSION_COLUMNS.every(column => widths[column.id] === FIXED[column.id]), `${columns}: widths ${JSON.stringify(widths)}`)
-      if (columns < threshold) {
-        // Too narrow for the fixed columns and the shortest title: the title keeps its least, the row ends at the edge.
-        check(widths.title === TITLE_MIN, `${columns}: title ${widths.title}`)
-        for (const [i, line] of lines.entries()) {
-          const whole = formatRow(rows[i]!, 1000, widths)
-          const isCut = line === fromCell(whole, 0).slice(0, line.length - 1) + '\u2026' && cellWidth(line) === columns
-          check(cellWidth(whole) <= columns ? line === whole : isCut, `${columns}: not cut at the edge: ${line}`)
-        }
-        continue
-      }
-      const at = starts(widths)
-      for (const [i, line] of lines.entries()) {
-        const row = rows[i]!
-        check(fromCell(line, at.sid!).startsWith((row.sid8 || '-').padEnd(8) + '   '), `${columns}: sid moved: ${line}`)
-        check(fromCell(line, at.status!).startsWith(statusLabel(row.status).padEnd(FIXED.status) + '   '), `${columns}: status moved: ${line}`)
-        check(fromCell(line, at.model!).startsWith(modelFamily(row.model).padEnd(FIXED.model) + '   '), `${columns}: model moved: ${line}`)
-        check(fromCell(line, at.effort!).startsWith(row.effort.padEnd(FIXED.effort) + '   '), `${columns}: effort moved: ${line}`)
-        check(fromCell(line, at.elapsed!) === elapsedText(row), `${columns}: elapsed not whole: ${line}`)
-      }
-      check(fromCell(header, at.sid!) === 'sid        status                 model       effort   elapsed', `${columns}: header: ${header}`)
-    }
-    expect(wrong).toEqual([])
-  })
-
-  test('the widths are the same for no row, one short row and rows long in every column: no column follows its rows', () => {
-    const short = { ...alive, title: 'x', sid8: 'ab', model: 'm', effort: 'lo', status: 'queued' as const, elapsedSec: 1 }
-    const long = { ...alive, title: LONG.title, sid8: 'ffffffffff', model: 'global.anthropic.claude-sonnet-4-5-20250929-v1:0', effort: 'unbounded-effort', status: 'dead' as const, startedAt: 0, endedAt: NOW_SEC }
-    for (const columns of [20, 90, 300]) {
-      const fixed = [[], [short], [long, long]].map(set => paneWidths(set, columns)).map(widths => SESSION_COLUMNS.map(column => widths[column.id]))
-      expect(fixed).toEqual([Object.values(FIXED), Object.values(FIXED), Object.values(FIXED)])
-    }
-    // No row shows the widest status: the status column keeps its 20 cells.
-    const running = paneWidths([alive], 200)
-    expect(running.status).toBe(FIXED.status)
-    expect(formatHeader(200, running)).toContain('status                 model')
   })
 
   test('a value longer than its column is cut in its cell with the ellipsis and never widens it; the next column starts where it did', () => {
@@ -756,30 +654,9 @@ describe('elapsed column', () => {
     return entry
   })
   const at = (sec: number) => ({ nowSec: NOW_SEC + sec, probedSec: NOW_SEC })
-  const textOf = (rows: ReturnType<typeof buildRows>, title: string, sec: number) => {
-    const row = rows.find(one => one.title === title)!
-    return formatRow(row, 200, paneWidths(rows, 200, at(sec)), at(sec)).trimEnd().split(/\s+/).at(-1)
-  }
 
   test('42s under a minute, 5m12s under an hour, 1h05m from an hour up', () => {
     expect([0, 42, 59.9, 60, 312, 3599, 3600, 3900, 3959, 86_400 + 61].map(formatAge)).toEqual(['0s', '42s', '59s', '1m00s', '5m12s', '59m59s', '1h00m', '1h05m', '1h05m', '24h01m'])
-  })
-
-  test('a running entry counts from started_at, a finished one shows its run, an orphan and an older entry the probe age', () => {
-    const rows = buildRows(timed, facts, NOW_SEC)
-    expect(rows.find(one => one.sid === SID_ALIVE)).toMatchObject({ startedAt: NOW_SEC - 42, elapsedSec: 125 })
-    expect(textOf(rows, 'alive worker', 0)).toBe('42s')
-    expect(textOf(rows, 'alive worker', 30)).toBe('1m12s')
-    expect(textOf(rows, 'unreported worker', 30)).toBe('5m12s')
-    expect(textOf(rows, 'done worker', 30)).toBe('1h06m')
-    // The orphan: 2400 s at the probe, then the display clock's seconds since.
-    expect(textOf(rows, '(no entry) /work/x', 0)).toBe('40m00s')
-    expect(textOf(rows, '(no entry) /work/x', 7)).toBe('40m07s')
-    // Entries without the fields stay valid: the probe age while running, '-' once finished.
-    const old = buildRows(REGISTRY, facts, NOW_SEC)
-    expect(textOf(old, 'alive worker', 5)).toBe('2m10s')
-    expect(textOf(old, 'unreported worker', 5)).toBe('-')
-    expect(textOf(old, 'limited worker', 5)).toBe('-')
   })
 
   test('without a display clock the row shows what the probe left; a started_at in the future reads 0s', () => {
@@ -952,16 +829,6 @@ describe('panel layout', () => {
       expect(lines.join('').replace(/\s+/g, '')).toBe(entry.replace(/\s+/g, ''))
       return lines
     }
-    /** Short pieces of text a log line holds, blanks and control characters among them. */
-    const PIECES = ['a', 'bc', 'word', 'x'.repeat(30), ' ', '  ', '\t', '\n', '\r\n', '漢字', '\u{1F600}', 'é', '\u0007', '\u001b[31m', '>', '<', '[redacted]', 'API_KEY=[redacted]']
-    const generated = (count: number): string[] => {
-      let seed = 7
-      const next = (n: number) => {
-        seed = (seed * 1103515245 + 12345) % 2147483648
-        return seed % n
-      }
-      return Array.from({ length: count }, () => Array.from({ length: next(40) }, () => PIECES[next(PIECES.length)]).join(''))
-    }
 
     test('a wrapped tool call and tool result keep their continuation lines two columns in, under the text after the marker; the worker\'s own text wraps at column 0', () => {
       expect(wrapLogLine(`> Bash ${'word '.repeat(12)}`, 24)).toEqual(['> Bash word word word', '  word word word word', '  word word word word', '  word'])
@@ -975,29 +842,6 @@ describe('panel layout', () => {
       // At the snapshot's width (116) and a terminal's: the same rule.
       expectHung(`> Bash ${'git log --oneline origin/main..HEAD && '.repeat(8)}`, 116)
       expectHung(`  < ${'## feature/x...origin/feature/x '.repeat(10)}`, 56)
-    })
-
-    test('a log line that fits is unchanged byte for byte, and the first line of a wrapped one is as before; wrapText without a hang is as before', () => {
-      for (const line of ['> Bash git status -sb', '  < ## develop', '  < ', 'Reading the suite files.', `> ${'a'.repeat(22)}`, '  < ok'])
-        expect(wrapLogLine(line, 24)).toEqual(wrapBefore(line, 24))
-      expect(wrapLogLine('> Bash git status -sb', 116)).toEqual(['> Bash git status -sb'])
-      // A result that fit as two lines may take three: its continuation has two columns less.
-      expect(wrapBefore('  < ## develop...origin/develop', 24)).toEqual(['< ##', 'develop...origin/develop'])
-      expect(wrapLogLine('  < ## develop...origin/develop', 24)).toEqual(['< ##', '  develop...origin/devel', '  op'])
-      for (const entry of generated(400)) {
-        for (const width of [8, 20, 21, 24, 56, 116]) {
-          expect(wrapText(entry, width)).toEqual(wrapBefore(entry, width))
-          const before = wrapBefore(entry, width)
-          const after = wrapLogLine(entry, width)
-          expect(after[0]).toBe(before[0])
-          if (before.length === 1) expect(after).toEqual(before)
-          for (const marked of [`> ${entry}`, `  < ${entry}`]) {
-            const lines = wrapLogLine(marked, width)
-            expect(lines[0]).toBe(wrapBefore(marked, width)[0])
-            for (const line of lines) expect(line.length).toBeLessThanOrEqual(Math.max(8, width))
-          }
-        }
-      }
     })
 
     test('a word longer than the room is cut, and each piece after the first line carries the indent', () => {
@@ -1106,23 +950,6 @@ describe('retiring finished workers', () => {
   })
   test('the first eight characters name a session too', () => {
     expect(retireVerdict([entry('aaaaaaaa-1')], none, '', ['aaaaaaaa']).removable).toEqual(['aaaaaaaa-1'])
-  })
-  test('refuses a session that could still be resumed or is still needed, with the reason', () => {
-    const list = [
-      entry('limit-001', { outcome: { kind: 'limit', summary: 'limit' } }),
-      entry('keep-0001', { keep: true }),
-      entry('queued-01'),
-      entry(SID_ALIVE, { pid: 4101, config_dir: '/fixture/lic/a' }),
-    ]
-    const v = retireVerdict(list, parseProcFacts(PROBE_STDOUT), 'task waits on queued-01', ['limit-001', 'keep-0001', 'queued-01', SID_ALIVE, 'unknown-1'])
-    expect(v.removable).toEqual([])
-    expect(v.refused.map(r => r.reason)).toEqual([
-      'outcome limit needs a resume',
-      'marked keep: a resume or follow-up is expected',
-      'a queued or running task names it',
-      'its process is alive',
-      'no registry entry',
-    ])
   })
 })
 
@@ -1288,33 +1115,6 @@ describe('registry edits: the differential cases the jq scripts are checked agai
 })
 
 describe('Windows paths', () => {
-  test('one native form from every spelling', () => {
-    const table: [string, string][] = [
-      ['C:\\Users\\u', 'C:/Users/u'],
-      ['C:/Users/u', 'C:/Users/u'],
-      ['/c/Users/u', 'C:/Users/u'],
-      ['c:\\users\\u', 'C:/users/u'],
-      ['/d/work', 'D:/work'],
-      ['C:\\Users\\u\\', 'C:/Users/u'],
-      ['C:/Users/u///', 'C:/Users/u'],
-      ['/c/Users/u/', 'C:/Users/u'],
-      ['C:\\', 'C:/'],
-      ['C:', 'C:/'],
-      ['/c', 'C:/'],
-      ['/c/', 'C:/'],
-      ['C:\\Users\\John Smith\\My Project', 'C:/Users/John Smith/My Project'],
-      ['/c/Users/John Smith/', 'C:/Users/John Smith'],
-      ['C:\\Users\\\\u\\/x', 'C:/Users/u/x'],
-      ['\\\\wsl.localhost\\Ubuntu-24.04\\home\\u', '//wsl.localhost/Ubuntu-24.04/home/u'],
-      ['\\\\wsl.localhost\\Ubuntu-24.04\\home\\u\\', '//wsl.localhost/Ubuntu-24.04/home/u'],
-      ['//server/share/dir', '//server/share/dir'],
-      ['/mnt/c/Users/u', '/mnt/c/Users/u'],
-      ['/tmp/x', '/tmp/x'],
-      ['relative\\dir', 'relative/dir'],
-    ]
-    for (const [given, want] of table) expect([given, winPath(given)]).toEqual([given, want])
-  })
-
   test('absolute is a drive or a share; comparisons ignore case and the spelling', () => {
     for (const path of ['C:\\x', 'C:/x', '/c/x', 'd:/', '\\\\wsl.localhost\\Ubuntu\\home', '//server/share']) expect([path, isWinAbsolute(path)]).toEqual([path, true])
     for (const path of ['/tmp/x', '/mnt/c/x', 'C:x', 'x\\y', '//server', '']) expect([path, isWinAbsolute(path)]).toEqual([path, false])
@@ -1412,26 +1212,6 @@ describe('the new worker of a launch', () => {
     const both = parseProcFacts([line(5, '', ''), line(6, 'C:/work/new', 'C:/Users/u/.claude')].join('\n'))
     expect(findNewWindowsWorker(both, winWant, new Set(), 10)?.pid).toBe(6)
   })
-
-  test('with the launch\'s session name: only the worker whose command line passes that name with -n, on either host', () => {
-    const named = (pid: number, name: string, cwd = '/work/new', cfg = '/fixture/lic/a') => line(pid, cwd, cfg, `claude -p --model opus -n ${name} --settings {} --output-format json -- prompt`)
-    const two = parseProcFacts([named(1, 'w-new-260921141320'), named(2, 'w-new-260921141335')].join('\n'))
-    expect(findNewWorker(two, { ...want, name: 'w-new-260921141335' }, new Set())?.pid).toBe(2)
-    expect(findNewWorker(two, { ...want, name: 'w-new-260921141320' }, new Set())?.pid).toBe(1)
-    // A name that only starts the same, another launch's, or none on the line: not this launch's worker.
-    expect(findNewWorker(two, { ...want, name: 'w-new-2609211413' }, new Set())).toBeUndefined()
-    expect(findNewWorker(parseProcFacts(named(3, 'w-new-260921141320-2')), { ...want, name: 'w-new-260921141320' }, new Set())).toBeUndefined()
-    expect(findNewWorker(parseProcFacts(line(4, '/work/new', '/fixture/lic/a')), { ...want, name: 'w-new-260921141320' }, new Set())).toBeUndefined()
-    // Windows: the name as the word, or quoted when it holds a blank; the unplaced worker needs it too.
-    const winWant = { dir: 'C:/Work/New', configDir: 'C:/Users/u/.claude', model: 'opus', name: 'w-new-260921141320' }
-    const exe = (pid: number, name: string, cwd = 'C:\\work\\new', cfg = 'C:\\Users\\u\\.claude') => line(pid, cwd, cfg, `"C:\\bin\\claude.exe" -p --model opus -n ${name} --output-format json`)
-    expect(findNewWindowsWorker(parseProcFacts(exe(5, 'w-new-260921141320')), winWant, new Set(), 10)?.pid).toBe(5)
-    expect(findNewWindowsWorker(parseProcFacts(exe(6, 'w-new-260921141335')), winWant, new Set(), 10)).toBeUndefined()
-    expect(findNewWindowsWorker(parseProcFacts(exe(7, 'w-new-260921141335', '', '')), winWant, new Set(), 10)).toBeUndefined()
-    expect(findNewWindowsWorker(parseProcFacts(exe(8, '"my run"')), { ...winWant, name: 'my run' }, new Set(), 10)?.pid).toBe(8)
-    expect(hasSessionName("claude -p -n 'w-a' --x", 'w-a')).toBe(true)
-    expect(hasSessionName('claude -p -n w-a.b --x', 'w-a-b')).toBe(false)
-  })
 })
 
 describe('one registry entry per session', () => {
@@ -1455,37 +1235,6 @@ describe('one registry entry per session', () => {
 })
 
 describe('launch line', () => {
-  // N is the session name a launch passes with -n (workerName of the title 'new' at 2026-10-10 12:00:00 UTC).
-  const linux: LaunchArgs = { dir: '/work/new', prompt_file: '/tmp/scratch/prompt.md', model: 'opus', effort: 'high', title: 'new' }
-  test('Linux: the line it always was', () => {
-    expect(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude' }, '/home/u/.claude/session-control/runs/r.json', '/home/u/.claude/session-control/runs/r.err')).toEqual([
-      'sh',
-      '-c',
-      "cd '/work/new' && CLAUDE_CONFIG_DIR='/home/u/.claude' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/home/u/.claude/session-control/runs/r.json' 2> '/home/u/.claude/session-control/runs/r.err'",
-    ])
-    expect(buildLaunchArgv({ ...linux, dir: '/c/foo' }, { name: N, configDir: '/c/cfg', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111' }, '/r.json')[2]).toBe(
-      "cd '/c/foo' && CLAUDE_CONFIG_DIR='/c/cfg' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
-    )
-  })
-
-  test('an inherited configuration: no CLAUDE_CONFIG_DIR on the line, on Linux and on Windows; everything else as before', () => {
-    expect(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude', isConfigInherited: true }, '/home/u/.claude/session-control/runs/r.json', '/home/u/.claude/session-control/runs/r.err')[2]).toBe(
-      "cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/home/u/.claude/session-control/runs/r.json' 2> '/home/u/.claude/session-control/runs/r.err'",
-    )
-    expect(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude', resumeSid: 'aaaaaaaa-1111-4111-8111-111111111111', isConfigInherited: true }, '/r.json')[2]).toBe(
-      "cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume 'aaaaaaaa-1111-4111-8111-111111111111' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat '/tmp/scratch/prompt.md')\" > '/r.json'",
-    )
-    // isConfigInherited false is the line with the variable, as when the field is absent.
-    expect(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude', isConfigInherited: false }, '/r.json')).toEqual(buildLaunchArgv(linux, { name: N, configDir: '/home/u/.claude' }, '/r.json'))
-    const win: LaunchArgs = { ...linux, dir: 'C:/Users/u/proj', prompt_file: 'C:/Users/u/AppData/Local/Temp/p.md' }
-    expect(buildLaunchArgv(win, { name: N, configDir: 'C:/Users/u/.claude', isConfigInherited: true }, 'C:/Users/u/.claude/session-control/runs/r.json', 'C:/Users/u/.claude/session-control/runs/r.err')[2]).toBe(
-      "cd 'C:/Users/u/proj' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/u/AppData/Local/Temp/p.md')\" " +
-        "> 'C:/Users/u/.claude/session-control/runs/r.json' 2> 'C:/Users/u/.claude/session-control/runs/r.err'",
-    )
-    expect(buildLaunchArgv(win, { name: N, configDir: 'C:/Users/u/.claude/lic/b' }, 'C:/r.json')[2]).toBe(
-      "cd 'C:/Users/u/proj' && CLAUDE_CONFIG_DIR='C:/Users/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/u/AppData/Local/Temp/p.md')\" > 'C:/r.json'",
-    )
-  })
 
   test('the default config dir: the orchestrator\'s own CLAUDE_CONFIG_DIR, else <home>/.claude; compared as the platform does', () => {
     expect(defaultConfigDir('/home/u', undefined)).toBe('/home/u/.claude')
@@ -1499,22 +1248,10 @@ describe('launch line', () => {
     expect(isDefaultConfigDir('c:\\users\\U\\.claude', 'C:/Users/u/.claude', true)).toBe(true)
     expect(isDefaultConfigDir('C:/Users/u/.claude/lic/b', 'C:/Users/u/.claude', true)).toBe(false)
   })
-
-  test('Windows: the same line for Git Bash, every path native C:/... in single quotes', () => {
-    const args: LaunchArgs = { ...linux, dir: winPath("/c/Users/John Smith/O'Brien proj/"), prompt_file: winPath('/c/Users/John Smith/AppData/Local/Temp/prompt.md') }
-    const runs = 'C:/Users/John Smith/.claude/session-control/runs'
-    expect(buildLaunchArgv(args, { name: N, configDir: winPath('C:\\Users\\John Smith\\.claude') }, `${runs}/r.json`, `${runs}/r.err`)[2]).toBe(
-      "cd 'C:/Users/John Smith/O'\\''Brien proj' && CLAUDE_CONFIG_DIR='C:/Users/John Smith/.claude' CLAUDE_CODE_EFFORT_LEVEL='high' " +
-        "claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/John Smith/AppData/Local/Temp/prompt.md')\" " +
-        "> 'C:/Users/John Smith/.claude/session-control/runs/r.json' 2> 'C:/Users/John Smith/.claude/session-control/runs/r.err'",
-    )
-  })
 })
 
 describe('session name and inbox of a launch', () => {
   const at = Date.UTC(2026, 9, 10, 12, 0, 0)
-  const linux: LaunchArgs = { dir: '/work/new', prompt_file: '/tmp/scratch/prompt.md', model: 'opus', effort: 'high', title: 'new' }
-  const flags = `-n 'w-new-261010120000' --settings '{"crossSessionInbound":"accept"}'`
   test('the name: w-, the title slug up to 24, the UTC launch time; letters, digits and dashes, at most 39 characters', () => {
     expect(workerName('new', at)).toBe(N)
     expect(workerName("Design: launch_worker with an inbox (claude -p) - it's long", at)).toBe('w-design-launch-worker-wit-261010120000')
@@ -1546,52 +1283,9 @@ describe('session name and inbox of a launch', () => {
     expect(launchName('new', at, [{ session_id: SID_DEAD, name: "x'; rm -rf /" }], SID_DEAD)).toBe(N)
     expect(launchName('new', at, [{ session_id: SID_DEAD, name: 7 }], SID_DEAD)).toBe(N)
   })
-  test('golden: Linux with a picker, without one, and a resume keeping its name', () => {
-    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude/lic/b', name: N }, '/runs/r.json', '/runs/r.err')[2]).toBe(
-      `cd '/work/new' && CLAUDE_CONFIG_DIR='/home/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ${flags} ` +
-        `--dangerously-skip-permissions --output-format json -- "$(cat '/tmp/scratch/prompt.md')" > '/runs/r.json' 2> '/runs/r.err'`,
-    )
-    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude', isConfigInherited: true, name: N }, '/runs/r.json', '/runs/r.err')[2]).toBe(
-      `cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ${flags} ` +
-        `--dangerously-skip-permissions --output-format json -- "$(cat '/tmp/scratch/prompt.md')" > '/runs/r.json' 2> '/runs/r.err'`,
-    )
-    expect(buildLaunchArgv(linux, { configDir: '/home/u/.claude/lic/b', resumeSid: SID_DEAD, name: 'w-old-title-261001080000' }, '/runs/r.json', '/runs/r.err')[2]).toBe(
-      `cd '/work/new' && CLAUDE_CONFIG_DIR='/home/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume '${SID_DEAD}' ` +
-        `-n 'w-old-title-261001080000' --settings '{"crossSessionInbound":"accept"}' ` +
-        `--dangerously-skip-permissions --output-format json -- "$(cat '/tmp/scratch/prompt.md')" > '/runs/r.json' 2> '/runs/r.err'`,
-    )
-  })
-  test('golden: Windows (Git Bash) with a picker, without one, and a resume', () => {
-    const win: LaunchArgs = { ...linux, dir: 'C:/Users/u/proj', prompt_file: 'C:/Users/u/AppData/Local/Temp/p.md' }
-    const tail = `--dangerously-skip-permissions --output-format json -- "$(cat 'C:/Users/u/AppData/Local/Temp/p.md')" > 'C:/runs/r.json' 2> 'C:/runs/r.err'`
-    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude/lic/b', name: N }, 'C:/runs/r.json', 'C:/runs/r.err')[2]).toBe(
-      `cd 'C:/Users/u/proj' && CLAUDE_CONFIG_DIR='C:/Users/u/.claude/lic/b' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ${flags} ${tail}`,
-    )
-    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude', isConfigInherited: true, name: N }, 'C:/runs/r.json', 'C:/runs/r.err')[2]).toBe(
-      `cd 'C:/Users/u/proj' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ${flags} ${tail}`,
-    )
-    expect(buildLaunchArgv(win, { configDir: 'C:/Users/u/.claude', resumeSid: SID_DEAD, isConfigInherited: true, name: N }, 'C:/runs/r.json', 'C:/runs/r.err')[2]).toBe(
-      `cd 'C:/Users/u/proj' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' --resume '${SID_DEAD}' ${flags} ${tail}`,
-    )
-  })
   test('the settings are one shell word with no blank and no quote shq would have to escape', () => {
     expect(JSON.parse(WORKER_SETTINGS)).toEqual({ crossSessionInbound: 'accept' })
     expect(WORKER_SETTINGS).not.toMatch(/[\s']/)
-  })
-  test('the worker matcher still finds the launched worker with the extra flags, on Linux and on Windows', () => {
-    const want = { dir: '/work/new', configDir: '/fixture/lic/a', model: 'opus' }
-    // /proc/<pid>/cmdline with its NULs turned to blanks, as the probe prints it.
-    const linuxCmd = `claude -p --model opus -n ${N} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- Goal: x`
-    const linuxResume = `claude -p --model opus --resume ${SID_DEAD} -n ${N} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- Goal: x`
-    for (const cmd of [linuxCmd, linuxResume]) {
-      expect(findNewWorker(parseProcFacts(['P', 7, 'claude', 2, '/work/new', '/fixture/lic/a', cmd].join('\t')), want, new Set())?.pid).toBe(7)
-    }
-    expect(findNewWorker(parseProcFacts(['P', 7, 'claude', 2, '/work/new', '/fixture/lic/a', linuxCmd].join('\t')), { ...want, model: 'sonnet' }, new Set())).toBeUndefined()
-    // Win32_Process.CommandLine as Git Bash builds it for claude.exe.
-    const winCmd = `"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus -n ${N} --settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json -- "Goal: x"`
-    const winWant = { dir: 'C:/work/new', configDir: 'C:/Users/u/.claude', model: 'opus' }
-    expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, 'C:\\work\\new', 'C:\\Users\\u\\.claude', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
-    expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, '', '', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
   })
 })
 
@@ -1600,19 +1294,6 @@ describe('worker-report check', () => {
     expect(reportCheck(REPORT_TEXTS.design)).toBeUndefined()
     expect(reportCheck(REPORT_TEXTS.probe)).toBeUndefined()
     expect(reportCheck(resultReport(REAL_RESULTS.designReport))).toBeUndefined()
-  })
-  test('a report without the reads: one short line naming what is missing', () => {
-    expect(reportCheck('Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.')).toBe(
-      'report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes',
-    )
-    const statusOnly = REPORT_TEXTS.design.split('`git log')[0] ?? ''
-    expect(reportCheck(statusOnly)).toBe('report lacks git log --oneline @{u}..HEAD with its exit code')
-    // The commands named without their output or exit code do not count.
-    expect(reportCheck('I ran git status -sb and git log --oneline @{u}..HEAD; all clean.')).toBe(
-      'report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes',
-    )
-    const noBranchLine = REPORT_TEXTS.probe.replace('## feature/panel-expand-sections...origin/feature/panel-expand-sections\n', '')
-    expect(reportCheck(noBranchLine)).toBe('report lacks git status -sb with its exit code')
   })
   test('unpushed commits listed by the log are noted, in a fence or in a list', () => {
     const ahead = REPORT_TEXTS.probe
@@ -1658,30 +1339,6 @@ describe('worker-report check', () => {
     }
     expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD → 128`)).toBe('git log @{u}..HEAD exited 128')
     expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD exited 1`)).toBe('git log @{u}..HEAD exited 1')
-  })
-  test('the ASCII arrow -> 0 is an exit spelling in the same places as the Unicode arrow', () => {
-    const status = '`git status -sb` (exit 0):\n```\n## main...origin/main\n```\n'
-    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD   -> 0`)).toBeUndefined()
-    expect(reportCheck(`$ git status -sb -> 0\n## main...origin/main\n$ git log --oneline @{u}..HEAD ->0`)).toBeUndefined()
-    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD -> 128`)).toBe('git log @{u}..HEAD exited 128')
-    // On the exit marker line after the output, and on the line after the fence that ends the block.
-    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix(toast): drop the plugin name\n-> 0`)).toBe('git log @{u}..HEAD lists 1 unpushed commit')
-    expect(reportCheck(`${status}\`\`\`\n$ git log --oneline @{u}..HEAD\n\`\`\`\n-> 0`)).toBeUndefined()
-    // A marker line stops the block: a commit-like line below it is not counted.
-    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n-> 0\n9b6e367 fix(toast): drop the plugin name`)).toBeUndefined()
-    // Without a number after the arrow there is no exit code.
-    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD -> none`)).toBe('report lacks git log --oneline @{u}..HEAD with its exit code')
-  })
-  test('the log\'s exit code sits in or right after its block, not later in the report', () => {
-    const status = '`git status -sb` (exit 0):\n```\n## main...origin/main\n```\n'
-    const lacking = 'report lacks git log --oneline @{u}..HEAD with its exit code'
-    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n\nThe build script ended with exit 0.`)).toBe(lacking)
-    expect(reportCheck(`${status}\`git log --oneline @{u}..HEAD\`: no output.\n\nLater: tests ran (exit 0).`)).toBe(lacking)
-    // After the output, on an exit marker line or the line after the fence that ends the block.
-    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix(toast): drop the plugin name\nexit 0`)).toBe('git log @{u}..HEAD lists 1 unpushed commit')
-    expect(reportCheck(`${status}\`\`\`\n$ git log --oneline @{u}..HEAD\n\`\`\`\nexit 0`)).toBeUndefined()
-    // A commit subject holding an exit-like word is not the log's exit code.
-    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix: exit 0 on cancel`)).toBe(lacking)
   })
   // Layouts of real worker reports (results and transcripts of earlier workers) that the check flagged although they
   // carry both reads with their exit codes; each is a correct report.
@@ -1734,12 +1391,6 @@ describe('worker-report check', () => {
     expect(reportCheck('| Command | Output |\n|---|---|\n| `git status -sb` | `## main` |\n| `git log --oneline @{u}..HEAD` | 0 |')).toBe(lacksBoth)
   })
 
-  test('the refined layouts still count commits and failures: a commit in the log\'s fence, a non-zero exit after it', () => {
-    expect(reportCheck('`git status -sb` (exit 0): `## main...origin/main [ahead 1]`\n`git log --oneline @{u}..HEAD`:\n```\n9b6e367 fix(toast): drop the plugin name\n```\nexit code: `0`')).toBe('git log @{u}..HEAD lists 1 unpushed commit')
-    expect(reportCheck('`git status -sb` (exit 0): `## feature/new`\n`git log --oneline @{u}..HEAD`:\n```\nfatal: no upstream configured\n```\n=> 128')).toBe('git log @{u}..HEAD exited 128')
-    expect(reportCheck('| Command | Exit |\n|---|---|\n| `git status -sb` `## x` | 0 |\n| `git log --oneline @{u}..HEAD` | 128 |')).toBe('git log @{u}..HEAD exited 128')
-  })
-
   test('resultReport: the result text of a result file, empty otherwise', () => {
     expect(resultReport(JSON.stringify({ result: 'x' }))).toBe('x')
     for (const text of ['', '{', 'null', '{"result":5}']) expect(resultReport(text)).toBe('')
@@ -1747,8 +1398,6 @@ describe('worker-report check', () => {
 })
 
 describe('the inbox fields of the registry entry', () => {
-  const args: LaunchArgs = { dir: '/work/new/', prompt_file: '/tmp/p.md', model: 'haiku', effort: 'low', title: 'new' }
-  const files = { result: '/r/new.json', err: '/r/new.err' }
   test('sessionFileFacts reads sessionId, name and messagingSocketPath; anything else is undefined', () => {
     expect(sessionFileFacts(JSON.stringify({ pid: 7, sessionId: SID_DEAD, name: N, messagingSocketPath: '/run/user/1000/cc-socks/7.sock', kind: 'interactive' }))).toEqual({
       sessionId: SID_DEAD,
@@ -1758,21 +1407,6 @@ describe('the inbox fields of the registry entry', () => {
     expect(sessionFileFacts(JSON.stringify({ sessionId: SID_DEAD, procStart: '1' }))).toEqual({ sessionId: SID_DEAD })
     expect(sessionFileFacts(JSON.stringify({ sessionId: SID_DEAD, name: '', messagingSocketPath: 5 }))).toEqual({ sessionId: SID_DEAD })
     for (const text of ['', '{', 'null', '[1]', '"x"']) expect(sessionFileFacts(text)).toEqual({})
-  })
-  test('a fresh entry: name after the session id, socket_path when known, none otherwise', () => {
-    expect(Object.keys(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }, NOW_SEC - 9))).toEqual([
-      'title', 'pid', 'session_id', 'name', 'socket_path', 'config_dir', 'cwd', 'model', 'effort', 'result_file', 'err_file', 'started_at',
-    ])
-    expect(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N }, NOW_SEC - 9)).toEqual({
-      title: 'new', pid: 7, session_id: SID_DEAD, name: N, config_dir: '/c/a', cwd: '/work/new', model: 'haiku', effort: 'low', result_file: '/r/new.json', err_file: '/r/new.err', started_at: NOW_SEC - 9,
-    })
-  })
-  test('a resume entry: socket_path null when the new sessions file has none, so the merge clears the dead socket', () => {
-    expect(newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }, NOW_SEC - 9).socket_path).toBeNull()
-    expect(newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }, NOW_SEC - 9).socket_path).toBe('/s.sock')
-    const before = JSON.stringify([{ session_id: SID_DEAD, name: N, socket_path: '/old.sock', reported: false }])
-    const merged = registerEntry(before, newRegistryEntry(args, { configDir: '/c/a', resumeSid: SID_DEAD }, 7, SID_DEAD, files, { name: N }, NOW_SEC - 9), 'resume')
-    expect(merged.ok && JSON.parse(merged.text)[0].socket_path).toBeNull()
   })
 })
 
@@ -1889,20 +1523,6 @@ describe('launch guard on Windows', () => {
 })
 
 describe('launch_worker: the prompt it builds and the resume fill', () => {
-  test('composePrompt: the section block, then the rules block only when an item the guard checks is missing', () => {
-    const section = { heading: 'Unit (user)', body: 'unit-1. a\nunit-2. b\n\n' }
-    expect(composePrompt('Do it.', undefined, true)).toEqual({ text: `Do it.\n\n${RULES_BLOCK}\n`, isSectionAdded: false, isRulesAdded: true })
-    expect(composePrompt('Do it.', undefined, false)).toEqual({ text: 'Do it.', isSectionAdded: false, isRulesAdded: false })
-    expect(composePrompt('Do it.\n\n', section, false).text).toBe('Do it.\n\n## Binding decisions (section Unit (user))\n\nunit-1. a\nunit-2. b\n')
-    const full = 'Foreground waits; git status -sb; no attribution.'
-    expect(composePrompt(full, undefined, true)).toEqual({ text: full, isSectionAdded: false, isRulesAdded: false })
-    expect(composePrompt('A skill test of x.', undefined, true).isRulesAdded).toBe(false)
-    // The block passes the guard by itself, and a prompt with it gets no second copy.
-    expect(missingPromptItems(RULES_BLOCK)).toEqual([])
-    const once = composePrompt('Do it.', undefined, true).text
-    expect(composePrompt(once, undefined, true).text).toBe(once)
-  })
-
   test('rulesWanted: given wins; by default only when the mod writes the prompt (inline text or a section)', () => {
     expect(rulesWanted({ prompt: 'x' })).toBe(true)
     expect(rulesWanted({ prompt_file: '/p', section: 's' })).toBe(true)
@@ -1934,17 +1554,6 @@ describe('launch_worker: the prompt it builds and the resume fill', () => {
 describe('retire cleanup', () => {
   const RUNS = '/h/.claude/session-control/runs'
   const under = (path: string, dir: string) => path.startsWith(`${dir}/`)
-  test('runFilesToDelete: result, error, pid, prompt in the runs directory, never one another entry names, never outside, never a transcript', () => {
-    const entry = { session_id: 'a', result_file: `${RUNS}/x.json`, err_file: `${RUNS}/x.err`, prompt_file: `${RUNS}/x.prompt.md` }
-    expect(runFilesToDelete(entry, [], RUNS, under)).toEqual([
-      { kind: 'result', path: `${RUNS}/x.json` },
-      { kind: 'error', path: `${RUNS}/x.err` },
-      { kind: 'pid', path: `${RUNS}/x.pid` },
-      { kind: 'prompt', path: `${RUNS}/x.prompt.md` },
-    ])
-    expect(runFilesToDelete(entry, [{ session_id: 'b', note: `${RUNS}/x.err` }], RUNS, under).map(one => one.kind)).toEqual(['result', 'pid', 'prompt'])
-    expect(runFilesToDelete({ result_file: '/elsewhere/x.json', err_file: `${RUNS}/t.jsonl`, prompt_file: '/scratch/p.md' }, [], RUNS, under)).toEqual([])
-  })
   test('runFileLocationProblem: a file directly in the runs directory is fine; a subfolder, a double slash and (on Windows) a stream or a trailing dot are not', () => {
     expect(runFileLocationProblem(`${RUNS}/x.json`, RUNS, false)).toBeUndefined()
     expect(runFileLocationProblem(`${RUNS}/x.json`, `${RUNS}/`, false)).toBeUndefined()

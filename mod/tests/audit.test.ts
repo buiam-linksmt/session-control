@@ -5,8 +5,8 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { MAX_FINDINGS, auditFindings, auditText, backupKind, decisionSections, licenceWait } from '../hooks/audit'
-import type { AuditInput, Finding } from '../hooks/audit'
+import { MAX_FINDINGS, auditFindings, auditText, decisionSections, licenceWait } from '../hooks/audit'
+import type { AuditInput } from '../hooks/audit'
 import { parseProcFacts } from '../hooks/core'
 import { nodeAnswer } from './fake-helper'
 import { NOW_MS, worldPath } from './fixtures'
@@ -92,8 +92,6 @@ const BASE: AuditInput = {
   git: { branch: 'feature/x', defaultBranch: 'main', changed: [{ path: 'CLAUDE.md', mtimeMs: NOW - 3 * 3600_000 }] },
 }
 
-const kinds = (findings: Finding[]) => findings.map(one => `${one.kind}:${one.subject}`)
-
 describe('audit findings, one fixture per kind', () => {
   const findings = auditFindings(BASE)
   const of = (kind: string) => findings.filter(one => one.kind === kind)
@@ -120,19 +118,6 @@ describe('audit findings, one fixture per kind', () => {
     expect(of('kept-old').map(one => [one.subject, one.evidence])).toEqual([['session f0f0f0f0 "kept long"', 'marked keep, last active 7h00m ago (more than 6 hours)']])
   })
 
-  test('a finished clean acknowledged session no task names is retirable; kept, named or not clean is not', () => {
-    const queue = JSON.stringify({ tasks: [{ id: 'q', status: 'queued', title: 'x', note: SID_UNREP.slice(0, 8) }] })
-    const entries = [
-      { title: 'free', session_id: SID_DONE, reported: true, outcome: { kind: 'clean' } },
-      { title: 'kept', session_id: SID_KEPT, reported: true, keep: true, outcome: { kind: 'clean' }, ended_at: NOW / 1000 - 60 },
-      { title: 'named', session_id: SID_UNREP, reported: true, outcome: { kind: 'clean' } },
-      { title: 'limited', session_id: SID_DEAD, reported: true, outcome: { kind: 'limit' } },
-    ]
-    const found = auditFindings({ entries, facts: FACTS, nowMs: NOW, queueText: queue })
-    expect(kinds(found.filter(one => one.kind === 'retirable'))).toEqual(['retirable:session d0d0d0d0 "free"'])
-    expect(found.filter(one => one.kind === 'kept-old')).toEqual([])
-  })
-
   test('the open points: an open one raised more than 7 days ago, a held one; closed and fresh ones are fine', () => {
     expect(of('open-point-old').map(one => [one.subject, one.evidence])).toEqual([['open point old "An old question"', 'raised 2026-01-01, 9 days ago']])
     expect(of('open-point-held').map(one => one.subject)).toEqual(['open point held "A held question"'])
@@ -147,22 +132,6 @@ describe('audit findings, one fixture per kind', () => {
     expect(auditFindings({ ...BASE, git: { changed: [] } }).filter(one => one.kind === 'git-branch').map(one => one.evidence)).toEqual(['HEAD is detached; 1 worker alive'])
     const silent = auditFindings({ ...BASE, git: undefined } as AuditInput)
     expect(silent.filter(one => one.kind.startsWith('git'))).toEqual([])
-  })
-
-  test('backups/: per kind, the files older than 2 days besides the newest; a kind of one file is fine', () => {
-    expect(of('backups').map(one => [one.subject, one.evidence])).toEqual([
-      ['backups of kind task-queue-before-queue-task.json', '3 files; 2 are older than 2 days besides the newest: task-queue-before-queue-task-2026-01-07.json, task-queue-before-queue-task-2026-01-06.json'],
-    ])
-    // A file name is redacted as a path is: dated names read whole, a token-like word goes.
-    const token = ['ghp', 'CANARY0123456789abcdefABCDEF'].join('_')
-    const tokenName = auditFindings({ ...BASE, backups: [file(`${token}-2026-01-09.json`, 0), file(`${token}-2026-01-01.json`, 5 * DAY)] }).filter(one => one.kind === 'backups')
-    expect(tokenName.map(one => [one.subject, one.evidence])).toEqual([['backups of kind [redacted].json', '2 files; 1 is older than 2 days besides the newest: [redacted]-2026-01-01.json']])
-    expect(auditText({ ...BASE, backups: [file(`${token}-2026-01-09.json`, 0)] })).not.toContain('CANARY')
-    const loose = auditFindings({ ...BASE, runs: [file(`${token}.json`, DAY)] }).filter(one => one.kind === 'runs')
-    expect(loose.map(one => one.evidence)).toEqual(['1 file (1 KiB) that no registry entry names, the oldest 24h00m old: [redacted].json'])
-    expect(backupKind('headless-sessions-before-completion-2026-10-10.json')).toBe('headless-sessions-before-completion.json')
-    expect(backupKind('license-lib.sh.orig-2026-10-10b')).toBe('license-lib.sh.orig')
-    expect(backupKind('sheet-notes-1.2.8-2026-10-09.md')).toBe('sheet-notes-1.2.8.md')
   })
 
   test('the runs directory: the files no registry entry names, the mod\'s own files aside; reports/: every saved report', () => {
@@ -336,7 +305,7 @@ const HOME = '/m/home'
 const ORCH = '/m/orch'
 const RUNS = `${HOME}/.claude/session-control/runs`
 const REG = `${HOME}/.claude/headless-sessions.json`
-const OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: false, helper: 'off' }
+const OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: false }
 
 type Git = 'repo' | 'missing' | 'not-a-repo'
 

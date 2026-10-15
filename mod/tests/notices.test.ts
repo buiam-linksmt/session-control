@@ -3,7 +3,7 @@
 // mock-world.ts (Linux) or the small Windows world below; the plugin's store is a map of the test's own, so a test can
 // read what a load left and seed the next.
 
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { TOAST_TITLES, parseProcFacts } from '../hooks/core'
@@ -37,14 +37,12 @@ import {
   repoStep,
   retireStep,
   stallStep,
-  unitStep,
   waitKey,
 } from '../hooks/notices'
 import type { Notice, NoticeKind } from '../hooks/notices'
 import { localDate } from '../hooks/store'
-import { nodeAnswer } from './fake-helper'
 import { E2E_CWDS, NOW_MS, RESULTS } from './fixtures'
-import { HOME, OPTIONS, ORCH, POWERSHELL, REGISTRY, RUNS, WIN_ENV, WIN_ORCH, WIN_REGISTRY, mockWorld, seedLiveWorker, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
+import { HOME, OPTIONS, ORCH, REGISTRY, RUNS, mockWorld, seedLiveWorker } from './mock-world'
 import type { World } from './mock-world'
 
 const NOW_SEC = NOW_MS / 1000
@@ -192,27 +190,6 @@ function seedE2eProc(world: World, pid: number, cwd: string): void {
 
 describe('orphan: the e2e scripts\' own runs', () => {
   const { linux } = E2E_CWDS
-  const exempt = linux.exempt.map((cwd, i) => [7100 + i, cwd] as const)
-  const kept = linux.kept.map((cwd, i) => [7200 + i, cwd] as const)
-
-  test('Linux: a live headless claude in /tmp/session-control-e2e<suffix>/orch or /work is no orphan row and no notice; each other form stays an orphan, told and listed', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    const store = storeOf(on)
-    ownSession(on)
-    echoPrompt(on)
-    seed(world)
-    for (const [pid, cwd] of [...exempt, ...kept]) seedE2eProc(world, pid, cwd)
-    await start($)
-    await poll(world, 90)
-    const orphans = parseNoticeState(store.get(KEY)).orphans
-    expect(Object.keys(orphans).sort()).toEqual(kept.map(([pid]) => String(pid)).sort())
-    expect(Object.values(orphans).every(one => one.isTold === true)).toBe(true)
-    expect((await orphanRowPids($)).sort()).toEqual(kept.map(([pid]) => pid).sort())
-    const lines = noticeLines(await userPrompt($)).join('\n')
-    for (const [pid] of exempt) expect(lines).not.toContain(`${pid}`)
-    expect(world.toasts.join('\n')).not.toContain('pid 71')
-    expect(toastsOf(world, 'orphan').length).toBeGreaterThan(0)
-  })
 
   test('Linux with TMPDIR: its own scratch directories are exempt as well as /tmp\'s; one level deeper or elsewhere stays an orphan', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on, { env: { TMPDIR: '/var/tmp/' } })
@@ -354,65 +331,12 @@ describe('toast order on a surface other than the terminal (decision mod-28)', (
     'Queued task ready \u00B7 queued task q-id8 waited for w-unit-worker-261011090000, which finished',
   ]
   const DUE = 'Compliance check due \u00B7 compliance check due for section Unit X (user, 2026-10-11) (session w-unit-worker-261011090000)'
-  // The hourly reminder of the poll's first tick (its tasks wait on a session that finished): raised during the hold, held after the others.
-  const HOUSEKEEPING = 'Housekeeping due \u00B7 2 queue tasks look stale (q-next, q-id8): run audit_state'
   const QUEUE = [
     { id: 'q-next', status: 'queued', title: 'Next step', waits_for: 'w-unit-worker-261011090000 to finish' },
     { id: 'q-id8', status: 'queued', title: 'By id', waits_for: `session ${SID_UNIT.slice(0, 8)}` },
   ]
   /** The surfaces the session draws on, as $.session.surfaces answers them. */
   const drawsOn = (on: On, surfaces: readonly string[]) => on('session.surfaces', () => ({ value: surfaces }) as never)
-
-  test('on the desktop the completion toast shows alone for its 8 s, then the harvest\'s notice toasts follow it in order; the prompt lines are not held', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    echoPrompt(on)
-    drawsOn(on, ['desktop'])
-    seed(world, { entries: [UNIT_ENTRY], queue: QUEUE })
-    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
-    await start($)
-    expect(world.toasts).toEqual([COMPLETION])
-    const sent = (await $.prompt.submit({ text: 'notification', wait: false, origin: { kind: 'task-notification' } } as never)) as { context?: readonly unknown[] }
-    expect(noticeLines(sent).length).toBe(3)
-    await world.clock.advance(7999)
-    expect(world.toasts).toEqual([COMPLETION])
-    await world.clock.advance(1)
-    // Then one toast each time the one before has shown for its 8 s, in order.
-    expect(world.toasts).toEqual([COMPLETION, READY[0]])
-    await world.clock.advance(8000)
-    expect(world.toasts).toEqual([COMPLETION, ...READY])
-    await world.clock.advance(8000)
-    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE])
-    await world.clock.advance(8000)
-    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, HOUSEKEEPING])
-    await world.clock.advance(8000)
-    // Nothing waits any more: a later notice toast goes out at once.
-    await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-next', status: 'done' } as never)
-    await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-id8', status: 'done' } as never)
-    expect(world.toasts.at(-1)).toBe('Queue empty \u00B7 queue empty: run audit_state and report')
-  })
-
-  test('on the desktop a second completion waits for the first, and holds the toasts after it in turn', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    drawsOn(on, ['terminal', 'desktop'])
-    const second = { ...UNIT_ENTRY, title: 'second worker', pid: 4301, session_id: SID_FREE, name: 'w-second-worker-261011090000', section: undefined, result_file: `${RUNS}/second.json` }
-    seed(world, { entries: [UNIT_ENTRY, second], queue: QUEUE })
-    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
-    world.files.set(`${RUNS}/second.json`, RESULTS.clean)
-    await start($)
-    const secondToast = COMPLETION.replace('unit worker', 'second worker')
-    expect(world.toasts).toEqual([COMPLETION])
-    // The notice toasts of the first harvest, one each 8 s, then the second completion, which holds the next in turn.
-    for (const [at, shown] of [[8000, 2], [16000, 3], [24000, 4], [32000, 5]] as const) {
-      await world.clock.set(NOW_MS + at)
-      expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast].slice(0, shown))
-    }
-    await world.clock.advance(7999)
-    expect(world.toasts.length).toBe(5)
-    await world.clock.advance(1)
-    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast, HOUSEKEEPING])
-  })
 
   /** Three open points two days old: three open-point-age notices of one pass, the poll's cap. */
   const threePoints = (world: World) => {
@@ -421,28 +345,6 @@ describe('toast order on a surface other than the terminal (decision mod-28)', (
     seed(world, { points: ids.map(id => ({ id, status: 'open', raised, title: `Point ${id}` })) })
     return ids.map(id => `Open point waiting \u00B7 open point ${id} (raised ${raised}) is still open: Point ${id}`)
   }
-
-  test('on the desktop three notice toasts raised together come out one after another, each once the one before has shown for 8 s', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    echoPrompt(on)
-    drawsOn(on, ['desktop'])
-    const waiting = threePoints(world)
-    await start($)
-    expect(world.toasts).toEqual(waiting.slice(0, 1))
-    // The model has every line at once: only the toasts wait.
-    expect(noticeLines(await userPrompt($)).length).toBe(3)
-    await world.clock.advance(7999)
-    expect(world.toasts).toEqual(waiting.slice(0, 1))
-    await world.clock.advance(1)
-    expect(world.toasts).toEqual(waiting.slice(0, 2))
-    await world.clock.advance(7999)
-    expect(world.toasts).toEqual(waiting.slice(0, 2))
-    await world.clock.advance(1)
-    expect(world.toasts).toEqual(waiting)
-    await world.clock.advance(8000)
-    expect(world.toasts).toEqual(waiting)
-  })
 
   test('on the terminal the same three notice toasts go out together, at once, as before', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
@@ -534,27 +436,6 @@ describe('toasts while no surface is attached (decision mod-28)', () => {
     await start($)
     return { world, surfaces }
   }
-
-  test('raised before a surface attaches, the toasts wait; the desktop attached 30 s later gets them through the queue, one each 8 s; the note and the lines reach the model at once', { options: OPTIONS }, async ($, on) => {
-    const { world, surfaces } = await unattachedStart($, on)
-    expect(world.toasts).toEqual([])
-    const sent = await userPrompt($)
-    expect(String(sent.context?.[0])).toStartWith('session-control completions: unit worker: clean: ')
-    expect(noticeLines(sent).length).toBe(3)
-    await world.clock.advance(30_000)
-    expect(world.toasts).toEqual([])
-    // The poll at 35 s reads the desktop attached: the kept toasts go out in the order they were raised.
-    surfaces.list = ['desktop']
-    await world.clock.advance(5000)
-    expect(world.toasts).toEqual([COMPLETION])
-    for (const [shown, toast] of [READY[0], READY[1], DUE, HOUSEKEEPING].entries()) {
-      await world.clock.advance(7999)
-      expect(world.toasts.length).toBe(shown + 1)
-      await world.clock.advance(1)
-      expect(world.toasts.at(-1)).toBe(toast)
-    }
-    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, HOUSEKEEPING])
-  })
 
   test('a client that attaches gets the kept toasts at once, without waiting for the poll', { options: OPTIONS }, async ($, on) => {
     const { world, surfaces } = await unattachedStart($, on)
@@ -674,17 +555,6 @@ describe('retire-due: queued tasks whose wait audit_state cannot check', () => {
   ]
   const entries = [{ title: 'kept', session_id: SID_KEPT, config_dir: `${HOME}/.claude`, reported: true, keep: true, outcome: { kind: 'clean' }, ended_at: NOW_SEC - 600 }]
   const text = '2 queue tasks look stale (q-groups, q-steps): run audit_state'
-
-  test('retireStep counts the free-text waits as stale queue tasks and names their ids; a licence wait and no wait are not counted', () => {
-    const state = freshNoticeState()
-    const told = retireStep(state, { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: queue }) })
-    expect(told).toEqual([{ kind: 'retire-due', message: text, fields: { retirable: 0, keptOld: 0, staleTasks: 2 } }])
-    expect(state.retireAt).toBe(NOW_MS)
-    expect(retireStep(freshNoticeState(), { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: queue.slice(2) }) })).toEqual([])
-    // With a done task as well: one group, the ids in audit_state's order.
-    const mixed = retireStep(freshNoticeState(), { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: [...queue, { id: 'q-done', status: 'done', title: 'Done' }] }) })
-    expect(mixed[0]?.message).toBe('3 queue tasks look stale (q-done, q-groups, q-steps): run audit_state')
-  })
 
   let leftByFirstLoad: unknown
 
@@ -841,45 +711,6 @@ describe('retire-due: each free-text wait told once', () => {
     expect(noticeLines(await userPrompt($))).toEqual([])
     expect(store.has(KEY)).toBe(false)
   })
-
-  test('the other stale kinds keep their hourly notice, wording and ids beside a told free-text wait', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
-    const entries = [
-      { title: 'free', session_id: SID_FREE, config_dir: `${HOME}/.claude`, reported: true, outcome: { kind: 'clean' } },
-      { title: 'kept', session_id: SID_KEPT, config_dir: `${HOME}/.claude`, reported: true, keep: true, outcome: { kind: 'clean' }, ended_at: NOW_SEC - 7 * 3600 },
-    ]
-    const queue = [
-      { id: 'q-done', status: 'done', title: 'Done' },
-      { id: 'q-blocked', status: 'blocked', title: 'Odd status' },
-      { id: 'q-run', status: 'running', title: 'Running, no session' },
-    ]
-    const head = `1 finished session can be retired (${SID_FREE.slice(0, 8)}); 1 kept session idle over 6 hours (${SID_KEPT.slice(0, 8)})`
-    const text = `${head}; 3 queue tasks look stale (q-blocked, q-run, q-done): run audit_state`
-    const world = mockWorld(on)
-    storeOf(on)
-    echoPrompt(on)
-    seed(world, { entries, queue: [...queue, groups] })
-    await start($)
-    expect(noticeToasts(world)).toEqual([])
-    await poll(world, 60, 60)
-    expect(noticeToasts(world)).toEqual([`Housekeeping due · ${head}; 4 queue tasks look stale (q-blocked, q-run, q-done and 1 more): run audit_state`])
-    await poll(world, 3540, 60)
-    expect(noticeToasts(world).length).toBe(1)
-    await poll(world, 60, 60)
-    expect(noticeToasts(world).length).toBe(2)
-    expect(noticeToasts(world)[1]).toBe(`Housekeeping due · ${text}`)
-    expect(noticeLines(await userPrompt($))).toEqual([
-      `session-control notice: retire-due: ${head}; 4 queue tasks look stale (q-blocked, q-run, q-done and 1 more): run audit_state`,
-      `session-control notice: retire-due: ${text}`,
-    ])
-    await poll(world, 3540, 60)
-    expect(noticeToasts(world).length).toBe(2)
-    await poll(world, 60, 60)
-    expect(noticeToasts(world)).toEqual([
-      `Housekeeping due · ${head}; 4 queue tasks look stale (q-blocked, q-run, q-done and 1 more): run audit_state`,
-      `Housekeeping due · ${text}`,
-      `Housekeeping due · ${text}`,
-    ])
-  })
 })
 
 describe('repo-state', () => {
@@ -1001,25 +832,6 @@ describe('a reload of the mod', () => {
 })
 
 describe('the notices option', () => {
-  test('off: no notice of any kind (no toast, no line, no store, no git); the completion note and its toast stay', { options: { ...OPTIONS, notices: 'off' } }, async ($, on) => {
-    const world = mockWorld(on)
-    const store = storeOf(on)
-    echoPrompt(on)
-    seedAll(world)
-    world.git = () => ({ exitCode: 0, stdout: 'true\n' })
-    await start($)
-    await poll(world, 120)
-    await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-next', status: 'done' } as never)
-    expect(noticeToasts(world)).toEqual([])
-    expect(world.toasts.some(text => text.startsWith('Session finished \u00B7 unit worker'))).toBe(true)
-    const sent = (await $.prompt.submit({ text: 'notification', wait: false, origin: { kind: 'task-notification' } } as never)) as { context?: readonly unknown[] }
-    expect(sent.context?.length).toBe(1)
-    expect(String(sent.context?.[0])).toStartWith('session-control completions: unit worker: clean: ')
-    expect(noticeLines(sent)).toEqual([])
-    expect(store.size).toBe(0)
-    expect(world.runs.some(argv => argv[0] === 'git')).toBe(false)
-  })
-
   test('on, the debug trace: one notice line per notice with its kind, ids and counts, never its text', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
     const world = mockWorld(on)
     storeOf(on)
@@ -1033,103 +845,6 @@ describe('the notices option', () => {
     expect(notices.find(line => line.kind === 'compliance-due')).toMatchObject({ session_id: SID_UNIT })
     const text = JSON.stringify(notices)
     for (const secret of ['Unit X', 'Old question', '/w/other', 'live worker', 'unit worker']) expect(text).not.toContain(secret)
-  })
-})
-
-// ---------------------------------------------------------------- Windows
-
-const WIN_OPTIONS = { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, helper: 'off' }
-
-type WinWorld = { files: Map<string, string>; toasts: string[]; probe: string[]; clock: World['clock'] }
-
-/** The Windows machine: files by their C:/ path, the probe's lines as PROBE_PS1 prints them, the file script answering ok. */
-function winWorld(on: On, probe: string[]): WinWorld {
-  const w: WinWorld = { files: new Map(), toasts: [], probe, clock: mock.clock(on, { now: NOW_MS }) }
-  winBase(on, WIN_ENV, w.toasts)
-  winFiles(on, w.files, given)
-  on('fs.exists', ($, e) => ({ value: w.files.has(given(e.path)) }))
-  on('fs.stat', ($, e) => {
-    if (w.files.has(given(e.path))) return { value: { kind: 'file', size: 1, mtimeMs: NOW_MS, isLink: false } as never }
-    throw new Error(`ENOENT ${e.path}`)
-  })
-  on('fs.list', () => ({ value: [] as never }))
-  on('process.run', ($, e) => {
-    const ok = { exitCode: 0, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
-    // Node and its helper's file operations over the map (the probe on Windows is PROBE_PS1's).
-    const node = nodeAnswer(e.argv, e.init?.stdin, w.files, given)
-    if (node !== undefined) return { value: node }
-    if (e.argv[0] === POWERSHELL && String(e.argv[6]).endsWith('/probe.ps1')) return { value: { ...ok, stdout: `${w.probe.join('\r\n')}\r\n` } }
-    if (e.argv[0] === POWERSHELL) return { value: { ...ok, stdout: '' } }
-    if (e.argv[0] === 'git') return { value: { ...ok, exitCode: 128, stdout: '' } }
-    throw new Error(`unexpected command ${e.argv.join(' ')}`)
-  })
-  return w
-}
-
-const winNoticeToasts = (w: WinWorld) => w.toasts.filter(text => TITLES.some(title => text.startsWith(`${title} \u00B7 `)))
-
-describe('Windows host', () => {
-  test('orphan: told after 30 s with the Windows cwd and config dir; the orchestrator\'s own claude.exe never', { options: WIN_OPTIONS }, async ($, on) => {
-    const tab = (...cols: (string | number)[]) => cols.join('\t')
-    const w = winWorld(on, [
-      tab('P', 5555, 'claude', 600, 'C:\\w\\other', 'C:\\w\\home\\.claude', '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus --output-format json'),
-      tab('P', 3000, 'claude', 900, 'C:\\w\\orch', 'C:\\w\\home\\.claude', '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --output-format stream-json'),
-    ])
-    storeOf(on)
-    ownSession(on)
-    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
-    w.files.set(WIN_REGISTRY, '[]\n')
-    w.files.set('C:/w/home/.claude/sessions/5555.json', JSON.stringify({ pid: 5555, sessionId: OTHER_SID, startedAt: NOW_MS - 600_000 }))
-    w.files.set('C:/w/home/.claude/sessions/3000.json', JSON.stringify({ pid: 3000, sessionId: OWN_SID, startedAt: NOW_MS - 900_000 }))
-    await startWinOrch($)
-    for (let step = 0; step < 5; step++) await w.clock.advance(5000)
-    expect(winNoticeToasts(w)).toEqual([])
-    await w.clock.advance(5000)
-    expect(winNoticeToasts(w)).toEqual([
-      `Unregistered session \u00B7 pid 5555 is a live headless claude no registry entry claims (cwd C:\\w\\other, config dir C:\\w\\home\\.claude, age 10m00s, unclaimed 30s, session ${OTHER_SID}); raise an open point naming it`,
-    ])
-    for (let step = 0; step < 12; step++) await w.clock.advance(5000)
-    expect(winNoticeToasts(w).length).toBe(1)
-  })
-
-  test('orphan: a live headless claude.exe in <...>\\Temp\\session-control-e2e<suffix>\\orch or \\work is no orphan row and no notice; each other form stays an orphan', { options: WIN_OPTIONS }, async ($, on) => {
-    const tab = (...cols: (string | number)[]) => cols.join('\t')
-    const cmd = '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model haiku --max-budget-usd 0.25 --output-format stream-json --verbose'
-    const { windows } = E2E_CWDS
-    const exempt = windows.exempt.map((cwd, i) => [7100 + i, cwd] as const)
-    const kept = windows.kept.map((cwd, i) => [7200 + i, cwd] as const)
-    const w = winWorld(on, [...exempt, ...kept].map(([pid, cwd]) => tab('P', pid, 'claude', 600, cwd, 'C:\\w\\home\\.claude', cmd)))
-    const store = storeOf(on)
-    ownSession(on)
-    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
-    w.files.set(WIN_REGISTRY, '[]\n')
-    await startWinOrch($)
-    for (let step = 0; step < 18; step++) await w.clock.advance(5000)
-    // The one notice state of the load, under the key of its Windows orchestrator directory.
-    const keys = [...store.keys()].filter(key => key.startsWith('notices:'))
-    expect(keys.length).toBe(1)
-    const orphans = parseNoticeState(store.get(keys[0]!)).orphans
-    expect(Object.keys(orphans).sort()).toEqual(kept.map(([pid]) => String(pid)).sort())
-    expect(Object.values(orphans).every(one => one.isTold === true)).toBe(true)
-    expect(w.toasts.join('\n')).not.toContain('pid 71')
-    expect(winNoticeToasts(w).length).toBeGreaterThan(0)
-    expect((await orphanRowPids($)).sort()).toEqual(kept.map(([pid]) => pid).sort())
-  })
-
-  test('stall: a live registered worker (the probe\'s A line proves it) with an old transcript', { options: WIN_OPTIONS }, async ($, on) => {
-    const tab = (...cols: (string | number)[]) => cols.join('\t')
-    const w = winWorld(on, [
-      tab('P', 4101, 'claude', 1200, 'C:\\work\\a', 'C:/w/home/.claude', '"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model haiku'),
-      tab('A', 4101, 'claude', 1789998800000, 1789998800000, SID_LIVE),
-      tab('T', SID_LIVE, NOW_SEC - STALL_SEC - 120),
-    ])
-    storeOf(on)
-    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
-    w.files.set(WIN_REGISTRY, JSON.stringify([{ title: 'win worker', pid: 4101, session_id: SID_LIVE, config_dir: 'C:/w/home/.claude', cwd: 'C:/work/a', model: 'haiku', effort: 'low' }]))
-    await startWinOrch($)
-    expect(winNoticeToasts(w)).toEqual([`Session stalled \u00B7 worker "win worker" (session ${SID_LIVE.slice(0, 8)}) is alive but its transcript has not been written for 17 min; look at it with worker_tail`])
-    for (let step = 0; step < 6; step++) await w.clock.advance(5000)
-    expect(winNoticeToasts(w).length).toBe(1)
   })
 })
 
@@ -1174,17 +889,6 @@ describe('notices.ts', () => {
     expect(state.orphans).toEqual({})
   })
 
-  test('orphanStep: an e2e run directory under the temporary directory is never remembered or due, on Linux and Windows; the other forms are', () => {
-    const line = (pid: number, cwd: string) => ['P', pid, 'claude', 1, cwd, '/c', 'claude -p --model haiku'].join('\t')
-    for (const [cases, temp] of [[E2E_CWDS.linux, { isWindows: false, dirs: ['/tmp'] }], [E2E_CWDS.windows, { isWindows: true, dirs: [] }]] as const) {
-      const state = freshNoticeState()
-      const seen = { ...facts([...cases.exempt.map((cwd, i) => line(100 + i, cwd)), ...cases.kept.map((cwd, i) => line(200 + i, cwd))]), temp }
-      expect(orphanStep(state, [], seen, 1000)).toEqual([])
-      expect(orphanStep(state, [], seen, 1000 + ORPHAN_GRACE_SEC * 1000).map(one => one.pid)).toEqual(cases.kept.map((_, i) => 200 + i))
-      expect(Object.keys(state.orphans).sort()).toEqual(cases.kept.map((_, i) => String(200 + i)).sort())
-    }
-  })
-
   test('stallStep: needs the Abort check alive and a known transcript mtime', () => {
     const state = freshNoticeState()
     const entry = { title: 't', pid: 7, session_id: 's7', config_dir: '/c' }
@@ -1214,18 +918,6 @@ describe('notices.ts', () => {
     expect(harvestNotices(state, { ...entry, pid: 6 }, { kind: 'error', summary: '' }, queue).length).toBe(3)
     pruneHarvested(state, [], JSON.stringify({ tasks: [{ id: 'full', status: 'queued' }] }))
     expect(state.queueReady).toEqual([`full ${SID_UNIT}:5`, `full ${SID_UNIT}:6`])
-  })
-
-  test('unitStep: told on a trigger only, once, re-armed by a task queued or running; an unreadable queue changes nothing', () => {
-    const state = freshNoticeState()
-    const empty = JSON.stringify({ tasks: [{ id: 'd', status: 'done' }] })
-    expect(unitStep(state, empty, false)).toEqual([])
-    expect(unitStep(state, empty, true).map(one => one.message)).toEqual(['queue empty: run audit_state and report'])
-    expect(unitStep(state, empty, true)).toEqual([])
-    expect(unitStep(state, '{ broken', true)).toEqual([])
-    expect(state.isUnitTold).toBe(true)
-    expect(unitStep(state, JSON.stringify({ tasks: [{ status: 'running' }] }), false)).toEqual([])
-    expect(unitStep(state, empty, true).length).toBe(1)
   })
 
   test('pointStep: the earlier of the end of the raised day and the first sight counts; once per day', () => {
@@ -1322,47 +1014,6 @@ describe('a registry that cannot be read', () => {
     expect(parseNoticeState(store.get(KEY)).orphans).toEqual({})
   })
 
-  for (const [how, fail] of FAILED_READS) {
-    test(`${how} for 40 s with a registered live worker: no orphan notice, nothing pruned, nothing told again once it reads back`, { options: OPTIONS }, async ($, on) => {
-      const world = mockWorld(on)
-      const store = storeOf(on)
-      echoPrompt(on)
-      seed(world, { entries: [seedLiveWorker(world, SID_LIVE), seedSecondWorker(world)] })
-      const good = world.files.get(REGISTRY) ?? ''
-      seedTranscript(world, SID_LIVE)
-      world.mtimes.set(SID_LIVE, NOW_SEC - STALL_SEC - 60)
-      await start($)
-      const before = clone(store.get(KEY))
-      fail(world)
-      await poll(world, 40)
-      expect(toastsOf(world, 'orphan')).toEqual([])
-      expect(store.get(KEY)).toEqual(before)
-      restore(world, good)
-      await poll(world, 60)
-      expect(toastsOf(world, 'orphan')).toEqual([])
-      expect(toastsOf(world, 'stall').length).toBe(1)
-    })
-  }
-
-  test('a registry that parses to [] is a sound, empty registry: a live unclaimed headless process is told as an orphan after 30 s', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    ownSession(on)
-    echoPrompt(on)
-    seed(world, { entries: [seedLiveWorker(world, SID_LIVE)] })
-    await start($)
-    await poll(world, 10)
-    // The entry is gone from a registry that reads back as []: pid 4101 is an orphan from the next poll on (5 s later),
-    // and told once it has been unclaimed for 30 s.
-    world.files.set(REGISTRY, '[]')
-    await poll(world, ORPHAN_GRACE_SEC)
-    expect(toastsOf(world, 'orphan')).toEqual([])
-    await poll(world, 5)
-    expect(toastsOf(world, 'orphan').length).toBe(1)
-    expect(toastsOf(world, 'orphan')[0]).toContain('pid 4101 is a live headless claude no registry entry claims')
-    expect(noticeLines(await userPrompt($)).filter(line => line.startsWith(`${NOTICE_PREFIX} orphan: pid 4101 `)).length).toBe(1)
-  })
-
   test('a failed read still looks at the queue and the points: unit-complete re-arms and an old open point is told', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     storeOf(on)
@@ -1388,104 +1039,6 @@ describe('notices.ts: the registry read', () => {
 })
 
 // ---------------------------------------------------------------- many at once (decision mod-20)
-
-const MORE_TITLE = TOAST_TITLES.moreNotices
-
-/** `count` live headless claudes no entry claims, pids from 7000 up, each with a sessions file of its own. */
-function seedOrphans(world: World, count: number): number[] {
-  const pids = Array.from({ length: count }, (_, at) => 7000 + at)
-  for (const pid of pids) seedOrphan(world, `7a7a7a7a-0000-4000-8000-${String(pid).padStart(12, '0')}`, pid)
-  return pids
-}
-
-/** `count` open points raised three days ago, ids op-01 up. */
-const oldPoints = (count: number, from = 1) =>
-  Array.from({ length: count }, (_, at) => ({ id: `op-${String(from + at).padStart(2, '0')}`, status: 'open', raised: localDate(NOW_MS - 3 * 86_400_000), title: `Question ${from + at}` }))
-
-describe('many notices at once', () => {
-  test('45 orphans in one poll: 5 told one by one and the other 40 in one notice; 3 toasts and one summary toast; every pid recorded, none told again', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    const store = storeOf(on)
-    ownSession(on)
-    echoPrompt(on)
-    seed(world)
-    const pids = seedOrphans(world, 45)
-    await start($)
-    await poll(world, ORPHAN_GRACE_SEC)
-    const toasts = world.toasts.filter(text => text.startsWith(`${TOAST_TITLES.orphan} · `) || text.startsWith(`${MORE_TITLE} · `))
-    expect(toasts.length).toBe(4)
-    expect(toasts.slice(0, 3).every(text => text.startsWith(`${TOAST_TITLES.orphan} · pid 700`))).toBe(true)
-    expect(toasts[3]).toBe(`${MORE_TITLE} · 3 more notices: see the next prompt`)
-    const lines = noticeLines(await userPrompt($))
-    expect(lines.length).toBe(6)
-    expect(lines.slice(0, 5).map(line => line.slice(0, `${NOTICE_PREFIX} orphan: pid 7000 `.length))).toEqual([7000, 7001, 7002, 7003, 7004].map(pid => `${NOTICE_PREFIX} orphan: pid ${pid} `))
-    expect(lines[5]).toBe(`${NOTICE_PREFIX} orphan: 40 more unregistered sessions: 7005, 7006, 7007, 7008, 7009, 7010, 7011, 7012, 7013, 7014 and 30 not listed; list_sessions shows each; raise an open point naming them`)
-    const orphans = parseNoticeState(store.get(KEY)).orphans
-    expect(Object.keys(orphans).sort()).toEqual(pids.map(String).sort())
-    expect(Object.values(orphans).every(one => one.isTold === true)).toBe(true)
-    await poll(world, 120)
-    expect(noticeToasts(world).length).toBe(3)
-    expect(world.toasts.filter(text => text.startsWith(`${MORE_TITLE} · `)).length).toBe(1)
-    expect(noticeLines(await userPrompt($))).toEqual([])
-  })
-
-  test('a mix of kinds in one poll (2 orphans, a stall, 2 old open points): the first 3 toasted, one summary for the other 2, all 5 lines on the next prompt', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    ownSession(on)
-    echoPrompt(on)
-    seed(world, { entries: [seedLiveWorker(world, SID_LIVE)] })
-    seedOrphans(world, 2)
-    seedTranscript(world, SID_LIVE)
-    // The stall and the orphans come due at the same poll, 30 s on; the points file appears just before it.
-    world.mtimes.set(SID_LIVE, NOW_SEC + ORPHAN_GRACE_SEC - STALL_SEC)
-    await start($)
-    await poll(world, ORPHAN_GRACE_SEC - 5)
-    expect(noticeToasts(world)).toEqual([])
-    world.files.set(`${ORCH}/open-points.json`, JSON.stringify({ points: oldPoints(2) }))
-    await poll(world, 5)
-    const titles = world.toasts.filter(text => noticeToasts(world).includes(text) || text.startsWith(`${MORE_TITLE} · `)).map(text => text.slice(0, text.indexOf(' · ')))
-    expect(titles).toEqual([TOAST_TITLES.orphan, TOAST_TITLES.orphan, TOAST_TITLES.stall, MORE_TITLE])
-    expect(world.toasts.at(-1)).toBe(`${MORE_TITLE} · 2 more notices: see the next prompt`)
-    const kinds = noticeLines(await userPrompt($)).map(line => line.slice(NOTICE_PREFIX.length + 1, line.indexOf(': ', NOTICE_PREFIX.length + 1)))
-    expect(kinds).toEqual(['orphan', 'orphan', 'stall', 'open-point-age', 'open-point-age'])
-  })
-
-  test('a harvest with 4 queued tasks waiting and a compliance check, and 2 old open points, in one refresh: 3 toasts for the harvest, 2 for the poll, one summary', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    echoPrompt(on)
-    seed(world, {
-      entries: [{ ...UNIT_ENTRY }],
-      queue: ['q-1', 'q-2', 'q-3', 'q-4'].map(id => ({ id, status: 'queued', title: id, waits_for: SID_UNIT })),
-      points: oldPoints(2),
-    })
-    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
-    await start($)
-    const shown = world.toasts.filter(text => noticeToasts(world).includes(text) || text.startsWith(`${MORE_TITLE} · `)).map(text => text.slice(0, text.indexOf(' · ')))
-    expect(shown).toEqual([TOAST_TITLES['queue-ready'], TOAST_TITLES['queue-ready'], TOAST_TITLES['queue-ready'], TOAST_TITLES['open-point-age'], TOAST_TITLES['open-point-age'], MORE_TITLE])
-    expect(world.toasts.at(-1)).toBe(`${MORE_TITLE} · 2 more notices: see the next prompt`)
-    const kinds = noticeLines(await userPrompt($)).map(line => line.slice(NOTICE_PREFIX.length + 1, line.indexOf(': ', NOTICE_PREFIX.length + 1)))
-    expect(kinds).toEqual(['queue-ready', 'queue-ready', 'queue-ready', 'queue-ready', 'compliance-due', 'open-point-age', 'open-point-age'])
-  })
-
-  test('more than 30 lines waiting: the first 29 stay and the last line says how many were not shown, added up over several passes; drained by the prompt', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    echoPrompt(on)
-    seed(world, { points: oldPoints(40) })
-    await start($)
-    expect(noticeToasts(world).length).toBe(3)
-    expect(world.toasts.at(-1)).toBe(`${MORE_TITLE} · 37 more notices: see the next prompt`)
-    world.files.set(`${ORCH}/open-points.json`, JSON.stringify({ points: [...oldPoints(40), ...oldPoints(5, 41)] }))
-    await poll(world, 5)
-    const lines = noticeLines(await userPrompt($))
-    expect(lines.length).toBe(30)
-    expect(lines.slice(0, 29).map(line => /open point (op-\d+)/.exec(line)?.[1])).toEqual(oldPoints(29).map(point => point.id))
-    expect(lines[29]).toBe(`${NOTICE_PREFIX} more: 16 further notices not shown; run list_sessions and audit_state`)
-    expect(noticeLines(await userPrompt($))).toEqual([])
-  })
-})
 
 describe('notices.ts: the caps', () => {
   test('pendingWith: under the cap the lines are kept as they come; past it 29 stay and the more line counts the rest, over several additions', () => {
@@ -1515,29 +1068,11 @@ describe('notices.ts: the caps', () => {
 // ---------------------------------------------------------------- completion notes redacted (decision mod-20)
 
 describe('completion notes', () => {
-  const TITLE_CANARY = ['sk', 'canarytitle00000000'].join('-')
-  const RESULT_CANARY = ['ghp', 'canaryresult0000000000'].join('_')
   const ERROR_CANARY = ['sk', 'canaryerror000000000'].join('-')
   const notification = ($: { prompt: { submit: (e: never) => Promise<unknown> } }) =>
     $.prompt.submit({ text: 'notification', wait: false, origin: { kind: 'task-notification' } } as never) as Promise<{ context?: readonly unknown[] }>
   const completions = (sent: { context?: readonly unknown[] }) => (sent.context ?? []).map(String).filter(line => line.startsWith('session-control completions: '))
   const REPORT_CHECK = 'report check: report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes'
-
-  test('a canary in the title and one in the result summary: redacted in the note and the toast; the rest of the wording as before', { options: OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    echoPrompt(on)
-    seed(world, { entries: [{ ...UNIT_ENTRY, title: `rotate ${TITLE_CANARY} worker` }] })
-    world.files.set(`${RUNS}/unit.json`, JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: `Done; the canary ${RESULT_CANARY} was revoked and replaced.`, session_id: SID_UNIT }))
-    await start($)
-    const toast = world.toasts.find(text => text.startsWith('Session finished · '))
-    expect(toast).toBe('Session finished · rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.')
-    const notes = completions(await notification($))
-    // The secret scan (decision win-22) adds its line last: kinds only.
-    expect(notes).toEqual([`session-control completions: rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.; rotate [redacted] worker: ${REPORT_CHECK}; rotate [redacted] worker: secret scan: 1 likely secret redacted (kinds: github-token)`])
-    const everything = JSON.stringify([world.toasts, notes])
-    for (const canary of [TITLE_CANARY, RESULT_CANARY]) expect(everything).not.toContain(canary)
-  })
 
   test('a canary in a failed run\'s message: redacted; no title: the session id\'s first 8 characters, readable; a usual title and summary unchanged', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)

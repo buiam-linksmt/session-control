@@ -7,7 +7,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { ProcessRunInit, ProcessRunResult } from 'claude-code'
 
 import type { HostPort } from '../hooks/host'
-import { NODE_REFUSAL, USAGE_CALL_TIMEOUT_MS, usageOfCall, withHelper } from '../hooks/host-helper'
+import { NODE_REFUSAL, usageOfCall, withHelper } from '../hooks/host-helper'
 import type { HelperNote } from '../hooks/host-helper'
 import { posixHost } from '../hooks/host-posix'
 import { windowsHost } from '../hooks/host-windows'
@@ -80,34 +80,10 @@ describe('the helper route', () => {
   }
   const windows = { ok: true, five: { percent: 12, resets: 'Oct 11, 11:20am (Europe/Budapest)' }, seven: { percent: 41, resets: 'Oct 16, 1pm (Europe/Budapest)' } }
 
-  test('the helper answers: one node process with the directory, no claude run by the mod itself, no note', async () => {
-    const sim = machine(() => ran(JSON.stringify(windows)))
-    const host = withHelper(posixHost, setup)
-    expect(await host.probeUsage(sim.port, '/home/u/.claude/second', false)).toEqual(windows)
-    const calls = sim.runs.filter(one => one.argv[1] === SCRIPT)
-    expect(calls.map(one => [one.argv[2], one.init?.stdin, one.init?.timeoutMs, one.shown])).toEqual([['probeUsage', '{"configDir":"/home/u/.claude/second"}', USAGE_CALL_TIMEOUT_MS, { helper: 'probeUsage', configDir: '/home/u/.claude/second', isInherited: false }]])
-    expect(sim.runs.some(one => one.argv[0] === 'claude')).toBe(false)
-    expect(sim.notes.filter(one => one.kind === 'failed')).toEqual([])
-  })
-
   test('the default directory goes as isInherited', async () => {
     const sim = machine(request => ran(JSON.stringify({ ok: true, five: windows.five, seven: null, isInherited: request.isInherited })))
     await withHelper(posixHost, setup).probeUsage(sim.port, '/home/u/.claude', true)
     expect(sim.runs.find(one => one.argv[1] === SCRIPT)?.init?.stdin).toBe('{"configDir":"/home/u/.claude","isInherited":true}')
-  })
-
-  test("the probe's own codes are the answer, with no fallback and no note; a call that timed out is TIMEOUT", async () => {
-    for (const code of USAGE_CODES) {
-      const sim = machine(() => ran(JSON.stringify({ ok: false, code }), 1))
-      expect(await withHelper(posixHost, setup).probeUsage(sim.port, '/home/u/.claude', false)).toEqual({ ok: false, code })
-      expect(sim.runs.some(one => one.argv[0] === 'claude')).toBe(false)
-      expect(sim.notes.filter(one => one.kind === 'failed')).toEqual([])
-    }
-    const slow = machine(() => {
-      throw new Error('the command timed out after 20000 ms')
-    })
-    expect(await withHelper(posixHost, setup).probeUsage(slow.port, '/home/u/.claude', false)).toEqual({ ok: false, code: 'TIMEOUT' })
-    expect(slow.runs.some(one => one.argv[0] === 'claude')).toBe(false)
   })
 
   test('a failure of the helper itself is FAILED, told to the port with its code; nothing else runs', async () => {

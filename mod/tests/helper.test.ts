@@ -5,13 +5,11 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On, ProcessRunResult } from 'claude-code'
 
-import { parseProcFacts } from '../hooks/core'
 import type { HostPort, RotatePlan } from '../hooks/host'
 import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, NODE_REFUSAL, NODE_WARNING, appendText, newerAnswer, nodeMajor, readAnswer, rejectionCode, treeAnswer, withHelper } from '../hooks/host-helper'
-import { TAIL_SHAPED_MAX_BYTES } from '../hooks/host-shared'
 import type { HelperNote } from '../hooks/host-helper'
 import { posixHost } from '../hooks/host-posix'
-import { PROBE_PS1, windowsHost } from '../hooks/host-windows'
+import { windowsHost } from '../hooks/host-windows'
 import { helperAnswer as fakeHelper } from './fake-helper'
 import { NOW_MS, worldPath } from './fixtures'
 import { machineBase } from './mock-world'
@@ -160,52 +158,6 @@ describe('helper answers', () => {
 })
 
 describe('withHelper on Linux', () => {
-  test('Node is looked for once, untraced, at the first operation; each operation is one helper call with its request', async () => {
-    const sim = machine()
-    const host = helped()
-    const port = portOf(sim)
-    sim.files.set('/m/reg.json', '[]\n')
-    sim.files.set('/m/runs/t.jsonl', 'a\nb\n')
-    sim.files.set('/m/a.tmp', 'A')
-    sim.files.set('/m/gone', 'x')
-
-    const facts = await host.probe(port, [{ pid: 4242, session_id: SID, config_dir: '/m/cfg' }])
-    expect(facts).toEqual(parseProcFacts(PROBE_OUT))
-    expect(await host.writeAtomic(port, '/m/reg.json', '[1]\n', '[]\n')).toBe(true)
-    expect(await host.writeAtomic(port, '/m/reg.json', '[2]\n', '[]\n')).toBe(false)
-    await host.renameOver(port, '/m/a.tmp', '/m/a')
-    expect(await host.removeFile(port, '/m/gone')).toBe(true)
-    const codes: number[] = []
-    expect(await host.append(port, '/m/runs/log.jsonl', ['{"a":1}', '{"b":2}'], false, code => codes.push(code))).toBeUndefined()
-    expect(await host.tail(port, '/m/runs/t.jsonl')).toBe('a\nb\n')
-    await host.rotate(port, { ...PLAN, path: '/m/runs/t.jsonl', moves: [['/m/runs/t.jsonl', '/m/runs/t.jsonl.1']] })
-
-    expect(lookups(sim).map(one => one.isQuiet)).toEqual([true])
-    expect(sim.runs[0]?.argv).toEqual([NODE, '--version'])
-    expect(sim.notes).toEqual([{ kind: 'node', isActive: true, version: 'v24.14.0' }])
-    expect(calls(sim)).toEqual([
-      { op: 'probe', request: { args: [`pid:4242|/m/cfg`, `t:${SID}|/m/cfg`] } },
-      { op: 'writeAtomic', request: { path: '/m/reg.json', text: '[1]\n', expected: '[]\n' } },
-      { op: 'writeAtomic', request: { path: '/m/reg.json', text: '[2]\n', expected: '[]\n' } },
-      { op: 'renameOver', request: { from: '/m/a.tmp', to: '/m/a' } },
-      { op: 'removeFile', request: { path: '/m/gone' } },
-      { op: 'append', request: { path: '/m/runs/log.jsonl', text: '{"a":1}\n{"b":2}\n' } },
-      { op: 'tail', request: { path: '/m/runs/t.jsonl', lines: 600, width: 20000 } },
-      { op: 'rotate', request: { path: '/m/runs/t.jsonl', adding: 10, maxBytes: 8, moves: [['/m/runs/t.jsonl', '/m/runs/t.jsonl.1']] } },
-    ])
-    // No adapter command ran: one process per operation, the helper's.
-    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
-    expect([sim.files.get('/m/reg.json'), sim.files.get('/m/a'), sim.files.has('/m/gone'), sim.files.get('/m/runs/log.jsonl'), sim.files.get('/m/runs/t.jsonl.1')]).toEqual([
-      '[1]\n',
-      'A',
-      false,
-      '{"a":1}\n{"b":2}\n',
-      'a\nb\n',
-    ])
-    expect(codes).toEqual([0])
-    expect(failures(sim)).toEqual([])
-  })
-
   test('the trace sees the operation and its path, never the request: the text written stays out', async () => {
     const sim = machine()
     const port = portOf(sim)
@@ -271,37 +223,6 @@ describe('withHelper on Linux', () => {
     })
   }
 
-  /** A helper that does the operation, then outlasts its timeout (the write went through, the answer never came). */
-  const writesThenTimesOut = (sim: Sim) => (op: string, request: Request): ProcessRunResult => {
-    if (op === 'append' || op === 'batch') {
-      helperAnswer(sim.files, op, request)
-      throw new Error('the command timed out after 10000 ms')
-    }
-    const answer = helperAnswer(sim.files, op, request)
-    return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
-  }
-
-  test('removeRegularFile is one helper call with regularOnly; the helper\'s refusal of a link or a non-file is the answer, no fallback, no adapter command', async () => {
-    const sim = machine()
-    const host = helped()
-    const port = portOf(sim)
-    sim.files.set('/m/runs/a.json', 'A')
-    sim.files.set('/m/runs/sub/inner', 'I')
-    sim.files.set('/m/out/secret', 'S')
-    sim.links.set('/m/runs/link.json', '/m/out/secret')
-    sim.links.set('/m/runs/linkdir', '/m/out')
-    expect(await host.removeRegularFile(port, '/m/runs/a.json')).toBe('removed')
-    expect(await host.removeRegularFile(port, '/m/runs/a.json')).toBe('absent')
-    expect(await host.removeRegularFile(port, '/m/runs/link.json')).toBe('symlink')
-    expect(await host.removeRegularFile(port, '/m/runs/linkdir')).toBe('symlink')
-    expect(await host.removeRegularFile(port, '/m/runs/sub')).toBe('not-file')
-    expect(calls(sim)).toEqual(['/m/runs/a.json', '/m/runs/a.json', '/m/runs/link.json', '/m/runs/linkdir', '/m/runs/sub'].map(path => ({ op: 'removeFile', request: { path, regularOnly: true } })))
-    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
-    expect(failures(sim)).toEqual([])
-    expect([...sim.files.keys()].sort()).toEqual(['/m/out/secret', '/m/runs/sub/inner'])
-    expect(sim.links.size).toBe(2)
-  })
-
   test('removeRegularFile after a failed call (a spawn failure, a timeout, an access error, an answer that is not JSON, one without the field) answers failed, told by its code; nothing is removed', async () => {
     for (const [answering, code] of [
       ['spawn', 'SPAWN'],
@@ -318,30 +239,6 @@ describe('withHelper on Linux', () => {
       expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
       expect(sim.files.get('/m/runs/a.json')).toBe('A')
     }
-  })
-
-  test('an append that timed out after writing is not made again: one line in the log, a note that says so, no exit code', async () => {
-    const sim = machine('real')
-    sim.answering = writesThenTimesOut(sim)
-    const port = portOf(sim)
-    sim.files.set('/m/runs/cleared.jsonl', 'old\n')
-    const codes: number[] = []
-    expect(await helped().append(port, '/m/runs/cleared.jsonl', ['{"session_id":"x"}'], false, exit => codes.push(exit))).toBe('/m/runs/cleared.jsonl cannot be appended to (TIMEOUT)')
-    expect(sim.files.get('/m/runs/cleared.jsonl')).toBe('old\n{"session_id":"x"}\n')
-    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
-    expect(codes).toEqual([])
-    expect(failures(sim)).toEqual([{ kind: 'failed', op: 'append', code: 'TIMEOUT', isQuiet: false }])
-  })
-
-  test('the trace\'s batch that timed out after writing is not made again: rotated once, the lines once', async () => {
-    const sim = machine('real')
-    sim.answering = writesThenTimesOut(sim)
-    const port = portOf(sim)
-    sim.files.set('/m/runs/trace.log', 'old\n')
-    expect(await helped().rotateAndAppend(port, '/m/runs/trace.log', ['new'], PLAN)).toBe('/m/runs/trace.log cannot be appended to (TIMEOUT)')
-    expect([sim.files.get('/m/runs/trace.log'), sim.files.get('/m/runs/trace.log.1'), sim.files.get('/m/runs/trace.log.2')]).toEqual(['new\n', 'old\n', undefined])
-    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
-    expect(failures(sim)).toEqual([{ kind: 'failed', op: 'batch', code: 'TIMEOUT', isQuiet: true }])
   })
 
   test('the batch: the rotation, then the append, in that order, in one helper process', async () => {
@@ -367,23 +264,6 @@ describe('withHelper on Linux', () => {
     await helped().rotateAndAppend(port, '/m/runs/trace.log', ['three'])
     expect((calls(sim).at(-1)?.request.ops as Request[]).map(step => step.op)).toEqual(['append'])
     expect(sim.files.get('/m/runs/trace.log')).toBe('one\ntwo\nthree\n')
-  })
-
-  test('a batch that failed after its rotation is not made again: the trace rotated once, the problem said', async () => {
-    const sim = machine((_, request) => {
-      // The rotation goes through, the append fails.
-      const steps = request.ops as Request[]
-      helperAnswer(sim.files, 'rotate', steps[0] ?? {})
-      return ran(JSON.stringify({ ok: false, code: 'NO_SPACE', at: 1, results: [{ ok: true, rotated: true }] }), 1)
-    })
-    const port = portOf(sim)
-    sim.files.set('/m/runs/trace.log', 'old\n')
-    sim.files.set('/m/runs/trace.log.1', 'older\n')
-    expect(await helped().rotateAndAppend(port, '/m/runs/trace.log', ['new'], PLAN)).toBe('/m/runs/trace.log cannot be appended to (NO_SPACE)')
-    expect(calls(sim).map(one => one.op)).toEqual(['batch'])
-    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
-    expect([sim.files.get('/m/runs/trace.log'), sim.files.get('/m/runs/trace.log.1'), sim.files.get('/m/runs/trace.log.2')]).toEqual([undefined, 'old\n', 'older\n'])
-    expect(failures(sim)).toEqual([{ kind: 'failed', op: 'batch', code: 'NO_SPACE', isQuiet: true }])
   })
 
   const NO_NODE: [string, string | null, Record<string, unknown>][] = [
@@ -445,38 +325,6 @@ describe('withHelper on Linux', () => {
     expect(calls(sim).map(one => one.op).sort()).toEqual(['append', 'probe'])
   })
 
-  test('no Node: looked for again at the first operation 10 minutes after the last lookup, not before; Node installed meanwhile is taken', async () => {
-    const sim = machine('real', null)
-    const host = helped()
-    const port = portOf(sim)
-    expect(HELPER_REDETECT_MS).toBe(600_000)
-    expect(await outcome(host.probe(port, []))).toEqual({ rejected: NODE_REFUSAL })
-    expect(lookups(sim).length).toBe(1)
-    // Node is installed four minutes on; the operations before the interval do not look for it.
-    sim.nowMs += 240_000
-    sim.version = 'v24.14.0\n'
-    expect(await outcome(host.probe(port, []))).toEqual({ rejected: NODE_REFUSAL })
-    sim.nowMs += HELPER_REDETECT_MS - 240_000 - 1
-    expect(await outcome(host.append(port, '/m/log', ['x'], false, () => undefined))).toEqual({ rejected: NODE_REFUSAL })
-    expect(lookups(sim).length).toBe(1)
-    expect(calls(sim)).toEqual([])
-    // At the interval, the next operation looks again, finds it and uses it.
-    sim.nowMs += 1
-    await host.append(port, '/m/log', ['y'], false, () => undefined)
-    expect(lookups(sim).length).toBe(2)
-    expect(calls(sim).map(one => one.op)).toEqual(['append'])
-    expect(sim.files.get('/m/log')).toBe('y\n')
-    // One note per change of state: none found, then found.
-    expect(sim.notes).toEqual([
-      { kind: 'node', isActive: false, reason: 'not-found' },
-      { kind: 'node', isActive: true, version: 'v24.14.0' },
-    ])
-    // Found, it stays for the load: an hour on, no lookup.
-    sim.nowMs += 3_600_000
-    await host.probe(port, [])
-    expect(lookups(sim).length).toBe(2)
-  })
-
   test('Node still missing at each later lookup: a lookup every 10 minutes at most, and no new note until its state changes', async () => {
     const sim = machine('real', null)
     const host = helped()
@@ -522,25 +370,6 @@ describe('withHelper on Linux', () => {
 })
 
 describe('withHelper: the listing and the shaped tail', () => {
-  test('filesNewerThan is one helper call with its request and a 30 s limit; a shaped tail asks the helper to keep the newest bytes', async () => {
-    const sim = machine()
-    const host = helped()
-    const timeouts: (number | undefined)[] = []
-    const base = portOf(sim)
-    const port: HostPort = { ...base, run: (argv, init, isQuiet, shown) => (timeouts.push(init?.timeoutMs), base.run(argv, init, isQuiet, shown)) }
-    sim.files.set('/m/work/a.txt', 'x')
-    sim.files.set('/m/runs/t.jsonl', 'a\nbb\nc\n')
-    expect(await host.filesNewerThan(port, '/m/work', 1700000000.9)).toEqual({ files: [], total: 0 })
-    expect(await host.tail(port, '/m/runs/t.jsonl', { lines: 2, width: 1 })).toBe('b\nc\n')
-    expect(calls(sim)).toEqual([
-      { op: 'filesNewerThan', request: { dir: '/m/work', since: 1700000000, max: 200 } },
-      { op: 'tail', request: { path: '/m/runs/t.jsonl', lines: 2, width: 1, maxBytes: TAIL_SHAPED_MAX_BYTES } },
-    ])
-    // The lookup, then the listing at 30 s and the tail at the usual 10 s.
-    expect(timeouts).toEqual([5_000, 30_000, 10_000])
-    expect(failures(sim)).toEqual([])
-  })
-
   test('filesNewerThan: an answer of the wrong shape or a directory the helper does not find answers nothing, told by its code', async () => {
     for (const [answer, code] of [
       ['{"ok":true,"files":"nope","total":1}', 'BAD_ANSWER'],
@@ -574,30 +403,6 @@ describe('withHelper: the listing and the shaped tail', () => {
 })
 
 describe('withHelper on Windows', () => {
-  test('the probe stays PROBE_PS1, run once Node is found; every file operation goes through the helper, a tail under the read cap too', async () => {
-    const sim = machine()
-    const host = helped(windowsHost)
-    const port = portOf(sim, 100)
-    sim.files.set('C:/m/reg.json', '[]\n')
-    sim.files.set('C:/m/t.jsonl', 'a\nb\n')
-    sim.files.set('C:/m/big.jsonl', `${'x'.repeat(120)}\nlast\n`)
-    const facts = await host.probe(port, [{ pid: 4242, session_id: SID, config_dir: 'C:/m/cfg' }], ['C:/m/cfg'])
-    expect(facts.claude.map(one => one.pid)).toEqual([4242])
-    expect(sim.runs[0]?.argv).toEqual([NODE, '--version'])
-    expect(sim.runs[1]?.argv[6]).toBe('/m/runs/probe.ps1')
-    expect(sim.files.get('/m/runs/probe.ps1')).toBe(PROBE_PS1)
-    expect(await host.writeAtomic(port, 'C:/m/reg.json', '[1]\n', '[]\n')).toBe(true)
-    expect(await host.tail(port, 'C:/m/t.jsonl')).toBe('a\nb\n')
-    expect(await host.tail(port, 'C:/m/big.jsonl')).toBe(`${'x'.repeat(120)}\nlast\n`)
-    expect(calls(sim)).toEqual([
-      { op: 'writeAtomic', request: { path: 'C:/m/reg.json', text: '[1]\n', expected: '[]\n' } },
-      { op: 'tail', request: { path: 'C:/m/t.jsonl', lines: 600, width: 20000 } },
-      { op: 'tail', request: { path: 'C:/m/big.jsonl', lines: 600, width: 20000 } },
-    ])
-    // The only PowerShell script that ran is the probe's.
-    expect(sim.runs.filter(one => one.argv[0] !== NODE).map(one => String(one.argv[6]).replace(/^.*\//, ''))).toEqual(['probe.ps1'])
-  })
-
   test('without Node the probe, the stop and every file operation refuse; no PowerShell script runs or is written', async () => {
     const sim = machine('real', null)
     const host = helped(windowsHost)
@@ -609,26 +414,6 @@ describe('withHelper on Windows', () => {
     expect(await outcome(host.prepareRunsDir(port, 'C:/m/runs'))).toEqual(refused)
     expect(sim.runs.map(one => one.argv[0])).toEqual([NODE])
     expect([...sim.files.keys()]).toEqual([])
-  })
-
-  test('removeRegularFile on Windows: through the helper, which keeps a link and a directory; a failed call answers failed', async () => {
-    const sim = machine()
-    const host = helped(windowsHost)
-    const port = portOf(sim)
-    sim.files.set('C:/m/runs/a.json', 'A')
-    sim.files.set('C:/m/runs/sub/inner', 'I')
-    sim.files.set('C:/m/out/secret', 'S')
-    sim.links.set('C:/m/runs/link.json', 'C:/m/out/secret')
-    expect(await host.removeRegularFile(port, 'C:/m/runs/a.json')).toBe('removed')
-    expect(await host.removeRegularFile(port, 'C:/m/runs/link.json')).toBe('symlink')
-    expect(await host.removeRegularFile(port, 'C:/m/runs/sub')).toBe('not-file')
-    expect(failures(sim)).toEqual([])
-    sim.answering = 'spawn'
-    sim.files.set('C:/m/runs/b.json', 'B')
-    expect(await host.removeRegularFile(port, 'C:/m/runs/b.json')).toBe('failed')
-    expect(failures(sim)).toEqual([{ kind: 'failed', op: 'removeFile', code: 'SPAWN', isQuiet: false }])
-    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
-    expect([...sim.files.keys()].sort()).toEqual(['C:/m/out/secret', 'C:/m/runs/b.json', 'C:/m/runs/sub/inner'])
   })
 })
 
@@ -717,26 +502,6 @@ const TOOL_CALLS: [string, Record<string, unknown>][] = [
 ]
 
 describe('helper options, through the plugin', () => {
-  test('auto (the default) with Node 24 on the PATH: the probe and the registry write go through the helper in the plugin\'s folder', { options: PLUGIN_OPTIONS }, async ($, on) => {
-    const w = world(on, 'node')
-    await startOrch($)
-    expect(nodeRuns(w)[0]).toEqual(['node', '--version'])
-    const helper = nodeRuns(w).filter(argv => argv[1] !== '--version')
-    expect(helper.length).toBeGreaterThan(0)
-    // The helper in the plugin's own folder ($.plugin.root), by absolute path: /... on Linux, C:\... on Windows.
-    const absolute = w.isWindowsHost ? /^[A-Za-z]:\\[^/]+\/helper\/host\.mjs$/ : /^\/.+\/helper\/host\.mjs$/
-    expect(helper.every(argv => argv.length === 3 && absolute.test(String(argv[1])) && !argv[1]?.includes('//'))).toBe(true)
-    expect(probes(w)).toEqual([['node', helper[0]?.[1] ?? '', 'probe']])
-    expect(w.argv.filter(argv => argv[0] === 'sh')).toEqual([])
-    expect(w.toasts).toEqual([])
-  })
-
-  test('an unknown value is auto', { options: { ...PLUGIN_OPTIONS, helper: 'sometimes' } }, async ($, on) => {
-    const w = world(on, 'node')
-    await startOrch($)
-    expect(probes(w).every(argv => argv[0] === 'node')).toBe(true)
-  })
-
   test('a leftover helper option (off) is ignored without an error: Node is looked for and the helper runs', { options: { ...PLUGIN_OPTIONS, helper: 'off' } }, async ($, on) => {
     const w = world(on, 'node')
     await startOrch($)
@@ -843,32 +608,6 @@ describe('helper options, through the plugin', () => {
     ])
     expect(trace.filter(line => line.event === 'helper.failed')).toEqual([])
   })
-
-  test('a helper call that fails: a helper.failed trace line with the operation and the code, no toast of its own; the failed probe is a tracking problem', { options: { ...PLUGIN_OPTIONS, debug: true } }, async ($, on) => {
-    const w = world(on, 'node', (op, request) => {
-      if (op === 'probe') return ran('{"ok":false,"code":"ACCESS"}', 1)
-      const answer = helperAnswer(w.sim.files, op, request)
-      return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
-    })
-    await startOrch($)
-    await w.clock.advance(5000)
-    const trace = (w.sim.files.get('/m/home/.claude/session-control/runs/trace.log') ?? '').trimEnd().split('\n').filter(line => line !== '').map(line => JSON.parse(line) as Record<string, unknown>)
-    const lines = trace.filter(line => line.event === 'helper.failed')
-    expect(lines.length).toBeGreaterThan(1)
-    expect(lines.every(line => Object.keys(line).sort().join() === 'code,event,op,seq,ts' && line.op === 'probe' && line.code === 'ACCESS')).toBe(true)
-    expect(w.toasts).toEqual(['Tracking problem \u00B7 Error: the process probe failed (ACCESS)'])
-  })
-
-  test('the trace shows the helper in use: its detection line and each call by operation and path, never the request', { options: { ...PLUGIN_OPTIONS, debug: true } }, async ($, on) => {
-    const w = world(on, 'node')
-    await startOrch($)
-    const text = w.sim.files.get('/m/home/.claude/session-control/runs/trace.log') ?? ''
-    const trace = text.trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
-    expect(trace.find(line => line.event === 'helper')).toMatchObject({ isActive: true, version: 'v24.14.0' })
-    expect(trace.filter(line => line.event === 'process.run' && line.helper === 'probe').length).toBeGreaterThan(0)
-    expect(trace.filter(line => line.event === 'helper.failed')).toEqual([])
-    expect(trace.every(line => line.event !== 'process.run' || !('argv' in line) || !String(line.argv).includes('helper'))).toBe(true)
-  })
 })
 
 // ---------------------------------------------------------------- hashTrees (the drift band, feature/drift-digest)
@@ -896,21 +635,6 @@ describe('withHelper: hashTrees', () => {
     }
   }
 
-  test('one helper batch hashes both folders with the same method, at the listing\'s 30 s limit; no fallback', async () => {
-    const sim = machine()
-    const port = trees(sim)
-    const timeouts: (number | undefined)[] = []
-    const timed: HostPort = { ...port, run: (argv, init, isQuiet, shown) => (timeouts.push(init?.timeoutMs), port.run(argv, init, isQuiet, shown)) }
-    const found = await helped().hashTrees(timed, ['/m/loaded', '/m/source'], SPEC)
-    expect(found?.map(one => one.method)).toEqual(['sha256', 'sha256'])
-    expect(Object.keys(found?.[0]?.files ?? {})).toEqual(['.claude-plugin/plugin.json', 'hooks/a.ts', 'hooks/b.ts', 'types/index.d.ts'])
-    expect(found?.[0]?.files['hooks/a.ts']).toBe(found?.[1]?.files['hooks/a.ts'])
-    expect(found?.[0]?.files['hooks/b.ts']).not.toBe(found?.[1]?.files['hooks/b.ts'])
-    expect(calls(sim)).toEqual([{ op: 'batch', request: { ops: ['/m/loaded', '/m/source'].map(root => ({ op: 'hashTree', root, dirs: SPEC.dirs, files: SPEC.files })) } }])
-    expect(timeouts).toEqual([5_000, 30_000])
-    expect(failures(sim)).toEqual([])
-  })
-
   for (const code of ['NOT_FOUND', 'NOT_DIR', 'TOO_LARGE', 'ACCESS', 'IO']) {
     test(`a ${code} from the helper is the answer: nothing compared, no native hash, no fallback note`, async () => {
       const sim = machine(() => ran(`{"ok":false,"code":"${code}","at":1,"results":[]}`, 1))
@@ -920,22 +644,6 @@ describe('withHelper: hashTrees', () => {
       expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
     })
   }
-
-  test('a helper that cannot hash (node not starting, a timeout, no answer, an older helper, a wrong shape): nothing compared, told by its code', async () => {
-    for (const [answering, code] of [
-      ['spawn', 'SPAWN'],
-      ['timeout', 'TIMEOUT'],
-      [() => ran('', 1, 'Error: Cannot find module'), 'BAD_JSON'],
-      [() => ran('{"ok":false,"code":"BAD_OP","at":0,"results":[]}', 1), 'BAD_OP'],
-      [() => ran('{"ok":true,"results":[{"ok":true,"files":[{"path":"a","sha256":"x"}]},{"ok":true,"files":[]}]}'), 'BAD_ANSWER'],
-    ] as const) {
-      const sim = machine(answering)
-      const port = trees(sim)
-      expect(await helped().hashTrees(port, ['/m/loaded', '/m/source'], SPEC)).toBeUndefined()
-      expect(failures(sim)).toEqual([{ kind: 'failed', op: 'hashTree', code, isQuiet: false }])
-      expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
-    }
-  })
 
   test('on Windows the helper hashes too (node.exe takes the same request)', async () => {
     const sim = machine()

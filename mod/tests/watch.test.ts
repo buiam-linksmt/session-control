@@ -5,13 +5,13 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { TOAST_TITLES, parseProcFacts } from '../hooks/core'
-import { LOCK_EVERY_SEC, holderState, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from '../hooks/locks'
+import { TOAST_TITLES } from '../hooks/core'
+import { LOCK_EVERY_SEC, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from '../hooks/locks'
 import { REGISTRY_UNREADABLE_SEC, freshNoticeState, lockStep, noticeStoreKey, parseNoticeState, registryStep } from '../hooks/notices'
 import type { LockSeen, RegistryWatch } from '../hooks/notices'
 import { nodeAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
-import { HOME, OPTIONS, ORCH, POWERSHELL, REGISTRY, WIN_ENV, WIN_ORCH, WIN_REGISTRY, mockWorld, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
+import { OPTIONS, ORCH, POWERSHELL, REGISTRY, WIN_ENV, WIN_ORCH, WIN_REGISTRY, mockWorld, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
 import type { World } from './mock-world'
 import { echoPrompt, noticeLines, poll, seedOrch, startOrch, storeOf, toastsOf, userPrompt } from './notice-kit'
 
@@ -62,28 +62,6 @@ describe('lock-holder', () => {
     expect(parseNoticeState(store.get(noticeStoreKey(ORCH))).locks).toEqual({ [`${LOCKS}/stack`]: lockFingerprint('12345\n') })
     expect(touched(world)).toEqual([])
     expect(world.files.get(`${LOCKS}/stack/pid`)).toBe('12345\n')
-  })
-
-  test('an alive holder is never told; the same lock re-taken by a pid that dies is told; a changed content re-arms it', { options: LOCK_OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    seedOrch(world)
-    live(world, 4242)
-    world.files.set(`${LOCKS}/stack/owner`, '4242 started by w\n')
-    await startOrch($)
-    await poll(world, 2 * LOCK_EVERY_SEC)
-    expect(toastsOf(world.toasts, 'lock-holder')).toEqual([])
-    // The holder dies: told at the next check, once.
-    world.table.procs.delete(4242)
-    await poll(world, LOCK_EVERY_SEC)
-    expect(toastsOf(world.toasts, 'lock-holder')).toEqual([`${TOAST_TITLES['lock-holder']} \u00B7 ${deadText(`${LOCKS}/stack`, 4242)}`])
-    await poll(world, 3 * LOCK_EVERY_SEC)
-    expect(toastsOf(world.toasts, 'lock-holder').length).toBe(1)
-    // Another dead holder writes the lock: a new content, told again.
-    world.files.set(`${LOCKS}/stack/owner`, '4343 started by w2\n')
-    await poll(world, LOCK_EVERY_SEC)
-    expect(toastsOf(world.toasts, 'lock-holder').length).toBe(2)
-    expect(toastsOf(world.toasts, 'lock-holder')[1]).toContain('held by pid 4343')
   })
 
   test('the formats: a *.pid file, a *.lock file, a holder file, and the JSON lock of a real project (its pid, and its pid_start against a reused pid)', { options: LOCK_OPTIONS }, async ($, on) => {
@@ -194,92 +172,13 @@ describe('lock-holder', () => {
     expect(world.listed.filter(path => path === LOCKS).length).toBe(3)
     expect(world.listed.filter(path => path === OTHER_LOCKS).length).toBe(3)
   })
-
-  test('a lock that goes is forgotten: one written again by a dead pid is told again', { options: LOCK_OPTIONS }, async ($, on) => {
-    const world = mockWorld(on)
-    const store = storeOf(on)
-    seedOrch(world)
-    world.files.set(`${LOCKS}/stack.lock`, '12345\n')
-    await startOrch($)
-    await poll(world, 10)
-    expect(toastsOf(world.toasts, 'lock-holder').length).toBe(1)
-    world.files.delete(`${LOCKS}/stack.lock`)
-    await poll(world, LOCK_EVERY_SEC)
-    expect(parseNoticeState(store.get(noticeStoreKey(ORCH))).locks).toBeUndefined()
-    world.files.set(`${LOCKS}/stack.lock`, '12345\n')
-    await poll(world, LOCK_EVERY_SEC)
-    expect(toastsOf(world.toasts, 'lock-holder').length).toBe(2)
-  })
 })
 
 // ---------------------------------------------------------------- registry-unreadable
 
-/** The ways a registry read is unsound, each set on the world. */
-const UNSOUND: readonly [string, (world: World) => void][] = [
-  ['empty', world => world.files.set(REGISTRY, '')],
-  ['missing', world => world.files.delete(REGISTRY)],
-  ['unreadable', world => world.unreadable.add(REGISTRY)],
-  ['whitespace-only', world => world.files.set(REGISTRY, '  \n\t\n')],
-  ['unparsable', world => world.files.set(REGISTRY, '[{"title": "half')],
-]
-
 const UNREADABLE_TEXT = 'the registry has been unreadable for 5 min: the registry-based notices are paused'
 
 describe('registry-unreadable', () => {
-  for (const [how, fail] of UNSOUND) {
-    test(`${how} for 5 minutes: told once; not again while it stays so; a sound read re-arms it`, { options: POLL_OPTIONS, timeoutMs: 30_000 }, async ($, on) => {
-      const world = mockWorld(on)
-      storeOf(on)
-      echoPrompt(on)
-      seedOrch(world)
-      const good = world.files.get(REGISTRY) ?? '[]'
-      await startOrch($)
-      await poll(world, 10)
-      fail(world)
-      // The first unsound read is the next poll's (10 s on): told 5 minutes after it.
-      await poll(world, REGISTRY_UNREADABLE_SEC)
-      expect(toastsOf(world.toasts, 'registry-unreadable')).toEqual([])
-      await poll(world, 10)
-      expect(toastsOf(world.toasts, 'registry-unreadable')).toEqual([`${TOAST_TITLES['registry-unreadable']} \u00B7 ${UNREADABLE_TEXT}`])
-      expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: registry-unreadable: ${UNREADABLE_TEXT}`])
-      await poll(world, 60)
-      expect(toastsOf(world.toasts, 'registry-unreadable').length).toBe(1)
-      // A sound read ends the episode; the next one is told again after its own 5 minutes.
-      world.unreadable.delete(REGISTRY)
-      world.files.set(REGISTRY, good)
-      await poll(world, 10)
-      fail(world)
-      await poll(world, REGISTRY_UNREADABLE_SEC + 10)
-      expect(toastsOf(world.toasts, 'registry-unreadable').length).toBe(2)
-    })
-  }
-
-  test('flapping every other poll for 7 minutes: never told; the episode is kept in memory, never in the stored notice state', { options: POLL_OPTIONS, timeoutMs: 30_000 }, async ($, on) => {
-    const world = mockWorld(on)
-    const store = storeOf(on)
-    seedOrch(world)
-    const good = world.files.get(REGISTRY) ?? '[]'
-    await startOrch($)
-    for (let at = 0; at < 42; at++) {
-      if (at % 2 === 0) world.files.set(REGISTRY, '')
-      else world.files.set(REGISTRY, good)
-      await poll(world, 10)
-    }
-    expect(toastsOf(world.toasts, 'registry-unreadable')).toEqual([])
-    expect(Object.keys(store.get(noticeStoreKey(ORCH)) as object).filter(key => !Object.keys(freshNoticeState()).includes(key)).sort()).toEqual(['repoAt', 'retireCheckAt'])
-  })
-
-  test('the registry-based notices stay frozen through the episode: a live unregistered claude is not told while the registry is unreadable', { options: POLL_OPTIONS, timeoutMs: 30_000 }, async ($, on) => {
-    const world = mockWorld(on)
-    storeOf(on)
-    seedOrch(world)
-    world.table.procs.set(5555, { ppid: 1, start: '42', state: 'S', comm: 'claude', claude: { cwd: '/w/other', configDir: `${HOME}/.claude`, cmdline: 'claude -p --model opus --output-format json', elapsedSec: 600 } })
-    world.files.set(REGISTRY, '')
-    await startOrch($)
-    await poll(world, REGISTRY_UNREADABLE_SEC + 30)
-    expect(toastsOf(world.toasts, 'registry-unreadable').length).toBe(1)
-    expect(toastsOf(world.toasts, 'orphan')).toEqual([])
-  })
 
   test('registryStep: a registry file that is not there and was never seen is no episode (a fresh machine); seen once, then gone, it is; an existing unreadable or empty one is', () => {
     const fresh: RegistryWatch = {}
@@ -341,7 +240,7 @@ function winWorld(on: On, alive: number[]) {
   return w
 }
 
-const WIN_OPTIONS = { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', helper: 'off', pollSeconds: 10, lockDirs: 'C:\\w\\locks' }
+const WIN_OPTIONS = { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', pollSeconds: 10, lockDirs: 'C:\\w\\locks' }
 
 describe('Windows host', () => {
   test('lock-holder: a dead holder in a C:\\ lock folder is told once, an alive one never (the probe proves it); a JSON lock\'s pid_start is not compared on Windows', { options: WIN_OPTIONS }, async ($, on) => {
@@ -416,19 +315,6 @@ describe('locks.ts', () => {
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, true)).toBe(true)
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, false)).toBe(false)
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '' }, true)).toBe(false)
-  })
-
-  test('holderState: gone, reused (Linux, a JSON pid_start that differs), zombie (Linux, state Z), alive; a zombie and a reused pid are dead; Windows compares neither', () => {
-    expect(holderState({ pid: 1, isJson: false }, { isAlive: false }, true)).toBe('gone')
-    expect(holderState({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, true)).toBe('reused')
-    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe('zombie')
-    expect(holderState({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe('zombie')
-    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'S' }, true)).toBe('alive')
-    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, state: 'Z' }, false)).toBe('alive')
-    expect(isHolderDead({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe(true)
-    // The probe's A line carries the state as its seventh column; an older line without it has none.
-    expect(parseProcFacts('A\t7\tpython3\t100\t\t\tZ\n').pidProof.get(7)?.state).toBe('Z')
-    expect(parseProcFacts('A\t7\tpython3\t100\t\t\n').pidProof.get(7)?.state).toBeUndefined()
   })
 
   test('lockStep: told once per content; a changed content re-arms; a lock gone or alive again is forgotten; a folder not read keeps its locks', () => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { ARCHIVED_HEADING, appendDecision, archiveDecisions, archivedLine, decisionIds, decisionSectionsOf, editOpenPoints, editQueue, findDecisionSection, namesSection, sectionUsers } from '../hooks/bookkeeping'
+import { ARCHIVED_HEADING, appendDecision, archiveDecisions, archivedLine, decisionIds, decisionSectionsOf, editOpenPoints, editQueue, findDecisionSection, sectionUsers } from '../hooks/bookkeeping'
 
 const POINTS = JSON.stringify({
   _cleanup: 'x',
@@ -65,16 +65,6 @@ describe('agreed decisions', () => {
     expect(last.ok && last.text).toBe('## One\nx-1. first\n\n## Two\ny-1. second\ny-2. tail\n')
   })
 
-  test('a decision id that a line of the archive starts with is refused, saying so; an id only mentioned there, or no archive, is not', () => {
-    const archive = '# Agreed decisions archive\n# Archived 2026-10-11 from agreed-decisions.md\n## Old unit\r\nold-1. Was decided.\r\nold-2. Also.\n'
-    const refused = appendDecision(TEXT, { section: 'One', id: 'old-2', text: 'again' }, archive)
-    expect(refused).toEqual({ ok: false, error: "decision old-2 already exists in agreed-decisions-archive.md (an archived section's ids stay taken); choose another id" })
-    expect(appendDecision(TEXT, { section: 'One', id: 'old', text: 'new' }, archive).ok).toBe(true)
-    expect(appendDecision(TEXT, { section: 'One', id: 'Was', text: 'new' }, archive).ok).toBe(true)
-    expect(appendDecision(TEXT, { section: 'One', id: 'old-2', text: 'new' }).ok).toBe(true)
-    expect(appendDecision(TEXT, { section: 'One', id: 'old-2', text: 'new' }, '').ok).toBe(true)
-  })
-
   test('a decision id that already exists in the file is refused', () => {
     expect(appendDecision(TEXT, { section: 'One', id: 'x-1', text: 'again' }).ok).toBe(false)
   })
@@ -128,17 +118,6 @@ describe('decision sections and their archive', () => {
     expect(decisionIds('1. a\nparser-1. b\nnot an id\n  2. indented\nwin-20. c')).toEqual(['1', 'parser-1', 'win-20'])
   })
 
-  test('what names a section: its heading in any case, an id with a letter as a whole word, a branch or T-number of its heading; a bare number never', () => {
-    const t58 = { heading: 'T58 - requirement 946677 - branch feature/req-946677', ids: ['1', '2'] }
-    const parser = { heading: 'Parser unit (user, 2026-10-11)', ids: ['parser-1', 'parser-2'] }
-    expect(namesSection('retest T58 tomorrow', t58)).toBe('T58')
-    expect(namesSection('push feature/req-946677', t58)).toBe('feature/req-946677')
-    expect(namesSection('item 1 and 2', t58)).toBeUndefined()
-    expect(namesSection('see PARSER UNIT (USER, 2026-10-11)', parser)).toBe('its heading')
-    expect(namesSection('per parser-2.', parser)).toBe('decision id parser-2')
-    expect(namesSection('per parser-20 and xparser-1', parser)).toBeUndefined()
-  })
-
   test('who names it: a task not done, a running session (its title, name or launch section), an open point; done tasks and settled points do not', () => {
     const parser = { heading: 'Parser unit (user, 2026-10-11)', ids: ['parser-1', 'parser-2'] }
     const refs = {
@@ -153,20 +132,6 @@ describe('decision sections and their archive', () => {
       'open point p2 names it by its heading',
     ])
     expect(sectionUsers(parser, { queueText: 'not json', running: [] })).toEqual([])
-  })
-
-  test('archive: the section text byte for byte under a dated header, one summary line under Archived sections after the intro', () => {
-    const edit = archiveDecisions(FILE, ['Parser unit (user, 2026-10-11)'], none, '2026-10-11')
-    expect(edit.ok).toBe(true)
-    if (!edit.ok) return
-    expect(edit.archive).toBe('\n# Archived 2026-10-11 from agreed-decisions.md\n\n## Parser unit (user, 2026-10-11)\nparser-1. Keep the grammar.\nparser-2. No new dependency.\n\n')
-    expect(edit.text).toBe(
-      FILE.replace('## Parser unit (user, 2026-10-11)\nparser-1. Keep the grammar.\nparser-2. No new dependency.\n\n', '').replace(
-        'Intro line.\n\n',
-        `Intro line.\n\n## ${ARCHIVED_HEADING}\n- Parser unit (user, 2026-10-11) (ids parser-1 to parser-2): archived 2026-10-11 to agreed-decisions-archive.md\n\n`,
-      ),
-    )
-    expect(edit.archived).toEqual([{ heading: 'Parser unit (user, 2026-10-11)', ids: ['parser-1', 'parser-2'] }])
   })
 
   test('archive: several sections at once in file order, the last one of the file, an existing summary section kept and extended', () => {

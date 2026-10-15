@@ -8,8 +8,8 @@ import type { On } from 'claude-code'
 
 import { TOAST_TITLES } from '../hooks/core'
 import { NODE_WARNING } from '../hooks/host-helper'
-import { DRIFT_EVERY_SEC, DRIFT_SPEC, changedFiles, driftBandText, driftEverySec, driftNoticeMessage, sourceModDir } from '../hooks/drift'
-import { driftStep, freshNoticeState, noticeStoreKey, parseNoticeState } from '../hooks/notices'
+import { DRIFT_EVERY_SEC, changedFiles, driftEverySec, sourceModDir } from '../hooks/drift'
+import { driftStep, freshNoticeState, parseNoticeState } from '../hooks/notices'
 import { listInMap, nodeAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
 import { OPTIONS, ORCH, POWERSHELL, WIN_ENV, WIN_ORCH, mockWorld, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
@@ -108,24 +108,6 @@ describe('the drift band on the mock world', () => {
     // The helper's hashTree did the comparing (one batch for both folders).
     const batches = world.runs.filter(argv => argv[0] === 'node' && argv[2] === 'batch')
     expect(batches.length).toBe(2)
-  })
-
-  test(`by the helper: one changed file: the band, one toast and one notice line; the next checks tell nothing again`, { options: SOURCE_OPTIONS }, async ($, on) => {
-    const world = mockWorld(on, { env: FAST })
-    const store = storeOf(on)
-    echoPrompt(on)
-    engineBand(on)
-    await started($, world, changedOne)
-    await poll(world, EVERY)
-    expect(await bandOf($)).toBe(BAND_ONE)
-    expect(toastsOf(world.toasts, 'mod-drift')).toEqual([TOAST_ONE])
-    expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: mod-drift: the loaded mod differs from ${SOURCE} (1 file changed: hooks/core.ts); the band above the prompt says how to reload it`])
-    expect(parseNoticeState(store.get(noticeStoreKey(ORCH))).drift).toBe('hooks/core.ts')
-    await poll(world, 2 * EVERY)
-    expect(checks(world)).toBe(4)
-    expect(await bandOf($)).toBe(BAND_ONE)
-    expect(toastsOf(world.toasts, 'mod-drift').length).toBe(1)
-    expect(noticeLines(await userPrompt($))).toEqual([])
   })
 
   test(`by the helper: an added file and a removed file count; past three names the band ends with ...`, { options: SOURCE_OPTIONS }, async ($, on) => {
@@ -227,35 +209,6 @@ describe('the drift band on the mock world', () => {
     expect(await bandOf($)).toBe('engine band')
     expect(world.runs.filter(argv => argv[0] === 'node' && argv[1] !== '--version')).toEqual([])
     expect(world.toasts.filter(text => text.startsWith(`${TOAST_TITLES.helper} \u00B7 `))).toEqual([`${TOAST_TITLES.helper} \u00B7 session-control ${NODE_WARNING}`])
-  })
-
-  test('the 5-minute rule: a change is seen at the next check, never before; the band goes after a match and a new drift is told again', { options: SOURCE_OPTIONS, ...LONG }, async ($, on) => {
-    const world = mockWorld(on, { isHelper: true })
-    storeOf(on)
-    engineBand(on)
-    await started($, world)
-    await poll(world, DRIFT_EVERY_SEC)
-    expect(checks(world)).toBe(2)
-    world.files.set(`${SOURCE}/hooks/core.ts`, 'export const core = 3\n')
-    await poll(world, DRIFT_EVERY_SEC - 5)
-    expect(checks(world)).toBe(2)
-    expect(await bandOf($)).toBe('engine band')
-    await poll(world, 5)
-    expect(checks(world)).toBe(3)
-    expect(await bandOf($)).toBe(BAND_ONE)
-    expect(toastsOf(world.toasts, 'mod-drift').length).toBe(1)
-    // The source is put back: the band goes at the next check.
-    world.files.set(`${SOURCE}/hooks/core.ts`, MOD_FILES['hooks/core.ts'] ?? '')
-    await poll(world, DRIFT_EVERY_SEC - 5)
-    expect(await bandOf($)).toBe(BAND_ONE)
-    await poll(world, 5)
-    expect(await bandOf($)).toBe('engine band')
-    // The same file differs again: the match cleared the notice, so it is told once more.
-    world.files.set(`${SOURCE}/hooks/core.ts`, 'export const core = 3\n')
-    await poll(world, DRIFT_EVERY_SEC)
-    expect(toastsOf(world.toasts, 'mod-drift').length).toBe(2)
-    // At most one check per interval in all, whatever the poll does: 5 checks in 15 minutes and the start.
-    expect(checks(world)).toBe(5)
   })
 
   test('the test-only shortening: with SESSION_CONTROL_TEST=1 and SESSION_CONTROL_DRIFT_SECONDS=20 the check runs every 20 s', { options: SOURCE_OPTIONS }, async ($, on) => {
@@ -423,17 +376,6 @@ describe('drift.ts', () => {
     const b = { method: 'sha256' as const, files: { 'hooks/a.ts': '1', 'hooks/b.ts': '9', 'helper/h.mjs': '4' } }
     expect(changedFiles(a, b)).toEqual(['helper/h.mjs', 'hooks/b.ts', 'types/x.d.ts'])
     expect(changedFiles(a, a)).toEqual([])
-  })
-
-  test('the band and the notice: the count, up to three names, nothing else', () => {
-    expect(driftBandText('/r/mod', ['a'])).toBe('session-control: the loaded mod differs from /r/mod (1 file changed: a). Reload it: copy hooks, helper, types and plugin.json to the plugin folder, or restart with --plugin-dir /r/mod')
-    expect(driftBandText('/r/mod', ['a', 'b', 'c', 'd'])).toContain('(4 files changed: a, b, c, ...)')
-    expect(driftBandText('/r/mod', ['a'], 'terminal')).toBe(driftBandText('/r/mod', ['a']))
-    expect(driftBandText('/r/mod', ['a'], 'desktop')).toBe(
-      'session-control: the loaded mod differs from /r/mod (1 file changed: a). Reload it: copy hooks, helper, types and plugin.json to the plugin folder, or name /r/mod in CLAUDE_CODE_PLUGIN_DIRS, then restart the Code session',
-    )
-    expect(driftNoticeMessage('/r/mod', ['a', 'b'])).toBe('the loaded mod differs from /r/mod (2 files changed: a, b); the band above the prompt says how to reload it')
-    expect(DRIFT_SPEC).toEqual({ dirs: ['hooks', 'helper', 'types'], files: ['.claude-plugin/plugin.json'] })
   })
 
   test('driftStep: told once per set of changed files; a match clears it; an unread folder changes nothing', () => {

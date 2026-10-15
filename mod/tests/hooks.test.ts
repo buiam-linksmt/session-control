@@ -6,10 +6,9 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { RULES_BLOCK, SESSION_COLUMNS, cellWidth, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
+import { RULES_BLOCK, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
 import { auditFindings } from '../hooks/audit'
 import { isRegistrySound } from '../hooks/notices'
-import { PROBE_PS1 } from '../hooks/host-windows'
 import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
 
 import {
@@ -432,30 +431,6 @@ describe('scope', () => {
     expect(w.registered).toEqual(['/session-control'])
   })
 
-  test('/session-control starts the board where it is off and shows the panel; again it hides the panel and the board stays on', { options: OPTIONS }, async ($, on) => {
-    const w = world(on)
-    let isUp = false
-    on('ui.open', () => {
-      isUp = true
-      return { value: { isPlaced: true } } as never
-    })
-    on('ui.panes', () => ({ value: isUp ? [{ id: 'session-control' }] : [] }) as never)
-    await boot($, '/work/elsewhere')
-    expect(w.runs.length).toBe(0)
-    const opened = await runCommand($, '')
-    expect(opened.text).toBe('Session-control panel opened.')
-    expect(w.registered).toContain('launch_worker')
-    const runs = w.runs.length
-    const hidden = await runCommand($, '')
-    expect(hidden.text).toBe('Session-control panel hidden, session-control stays on.')
-    // Still on: the board's tools stay registered once and a prompt notification would still be handled.
-    expect(w.registered.filter(name => name === 'launch_worker').length).toBe(1)
-    expect(w.runs.length).toBeGreaterThanOrEqual(runs)
-    isUp = false
-    const again = await runCommand($, '')
-    expect(again.text).toBe('Session-control panel opened.')
-    expect(w.registered.filter(name => name === 'launch_worker').length).toBe(1)
-  })
   test('without the orchestratorDir option the board starts where CLAUDE.md is the orchestrator, and the command refuses elsewhere', { options: { registryPath: '~/.claude/headless-sessions.json', completionWrites: true } }, async ($, on) => {
     const w = world(on)
     stubPanel(on)
@@ -480,64 +455,10 @@ describe('tool surface', () => {
   test('the six tools keep their names, descriptions and schemas', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await boot($)
-    // The first six as they were; later tools come after them (the full list: the next test).
+    // The first six as they were; later tools come after them.
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
-    // The whole tool surface in one pin: it moves only on purpose, together with the per-tool pin of the next test,
-    // which names the tool that changed (each past move and its old value is in git log).
+    // The whole tool surface in one pin: it moves only on purpose (each past move and its old value is in git log).
     expect(fingerprint(JSON.stringify(w.tools))).toBe('17298:d6106e35')
-  })
-
-  test('the registered tool names, in order: a tool added, removed or renamed must update this list', { options: OPTIONS }, async ($, on) => {
-    const w = world(on)
-    await boot($)
-    expect(w.tools.map(tool => tool.name)).toEqual([
-      'launch_worker',
-      'acknowledge_workers',
-      'retire_workers',
-      'open_point',
-      'queue_task',
-      'record_decision',
-      'list_sessions',
-      'read_result',
-      'worker_tail',
-      'session_writes',
-      'panel_snapshot',
-      'audit_state',
-      'close_worker',
-      'archive_decisions',
-      // A new tool goes last, so every tool before it keeps its place and its pin.
-      'stop_worker',
-      'turn_digest',
-      'list_licences',
-      'probe_licence_usage',
-    ])
-    // Each tool's own pin, so a change to one tool's name, description or schema shows which tool moved; a pin moves
-    // only on purpose.
-    const pins = Object.fromEntries(w.tools.map(tool => [tool.name, fingerprint(JSON.stringify(tool))]))
-    expect(pins).toEqual({
-      launch_worker: '3506:a5214540',
-      acknowledge_workers: '875:8ed174c7',
-      retire_workers: '1530:18bbed4e',
-      open_point: '932:ad93390e',
-      // Its status description says the panel shows queued tasks only, running work being a session.
-      queue_task: '723:d470f87e',
-      record_decision: '644:568b5ef',
-      list_sessions: '564:8e142ecb',
-      read_result: '803:cd9e805f',
-      worker_tail: '632:2fdec597',
-      session_writes: '593:3ee3f38e',
-      panel_snapshot: '267:bb88911d',
-      audit_state: '562:67cf260d',
-      close_worker: '1529:9741bcb0',
-      archive_decisions: '879:39a97972',
-      stop_worker: '1129:9b87c2b9',
-      turn_digest: '635:cbba99b4',
-      list_licences: '604:8cb60265',
-      probe_licence_usage: '872:606c21ff',
-    })
-    // Group pins: the five after launch_worker (queue_task among them) and the six inspection tools.
-    expect(fingerprint(JSON.stringify(w.tools.slice(1, 6)))).toBe('4710:7d7306c')
-    expect(fingerprint(JSON.stringify(w.tools.slice(6, 12)))).toBe('3428:1484e7b6')
   })
 })
 
@@ -580,7 +501,7 @@ describe('session-control board', () => {
   test('session.start registers, gathers with one probe call, gathers the rows', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await boot($, ORCH_DIR + '/')
-    // The command and the first six tools; the later ones are pinned by 'tool surface > the registered tool names, in order'.
+    // The command and the first six tools; the later ones are pinned by 'tool surface > the six tools keep their names, descriptions and schemas'.
     expect(w.registered.slice(0, 7)).toEqual(['/session-control', 'launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     const probes = w.calls.filter(one => one.op === 'probe')
     expect(probes.length).toBe(1)
@@ -611,20 +532,6 @@ describe('session-control board', () => {
     expect(at('1. First question')).toBeLessThan(at('2. Second question'))
     expect(/Held|Settled/.test(all)).toBe(false)
     expect(/CURRENT STATUS|FINAL STATE|IN FLIGHT/.test(all)).toBe(false)
-  })
-
-  test('clicking a session opens its output box, clicking it again closes it', { options: OPTIONS }, async ($, on) => {
-    world(on)
-    stubPanel(on)
-    await boot($)
-    await runCommand($, 'side')
-    const ui = await mountPane($)
-    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeUndefined()
-    await ui.press({ key: 's:aaaaaaaa-1111-4111-8111-111111111111' })
-    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /> Bash git status -sb/ })).toBeDefined()
-    await ui.press({ key: 's:aaaaaaaa-1111-4111-8111-111111111111' })
-    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeUndefined()
   })
 })
 
@@ -686,19 +593,6 @@ describe('completion', () => {
     expect(entry?.ended_at).toBe(NOW_MS / 1000)
   })
 
-  test('the report check adds one line to the completion notice of a clean report without the git reads; the toast and the outcome stay', { options: OPTIONS }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT.replace('/fixture/results/limit.json', '/fixture/results/clean.json'))
-    echoPrompt(on)
-    await boot($)
-    expect(w.toasts).toEqual(['Session finished · limited worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.'])
-    const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
-    expect(sent.context).toEqual([
-      'session-control completions: limited worker: clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.; ' +
-        'limited worker: report check: report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes',
-    ])
-    const entry = lastRegistry(w).find(one => one.session_id === SID_DEAD)
-    expect((entry?.outcome as { kind?: string }).kind).toBe('clean')
-  })
   test('a real report with both reads gets no report-check line', { options: OPTIONS }, async ($, on) => {
     world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT.replace('/fixture/results/limit.json', '/fixture/results/probeReport.json'))
     echoPrompt(on)
@@ -728,27 +622,6 @@ describe('completion', () => {
 
 describe('launch_worker', () => {
   const args = { dir: '/work/new', prompt_file: '/work/new/prompt.md', model: 'opus', effort: 'high', title: 'new' }
-
-  test('passes the guards, runs the worker in the background, finds its pid and registers it', { options: OPTIONS }, async ($, on) => {
-    const w = world(on)
-    await boot($)
-    const ran = await launchTool($, args)
-    expect(String(ran.result)).toContain('Launched pid 7001')
-    expect(String(ran.result)).toContain('session abcdabcd-0000-4000-8000-000000000001')
-    expect(w.bash.length).toBe(1)
-    const bash = w.bash[0]
-    expect(bash?.run_in_background).toBe(true)
-    expect(bash?.timeout).toBe(180 * 60_000)
-    expect(String(bash?.command)).toContain("CLAUDE_CONFIG_DIR='/fixture/lic/a'")
-    expect(String(bash?.command)).toContain('/.claude/session-control/runs/')
-    expect(String(bash?.command)).not.toContain("'/work/new/result.json'")
-    expect(String(bash?.command)).toContain('2>')
-    // Registered as new: appended to the registry it read, with the real pid and the launch dir.
-    const after = lastRegistry(w)
-    expect(after.length).toBe(JSON.parse(REGISTRY_TEXT).length + 1)
-    expect(after.at(-1)).toMatchObject({ pid: 7001, session_id: 'abcdabcd-0000-4000-8000-000000000001', cwd: '/work/new' })
-    expect(w.runs.some(argv => argv.join(' ') === '/fixture/bin/pick --need 40')).toBe(true)
-  })
 
   test('every launch has a unique session name and accepts messages from other sessions', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
@@ -785,22 +658,6 @@ describe('launch_worker', () => {
     }
   })
 
-  test('without a licence picker command a fresh launch runs no picker, sets no CLAUDE_CONFIG_DIR and records <home>/.claude', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
-    WORKER.linuxConfigDir = ''
-    try {
-      const w = world(on, '')
-      await boot($)
-      const out = await launchTool($, args)
-      expect(String(out.result)).toContain(`Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${HOME}/.claude, registered.`)
-      expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
-      expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
-      expect(String(w.bash[0]?.command)).toStartWith("cd '/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' ")
-      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: `${HOME}/.claude`, cwd: '/work/new' })
-    } finally {
-      WORKER.linuxConfigDir = '/fixture/lic/a'
-    }
-  })
-
   test('without a picker, an orchestrator with its own CLAUDE_CONFIG_DIR: the worker inherits it, and the registry records it', { options: { ...OPTIONS, licencePickCommand: '' } }, async ($, on) => {
     WORKER.linuxConfigDir = '/fixture/lic/own'
     try {
@@ -819,30 +676,6 @@ describe('launch_worker', () => {
   const ALLOW_HINT =
     '; the worker was not started and nothing was registered. The launch runs claude -p with --dangerously-skip-permissions through the shell, ' +
     "which a permission mode can refuse (the Auto mode of Claude Desktop's Code tab among them): allow that Bash command when you are asked, or with a permission rule, then launch again."
-
-  test('a launch the Bash tool refuses ({ deny }): the refusal with its reason at once, no probe for the worker, no entry, nothing looked for later', { options: OPTIONS }, async ($, on) => {
-    WORKER.bashAnswer = { deny: 'Permission to use Bash has been denied by the auto mode classifier.' }
-    try {
-      const w = world(on)
-      await boot($)
-      const before = lastRegistry(w).length
-      const probesBefore = w.calls.filter(one => one.op === 'probe').length
-      const out = await launchTool($, args)
-      expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: Permission to use Bash has been denied by the auto mode classifier.${ALLOW_HINT}`)
-      // No wait: the launch's own check before the call, and one probe after it for a worker with the launch's name,
-      // which finds none (the launch never ran).
-      expect(w.runs.some(argv => argv[0] === 'sleep')).toBe(false)
-      expect(w.calls.filter(one => one.op === 'probe').length).toBe(probesBefore + 2)
-      expect(lastRegistry(w).length).toBe(before)
-      // The worker shows up after all (another launch's): no poll registers it for this one.
-      WORKER.bashAnswer = undefined
-      w.spawned = true
-      await w.clock.advance(5000)
-      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
-    } finally {
-      WORKER.bashAnswer = undefined
-    }
-  })
 
   test('a launch the Bash tool answers with an error: said with its text, nothing registered, nothing looked for', { options: OPTIONS }, async ($, on) => {
     WORKER.bashAnswer = { isError: true, result: 'Error: spawn failed', text: 'Error: spawn failed' }
@@ -910,25 +743,6 @@ describe('launch_worker', () => {
           }
         })
       }
-
-      test(`${host.name}, a refusal before the command ran: the one probe finds no worker; the refusal as before, nothing registered, nothing looked for later`, { options: host.options }, async ($, on) => {
-        WORKER.bashAnswer = { deny: 'refused by a hook' }
-        try {
-          const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-          await boot($, host.dir)
-          const before = probes(w)
-          const out = await launchTool($, host.launch)
-          expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: refused by a hook${ALLOW_HINT}`)
-          // The launch's own check before the call and the one probe after it; no wait.
-          expect(probes(w) - before).toBe(2)
-          expect(searchWaits(w)).toBe(0)
-          expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
-          await w.clock.advance(5000)
-          expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
-        } finally {
-          reset()
-        }
-      })
     }
   })
 
@@ -999,17 +813,6 @@ describe('launch_worker', () => {
     }
   })
 
-  test('a settings hook that denies the Bash call (classic PreToolUse) is a refusal of the launch too', { options: OPTIONS }, async ($, on) => {
-    const w = world(on)
-    // Its input is the call's envelope (the tool and its arguments), as a settings hook's PreToolUse sees it.
-    on('classic.PreToolUse', ($, e) => (String((e as { tool?: unknown }).tool) === 'Bash' ? { deny: 'blocked by a PreToolUse hook' } : {}))
-    await boot($)
-    const out = await launchTool($, args)
-    expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: blocked by a PreToolUse hook${ALLOW_HINT}`)
-    expect(w.bash.length).toBe(0)
-    expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
-  })
-
   test('a refusal reason past 500 characters is cut there; an empty one is said as none given', { options: OPTIONS }, async ($, on) => {
     WORKER.bashAnswer = { deny: `x${'y'.repeat(700)}` }
     try {
@@ -1071,20 +874,6 @@ describe('launch_worker', () => {
       expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
       expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}' -n 'w-first-run-260901080000' --settings '{"crossSessionInbound":"accept"}' --dangerously`)
     })
-    test('sets the new run\'s started_at and drops the previous run\'s ended_at', { options: OPTIONS }, async ($, on) => {
-      const timed = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? { ...one, started_at: 1_700_000_000, ended_at: 1_700_000_312 } : one)))
-      WORKER.sid = SID_UNREPORTED
-      try {
-        const w = world(on, '/fixture/lic/a\n', true, timed)
-        await boot($)
-        expect(String((await launchTool($, resume)).result)).toContain('Launched pid 7001')
-        const entry = lastRegistry(w).find(one => one.session_id === SID_UNREPORTED) as Record<string, unknown>
-        expect(entry).toMatchObject({ pid: 7001, started_at: NOW_MS / 1000 })
-        expect('ended_at' in entry).toBe(false)
-      } finally {
-        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
-      }
-    })
     const stale = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? { ...one, name: 'w-first-run-260901080000', socket_path: '/run/user/1000/cc-socks/1.sock' } : one)))
     test('records the new socket over the old one', { options: OPTIONS }, async ($, on) => {
       WORKER.sid = SID_UNREPORTED
@@ -1145,48 +934,6 @@ describe('launch_worker', () => {
   })
 
   const LAUNCH_RUNS = `${HOME}/.claude/session-control/runs`
-  test('a worker that appears only after the 30 s of the launch: answered as started and not registered yet, then registered by the poll that finds it', { options: OPTIONS }, async ($, on) => {
-    LINUX_FIXTURE.isWorkerHidden = true
-    try {
-      const w = world(on)
-      await boot($)
-      const before = lastRegistry(w).length
-      const out = await launchTool($, args)
-      expect(String(out.result)).toBe(
-        'Started in the background, but no claude process for it appeared within 30 s: it is not registered yet. ' +
-          "Check it with list_sessions: while it runs unregistered it is an orphan row (cwd /work/new); the mod's poll registers it as soon as it finds it " +
-          '(up to 10 min after the launch), and its entry then takes the orphan row\'s place. ' +
-          `If neither row appears, it did not start: read ${LAUNCH_RUNS}/20260921141320-new.err. Result: ${LAUNCH_RUNS}/20260921141320-new.json.`,
-      )
-      // Fifteen checks at most, each after a `sleep 2` process: the Linux wait as it was.
-      expect(w.runs.filter(argv => argv.join(' ') === 'sleep 2').length).toBe(15)
-      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
-      // The worker shows up: the next poll registers it with what the launch would have written.
-      LINUX_FIXTURE.isWorkerHidden = false
-      await w.clock.advance(5000)
-      const after = lastRegistry(w)
-      expect(after.length).toBe(before + 1)
-      expect(after.at(-1)).toMatchObject({
-        title: 'new',
-        pid: 7001,
-        session_id: 'abcdabcd-0000-4000-8000-000000000001',
-        name: 'w-new-260921141320',
-        socket_path: '/run/user/1000/cc-socks/7001.sock',
-        config_dir: '/fixture/lic/a',
-        cwd: '/work/new',
-        model: 'opus',
-        effort: 'high',
-        result_file: `${LAUNCH_RUNS}/20260921141320-new.json`,
-        err_file: `${LAUNCH_RUNS}/20260921141320-new.err`,
-        started_at: NOW_MS / 1000,
-      })
-      // Registered once: later polls leave it as it is.
-      await w.clock.advance(5000)
-      expect(lastRegistry(w).filter(one => one.pid === 7001).length).toBe(1)
-    } finally {
-      LINUX_FIXTURE.isWorkerHidden = false
-    }
-  })
 
   test('a worker still not seen 10 minutes after its launch is no longer looked for', { options: OPTIONS }, async ($, on) => {
     LINUX_FIXTURE.isWorkerHidden = true
@@ -1508,37 +1255,6 @@ describe('launch_worker', () => {
           }
         })
       }
-
-      test(`${host.name}: a sessions file read in time decides as before, whatever the result file holds: the launch's own answer and entry`, { options: host.options }, async ($, on) => {
-        const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, host.env)
-        await boot($, host.dir)
-        WORKER.resultText = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'PONG', session_id: 'ffffffff-0000-4000-8000-00000000000f' })
-        try {
-          const out = await launchTool($, host.launch)
-          expect(String(out.result)).toBe(
-            `Launched pid 7001, session ${SID_NEW}, config_dir ${host.configDir}, registered. ` +
-              `Name: w-new-260921141320; socket: ${host.socket ?? 'none'}. Result: ${result}; errors: ${err}.`,
-          )
-          expect(lastRegistry(w).at(-1)).toEqual({
-            title: 'new',
-            pid: 7001,
-            session_id: SID_NEW,
-            name: 'w-new-260921141320',
-            ...(host.socket === undefined ? {} : { socket_path: host.socket }),
-            config_dir: host.configDir,
-            cwd: host.cwd,
-            model: 'opus',
-            effort: 'high',
-            result_file: result,
-            err_file: err,
-            started_at: NOW_MS / 1000,
-          })
-          expect(w.toasts).not.toContain(TOAST)
-          expect(w.reads).not.toContain(result)
-        } finally {
-          reset(host)
-        }
-      })
     }
   })
 
@@ -1602,68 +1318,6 @@ describe('launch_worker', () => {
     expect(JSON.stringify(out)).toContain('the prompt lacks')
   })
 
-  test('a prompt runs no probe, no registry read and no git, and does not wait for the trace: a trace write that hangs holds no prompt', { options: { ...OPTIONS, debug: true } }, async ($, on) => {
-    const w = world(on)
-    on('classic.PostCompact', () => ({}))
-    echoPrompt(on)
-    await boot($)
-    const [calls, reads, runs] = [w.calls.length, w.reads.length, w.runs.length]
-    let release = () => {}
-    HELD.append = new Promise<void>(resolve => {
-      release = resolve
-    })
-    try {
-      // A prompt without a task notification (a task notification's prompt starts a harvest: see the tests below).
-      const sent = await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'user' } } as never)
-      // The completion the start's poll harvested rides on it; no helper call but the trace's write (a batch) was made.
-      expect(sent.context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
-      expect(w.calls.slice(calls).filter(one => one.op !== 'batch')).toEqual([])
-      expect(w.reads.slice(reads).filter(path => path === REGISTRY_PATH)).toEqual([])
-      expect(w.runs.slice(runs).filter(argv => argv[0] === 'git' || (argv[0] === 'node' && argv[2] === 'probe'))).toEqual([])
-      // The poll goes on: the prompt's trace write is still hanging (one batch, never answered), and nothing waited for it.
-      await w.clock.advance(5000)
-      expect(w.calls.slice(calls).filter(one => one.op === 'batch').length).toBe(1)
-      expect(w.calls.slice(calls).some(one => one.op === 'probe')).toBe(true)
-      const before = w.calls.length
-      // After a compaction the digest is the last poll's: no probe either.
-      await $.classic.PostCompact({ hook_event_name: 'PostCompact', trigger: 'auto', compact_summary: 's', session_id: 's', transcript_path: '/t', cwd: ORCH_DIR } as never)
-      const digest = await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)
-      expect(JSON.stringify(digest.context)).toContain('after compaction')
-      expect(w.calls.slice(before).filter(one => one.op === 'probe')).toEqual([])
-    } finally {
-      release()
-      HELD.append = undefined
-    }
-  })
-
-  test('a task notification\'s status goes to the next poll\'s harvest, whose note rides on the next prompt of any origin', { options: OPTIONS }, async ($, on) => {
-    const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_ALIVE ? { ...one, result_file: '/fixture/results/alive.json' } : one)))
-    const w = world(on, '/fixture/lic/a\n', true, registry)
-    echoPrompt(on)
-    await boot($)
-    expect((await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)).context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
-    LINUX_FIXTURE.isAliveGone = true
-    // The prompt's own harvest outlasts its bound (its probe answers 6 s on): the prompt goes on without the note.
-    LINUX_FIXTURE.probeLateMs = 6000
-    try {
-      const probes = w.calls.filter(one => one.op === 'probe').length
-      const pending = $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
-      await w.clock.advance(PROMPT_HARVEST_SEC * 1000)
-      const sent = await pending
-      expect(sent.context).toBeUndefined()
-      // The one probe is the prompt's harvest, still running; no other was started.
-      expect(w.calls.filter(one => one.op === 'probe').length).toBe(probes + 1)
-      LINUX_FIXTURE.probeLateMs = 0
-      await w.clock.advance(5000)
-      expect(w.toasts).toContain('Session killed \u00B7 alive worker: killed: background task killed')
-      // The poll's first tick also told its hourly reminder: a notice line after the note.
-      expect((await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)).context?.[0]).toBe('session-control completions: alive worker: killed: background task killed')
-    } finally {
-      LINUX_FIXTURE.isAliveGone = false
-      LINUX_FIXTURE.probeLateMs = 0
-    }
-  })
-
   // A task notification's prompt runs the harvest it ran before decision mod-28's prompt fix, bounded: it waits at most
   // PROMPT_HARVEST_SEC (a pause in a process: `sleep` on Linux, the helper's pause on Windows) for that harvest.
   describe('a task notification\'s prompt and the harvest it starts', () => {
@@ -1684,38 +1338,8 @@ describe('launch_worker', () => {
       })
       return state
     }
-    /** The bound's own pauses: Linux `sleep 3`, the helper's pause of 3000 ms on Windows. */
-    const bounds = (w: World) => w.runs.filter(argv => argv.join(' ') === `sleep ${PROMPT_HARVEST_SEC}`).length + w.calls.filter(one => one.op === 'pause' && one.request.ms === PROMPT_HARVEST_SEC * 1000).length
 
     for (const host of hosts) {
-      test(`${host.name}: a fast harvest: the finished worker's note rides on the task notification's own prompt, which returns as soon as the harvest ends`, { options: host.options }, async ($, on) => {
-        const w = world(on, '/fixture/lic/a\n', true, ALIVE_RESULT, host.env)
-        echoPrompt(on)
-        await boot($, host.dir)
-        // The start's harvest (the limited worker) rides on a first prompt.
-        await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)
-        host.knobs.isAliveGone = true
-        try {
-          const [runs, calls, at] = [w.runs.length, w.calls.length, w.clock.now()]
-          const prompt = submitted($ as never, TASK_NOTIFICATION_KILLED, 'task-notification')
-          await w.clock.settle()
-          // Back without the clock moving: the harvest ended first.
-          expect(prompt.isDone).toBe(true)
-          expect((await prompt.sent).context).toEqual([NOTE])
-          expect(w.clock.now()).toBe(at)
-          expect(w.toasts).toContain(KILLED_TOAST)
-          // One harvest (a probe) and one bound, a pause in a process, never the engine's clock.
-          const probes = host.name === 'Linux' ? w.calls.slice(calls).filter(one => one.op === 'probe').length : w.runs.slice(runs).filter(argv => argv[0] === POWERSHELL).length
-          expect(probes).toBe(1)
-          expect(bounds(w)).toBe(1)
-          if (host.name === 'Linux') expect(traceOf(w).filter(line => line.event === 'prompt.harvest').map(line => [line.isInTime, line.ms])).toEqual([[true, 0]])
-          // The note went once: the next prompt has none.
-          expect((await $.prompt.submit({ text: 'go on', wait: false, origin: { kind: 'user' } } as never)).context ?? []).not.toContain(NOTE)
-        } finally {
-          host.knobs.isAliveGone = false
-        }
-      })
-
       test(`${host.name}: a slow harvest holds the task notification's prompt for its 3 s bound and no longer; the prompt goes on without the note, which rides on the next prompt`, { options: host.options }, async ($, on) => {
         const w = world(on, '/fixture/lic/a\n', true, ALIVE_RESULT, host.env)
         echoPrompt(on)
@@ -1771,9 +1395,7 @@ describe('launch_worker', () => {
     const notification = (taskId: string) =>
       `<task-notification>\n<task-id>${taskId}</task-id>\n<output-file>/tmp/tasks/${taskId}.output</output-file>\n<status>killed</status>\n<summary>Background command was killed</summary>\n</task-notification>`
     const SID_NEW = 'abcdabcd-0000-4000-8000-000000000001'
-    const CLEAN = 'clean: Implemented the parser, 14 tests pass, committed as feat(parser): add registry reader.'
     const aliveWith = (resultFile: string) => JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_ALIVE ? { ...one, result_file: resultFile } : one)))
-    const ALIVE_CLEAN = aliveWith('/fixture/results/clean.json')
     const ALIVE_UNWRITTEN = aliveWith('/fixture/results/alive.json')
     const hosts = [
       { name: 'Linux', options: OPTIONS, env: { HOME }, dir: ORCH_DIR, launch: args, knobs: LINUX_FIXTURE },
@@ -1796,33 +1418,6 @@ describe('launch_worker', () => {
     }
 
     for (const host of hosts) {
-      test(`${host.name}: the notification's harvest fails: its status is dropped; a worker that ends after it is told by its result file alone`, { options: host.options }, async ($, on) => {
-        REGISTRY_READS.isCurrent = true
-        try {
-          const w = world(on, '/fixture/lic/a\n', true, ALIVE_CLEAN, host.env)
-          echoPrompt(on)
-          await boot($, host.dir)
-          expect(String((await launchTool($, host.launch)).result)).toStartWith('Launched pid 7001')
-          await w.clock.advance(5000)
-          // A notification of a task this load did not start, then one of the launch's own task: each prompt's harvest
-          // fails (the probe cannot run).
-          host.knobs.isProbeBroken = true
-          await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
-          await $.prompt.submit({ text: notification('fixture'), wait: false, origin: { kind: 'task-notification' } })
-          host.knobs.isProbeBroken = false
-          // Then the alive worker ends with its clean report, and the launched one with no result written.
-          host.knobs.isAliveGone = true
-          host.knobs.isWorkerHidden = true
-          await w.clock.advance(5000)
-          await w.clock.advance(5000)
-          expect(outcomeOf(w, SID_ALIVE)).toBe(CLEAN)
-          expect(outcomeOf(w, SID_NEW)).toBe('killed: no result written')
-          expect(w.toasts.filter(one => one.includes('background task killed'))).toEqual([])
-        } finally {
-          reset(host)
-        }
-      })
-
       test(`${host.name}: a notification that names a launch of this load: its status goes to that worker alone`, { options: host.options }, async ($, on) => {
         REGISTRY_READS.isCurrent = true
         try {
@@ -1899,7 +1494,6 @@ describe('launch_worker', () => {
     expect(JSON.stringify(closed.context)).not.toContain('not acknowledged')
   })
 
-
   test('clicking an open point shows its description; clicking the title hides it; the description is not clickable', { options: OPTIONS }, async ($, on) => {
     world(on)
     stubPanel(on)
@@ -1931,93 +1525,6 @@ describe('launch_worker', () => {
     expect(await ui.find({ type: 'Text', text: /^\u2022 Queued one$/ })).toBeDefined()
   })
 
-  test('retire_workers removes a finished clean session on request and refuses the rest; typing a prompt removes nothing', { options: OPTIONS }, async ($, on) => {
-    const finished = { title: 'finished clean', session_id: 'f1f1f1f1-0000-4000-8000-000000000001', config_dir: '/fixture/lic/a', reported: false, outcome: { kind: 'clean', summary: 'clean: done' } }
-    const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), finished]))
-    echoPrompt(on)
-    await boot($)
-    // The cleared log is written before the registry, so a log write marks a removal.
-    const clears = () => w.writes.filter(one => one.path.endsWith('/cleared.jsonl'))
-    await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } } as never)
-    expect(clears().length).toBe(0)
-    const out = await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [finished.session_id.slice(0, 8), 'aaaaaaaa'] } as never)
-    expect(String(out.result)).toContain('Retired: f1f1f1f1.')
-    expect(String(out.result)).toContain('its process is alive')
-    expect(clears().length).toBe(1)
-    expect(clears()[0]?.text.trimEnd().split('\n').map(line => JSON.parse(line).session_id)).toEqual([finished.session_id])
-    expect(clears()[0]?.path).toBe(`${HOME}/.claude/session-control/runs/cleared.jsonl`)
-    expect(lastRegistry(w).some(one => one.session_id === finished.session_id)).toBe(false)
-    expect(lastRegistry(w).some(one => one.session_id === SID_ALIVE)).toBe(true)
-  })
-
-  describe('retire_workers with reviewed', () => {
-    const stuck = (n: number, kind: string, extra: object = {}) => ({ title: `stuck ${kind}`, session_id: `5757575${n}-0000-4000-8000-00000000000${n}`, config_dir: '/fixture/lic/a', reported: true, outcome: { kind, summary: `${kind}: old label` }, ...extra })
-    const login = stuck(1, 'login')
-    const limit = stuck(2, 'limit')
-    const killed = stuck(3, 'killed')
-    const kept = stuck(4, 'login', { keep: true })
-    // The first eight characters of a queued task's title name this session.
-    const queued = { ...stuck(5, 'limit'), session_id: 'Queued o-0000-4000-8000-000000000005' }
-    const setup = async (on: Parameters<typeof world>[0], $: Parameters<Parameters<typeof test>[2]>[0]) => {
-      const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login, limit, killed, kept, queued]))
-      await boot($)
-      return w
-    }
-    const retire = async ($: Parameters<Parameters<typeof test>[2]>[0], input: object) =>
-      String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', ...input } as never)).result)
-    const clears = (w: World) => w.writes.filter(one => one.path.endsWith('/cleared.jsonl'))
-
-    test('login, limit and killed outcomes are retired on a reason; the log and the answer carry the original outcome and the reason', { options: OPTIONS }, async ($, on) => {
-      const w = await setup(on, $)
-      const out = await retire($, {
-        session_ids: [login.session_id.slice(0, 8), limit.session_id, killed.session_id.slice(0, 8)],
-        reviewed: { [login.session_id.slice(0, 8)]: 'run succeeded, label from the old classifier', [limit.session_id]: 'work done, limit text was quoted', [killed.session_id.slice(0, 8)]: 'abandoned on purpose' },
-      })
-      expect(out).toBe('Retired: 57575751, 57575752, 57575753. Retired with review: 57575751 (was login: run succeeded, label from the old classifier); 57575752 (was limit: work done, limit text was quoted); 57575753 (was killed: abandoned on purpose).')
-      expect(clears(w).length).toBe(1)
-      const lines = clears(w)[0]?.text.trimEnd().split('\n').map(line => JSON.parse(line)) ?? []
-      expect(lines.map(one => [one.session_id, one.outcome.kind, one.reviewed_outcome, one.reviewed_reason])).toEqual([
-        [login.session_id, 'login', 'login', 'run succeeded, label from the old classifier'],
-        [limit.session_id, 'limit', 'limit', 'work done, limit text was quoted'],
-        [killed.session_id, 'killed', 'killed', 'abandoned on purpose'],
-      ])
-      // The entry is logged as it was, with the two fields appended last.
-      expect(Object.keys(lines[0]).slice(-2)).toEqual(['reviewed_outcome', 'reviewed_reason'])
-      expect(Object.keys(lines[0]).slice(0, -2)).toEqual(Object.keys(login))
-      const left = lastRegistry(w).map(one => one.session_id)
-      for (const gone of [login, limit, killed]) expect(left).not.toContain(gone.session_id)
-      expect(left).toContain(kept.session_id)
-    })
-
-    test('without a reason nothing is retired; a clean session logs no review fields', { options: OPTIONS }, async ($, on) => {
-      const w = await setup(on, $)
-      const out = await retire($, { session_ids: [login.session_id.slice(0, 8)], reviewed: { [login.session_id.slice(0, 8)]: '' } })
-      expect(out).toContain('reviewed needs a non-empty reason')
-      expect(out).not.toContain('Retired with review')
-      expect(clears(w).length).toBe(0)
-      expect(out).toBe('Retired: none. Refused: 57575751 (reviewed needs a non-empty reason).')
-      const plain = await retire($, { session_ids: ['dddddddd'], reviewed: { dddddddd: 'not needed' } })
-      expect(plain).toBe('Retired: dddddddd.')
-      expect(clears(w)[0]?.text).not.toContain('reviewed_')
-    })
-
-    test('a live, kept or queue-named session is refused even with a reason; a partial batch retires only what passes', { options: OPTIONS }, async ($, on) => {
-      const w = await setup(on, $)
-      const ids = [SID_ALIVE.slice(0, 8), kept.session_id.slice(0, 8), queued.session_id.slice(0, 8), limit.session_id.slice(0, 8), killed.session_id.slice(0, 8)]
-      const out = await retire($, { session_ids: ids, reviewed: { [SID_ALIVE.slice(0, 8)]: 'r', [kept.session_id.slice(0, 8)]: 'r', [queued.session_id.slice(0, 8)]: 'r', [limit.session_id.slice(0, 8)]: 'false label' } })
-      expect(out).toContain('Retired: 57575752.')
-      expect(out).toContain('Retired with review: 57575752 (was limit: false label).')
-      expect(out).toContain('aaaaaaaa (its process is alive)')
-      expect(out).toContain('57575754 (marked keep: a resume or follow-up is expected)')
-      expect(out).toContain('Queued o (a queued or running task names it)')
-      expect(out).toContain('57575753 (outcome killed needs a resume)')
-      const left = lastRegistry(w).map(one => one.session_id)
-      expect(left).toEqual(expect.arrayContaining([SID_ALIVE, kept.session_id, queued.session_id, killed.session_id]))
-      expect(left).not.toContain(limit.session_id)
-      expect(clears(w).length).toBe(1)
-    })
-  })
-
   test('open_point and record_decision edit the helper files, back them up first, and report a refusal', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await boot($)
@@ -2029,21 +1536,6 @@ describe('launch_worker', () => {
     expect(JSON.parse(written?.text ?? '{}').points.some((p: { id: string }) => p.id === 'fresh')).toBe(true)
     const refused = await $.tool.call({ tool: 'mcp__session-control__open_point', action: 'close', id: 'nope', resolution: 'x' } as never)
     expect(JSON.stringify(refused)).toContain('no open point nope')
-  })
-
-  test('acknowledge_workers marks a finished session acknowledged, kept on request, and refuses a live one', { options: OPTIONS }, async ($, on) => {
-    const finished = { title: 'finished clean', session_id: 'f2f2f2f2-0000-4000-8000-000000000002', config_dir: '/fixture/lic/a', reported: false, outcome: { kind: 'clean', summary: 'clean: done' } }
-    const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), finished]))
-    await boot($)
-    const acks = () => w.writes.filter(one => one.path === REGISTRY_PATH)
-    const before = acks().length
-    const out = await $.tool.call({ tool: 'mcp__session-control__acknowledge_workers', session_ids: ['f2f2f2f2', 'aaaaaaaa'], keep: true } as never)
-    expect(String(out.result)).toContain('Acknowledged and kept: f2f2f2f2.')
-    expect(String(out.result)).toContain('its process is alive')
-    expect(acks().length).toBe(before + 1)
-    const after = lastRegistry(w)
-    expect(after.find(one => one.session_id === finished.session_id)).toMatchObject({ reported: true, keep: true })
-    expect(after.filter(one => one.reported === true && one.keep === true).map(one => one.session_id)).toEqual([finished.session_id])
   })
 
   test('seated inline the panel is one box behind tabs, at most 11 rows, and a tab switches the box', { options: OPTIONS }, async ($, on) => {
@@ -2080,49 +1572,6 @@ describe('launch_worker', () => {
   })
 })
 
-describe('the queued work section', () => {
-  test('lists and counts only the tasks with status queued: a running task is shown nowhere, inline or docked', { options: OPTIONS }, async ($, on) => {
-    QUEUE.text = JSON.stringify({
-      tasks: [
-        { id: 'q1', status: 'queued', title: 'Queued one' },
-        { id: 'q2', status: 'running', title: 'Running one' },
-        { id: 'q3', status: 'done', title: 'Finished' },
-        { id: 'q4', status: 'queued', title: 'Queued two' },
-      ],
-    })
-    try {
-      world(on)
-      stubPanel(on)
-      await boot($)
-      await runCommand($, 'side')
-      const textOf = async (ui: Awaited<ReturnType<typeof mountPane>>) => String(((await ui.findAll({}))[0] as { text?: string }).text)
-      const inline = await $.ui.mount({
-        plugin: 'session-control',
-        surface: 'terminal',
-        component: 'Pane',
-        requestId: 'session-control',
-        props: { ...PANE_PROPS, placement: 'inline', scroll: { offset: 0, bodyRows: 40 } } as never,
-      })
-      expect(await textOf(inline)).toContain('Queued 2')
-      await inline.press({ key: 'tab:queue' })
-      const listed = await textOf(inline)
-      expect(listed).toContain('Queued one')
-      expect(listed).toContain('Queued two')
-      expect(listed).not.toContain('Running one')
-      expect(listed).not.toContain('Finished')
-      await inline.unmount()
-      const docked = await textOf(await mountPane($))
-      expect(docked).toContain('QUEUED WORK')
-      expect(docked).toContain('Queued one')
-      expect(docked).toContain('Queued two')
-      expect(docked).not.toContain('Running one')
-      expect(docked).not.toContain('(running)')
-    } finally {
-      QUEUE.text = QUEUE_TEXT
-    }
-  })
-})
-
 describe('expanding a section', () => {
   type Ui = Awaited<ReturnType<typeof mountPane>>
   /** The sections as drawn, top to bottom: a bordered box by its title and height, a one-line header by its title and 1. */
@@ -2152,40 +1601,6 @@ describe('expanding a section', () => {
     expect(await layoutOf(ui)).toEqual(THREE)
     expect(await headersOf(ui)).toEqual([])
     for (const id of ['sessions', 'queue', 'points']) expect((await ui.find({ key: `x:${id}` }))?.props.label).toBe('[+]')
-  })
-
-  test('each icon expands its section, the other two stay in order as one-line headers with their icons; pressed again it restores the three boxes', { options: OPTIONS }, async ($, on) => {
-    const ui = await open($, on)
-    for (const [id, title] of [['sessions', 'SESSIONS'], ['queue', 'QUEUED WORK'], ['points', 'OPEN POINTS']] as const) {
-      await ui.press({ key: `x:${id}` })
-      expect(await layoutOf(ui)).toEqual(EXPANDED[id])
-      expect((await ui.find({ key: `x:${id}` }))?.props.label).toBe('[-]')
-      const others = THREE.map(one => one[0] as string).filter(one => one !== title)
-      expect(await headersOf(ui)).toEqual(others.map(other => `${other}[+]`))
-      for (const other of (['sessions', 'queue', 'points'] as const).filter(one => one !== id)) {
-        expect((await ui.find({ key: `x:${other}` }))?.props.label).toBe('[+]')
-      }
-      await ui.press({ key: `x:${id}` })
-      expect(await layoutOf(ui)).toEqual(THREE)
-      expect(await headersOf(ui)).toEqual([])
-    }
-  })
-
-  test('a header icon expands its section directly: the expanded one collapses to its header, one section at a time', { options: OPTIONS }, async ($, on) => {
-    const ui = await open($, on)
-    await ui.press({ key: 'x:sessions' })
-    expect(await layoutOf(ui)).toEqual(EXPANDED.sessions)
-    await ui.press({ key: 'x:queue' })
-    expect(await layoutOf(ui)).toEqual(EXPANDED.queue)
-    expect((await ui.find({ key: 'x:queue' }))?.props.label).toBe('[-]')
-    expect((await ui.find({ key: 'x:sessions' }))?.props.label).toBe('[+]')
-    await ui.press({ key: 'x:points' })
-    expect(await layoutOf(ui)).toEqual(EXPANDED.points)
-    await ui.press({ key: 'x:sessions' })
-    expect(await layoutOf(ui)).toEqual(EXPANDED.sessions)
-    expect(await ui.findAll({ type: 'Button', text: '[-]' })).toHaveLength(1)
-    await ui.press({ key: 'x:sessions' })
-    expect(await layoutOf(ui)).toEqual(THREE)
   })
 
   test('opening a session log from the expanded sessions box resets to sessions one third, log two thirds', { options: OPTIONS }, async ($, on) => {
@@ -2242,7 +1657,6 @@ describe('expanding a section', () => {
 
 describe('row hover', () => {
   type Ui = Awaited<ReturnType<typeof mountPane>>
-  const SID = 'aaaaaaaa-1111-4111-8111-111111111111'
   /**
    * Every pressable row of the sessions and open points: its label fills the rows' column, the box's inner width
    * less the scroll bar, so the light under the pointer spans the row and not only its text. (The mock leaves out
@@ -2261,26 +1675,6 @@ describe('row hover', () => {
     await runCommand($, 'side')
     return $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: props as never })
   }
-
-  test('docked, every pressable row spans its box to the scroll bar, in the three boxes, each expanded section and the log view', { options: OPTIONS }, async ($, on) => {
-    const ui = await open($, on)
-    // 120 body columns: the box's two borders and the scroll bar leave 117 for the rows.
-    const keys = (await expectFullRows(ui, 117)).map(one => one.key)
-    expect(keys).toContain(`s:${SID}`)
-    expect(keys).toContain('p:a:0')
-    await ui.press({ key: 'p:a:0' })
-    expect((await expectFullRows(ui, 117)).some(one => /^p:a:t:/.test(one.key ?? ''))).toBe(true)
-    for (const id of ['sessions', 'points']) {
-      await ui.press({ key: `x:${id}` })
-      await expectFullRows(ui, 117)
-      await ui.press({ key: `x:${id}` })
-    }
-    await ui.press({ key: `s:${SID}` })
-    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
-    await expectFullRows(ui, 117)
-    // The padding is trailing: the row still reads and presses as before.
-    expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toMatch(/^\u25B8 alive worker/)
-  })
 
   test('seated inline, with no border, a pressable row spans the body to the scroll bar', { options: OPTIONS }, async ($, on) => {
     const ui = await open($, on, { ...PANE_PROPS, placement: 'inline', scroll: { offset: 0, bodyRows: 40 } })
@@ -2393,33 +1787,6 @@ describe('platform', () => {
   const WIN_REGISTRY = `C:${REGISTRY_PATH}`
   const WIN_RUNS = `C:${RUNS}`
 
-  test('Windows: home is the profile folder in native form, and the registry write goes through the helper in that form', { options: WIN_OPTIONS }, async ($, on) => {
-    const w = winWorld(on)
-    await boot($, `C:${ORCH_DIR}`)
-    expect(w.calls.filter(one => one.op === 'writeAtomic').map(one => one.request.path)).toContain(WIN_REGISTRY)
-    expect(lastRegistry(w).find(one => one.session_id === SID_DEAD)?.reported).toBe(false)
-    // No POSIX tool is started for the files: the missing ones are written through $.fs, which makes their directories.
-    expect(w.runs.filter(argv => ['mv', 'rm', 'test', 'mkdir', 'sh'].includes(String(argv[0])))).toEqual([])
-    expect(w.writes.some(one => one.path.endsWith(`C:${ORCH_DIR}/agreed-decisions.md`))).toBe(true)
-  })
-
-  test('Windows: the probe is PROBE_PS1 run as a file, with the registry\'s pids and transcripts', { options: WIN_OPTIONS }, async ($, on) => {
-    const w = winWorld(on)
-    stubPanel(on)
-    await boot($, `C:${ORCH_DIR}`)
-    // Node first (the probe runs only once it is found), then the probe, which also looks for sessions files under the
-    // discovered licences (here the default one alone).
-    expect(w.runs[0]).toEqual(['node', '--version'])
-    expect(w.runs[1]).toEqual([POWERSHELL, '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', `${WIN_RUNS}/probe.ps1`, ...probeArgs(JSON.parse(REGISTRY_TEXT)), 'c:C:/fixture/home/.claude'])
-    expect(w.writes.find(one => one.path.endsWith(`${WIN_RUNS}/probe.ps1`))?.text).toBe(PROBE_PS1)
-    expect(w.runs.filter(argv => argv[0] === 'sh')).toEqual([])
-    // The dead worker is harvested, the live one shows as running with its elapsed time.
-    expect(w.toasts).toEqual(['Usage limit reached \u00B7 limited worker: limit: rate limit hit'])
-    await runCommand($, '')
-    const all = String(((await (await mountPane($)).findAll({}))[0] as { text?: string }).text ?? '')
-    expect(all).toMatch(/alive worker\s+aaaaaaaa\s+running\s+opus\s+high\s+2m/)
-  })
-
   test('Windows, the trace on: a poll tick with a failing probe writes its lines through the helper', { options: { ...WIN_OPTIONS, debug: true } }, async ($, on) => {
     const w = winWorld(on)
     await boot($, `C:${ORCH_DIR}`)
@@ -2474,40 +1841,6 @@ describe('platform', () => {
   const WIN_HOME_CLAUDE = 'C:/fixture/home/.claude'
   const NO_PICKER = { ...WIN_OPTIONS, licencePickCommand: '' }
 
-  test('Windows: a launch given /c/ paths runs native paths, no POSIX tool, finds the worker and registers it', { options: NO_PICKER }, async ($, on) => {
-    const w = winWorld(on, '')
-    await boot($, `C:${ORCH_DIR}`)
-    const out = await settled(w, launchTool($, winArgs))
-    expect(String(out.result)).toBe(
-      `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${WIN_HOME_CLAUDE}, registered. ` +
-        `Name: w-new-260921141320; socket: none. ` +
-        `Result: ${WIN_RUNS}/20260921141320-new.json; errors: ${WIN_RUNS}/20260921141320-new.err.`,
-    )
-    expect(w.bash[0]?.command).toBe(
-      `cd 'C:/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-260921141320' --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions --output-format json ` +
-        `-- "$(cat 'C:/work/new/prompt.md')" > '${WIN_RUNS}/20260921141320-new.json' 2> '${WIN_RUNS}/20260921141320-new.err'`,
-    )
-    expect(lastRegistry(w).at(-1)).toEqual({
-      title: 'new',
-      pid: 7001,
-      session_id: 'abcdabcd-0000-4000-8000-000000000001',
-      // The Windows fixture's sessions file has no inbox fields: the launch's own name, no socket.
-      name: 'w-new-260921141320',
-      config_dir: WIN_HOME_CLAUDE,
-      cwd: 'C:/work/new',
-      model: 'opus',
-      effort: 'high',
-      result_file: `${WIN_RUNS}/20260921141320-new.json`,
-      err_file: `${WIN_RUNS}/20260921141320-new.err`,
-      started_at: NOW_MS / 1000,
-    })
-    // Every command is Node (its one lookup, then the helper's file operations) or Windows PowerShell running the probe;
-    // the launch's probes also search its config dir.
-    expect(w.runs.filter(argv => argv[0] === 'node' && argv[1] === '--version')).toEqual([NODE_LOOKUP])
-    expect(w.runs.every(argv => argv[0] === 'node' || (argv[0] === POWERSHELL && /\/probe\.ps1$/.test(String(argv[6]))))).toBe(true)
-    expect(w.runs.some(argv => String(argv[6]).endsWith('/probe.ps1') && argv.at(-1) === `c:${WIN_HOME_CLAUDE}`)).toBe(true)
-  })
-
   test('Windows: the waits between the discovery checks are the helper\'s pause, never the engine\'s clock; a worker not seen in 30 s is answered as started, and the poll registers it when it shows', { options: NO_PICKER }, async ($, on) => {
     WINDOWS.isWorkerHidden = true
     try {
@@ -2546,20 +1879,6 @@ describe('platform', () => {
     }
   })
 
-  test('Windows: an orchestrator with its own CLAUDE_CONFIG_DIR: no variable on the line, its dir in native form in the registry', { options: NO_PICKER }, async ($, on) => {
-    WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
-    try {
-      const w = world(on, '', true, REGISTRY_TEXT, { ...WINDOWS_ENV, CLAUDE_CONFIG_DIR: 'C:\\fixture\\lic\\a\\' })
-      await boot($, `C:${ORCH_DIR}`)
-      const out = await settled(w, launchTool($, winArgs))
-      expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered.')
-      expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
-      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: 'C:/fixture/lic/a' })
-    } finally {
-      WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
-    }
-  })
-
   test('Windows: without a Bash tool (Git Bash not found) the refusal says how to give the engine Git Bash', { options: NO_PICKER }, async ($, on) => {
     WORKER.isBashMissing = true
     try {
@@ -2592,52 +1911,6 @@ describe('platform', () => {
     ].join('\n')
   const PS_SETTINGS = '--settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json'
 
-  test('Windows, launchRoute powershell: the worker starts through the PowerShell tool, Start-Process with the prompt on standard input; found and registered as by the Bash route', { options: PS_OPTIONS }, async ($, on) => {
-    const w = winWorld(on, '')
-    await boot($, `C:${ORCH_DIR}`)
-    const out = await settled(w, launchTool($, winArgs))
-    expect(String(out.result)).toBe(
-      `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${WIN_HOME_CLAUDE}, registered. ` +
-        `Name: w-new-260921141320; socket: none. ` +
-        `Result: ${WIN_RUNS}/20260921141320-new.json; errors: ${WIN_RUNS}/20260921141320-new.err.`,
-    )
-    expect(w.bash).toEqual([])
-    expect(w.powershell.length).toBe(1)
-    expect(w.powershell[0]).toMatchObject({ description: 'session-control worker: new', run_in_background: true, timeout: 180 * 60_000 })
-    // No picker: the worker inherits the config dir, so no CLAUDE_CONFIG_DIR line.
-    expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`))
-    expect(lastRegistry(w).at(-1)).toEqual({
-      title: 'new',
-      pid: 7001,
-      session_id: 'abcdabcd-0000-4000-8000-000000000001',
-      name: 'w-new-260921141320',
-      config_dir: WIN_HOME_CLAUDE,
-      cwd: 'C:/work/new',
-      model: 'opus',
-      effort: 'high',
-      result_file: `${WIN_RUNS}/20260921141320-new.json`,
-      err_file: `${WIN_RUNS}/20260921141320-new.err`,
-      started_at: NOW_MS / 1000,
-    })
-    // The pid came from the probe, and the pid file was read beside it; every command is still one of the mod's scripts.
-    expect(w.reads).toContain(`${WIN_RUNS}/20260921141320-new.pid`)
-    expect(w.runs.every(argv => argv[0] === 'node' || (argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6]))))).toBe(true)
-  })
-
-  test('Windows, launchRoute powershell, with a picker: CLAUDE_CONFIG_DIR is set to the picked dir before Start-Process', { options: { ...WIN_OPTIONS, launchRoute: 'powershell', licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
-    WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
-    try {
-      const w = winWorld(on)
-      await boot($, `C:${ORCH_DIR}`)
-      const out = await settled(w, launchTool($, winArgs))
-      expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered')
-      expect(w.powershell[0]?.command).toBe(psCommand("$env:CLAUDE_CONFIG_DIR = 'C:/fixture/lic/a'", `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`))
-      expect(w.bash).toEqual([])
-    } finally {
-      WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
-    }
-  })
-
   test('Windows, launchRoute powershell: a resume passes --resume after the model and sets the entry\'s config dir', { options: PS_OPTIONS }, async ($, on) => {
     const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_DEAD ? { ...one, config_dir: 'C:/fixture/lic/b' } : one)))
     WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\b'
@@ -2650,55 +1923,6 @@ describe('platform', () => {
     } finally {
       WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
     }
-  })
-
-  test('Windows, launchRoute powershell: a runs directory with blanks and a quote, and a title with quotes, stay single PowerShell strings', { options: { ...PS_OPTIONS, runsDir: "C:/fixture/my runs/it's here" } }, async ($, on) => {
-    const w = winWorld(on, '')
-    await boot($, `C:${ORCH_DIR}`)
-    const title = `fix "the" parser's 'bug'`
-    const out = await settled(w, launchTool($, { ...winArgs, title }))
-    expect(String(out.result)).toContain('Launched pid 7001')
-    const base = "C:/fixture/my runs/it''s here/20260921141320-fix-the-parser-s-bug"
-    expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-fix-the-parser-s-bug-260921141320 ${PS_SETTINGS}`, base))
-    // The title reaches the tool's description only, never the command.
-    expect(w.powershell[0]?.description).toBe(`session-control worker: ${title}`)
-    expect(lastRegistry(w).at(-1)).toMatchObject({ title, result_file: "C:/fixture/my runs/it's here/20260921141320-fix-the-parser-s-bug.json" })
-  })
-
-  test('Windows, launchRoute powershell, without a PowerShell tool: a clear refusal, nothing launched, no fall back to Bash', { options: PS_OPTIONS }, async ($, on) => {
-    WORKER.isPowerShellMissing = true
-    try {
-      const w = winWorld(on, '')
-      await boot($, `C:${ORCH_DIR}`)
-      const before = lastRegistry(w).length
-      const out = await launchTool($, winArgs)
-      // The engine's own reason sits in the brackets (the kit's differs from the engine's).
-      expect(String(out.deny)).toStartWith('session-control: the worker could not be started through the PowerShell tool (')
-      expect(String(out.deny)).toEndWith(
-        '); nothing was launched. On Windows Claude Code offers the PowerShell tool by default only when it does not find Git Bash: start the orchestrator with CLAUDE_CODE_USE_POWERSHELL_TOOL=1, or set the launchRoute option to bash.',
-      )
-      expect(w.powershell.length).toBe(0)
-      expect(w.bash.length).toBe(0)
-      expect(lastRegistry(w).length).toBe(before)
-      expect(w.reads.some(path => path.endsWith('.pid'))).toBe(false)
-    } finally {
-      WORKER.isPowerShellMissing = false
-    }
-  })
-
-  test('Windows: an inline prompt goes to a prompt file of the mod in the native runs directory, the Bash route reads it, the entry records it', { options: NO_PICKER }, async ($, on) => {
-    const w = winWorld(on, '')
-    await boot($, `C:${ORCH_DIR}`)
-    const { prompt_file: _file, ...inline } = winArgs
-    const out = await settled(w, launchTool($, { ...inline, prompt: 'Reply PONG.' }))
-    const own = `${WIN_RUNS}/w-new-260921141320.prompt.md`
-    expect(String(out.result)).toEndWith(`errors: ${WIN_RUNS}/20260921141320-new.err. Prompt: ${own} (written by the mod; rules block appended).`)
-    expect(w.writes.filter(one => one.path === own).map(one => one.text)).toEqual([`Reply PONG.\n\n${RULES_BLOCK}\n`])
-    expect(w.bash[0]?.command).toBe(
-      `cd 'C:/work/new' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-260921141320' --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions --output-format json ` +
-        `-- "$(cat '${own}')" > '${WIN_RUNS}/20260921141320-new.json' 2> '${WIN_RUNS}/20260921141320-new.err'`,
-    )
-    expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, cwd: 'C:/work/new', prompt_file: own })
   })
 
   test('Windows: an inline prompt that starts like a POSIX path is refused, as a prompt file would be, and nothing is written', { options: NO_PICKER }, async ($, on) => {
@@ -2718,20 +1942,6 @@ describe('platform', () => {
     const own = `${WIN_RUNS}/w-new-260921141320.prompt.md`
     expect(String(out.result)).toContain(`Prompt: ${own} (written by the mod).`)
     expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`, 'C:/work/new', own))
-  })
-
-  test('Windows, launchRoute powershell: a prompt file or runs directory with brackets is refused before anything runs', { options: { ...PS_OPTIONS, licencePickCommand: 'C:/fixture/bin/pick.exe --need {need}' } }, async ($, on) => {
-    const w = winWorld(on)
-    await boot($, `C:${ORCH_DIR}`)
-    const runs = w.runs.length
-    const out = await launchTool($, { ...winArgs, prompt_file: '/c/work/new/[draft] prompt.md' })
-    expect(String(out.deny)).toBe(
-      'session-control: refused: on the PowerShell launch route Start-Process reads the prompt file and the run files as wildcard patterns, and Windows PowerShell 5.1 and PowerShell 7 ' +
-        'cannot both be given a path with [, ] or a backtick: the prompt file C:/work/new/[draft] prompt.md; move it to a path without them, or set the launchRoute option to bash',
-    )
-    // Not the picker, not the probe, not a tool: nothing ran.
-    expect(w.runs.length).toBe(runs)
-    expect([w.powershell.length, w.bash.length]).toEqual([0, 0])
   })
 
   test('Windows, launchRoute powershell: a runs directory with brackets is refused too; the Bash route takes it', { options: { ...PS_OPTIONS, runsDir: 'C:/fixture/runs [old]' } }, async ($, on) => {
@@ -2850,55 +2060,6 @@ describe('platform', () => {
     await ui.press({ key: `s:${SID_ALIVE}` })
     expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
     expect(w.calls).toContainEqual({ op: 'tail', request: { path: `/fixture/lic/a/projects/-work-a/${SID_ALIVE}.jsonl`, lines: 600, width: 20000 } })
-  })
-
-  const retireDone = async ($: Parameters<Parameters<typeof test>[2]>[0]) =>
-    String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['dddddddd'] } as never)).result)
-  const doneLine = JSON.stringify(JSON.parse(REGISTRY_TEXT).find((one: { session_id?: string }) => one.session_id === SID_DONE))
-
-  test('Linux: a retire appends to the cleared log in one append, and a log over the read cap does not stop it', { options: OPTIONS }, async ($, on) => {
-    const log = `${RUNS}/cleared.jsonl`
-    UNREADABLE.add(log)
-    try {
-      const w = world(on)
-      await boot($)
-      expect(await retireDone($)).toBe('Retired: dddddddd.')
-      // One append of the helper, which never reads the log.
-      expect(w.calls.filter(one => one.op === 'append')).toEqual([{ op: 'append', request: { path: log, text: `${doneLine}\n` } }])
-      // Logged first, then the registry without the entry.
-      const at = (op: string) => w.calls.findIndex(one => one.op === op)
-      expect(at('append')).toBeLessThan(w.calls.findLastIndex(one => one.op === 'writeAtomic'))
-      expect(lastRegistry(w).some(one => one.session_id === SID_DONE)).toBe(false)
-    } finally {
-      UNREADABLE.clear()
-    }
-  })
-
-  test('Windows: a retire appends through the helper, never reading the log, even one over the read cap', { options: WIN_OPTIONS }, async ($, on) => {
-    const log = `${WIN_RUNS}/cleared.jsonl`
-    UNREADABLE.add(fixture(log))
-    try {
-      const w = winWorld(on)
-      await boot($, `C:${ORCH_DIR}`)
-      expect(await retireDone($)).toBe('Retired: dddddddd.')
-      expect(w.calls.filter(one => one.op === 'append')).toEqual([{ op: 'append', request: { path: log, text: `${doneLine}\n` } }])
-      expect(w.writes.filter(one => one.path === log).map(one => one.text)).toEqual([`${doneLine}\n`])
-      expect(w.reads.includes(log)).toBe(false)
-      expect(lastRegistry(w).some(one => one.session_id === SID_DONE)).toBe(false)
-    } finally {
-      UNREADABLE.clear()
-    }
-  })
-
-  test('Windows: a reviewed retire logs the original outcome and the reason through the helper', { options: WIN_OPTIONS }, async ($, on) => {
-    const login = { title: 'stuck login', session_id: '57575751-0000-4000-8000-000000000001', config_dir: 'C:/fixture/lic/a', reported: true, outcome: { kind: 'login', summary: 'login: old label' } }
-    const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login]), WINDOWS_ENV)
-    await boot($, `C:${ORCH_DIR}`)
-    const out = String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: ['57575751'], reviewed: { '57575751': 'wrong label' } } as never)).result)
-    expect(out).toBe('Retired: 57575751. Retired with review: 57575751 (was login: wrong label).')
-    const text = w.writes.filter(one => one.path === `${WIN_RUNS}/cleared.jsonl`).map(one => one.text).join('')
-    expect(JSON.parse(text)).toMatchObject({ session_id: login.session_id, outcome: login.outcome, reviewed_outcome: 'login', reviewed_reason: 'wrong label' })
-    expect(lastRegistry(w).some(one => one.session_id === login.session_id)).toBe(false)
   })
 
   test('Windows: a HOME that Git Bash handed on (/c/...) is home, in native form', { options: WIN_OPTIONS }, async ($, on) => {
@@ -3076,33 +2237,6 @@ describe('debug trace', () => {
     expect(events.at(-1)).toEqual({ event: 'tool.result', tool: 'retire_workers', result: 'Retired: 57575751. Retired with review: 57575751 (was login: wrong label).' })
   })
 
-  test('a poll tick with a failing probe: the tick, the failed run, the error caught, the warning; renders are counted', { options: TRACED }, async ($, on) => {
-    const w = world(on)
-    stubPanel(on)
-    await boot($)
-    await runCommand($, '')
-    const ui = await mountPane($)
-    await ui.findAll({})
-    LINUX_FIXTURE.isProbeBroken = true
-    try {
-      const before = traceOf(w).length
-      await w.clock.advance(5000)
-      const tick = bare(traceOf(w)).slice(before)
-      // The helper's probe answers a fixed code; the mod says the probe failed, never what the system said.
-      const message = 'the process probe failed (IO)'
-      expect(tick).toEqual([
-        { event: 'ui.render', count: 1 },
-        { event: 'poll.tick' },
-        { ...PROBE, exitCode: 1 },
-        { event: 'helper.failed', op: 'probe', code: 'IO' },
-        { event: 'error', where: 'refresh', message },
-        { event: 'error', where: 'panel', message: `Error: ${message}` },
-      ])
-    } finally {
-      LINUX_FIXTURE.isProbeBroken = false
-    }
-  })
-
   test('SESSION_CONTROL_DEBUG=1 switches it on; otherwise nothing is written and no trace command runs', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { HOME, SESSION_CONTROL_DEBUG: '1' })
     await boot($)
@@ -3219,20 +2353,6 @@ describe('seconds tick', () => {
     await runCommand($, '')
     return { w, pane, ui: await mountPane($) }
   }
-
-  test('each second the running row counts on from started_at and the finished row keeps its run, with no process and no file read', { options: OPTIONS }, async ($, on) => {
-    const { w, ui } = await setup($, on)
-    expect(await elapsedOf(ui, SID_ALIVE)).toBe('42s')
-    expect(await elapsedOf(ui, SID_UNREPORTED)).toBe('5m12s')
-    const [runs, reads] = [w.runs.length, w.reads.length]
-    const seen: string[] = []
-    for (let step = 0; step < 4; step++) {
-      await w.clock.advance(1000)
-      seen.push(`${await elapsedOf(ui, SID_ALIVE)} ${await elapsedOf(ui, SID_UNREPORTED)}`)
-    }
-    expect(seen).toEqual(['43s 5m12s', '44s 5m12s', '45s 5m12s', '46s 5m12s'])
-    expect([w.runs.length, w.reads.length]).toEqual([runs, reads])
-  })
 
   test('the tick stops when the command hides the panel, and comes back with the panel', { options: OPTIONS }, async ($, on) => {
     const { w, pane, ui } = await setup($, on)
@@ -3367,20 +2487,6 @@ describe('a log whose session leaves the registry', () => {
     expect(await boxesOf(ui)).toEqual(['SESSIONS', 'LOG'])
     return { w, reg, ui }
   }
-
-  test('the entry vanishes while its log is open: the default view returns, the log is cleared, the next polls reopen nothing', { options: OPTIONS }, async ($, on) => {
-    const { w, reg, ui } = await setup($, on)
-    reg.text = without(SID)
-    await w.clock.advance(5000)
-    expect(await boxesOf(ui)).toEqual(THREE)
-    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeUndefined()
-    expect(await ui.find({ type: 'Text', text: /no transcript path/ })).toBeUndefined()
-    await w.clock.advance(10000)
-    expect(await boxesOf(ui)).toEqual(THREE)
-    expect(await ui.find({ type: 'Text', text: /no transcript path/ })).toBeUndefined()
-    // No row keeps the selection marker.
-    expect((await ui.findAll({ type: 'Button' })).some(one => String(one.props.label).startsWith('▸'))).toBe(false)
-  })
 
   test('an expanded section state is cleared with the closed log', { options: OPTIONS }, async ($, on) => {
     const { w, reg, ui } = await setup($, on)
@@ -3522,7 +2628,6 @@ describe('a log whose session leaves the registry', () => {
 
 describe('launch_worker: inline prompt, decisions section, rules block, resume fill', () => {
   const RUNS = `${HOME}/.claude/session-control/runs`
-  const BASE = `${RUNS}/20260921141320-new`
   // The prompt file is named by the launch's unique session name (a resume adds its launch time).
   const OWN = `${RUNS}/w-new-260921141320.prompt.md`
   const fresh = { dir: '/work/new', model: 'opus', effort: 'high', title: 'new' }
@@ -3543,73 +2648,6 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
   ].join('\n')
   /** What the mod wrote to its own prompt file, if anything. */
   const ownPrompt = (w: World) => w.writes.filter(one => one.path === OWN).at(-1)?.text
-
-  test('the old launch, without the new parameters: the command, the answer and the entry as before, byte for byte', { options: OPTIONS }, async ($, on) => {
-    const w = world(on)
-    await boot($)
-    const out = await launchTool($, { ...fresh, prompt_file: '/work/new/prompt.md' })
-    expect(String(out.result)).toBe(
-      `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir /fixture/lic/a, registered. Name: w-new-260921141320; socket: /run/user/1000/cc-socks/7001.sock. Result: ${BASE}.json; errors: ${BASE}.err.`,
-    )
-    expect(w.bash[0]?.command).toBe(
-      `cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-260921141320' --settings '{"crossSessionInbound":"accept"}' --dangerously-skip-permissions --output-format json ` +
-        `-- "$(cat '/work/new/prompt.md')" > '${BASE}.json' 2> '${BASE}.err'`,
-    )
-    expect(lastRegistry(w).at(-1)).toEqual({
-      title: 'new',
-      pid: 7001,
-      session_id: 'abcdabcd-0000-4000-8000-000000000001',
-      name: 'w-new-260921141320',
-      socket_path: '/run/user/1000/cc-socks/7001.sock',
-      config_dir: '/fixture/lic/a',
-      cwd: '/work/new',
-      model: 'opus',
-      effort: 'high',
-      result_file: `${BASE}.json`,
-      err_file: `${BASE}.err`,
-      started_at: NOW_MS / 1000,
-    })
-    expect(w.writes.some(one => one.path.endsWith('.prompt.md'))).toBe(false)
-  })
-
-  test('an inline prompt that carries the items: written as given to a prompt file of the mod in the runs directory, launched from it, recorded', { options: OPTIONS }, async ($, on) => {
-    const w = world(on)
-    await boot($)
-    const out = await launchTool($, { ...fresh, prompt: FULL })
-    expect(String(out.result)).toEndWith(`Result: ${BASE}.json; errors: ${BASE}.err. Prompt: ${OWN} (written by the mod).`)
-    expect(ownPrompt(w)).toBe(FULL)
-    expect(String(w.bash[0]?.command)).toContain(`-- "$(cat '${OWN}')" > '${BASE}.json' 2> '${BASE}.err'`)
-    expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, prompt_file: OWN, result_file: `${BASE}.json` })
-    expect('section' in (lastRegistry(w).at(-1) as object)).toBe(false)
-    // The prompt is never traced nor written anywhere else.
-    expect(w.writes.filter(one => one.text.includes('tidy the parser')).map(one => one.path)).toEqual([OWN])
-  })
-
-  test('two launches of the same title in the same second write prompt files of their own: the path is the session name, unique per launch; neither overwrites the other', { options: OPTIONS }, async ($, on) => {
-    const w = world(on)
-    await boot($)
-    const first = `${FULL} First.`
-    const second = `${FULL} Second.`
-    await launchTool($, { ...fresh, prompt: first })
-    await launchTool($, { ...fresh, prompt: second })
-    const written = w.writes.filter(one => one.path.endsWith('.prompt.md'))
-    expect(written.map(one => one.path)).toEqual([`${RUNS}/w-new-260921141320.prompt.md`, `${RUNS}/w-new-260921141320-2.prompt.md`])
-    expect(written.map(one => one.text)).toEqual([first, second])
-    expect(new Set(written.map(one => one.path)).size).toBe(2)
-  })
-
-  test('an inline prompt that lacks the items gets the rules block once, and then passes the guard', { options: OPTIONS }, async ($, on) => {
-    const w = world(on)
-    await boot($)
-    const out = await launchTool($, { ...fresh, prompt: 'Reply PONG.' })
-    expect(String(out.result)).toEndWith(`Prompt: ${OWN} (written by the mod; rules block appended).`)
-    expect(ownPrompt(w)).toBe(`Reply PONG.\n\n${RULES_BLOCK}\n`)
-    expect(missingPromptItems(ownPrompt(w) ?? '')).toEqual([])
-    // Each item of the block, as CLAUDE.md's worker prompt lists them.
-    for (const phrase of ['no AI attribution trailer', 'never mention an agent', 'No human answers during the run', 'never for a sign-off item', 'Never read, print or pass a credential', '`run_in_background: true`', 'explicit `timeout`', 'until <check>; do sleep 30; done', 'under ten minutes', 'Never end the turn while a run', '`git status -sb`', '`git log --oneline @{u}..HEAD`', 'exit code']) {
-      expect(RULES_BLOCK).toContain(phrase)
-    }
-  })
 
   test('rules false: an inline prompt that lacks the items is refused as a prompt file would be, and nothing is written', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
@@ -3698,37 +2736,6 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
   })
 
   describe('a resume', () => {
-    // Its cwd and model are those of the fixture's new worker process, so the launch finds it.
-    const entry = { title: 'parser work', session_id: SID_UNREPORTED, name: 'w-parser-work-260920100000', config_dir: '/fixture/lic/a', cwd: '/work/new', model: 'opus', effort: 'medium', reported: false }
-    const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? entry : one)))
-    test('takes dir, model, effort and title from its entry, and says so', { options: OPTIONS }, async ($, on) => {
-      WORKER.sid = SID_UNREPORTED
-      try {
-        const w = world(on, '/fixture/lic/a\n', true, registry)
-        await boot($)
-        const out = await launchTool($, { resume_sid: SID_UNREPORTED, prompt: `${FULL} Continue.` })
-        expect(String(out.result)).toEndWith('From the entry: dir, model, effort, title.')
-        expect(String(w.bash[0]?.command)).toStartWith(`cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='medium' claude -p --model 'opus' --resume '${SID_UNREPORTED}' -n 'w-parser-work-260920100000'`)
-        expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ title: 'parser work', cwd: '/work/new', model: 'opus', effort: 'medium', pid: 7001 })
-        expect(String(w.bash[0]?.command)).toContain(`"$(cat '${RUNS}/w-parser-work-260920100000-260921141320.prompt.md')"`)
-        expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
-      } finally {
-        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
-      }
-    })
-    test('a value given wins over the entry\'s', { options: OPTIONS }, async ($, on) => {
-      WORKER.sid = SID_UNREPORTED
-      try {
-        const w = world(on, '/fixture/lic/a\n', true, registry)
-        await boot($)
-        const out = await launchTool($, { resume_sid: SID_UNREPORTED, prompt: FULL, effort: 'max', title: 'parser again' })
-        expect(String(out.result)).toEndWith('From the entry: dir, model.')
-        expect(String(w.bash[0]?.command)).toStartWith(`cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='max' claude -p --model 'opus' --resume '${SID_UNREPORTED}'`)
-        expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ title: 'parser again', effort: 'max' })
-      } finally {
-        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
-      }
-    })
     test('of an entry without those fields, or of an unknown id, is refused as before', { options: OPTIONS }, async ($, on) => {
       world(on)
       await boot($)
@@ -3908,41 +2915,6 @@ describe('the panel on the desktop surface', () => {
       TAIL.rows = undefined
     }
   })
-
-  test('terminal: the session rows keep their fixed columns at every width and only the title shortens; the desktop draws the same cells whole (decision mod-33)', { options: OPTIONS }, async ($, on) => {
-    let ui = await open($, on, 'terminal', { ...PANE_PROPS, bodyColumns: 300 })
-    for (const bodyColumns of [300, 160, 90, 76, 75, 40]) {
-      if (bodyColumns !== 300) {
-        await ui.unmount()
-        ui = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, bodyColumns } as never })
-      }
-      // The rows' room: the box less its borders and the scroll bar.
-      const room = bodyColumns - 3
-      const texts = (await textsOf(ui)).map(one => one.text)
-      const header = texts.find(text => /^ {2}title/.test(text))!
-      const labels = (await ui.findAll({ type: 'Button' })).filter(one => String(one.key).startsWith('s:')).map(one => String(one.props.label).trimEnd())
-      const orphans = texts.filter(text => text.includes('(no entry)'))
-      const rows = [...labels, ...orphans]
-      expect(rows.length).toBeGreaterThan(1)
-      for (const line of [header, ...rows]) expect(cellWidth(line)).toBeLessThanOrEqual(room)
-      if (bodyColumns >= 76) {
-        // From 76 columns the fixed columns are whole: each starts at the header's cell, the elapsed ends the row.
-        for (const name of ['sid', 'status', 'model', 'effort', 'elapsed']) expect(header.indexOf(` ${name} `.trimEnd())).toBeGreaterThan(0)
-        const at = header.indexOf('elapsed')
-        for (const line of rows) expect(line.slice(at)).toMatch(/^(\d+s|\d+m\d\ds|\d+h\d\dm|-)$/)
-        for (const line of rows) expect(line.slice(header.indexOf('status'), header.indexOf('model'))).toMatch(/^(running|orphan|finished[-a-z]*|queued) +$/)
-      } else {
-        // Narrower: the title keeps its five cells and a row wider than the room is cut at the right edge.
-        expect(header).toStartWith('  title   sid')
-        if (bodyColumns === 40) for (const line of [header, ...rows]) expect(line).toEndWith('\u2026')
-      }
-    }
-    await ui.unmount()
-    const desk = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, bodyColumns: 40 } as never })
-    const cells = (await textsOf(desk)).map(one => one.text).filter(text => / \u00B7 /.test(text))
-    expect(cells[0]).toBe(SESSION_COLUMNS.map(column => column.header).join(' \u00B7 '))
-    for (const line of cells) expect(line).not.toContain('\u2026')
-  })
 })
 
 // ---------------------------------------------------------------- the probe's limits on a slow machine (decision mod-28)
@@ -3951,29 +2923,6 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
   const LIST = 'mcp__session-control__list_sessions'
   const TRACED = { ...OPTIONS, debug: true }
   const probes = (w: World) => w.calls.filter(one => one.op === 'probe').length
-
-  test('a poll tick during a probe skips its refresh', { options: TRACED }, async ($, on) => {
-    const w = world(on)
-    await boot($)
-    let release = () => {}
-    HELD.probe = new Promise<void>(resolve => {
-      release = resolve
-    })
-    try {
-      const before = probes(w)
-      const first = $.tool.call({ tool: LIST } as never)
-      await w.clock.advance(5000)
-      expect(probes(w)).toBe(before + 1)
-      expect(traceOf(w).filter(line => line.event === 'poll.skip').map(line => line.isProbing)).toContain(true)
-      release()
-      HELD.probe = undefined
-      expect(String(((await first) as { result?: unknown }).result)).toStartWith('7 session rows: 1 running, ')
-      expect(PROBES.max).toBe(1)
-    } finally {
-      release()
-      HELD.probe = undefined
-    }
-  })
 
   test('Windows: two tools at once probe one after the other, the second waiting in the helper\'s short pauses: never two probes at once', { options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}` } }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' })

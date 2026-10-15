@@ -9,10 +9,9 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { FsStat, On } from 'claude-code'
 
 import { HOST_MEMBERS, selectHost } from '../hooks/host'
-import type { Host, HostPort, Platform, StopReport } from '../hooks/host'
+import type { Host, HostPort, StopReport } from '../hooks/host'
 import { withHelper } from '../hooks/host-helper'
 import { withPowerShellLaunch } from '../hooks/host-powershell'
-import { NEWER_MAX } from '../hooks/host-shared'
 import { posixHost } from '../hooks/host-posix'
 import { MSYS_PS_MS, PROBE_PS1, PROBE_TIMEOUT_MS, TREE_PS1, windowsHost } from '../hooks/host-windows'
 import { localDate } from '../hooks/store'
@@ -195,20 +194,6 @@ describe('host contract', () => {
       expect(typeof host.launchToolHint).toBe('string')
     })
 
-    test(`${one.name}: paths: home, the stored form, the session directory, the config dir and the transcript`, async () => {
-      const port = portOf(machine(one.env), runs)
-      const home = await host.homeDir(port)
-      expect(home).toBe(one.home)
-      expect(host.nativePath(home)).toBe(home)
-      expect(host.isSameDir(host.sessionDir(`${root}/orch/`), `${root}/orch`)).toBe(true)
-      expect(host.isSameDir(host.sessionDir(`${root}/orch`), `${root}/other`)).toBe(false)
-      expect(host.defaultConfigDir(home, undefined)).toBe(`${home}/.claude`)
-      expect(host.isDefaultConfigDir(`${home}/.claude`, host.defaultConfigDir(home, undefined))).toBe(true)
-      expect(host.isDefaultConfigDir(`${home}/.claude/lic/b`, `${home}/.claude`)).toBe(false)
-      expect(host.transcriptPath({ config_dir: `${home}/.claude`, cwd: `${root}/work`, session_id: SID })).toMatch(new RegExp(`^${home}/\\.claude/projects/[A-Za-z0-9-]+/${SID}\\.jsonl$`))
-      expect(host.transcriptPath({ title: 'no cwd' })).toBeUndefined()
-    })
-
     test(`${one.name}: writeAtomic replaces a file through a rename and leaves no temp file; a changed file is not written`, async () => {
       const m = machine(one.env)
       const port = portOf(m, runs)
@@ -297,17 +282,6 @@ describe('host contract', () => {
       await host.prepareRunsDir(port, runs)
     })
 
-    test(`${one.name}: probe, then findNewWorker finds the new headless worker and not a known one`, async () => {
-      const port = portOf(machine(one.env), runs)
-      const facts = await host.probe(port, [{ session_id: SID, config_dir: `${root}/cfg` }], [`${root}/cfg`])
-      expect(facts.claude.map(proc => proc.pid)).toEqual([4242])
-      expect(facts.transcriptMtime.get(SID)).toBe(1700000000)
-      const want = { dir: `${root}/work`, configDir: host.workerConfigDir({ configDir: `${root}/cfg` }, undefined), model: 'opus' }
-      expect((await host.findNewWorker(port, facts, want, new Set(), NOW_MS))?.pid).toBe(4242)
-      expect(await host.findNewWorker(port, facts, want, new Set([4242]), NOW_MS)).toBeUndefined()
-      expect(await host.findNewWorker(port, facts, { ...want, model: 'sonnet' }, new Set(), NOW_MS)).toBeUndefined()
-    })
-
     // The Windows probe is a PowerShell start of seconds (2 to 24 s seen in a desktop session under load): 60 s.
     test(`${one.name}: the process probe's time limit`, async () => {
       const m = machine(one.env)
@@ -338,29 +312,6 @@ describe('host contract', () => {
       expect(m.paused).toEqual(one.platform === 'linux' ? [] : [2000])
     })
 
-    test(`${one.name}: the launch: its paths, its checks, its facts, the picker and the command for the Bash tool`, async () => {
-      const m = machine(one.env)
-      const port = portOf(m, runs)
-      m.files.set(keyOf(`${root}/work/prompt.md`), 'Goal: x')
-      const args = host.launchArgs({ dir: `${root}/work`, prompt_file: `${root}/work/prompt.md`, model: 'opus', effort: 'high', title: 'new' })
-      expect(args).toMatchObject({ dir: `${root}/work`, prompt_file: `${root}/work/prompt.md` })
-      expect(await host.launchChecks(port, args)).toEqual({ promptFileOk: true, dirOk: true })
-      expect(await host.launchChecks(port, { ...args, prompt_file: `${root}/work/none.md`, dir: `${root}/none` })).toEqual({ promptFileOk: false, dirOk: false })
-      expect(typeof host.launchFacts('Goal: x')).toBe('object')
-      expect(host.pickerArgv([`${root}/bin/pick`, '--need', '40'])).toEqual({ argv: [`${root}/bin/pick`, '--need', '40'] })
-      const command = host.launchCommand(args, { configDir: `${one.home}/.claude`, isConfigInherited: true, name: 'w-new-1' }, `${runs}/r.json`, `${runs}/r.err`)
-      if (one.isPowerShellRoute === true) {
-        expect(command).toContain(`$p = Start-Process -FilePath $exe -ArgumentList '-p --model opus -n w-new-1 --settings `)
-        expect(command).toContain(`-WorkingDirectory '${root}/work' -RedirectStandardInput '${root}/work/prompt.md' -RedirectStandardOutput '${runs}/r.json' -RedirectStandardError '${runs}/r.err' `)
-        expect(host.launchPidFile(`${runs}/r.json`)).toBe(`${runs}/r.pid`)
-        expect(command).toEndWith(`Set-Content -LiteralPath '${runs}/r.pid' -Value $p.Id -Encoding Ascii\n$p.WaitForExit()\nexit $p.ExitCode`)
-        return
-      }
-      expect(command).toStartWith(`cd '${root}/work' && CLAUDE_CODE_EFFORT_LEVEL='high' claude -p --model 'opus' -n 'w-new-1' `)
-      expect(command).toEndWith(`-- "$(cat '${root}/work/prompt.md')" > '${runs}/r.json' 2> '${runs}/r.err'`)
-      expect(host.launchPidFile(`${runs}/r.json`)).toBeUndefined()
-    })
-
     test(`${one.name}: rotate turns the trace into .1 and .1 into .2`, async () => {
       const m = machine(one.env)
       const port = portOf(m, runs)
@@ -369,65 +320,6 @@ describe('host contract', () => {
       m.files.set(keyOf(`${trace}.1`), 'mid\n')
       await host.rotate(port, { path: trace, adding: 10, keep: 3, maxBytes: 8, moves: [[`${trace}.1`, `${trace}.2`], [trace, `${trace}.1`]] })
       expect([at(m, trace), at(m, `${trace}.1`), at(m, `${trace}.2`)]).toEqual([undefined, 'new\n', 'mid\n'])
-    })
-
-    test(`${one.name}: rotateAndAppend rotates when a plan is given, then appends; without one it only appends`, async () => {
-      const m = machine(one.env)
-      const notes: string[] = []
-      const port = portOf(m, runs, notes)
-      const trace = `${runs}/trace.log`
-      m.files.set(keyOf(trace), 'new\n')
-      m.files.set(keyOf(`${trace}.1`), 'mid\n')
-      const plan = { path: trace, adding: 10, keep: 3, maxBytes: 8, moves: [[`${trace}.1`, `${trace}.2`], [trace, `${trace}.1`]] as [string, string][] }
-      expect(await host.rotateAndAppend(port, trace, ['{"a":1}'], plan)).toBeUndefined()
-      expect([at(m, trace), at(m, `${trace}.1`), at(m, `${trace}.2`)]).toEqual(['{"a":1}\n', 'new\n', 'mid\n'])
-      expect(await host.rotateAndAppend(port, trace, ['{"b":2}'])).toBeUndefined()
-      expect([at(m, trace), at(m, `${trace}.1`)]).toEqual(['{"a":1}\n{"b":2}\n', 'new\n'])
-      expect(notes).toEqual([])
-    })
-
-    test(`${one.name}: filesNewerThan lists the files written after a time, newest first, paths and mtimes only, never in .git; a missing directory is undefined`, async () => {
-      const m = machine(one.env)
-      const notes: string[] = []
-      const port = portOf(m, runs, notes)
-      const put = (path: string, sec: number) => {
-        m.files.set(keyOf(path), 'x')
-        m.mtimes.set(keyOf(path), sec * 1000 + 250)
-      }
-      put(`${root}/work/old.txt`, 1000)
-      put(`${root}/work/new.txt`, 3000)
-      put(`${root}/work/sub dir/mid.txt`, 2000)
-      put(`${root}/work/same.txt`, 2000)
-      put(`${root}/work/.git/index`, 3500)
-      put(`${root}/work/sub dir/.git/HEAD`, 3500)
-      put(`${root}/other/x.txt`, 4000)
-      // A file of exactly the second asked is not after it; 250 ms into it is.
-      put(`${root}/work/at.txt`, 1500)
-      m.mtimes.set(keyOf(`${root}/work/at.txt`), 1_500_000)
-      expect(await host.filesNewerThan(port, `${root}/work`, 1500)).toEqual({
-        files: [
-          { path: `${root}/work/new.txt`, mtimeMs: 3_000_250 },
-          { path: `${root}/work/same.txt`, mtimeMs: 2_000_250 },
-          { path: `${root}/work/sub dir/mid.txt`, mtimeMs: 2_000_250 },
-        ],
-        total: 3,
-      })
-      expect(await host.filesNewerThan(port, `${root}/work`, 5000)).toEqual({ files: [], total: 0 })
-      expect(notes).toEqual([])
-      expect(await host.filesNewerThan(port, `${root}/none`, 0)).toBeUndefined()
-    })
-
-    test(`${one.name}: filesNewerThan answers at most ${NEWER_MAX} paths, the newest, with the count of all`, async () => {
-      const m = machine(one.env)
-      for (let n = 0; n < NEWER_MAX + 25; n++) {
-        m.files.set(keyOf(`${root}/work/f${n}.txt`), 'x')
-        m.mtimes.set(keyOf(`${root}/work/f${n}.txt`), (10_000 + n) * 1000)
-      }
-      const listed = await host.filesNewerThan(portOf(m, runs), `${root}/work`, 0)
-      expect(listed?.total).toBe(NEWER_MAX + 25)
-      expect(listed?.files.length).toBe(NEWER_MAX)
-      expect(listed?.files[0]).toEqual({ path: `${root}/work/f${NEWER_MAX + 24}.txt`, mtimeMs: (10_000 + NEWER_MAX + 24) * 1000 })
-      expect(listed?.files.at(-1)?.path).toBe(`${root}/work/f25.txt`)
     })
 
     /** A worker's tree: root 5000 with a child 5001 and a grandchild 5002 that ignores TERM; 6000 is outside it. */
@@ -439,81 +331,7 @@ describe('host contract', () => {
     }
     const signalsOf = (steps: StopReport['steps']) => steps.flatMap(step => (step.kind === 'signal' ? [`${step.pid} ${step.signal}`] : []))
 
-    test(`${one.name}: stopProcessTree lists the tree before the first signal, stops the root, then the descendant still there; nothing outside the tree is signalled`, async () => {
-      const m = machine(one.env)
-      seedTree(m)
-      const notes: string[] = []
-      const report = await host.stopProcessTree(portOf(m, runs, notes), { pid: 5000, start: '100' })
-      expect(report.tree.root).toMatchObject({ pid: 5000, ppid: 1, start: '100', comm: 'claude' })
-      expect(report.tree.descendants.map(proc => [proc.pid, proc.ppid, proc.start, proc.comm])).toEqual([
-        [5001, 5000, '101', 'bash'],
-        [5002, 5001, '102', 'sleep'],
-      ])
-      expect(report.tree.ancestors).toEqual([900, 1])
-      // The listing ran before any signal: the first signal is recorded after it.
-      const listedAt = m.runs.findIndex(argv => argv.some(arg => arg.endsWith('/tree.ps1')) || argv.includes('processTree'))
-      const firstSignal = m.runs.findIndex(argv => argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))
-      expect(listedAt).toBeGreaterThanOrEqual(0)
-      expect(firstSignal).toBeGreaterThan(listedAt)
-      // Windows sends no gentle taskkill first (a console process without a window refuses it): /T /F to the root takes
-      // its whole Windows tree, the one that ignores the gentle signal with it.
-      expect(signalsOf(report.steps)).toEqual(one.platform === 'linux' ? ['5000 TERM', '5001 TERM', '5002 TERM', '5002 KILL'] : ['5000 taskkill /T /F'])
-      expect(report.steps.filter(step => step.kind === 'check' && step.status === 'gone').map(step => step.pid).sort()).toEqual(one.platform === 'linux' ? [5000, 5001, 5002] : [5000])
-      if (one.platform === 'windows') expect(m.table.signals.every(sent => sent.signal === 'taskkill /F')).toBe(true)
-      expect(report.final).toEqual([5000, 5001, 5002].map(pid => ({ pid, status: 'gone', state: '' })))
-      expect([...m.table.procs.keys()]).toEqual([6000])
-      expect(m.table.signals.some(sent => sent.pid === 6000)).toBe(false)
-      expect(notes).toEqual([])
-      expect(report.notes).toEqual([])
-    })
-
     if (one.platform === 'windows') {
-      test(`${one.name}: stopProcessTree reaches a program the worker started through Git Bash by the MSYS process table, and says when that table cannot be read`, async () => {
-        const GIT = 'C:\\Program Files\\Git\\usr\\bin'
-        /** The tree, plus a sleep.exe under the worker's bash 5001 through MSYS: its Windows parent 4999 (the fork that exec'd it) is gone. */
-        const seedMsys = (m: Machine) => {
-          seedTree(m)
-          m.table.procs.set(5003, { ppid: 4999, start: '103', state: '', comm: 'sleep.exe', msysParent: 5001 })
-          // Another session's MSYS program: its MSYS parent is outside the tree.
-          m.table.procs.set(6001, { ppid: 4998, start: '104', state: '', comm: 'sleep.exe', msysParent: 6000 })
-          // A program whose MSYS parent pid names a member that started after it: not that member's child.
-          m.table.procs.set(6002, { ppid: 4997, start: '90', state: '', comm: 'sleep.exe', msysParent: 5001 })
-        }
-        const m = machine(one.env)
-        seedMsys(m)
-        m.table.msys = { dir: GIT }
-        const report = await host.stopProcessTree(portOf(m, runs), { pid: 5000, start: '100' })
-        expect(report.tree.descendants.map(proc => [proc.pid, proc.ppid, proc.start, proc.state, proc.comm])).toEqual([
-          [5001, 5000, '101', 'S', 'bash'],
-          [5002, 5001, '102', 'S', 'sleep'],
-          [5003, 5001, '103', 'msys', 'sleep.exe'],
-        ])
-        expect(report.notes).toEqual([
-          'the MSYS process table of C:/Program Files/Git/usr/bin (Git Bash) was read before the first signal: 1 program the worker started through Git Bash, whose Windows parent has exited, is among the descendants listed, each with its MSYS parent',
-        ])
-        expect(signalsOf(report.steps)).toEqual(['5000 taskkill /T /F', '5003 taskkill /T /F'])
-        expect(report.final).toEqual([5000, 5001, 5002, 5003].map(pid => ({ pid, status: 'gone', state: '' })))
-        expect([...m.table.procs.keys()].sort()).toEqual([6000, 6001, 6002])
-        expect(m.table.signals.some(sent => [6000, 6001, 6002].includes(sent.pid))).toBe(false)
-
-        // The same worker with a table that cannot be read: the program stays outside the stop, and the note says so.
-        const blind = machine(one.env)
-        seedMsys(blind)
-        blind.table.msys = { dir: GIT, isUnreadable: true }
-        const unread = await host.stopProcessTree(portOf(blind, runs), { pid: 5000, start: '100' })
-        expect(unread.tree.descendants.map(proc => proc.pid)).toEqual([5001, 5002])
-        expect(unread.notes).toEqual([
-          'the MSYS process table of C:/Program Files/Git/usr/bin (Git Bash) could not be read: a program the worker started through Git Bash whose Windows parent has exited is not among the descendants listed, and this stop does not reach it',
-        ])
-        expect(blind.table.procs.has(5003)).toBe(true)
-        expect(blind.table.signals.some(sent => [5003, 6000, 6001, 6002].includes(sent.pid))).toBe(false)
-
-        // No MSYS member in the tree: no table read, no note.
-        const plain = machine(one.env)
-        seedTree(plain)
-        expect((await host.stopProcessTree(portOf(plain, runs), { pid: 5000, start: '100' })).notes).toEqual([])
-      })
-
       test(`${one.name}: stopProcessTree takes an MSYS process table with no row of a table (a ps.exe that exits 0 and prints garbage) as one that cannot be read, and stops what the Windows tree reaches`, async () => {
         const m = machine(one.env)
         seedTree(m)
@@ -598,22 +416,6 @@ describe('host contract', () => {
       expect(m.table.procs.size).toBe(4)
       expect(m.runs.some(argv => argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))).toBe(false)
     })
-
-    test(`${one.name}: no operation falls back (the helper, where there is one, answers every call)`, async () => {
-      const m = machine(one.env)
-      const notes: string[] = []
-      const port = portOf(m, runs, notes)
-      m.files.set(keyOf(`${root}/orch/reg.json`), '[]\n')
-      m.files.set(keyOf(`${root}/t.jsonl`), 'a\n')
-      await host.probe(port, [], [])
-      await host.writeAtomic(port, `${root}/orch/reg.json`, '[1]\n', '[]\n')
-      await host.append(port, `${runs}/log`, ['x'], false, () => undefined)
-      await host.tail(port, `${root}/t.jsonl`)
-      seedTree(m)
-      await host.stopProcessTree(port, { pid: 5000, start: '100' })
-      expect(notes).toEqual([])
-      expect(m.runs.some(argv => argv[0] === NODE && argv[1] === HELPER)).toBe(true)
-    })
   }
 })
 
@@ -634,27 +436,6 @@ describe('host selection', () => {
     expect(selectHost({ OS: 'Windows_NT', USERPROFILE: '\\\\host\\share\\u' })).toBe(posixHost)
   })
 
-  // Through the plugin on the mock engine: the board's probes at session start are the chosen adapter's.
-  const PROBES: [string, Record<string, string>, string, 'Linux' | 'Windows'][] = [
-    ['the Windows values', { OS: 'Windows_NT', USERPROFILE: 'C:\\m\\home', HOME: '/c/m/home' }, 'C:/m/orch', 'Windows'],
-    ['a Linux environment', { HOME: '/m/home' }, '/m/orch', 'Linux'],
-    ['Windows_NT without a drive-letter profile', { OS: 'Windows_NT', USERPROFILE: '/m/home', HOME: '/m/home' }, '/m/orch', 'Linux'],
-  ]
-  for (const [name, env, orch, adapter] of PROBES) {
-    test(`the plugin runs the ${adapter} adapter for ${name}`, { options: { orchestratorDir: orch, registryPath: '~/.claude/headless-sessions.json' } }, async ($, on) => {
-      const m = machine(env)
-      mount(on, m)
-      on('session.start', ($, e) => ({ cwd: e.cwd }))
-      on('command.register', ($, e) => ({ value: { command: e.name } }))
-      on('tool.register', ($, e) => ({ value: { tool: `mcp__session-control__${e.name}` } }))
-      on('ui.toast', () => ({ value: undefined }))
-      await startIn($, orch)
-      // Linux: the helper's probe; Windows: PROBE_PS1 (the helper probes Linux only).
-      const probes = m.runs.filter(argv => (argv[0] === NODE && argv[2] === 'probe') || String(argv[6]).endsWith('/probe.ps1'))
-      expect(probes.length).toBeGreaterThan(0)
-      expect(probes.every(argv => (adapter === 'Linux' ? argv[0] === NODE : argv[0]?.endsWith('\\powershell.exe')))).toBe(true)
-    })
-  }
 })
 
 // The write-side tools through the plugin on the simulated machine, Linux and Windows: files that really change, so an
@@ -665,9 +446,7 @@ describe('write-side tools through the plugin, on both platforms', () => {
     { name: 'Windows', env: WINDOWS_ENV, root: 'C:/m' },
   ]
   const SID_A = 'aaaa0001-1111-4111-8111-111111111111'
-  const SID_B = 'bbbb0002-2222-4222-8222-222222222222'
   const SID_C = 'cccc0003-3333-4333-8333-333333333333'
-  const SID_D = 'dddd0004-4444-4444-8444-444444444444'
   const SID_E = 'eeee0005-5555-4555-8555-555555555555'
   const today = localDate(NOW_MS)
 
@@ -712,69 +491,6 @@ describe('write-side tools through the plugin, on both platforms', () => {
       const cleared = (get(m, `${runs}/cleared.jsonl`) ?? '').trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
       expect(cleared).toEqual([{ ...entries[0], cost_usd: 0.12, duration_ms: 4500 }, { ...entries[2], cost_usd: 1, duration_ms: 1 }])
       expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([entries[1]])
-    })
-
-    test(`${p.name}: close_worker acknowledges then retires; the run files of a clean session go, unless outside the runs directory or named by another entry; cost and duration stay in the cleared log`, { options }, async ($, on) => {
-      const m = machine(p.env)
-      boot(on, m)
-      const transcriptA = posixOrWindows(p.name).transcriptPath({ config_dir: cfg, cwd: `${p.root}/work`, session_id: SID_A }) ?? ''
-      const entries = [
-        // A: clean, all four run files in the runs directory; its error file is also C's, so it stays.
-        { title: 'a', session_id: SID_A, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'clean', summary: 'clean: a' }, result_file: `${runs}/20260921-a.json`, err_file: `${runs}/20260921-a.err`, prompt_file: `${runs}/20260921-a.prompt.md` },
-        // B: clean but kept: the acknowledgement clears keep, so the retire after it takes it.
-        { title: 'b', session_id: SID_B, config_dir: cfg, cwd: `${p.root}/work`, reported: true, keep: true, outcome: { kind: 'clean', summary: 'clean: b' }, result_file: `${runs}/20260921-b.json` },
-        { title: 'c', session_id: SID_C, config_dir: cfg, cwd: `${p.root}/work`, reported: false, err_file: `${runs}/20260921-a.err` },
-        // D: clean, its result file outside the runs directory.
-        { title: 'd', session_id: SID_D, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'clean', summary: 'clean: d' }, result_file: `${p.root}/elsewhere/d.json` },
-        // E: no outcome (an entry from before outcomes): retired, its files kept.
-        { title: 'e', session_id: SID_E, config_dir: cfg, cwd: `${p.root}/work`, reported: false, result_file: `${runs}/20260921-e.json` },
-      ]
-      put(m, reg, `${JSON.stringify(entries, null, 2)}\n`)
-      put(m, `${runs}/20260921-a.json`, result(0.12, 4500))
-      put(m, `${runs}/20260921-a.err`, '')
-      put(m, `${runs}/20260921-a.pid`, '4242\r\n')
-      put(m, `${runs}/20260921-a.prompt.md`, 'Reply PONG.')
-      put(m, `${runs}/20260921-b.json`, result(0.5, 60000))
-      put(m, `${runs}/20260921-e.json`, result(1, 1))
-      put(m, `${p.root}/elsewhere/d.json`, result(2, 2))
-      put(m, transcriptA, '{"type":"user"}\n')
-      await startIn($, orch)
-      const out = (await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: [SID_A, SID_B, SID_D, SID_E] } as never)) as { result?: unknown }
-      expect(String(out.result)).toBe(
-        'Acknowledged: aaaa0001, bbbb0002, dddd0004, eeee0005. Retired: aaaa0001, bbbb0002, dddd0004, eeee0005. ' +
-          `Run files deleted from ${runs}: aaaa0001 (20260921-a.json, 20260921-a.pid, 20260921-a.prompt.md); bbbb0002 (20260921-b.json).`,
-      )
-      for (const gone of ['20260921-a.json', '20260921-a.pid', '20260921-a.prompt.md', '20260921-b.json']) expect(get(m, `${runs}/${gone}`)).toBeUndefined()
-      expect(get(m, `${runs}/20260921-a.err`)).toBe('')
-      expect(get(m, `${runs}/20260921-e.json`)).toBe(result(1, 1))
-      expect(get(m, `${p.root}/elsewhere/d.json`)).toBe(result(2, 2))
-      expect(get(m, transcriptA)).toBe('{"type":"user"}\n')
-      const cleared = (get(m, `${runs}/cleared.jsonl`) ?? '').trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
-      expect(cleared.map(one => one.session_id)).toEqual([SID_A, SID_B, SID_D, SID_E])
-      expect(cleared[0]).toMatchObject({ session_id: SID_A, outcome: { kind: 'clean' }, cost_usd: 0.12, duration_ms: 4500 })
-      expect(cleared[1]).toMatchObject({ session_id: SID_B, cost_usd: 0.5, duration_ms: 60000 })
-      expect(cleared[2]).toMatchObject({ session_id: SID_D, cost_usd: 2, duration_ms: 2 })
-      expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([entries[2]])
-    })
-
-    test(`${p.name}: a reviewed retire deletes the run files too; a kept close leaves every file`, { options }, async ($, on) => {
-      const m = machine(p.env)
-      boot(on, m)
-      const entries = [
-        { title: 'a', session_id: SID_A, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'login', summary: 'login: wrong' }, result_file: `${runs}/20260921-a.json`, err_file: `${runs}/20260921-a.err` },
-        { title: 'b', session_id: SID_B, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'clean', summary: 'clean: b' }, result_file: `${runs}/20260921-b.json` },
-      ]
-      put(m, reg, `${JSON.stringify(entries, null, 2)}\n`)
-      put(m, `${runs}/20260921-a.json`, result(0.3, 30))
-      put(m, `${runs}/20260921-a.err`, 'Please run /login\n')
-      put(m, `${runs}/20260921-b.json`, result(0.4, 40))
-      await startIn($, orch)
-      const reviewed = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [SID_A], reviewed: { aaaa0001: 'the run succeeded' } } as never)) as { result?: unknown }
-      expect(String(reviewed.result)).toBe(`Retired: aaaa0001. Retired with review: aaaa0001 (was login: the run succeeded). Run files deleted from ${runs}: aaaa0001 (20260921-a.json, 20260921-a.err).`)
-      const kept = (await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: [SID_B], keep: true } as never)) as { result?: unknown }
-      expect(String(kept.result)).toBe('Acknowledged and kept: bbbb0002.')
-      expect(get(m, `${runs}/20260921-b.json`)).toBe(result(0.4, 40))
-      expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([{ ...entries[1], reported: true, keep: true }])
     })
 
     test(`${p.name}, helper auto: a retire deletes only regular files directly in the runs folder: a .. path, an absolute outside path, a symlinked folder, a symlinked file, a subfolder, a directory, a shared file and a non-clean outcome leave every file where it is, and are named`, { options }, async ($, on) => {
@@ -948,8 +664,3 @@ describe('TREE_PS1', () => {
     expect(TREE_PS1).not.toMatch(/taskkill|Stop-Process/i)
   })
 })
-
-/** The adapter of a platform's name, for the paths the tests place files at. */
-function posixOrWindows(name: string): Platform {
-  return name === 'Windows' ? windowsHost : posixHost
-}

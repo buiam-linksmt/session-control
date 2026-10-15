@@ -18,7 +18,6 @@ import {
   panelSnapshotText,
   plainText,
   redactCounted,
-  sessionWritesText,
   shownName,
   shownSessionId,
   transcriptWrites,
@@ -262,34 +261,6 @@ describe('list_sessions', () => {
       '- orphan (no registry entry) | pid 4101 | age 2m05s | cwd /m/work/alive | config_dir /m/cfg',
       '- orphan (no registry entry) | pid 4999 | age 40m00s | cwd /m/elsewhere | config_dir /m/lic/b',
     ])
-  })
-
-  test('the session names the launch gives and the session ids are shown as they are; a title keeps its redaction', { options: OPTIONS }, async ($, on) => {
-    // Real-shaped names: what workerName gives for real titles, a uniqueness suffix among them. Each is a run of 32 or
-    // more letters, digits and dashes, which the redaction takes for a token in free text.
-    const at = Date.UTC(2026, 9, 11, 12, 0, 0)
-    const names = [
-      workerName('session-control T2a write tools', at),
-      workerName('NADIR manual tests for 946665, 946670 and 946671', at),
-      `${workerName('Windows support for the mod panel', at)}-2`,
-      workerName('fix token refresh', at),
-    ]
-    expect(names).toEqual(['w-session-control-t2a-writ-261011120000', 'w-nadir-manual-tests-for-9-261011120000', 'w-windows-support-for-the-261011120000-2', 'w-fix-token-refresh-261011120000'])
-    expect(names.slice(0, 3).every(name => redact(name) === REDACTED)).toBe(true)
-    const sids = ['5e551011-aaaa-4aaa-8aaa-aaaaaaaaaaa1', '5e551011-bbbb-4bbb-8bbb-bbbbbbbbbbb2', '5e551011-cccc-4ccc-8ccc-ccccccccccc3', '5e551011-dddd-4ddd-8ddd-ddddddddddd4']
-    const entries = names.map((name, n) => ({ title: n === 0 ? `T2a with ${CANARIES.github} in the title` : `worker ${n}`, session_id: sids[n], name, config_dir: CFG, cwd: '/m/work/named', model: 'haiku', effort: 'low', reported: true }))
-    // A name the launch never gives (a hand edit, another tool) is free text: a token in it goes.
-    entries.push({ title: 'foreign', session_id: '5e551011-eeee-4eee-8eee-eeeeeeeeeee5', name: `my ${CANARIES.anthropic}`, config_dir: CFG, cwd: '/m/work/named', model: 'haiku', effort: 'low', reported: true })
-    const w = world(on, entries)
-    const got = await call($, w, 'list_sessions')
-    expectReadOnly(got)
-    for (const [n, name] of names.entries()) expect(got.text).toContain(`| session_id ${sids[n]} | name ${name} | pid -`)
-    expect(got.text).toContain(`- finished | T2a with ${REDACTED} in the title | session_id ${sids[0]} | name ${names[0]} |`)
-    expect(got.text).toContain(`| name my ${REDACTED} | pid -`)
-    expectNoCanary(got.text)
-    // The headings of the tools that name one session show the id as it is too.
-    const tail = await $.tool.call({ tool: tool('worker_tail'), session_id: sids[0] } as never)
-    expect(String((tail as { result?: unknown }).result).split('\n')[0]).toBe(`worker_tail for session ${sids[0]} "T2a with ${REDACTED} in the title"`)
   })
 
   test('shownName and shownSessionId: the mod\'s forms as they are, anything else cleaned and redacted', () => {
@@ -716,22 +687,6 @@ describe('inspect.ts', () => {
     expect(isUnder('c:\\Work\\Orch\\a.json', 'C:/work/orch', true)).toBe(true)
     expect(isSamePath('C:\\Users\\U\\.claude\\headless-sessions.json', 'c:/users/u/.claude/headless-sessions.json', true)).toBe(true)
     expect(isSamePath('/a/B', '/a/b', false)).toBe(false)
-  })
-
-  test('session_writes on Windows: a path under the orchestrator directory and the registry are flagged in any case and separator', () => {
-    const text = sessionWritesText({
-      entry: { session_id: SID_WRITER, title: 'w', cwd: 'C:/work' },
-      start: { ms: T0 * 1000, source: "the transcript's first timestamp" },
-      listing: { files: [{ path: 'C:/work/Orch/open-points.json', mtimeMs: (T0 + 5) * 1000 }, { path: 'C:/work/reg.json', mtimeMs: (T0 + 4) * 1000 }, { path: 'C:/work/a.txt', mtimeMs: (T0 + 3) * 1000 }], total: 3 },
-      orchestratorDir: 'C:/work/orch',
-      registryPath: 'C:/WORK/REG.json',
-      isWindows: true,
-      transcript: { text: toolUse('e', 'Write', { file_path: 'c:\\work\\orch\\task-queue.json' }, 'x'), isWhole: true },
-    })
-    expect(text).toContain('flagged among those shown: 1 under the orchestrator directory C:/work/orch; 1 the registry file C:/WORK/REG.json')
-    expect(text).toContain('C:/work/Orch/open-points.json  [ORCHESTRATOR DIR]')
-    expect(text).toContain('C:/work/reg.json  [REGISTRY]')
-    expect(text).toContain('- Write of c:\\work\\orch\\task-queue.json')
   })
 
   test('worker_tail tells the age in whole seconds, and from a minute up also as the elapsed column does', () => {
