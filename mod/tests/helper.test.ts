@@ -7,6 +7,7 @@ import type { On, ProcessRunResult } from 'claude-code'
 
 import type { HostPort, RotatePlan } from '../hooks/host'
 import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, NODE_REFUSAL, NODE_WARNING, appendText, newerAnswer, nodeMajor, readAnswer, rejectionCode, treeAnswer, withHelper } from '../hooks/host-helper'
+import { TAIL_SHAPED_MAX_BYTES } from '../hooks/host-shared'
 import type { HelperNote } from '../hooks/host-helper'
 import { posixHost } from '../hooks/host-posix'
 import { windowsHost } from '../hooks/host-windows'
@@ -370,6 +371,25 @@ describe('withHelper on Linux', () => {
 })
 
 describe('withHelper: the listing and the shaped tail', () => {
+  test('filesNewerThan is one helper call with its request and a 30 s limit; a shaped tail asks the helper to keep the newest bytes', async () => {
+    const sim = machine()
+    const host = helped()
+    const timeouts: (number | undefined)[] = []
+    const base = portOf(sim)
+    const port: HostPort = { ...base, run: (argv, init, isQuiet, shown) => (timeouts.push(init?.timeoutMs), base.run(argv, init, isQuiet, shown)) }
+    sim.files.set('/m/work/a.txt', 'x')
+    sim.files.set('/m/runs/t.jsonl', 'a\nbb\nc\n')
+    expect(await host.filesNewerThan(port, '/m/work', 1700000000.9)).toEqual({ files: [], total: 0 })
+    expect(await host.tail(port, '/m/runs/t.jsonl', { lines: 2, width: 1 })).toBe('b\nc\n')
+    expect(calls(sim)).toEqual([
+      { op: 'filesNewerThan', request: { dir: '/m/work', since: 1700000000, max: 200 } },
+      { op: 'tail', request: { path: '/m/runs/t.jsonl', lines: 2, width: 1, maxBytes: TAIL_SHAPED_MAX_BYTES } },
+    ])
+    // The lookup, then the listing at 30 s and the tail at the usual 10 s.
+    expect(timeouts).toEqual([5_000, 30_000, 10_000])
+    expect(failures(sim)).toEqual([])
+  })
+
   test('filesNewerThan: an answer of the wrong shape or a directory the helper does not find answers nothing, told by its code', async () => {
     for (const [answer, code] of [
       ['{"ok":true,"files":"nope","total":1}', 'BAD_ANSWER'],

@@ -75,6 +75,7 @@ import {
   ackEntries,
   findNewWindowsWorker,
   findNewWorker,
+  hasSessionName,
   isHeadless,
   isLicenceRun,
   isE2eRunDir,
@@ -654,9 +655,30 @@ describe('elapsed column', () => {
     return entry
   })
   const at = (sec: number) => ({ nowSec: NOW_SEC + sec, probedSec: NOW_SEC })
+  const textOf = (rows: ReturnType<typeof buildRows>, title: string, sec: number) => {
+    const row = rows.find(one => one.title === title)!
+    return formatRow(row, 200, paneWidths(rows, 200, at(sec)), at(sec)).trimEnd().split(/\s+/).at(-1)
+  }
 
   test('42s under a minute, 5m12s under an hour, 1h05m from an hour up', () => {
     expect([0, 42, 59.9, 60, 312, 3599, 3600, 3900, 3959, 86_400 + 61].map(formatAge)).toEqual(['0s', '42s', '59s', '1m00s', '5m12s', '59m59s', '1h00m', '1h05m', '1h05m', '24h01m'])
+  })
+
+  test('a running entry counts from started_at, a finished one shows its run, an orphan and an older entry the probe age', () => {
+    const rows = buildRows(timed, facts, NOW_SEC)
+    expect(rows.find(one => one.sid === SID_ALIVE)).toMatchObject({ startedAt: NOW_SEC - 42, elapsedSec: 125 })
+    expect(textOf(rows, 'alive worker', 0)).toBe('42s')
+    expect(textOf(rows, 'alive worker', 30)).toBe('1m12s')
+    expect(textOf(rows, 'unreported worker', 30)).toBe('5m12s')
+    expect(textOf(rows, 'done worker', 30)).toBe('1h06m')
+    // The orphan: 2400 s at the probe, then the display clock's seconds since.
+    expect(textOf(rows, '(no entry) /work/x', 0)).toBe('40m00s')
+    expect(textOf(rows, '(no entry) /work/x', 7)).toBe('40m07s')
+    // Entries without the fields stay valid: the probe age while running, '-' once finished.
+    const old = buildRows(REGISTRY, facts, NOW_SEC)
+    expect(textOf(old, 'alive worker', 5)).toBe('2m10s')
+    expect(textOf(old, 'unreported worker', 5)).toBe('-')
+    expect(textOf(old, 'limited worker', 5)).toBe('-')
   })
 
   test('without a display clock the row shows what the probe left; a started_at in the future reads 0s', () => {
@@ -1115,6 +1137,33 @@ describe('registry edits: the differential cases the jq scripts are checked agai
 })
 
 describe('Windows paths', () => {
+  test('one native form from every spelling', () => {
+    const table: [string, string][] = [
+      ['C:\\Users\\u', 'C:/Users/u'],
+      ['C:/Users/u', 'C:/Users/u'],
+      ['/c/Users/u', 'C:/Users/u'],
+      ['c:\\users\\u', 'C:/users/u'],
+      ['/d/work', 'D:/work'],
+      ['C:\\Users\\u\\', 'C:/Users/u'],
+      ['C:/Users/u///', 'C:/Users/u'],
+      ['/c/Users/u/', 'C:/Users/u'],
+      ['C:\\', 'C:/'],
+      ['C:', 'C:/'],
+      ['/c', 'C:/'],
+      ['/c/', 'C:/'],
+      ['C:\\Users\\John Smith\\My Project', 'C:/Users/John Smith/My Project'],
+      ['/c/Users/John Smith/', 'C:/Users/John Smith'],
+      ['C:\\Users\\\\u\\/x', 'C:/Users/u/x'],
+      ['\\\\wsl.localhost\\Ubuntu-24.04\\home\\u', '//wsl.localhost/Ubuntu-24.04/home/u'],
+      ['\\\\wsl.localhost\\Ubuntu-24.04\\home\\u\\', '//wsl.localhost/Ubuntu-24.04/home/u'],
+      ['//server/share/dir', '//server/share/dir'],
+      ['/mnt/c/Users/u', '/mnt/c/Users/u'],
+      ['/tmp/x', '/tmp/x'],
+      ['relative\\dir', 'relative/dir'],
+    ]
+    for (const [given, want] of table) expect([given, winPath(given)]).toEqual([given, want])
+  })
+
   test('absolute is a drive or a share; comparisons ignore case and the spelling', () => {
     for (const path of ['C:\\x', 'C:/x', '/c/x', 'd:/', '\\\\wsl.localhost\\Ubuntu\\home', '//server/share']) expect([path, isWinAbsolute(path)]).toEqual([path, true])
     for (const path of ['/tmp/x', '/mnt/c/x', 'C:x', 'x\\y', '//server', '']) expect([path, isWinAbsolute(path)]).toEqual([path, false])
@@ -1212,6 +1261,26 @@ describe('the new worker of a launch', () => {
     const both = parseProcFacts([line(5, '', ''), line(6, 'C:/work/new', 'C:/Users/u/.claude')].join('\n'))
     expect(findNewWindowsWorker(both, winWant, new Set(), 10)?.pid).toBe(6)
   })
+
+  test('with the launch\'s session name: only the worker whose command line passes that name with -n, on either host', () => {
+    const named = (pid: number, name: string, cwd = '/work/new', cfg = '/fixture/lic/a') => line(pid, cwd, cfg, `claude -p --model opus -n ${name} --settings {} --output-format json -- prompt`)
+    const two = parseProcFacts([named(1, 'w-new-260921141320'), named(2, 'w-new-260921141335')].join('\n'))
+    expect(findNewWorker(two, { ...want, name: 'w-new-260921141335' }, new Set())?.pid).toBe(2)
+    expect(findNewWorker(two, { ...want, name: 'w-new-260921141320' }, new Set())?.pid).toBe(1)
+    // A name that only starts the same, another launch's, or none on the line: not this launch's worker.
+    expect(findNewWorker(two, { ...want, name: 'w-new-2609211413' }, new Set())).toBeUndefined()
+    expect(findNewWorker(parseProcFacts(named(3, 'w-new-260921141320-2')), { ...want, name: 'w-new-260921141320' }, new Set())).toBeUndefined()
+    expect(findNewWorker(parseProcFacts(line(4, '/work/new', '/fixture/lic/a')), { ...want, name: 'w-new-260921141320' }, new Set())).toBeUndefined()
+    // Windows: the name as the word, or quoted when it holds a blank; the unplaced worker needs it too.
+    const winWant = { dir: 'C:/Work/New', configDir: 'C:/Users/u/.claude', model: 'opus', name: 'w-new-260921141320' }
+    const exe = (pid: number, name: string, cwd = 'C:\\work\\new', cfg = 'C:\\Users\\u\\.claude') => line(pid, cwd, cfg, `"C:\\bin\\claude.exe" -p --model opus -n ${name} --output-format json`)
+    expect(findNewWindowsWorker(parseProcFacts(exe(5, 'w-new-260921141320')), winWant, new Set(), 10)?.pid).toBe(5)
+    expect(findNewWindowsWorker(parseProcFacts(exe(6, 'w-new-260921141335')), winWant, new Set(), 10)).toBeUndefined()
+    expect(findNewWindowsWorker(parseProcFacts(exe(7, 'w-new-260921141335', '', '')), winWant, new Set(), 10)).toBeUndefined()
+    expect(findNewWindowsWorker(parseProcFacts(exe(8, '"my run"')), { ...winWant, name: 'my run' }, new Set(), 10)?.pid).toBe(8)
+    expect(hasSessionName("claude -p -n 'w-a' --x", 'w-a')).toBe(true)
+    expect(hasSessionName('claude -p -n w-a.b --x', 'w-a-b')).toBe(false)
+  })
 })
 
 describe('one registry entry per session', () => {
@@ -1235,6 +1304,8 @@ describe('one registry entry per session', () => {
 })
 
 describe('launch line', () => {
+  // N is the session name a launch passes with -n (workerName of the title 'new' at 2026-10-10 12:00:00 UTC).
+  const linux: LaunchArgs = { dir: '/work/new', prompt_file: '/tmp/scratch/prompt.md', model: 'opus', effort: 'high', title: 'new' }
 
   test('the default config dir: the orchestrator\'s own CLAUDE_CONFIG_DIR, else <home>/.claude; compared as the platform does', () => {
     expect(defaultConfigDir('/home/u', undefined)).toBe('/home/u/.claude')
@@ -1247,6 +1318,16 @@ describe('launch line', () => {
     expect(isDefaultConfigDir('/Home/u/.claude', '/home/u/.claude')).toBe(false)
     expect(isDefaultConfigDir('c:\\users\\U\\.claude', 'C:/Users/u/.claude', true)).toBe(true)
     expect(isDefaultConfigDir('C:/Users/u/.claude/lic/b', 'C:/Users/u/.claude', true)).toBe(false)
+  })
+
+  test('Windows: the same line for Git Bash, every path native C:/... in single quotes', () => {
+    const args: LaunchArgs = { ...linux, dir: winPath("/c/Users/John Smith/O'Brien proj/"), prompt_file: winPath('/c/Users/John Smith/AppData/Local/Temp/prompt.md') }
+    const runs = 'C:/Users/John Smith/.claude/session-control/runs'
+    expect(buildLaunchArgv(args, { name: N, configDir: winPath('C:\\Users\\John Smith\\.claude') }, `${runs}/r.json`, `${runs}/r.err`)[2]).toBe(
+      "cd 'C:/Users/John Smith/O'\\''Brien proj' && CLAUDE_CONFIG_DIR='C:/Users/John Smith/.claude' CLAUDE_CODE_EFFORT_LEVEL='high' " +
+        "claude -p --model 'opus' -n 'w-new-261010120000' --settings '{\"crossSessionInbound\":\"accept\"}' --dangerously-skip-permissions --output-format json -- \"$(cat 'C:/Users/John Smith/AppData/Local/Temp/prompt.md')\" " +
+        "> 'C:/Users/John Smith/.claude/session-control/runs/r.json' 2> 'C:/Users/John Smith/.claude/session-control/runs/r.err'",
+    )
   })
 })
 
@@ -1286,6 +1367,21 @@ describe('session name and inbox of a launch', () => {
   test('the settings are one shell word with no blank and no quote shq would have to escape', () => {
     expect(JSON.parse(WORKER_SETTINGS)).toEqual({ crossSessionInbound: 'accept' })
     expect(WORKER_SETTINGS).not.toMatch(/[\s']/)
+  })
+  test('the worker matcher still finds the launched worker with the extra flags, on Linux and on Windows', () => {
+    const want = { dir: '/work/new', configDir: '/fixture/lic/a', model: 'opus' }
+    // /proc/<pid>/cmdline with its NULs turned to blanks, as the probe prints it.
+    const linuxCmd = `claude -p --model opus -n ${N} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- Goal: x`
+    const linuxResume = `claude -p --model opus --resume ${SID_DEAD} -n ${N} --settings {"crossSessionInbound":"accept"} --dangerously-skip-permissions --output-format json -- Goal: x`
+    for (const cmd of [linuxCmd, linuxResume]) {
+      expect(findNewWorker(parseProcFacts(['P', 7, 'claude', 2, '/work/new', '/fixture/lic/a', cmd].join('\t')), want, new Set())?.pid).toBe(7)
+    }
+    expect(findNewWorker(parseProcFacts(['P', 7, 'claude', 2, '/work/new', '/fixture/lic/a', linuxCmd].join('\t')), { ...want, model: 'sonnet' }, new Set())).toBeUndefined()
+    // Win32_Process.CommandLine as Git Bash builds it for claude.exe.
+    const winCmd = `"C:\\Users\\u\\.local\\bin\\claude.exe" -p --model opus -n ${N} --settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json -- "Goal: x"`
+    const winWant = { dir: 'C:/work/new', configDir: 'C:/Users/u/.claude', model: 'opus' }
+    expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, 'C:\\work\\new', 'C:\\Users\\u\\.claude', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
+    expect(findNewWindowsWorker(parseProcFacts(['P', 8, 'claude', 2, '', '', winCmd].join('\t')), winWant, new Set(), 5)?.pid).toBe(8)
   })
 })
 
@@ -1339,6 +1435,19 @@ describe('worker-report check', () => {
     }
     expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD → 128`)).toBe('git log @{u}..HEAD exited 128')
     expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD exited 1`)).toBe('git log @{u}..HEAD exited 1')
+  })
+  test('the ASCII arrow -> 0 is an exit spelling in the same places as the Unicode arrow', () => {
+    const status = '`git status -sb` (exit 0):\n```\n## main...origin/main\n```\n'
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD   -> 0`)).toBeUndefined()
+    expect(reportCheck(`$ git status -sb -> 0\n## main...origin/main\n$ git log --oneline @{u}..HEAD ->0`)).toBeUndefined()
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD -> 128`)).toBe('git log @{u}..HEAD exited 128')
+    // On the exit marker line after the output, and on the line after the fence that ends the block.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix(toast): drop the plugin name\n-> 0`)).toBe('git log @{u}..HEAD lists 1 unpushed commit')
+    expect(reportCheck(`${status}\`\`\`\n$ git log --oneline @{u}..HEAD\n\`\`\`\n-> 0`)).toBeUndefined()
+    // A marker line stops the block: a commit-like line below it is not counted.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n-> 0\n9b6e367 fix(toast): drop the plugin name`)).toBeUndefined()
+    // Without a number after the arrow there is no exit code.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD -> none`)).toBe('report lacks git log --oneline @{u}..HEAD with its exit code')
   })
   // Layouts of real worker reports (results and transcripts of earlier workers) that the check flagged although they
   // carry both reads with their exit codes; each is a correct report.

@@ -446,6 +446,7 @@ describe('write-side tools through the plugin, on both platforms', () => {
     { name: 'Windows', env: WINDOWS_ENV, root: 'C:/m' },
   ]
   const SID_A = 'aaaa0001-1111-4111-8111-111111111111'
+  const SID_B = 'bbbb0002-2222-4222-8222-222222222222'
   const SID_C = 'cccc0003-3333-4333-8333-333333333333'
   const SID_E = 'eeee0005-5555-4555-8555-555555555555'
   const today = localDate(NOW_MS)
@@ -491,6 +492,26 @@ describe('write-side tools through the plugin, on both platforms', () => {
       const cleared = (get(m, `${runs}/cleared.jsonl`) ?? '').trimEnd().split('\n').map(line => JSON.parse(line) as Record<string, unknown>)
       expect(cleared).toEqual([{ ...entries[0], cost_usd: 0.12, duration_ms: 4500 }, { ...entries[2], cost_usd: 1, duration_ms: 1 }])
       expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([entries[1]])
+    })
+
+    test(`${p.name}: a reviewed retire deletes the run files too; a kept close leaves every file`, { options }, async ($, on) => {
+      const m = machine(p.env)
+      boot(on, m)
+      const entries = [
+        { title: 'a', session_id: SID_A, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'login', summary: 'login: wrong' }, result_file: `${runs}/20260921-a.json`, err_file: `${runs}/20260921-a.err` },
+        { title: 'b', session_id: SID_B, config_dir: cfg, cwd: `${p.root}/work`, reported: false, outcome: { kind: 'clean', summary: 'clean: b' }, result_file: `${runs}/20260921-b.json` },
+      ]
+      put(m, reg, `${JSON.stringify(entries, null, 2)}\n`)
+      put(m, `${runs}/20260921-a.json`, result(0.3, 30))
+      put(m, `${runs}/20260921-a.err`, 'Please run /login\n')
+      put(m, `${runs}/20260921-b.json`, result(0.4, 40))
+      await startIn($, orch)
+      const reviewed = (await $.tool.call({ tool: 'mcp__session-control__retire_workers', session_ids: [SID_A], reviewed: { aaaa0001: 'the run succeeded' } } as never)) as { result?: unknown }
+      expect(String(reviewed.result)).toBe(`Retired: aaaa0001. Retired with review: aaaa0001 (was login: the run succeeded). Run files deleted from ${runs}: aaaa0001 (20260921-a.json, 20260921-a.err).`)
+      const kept = (await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: [SID_B], keep: true } as never)) as { result?: unknown }
+      expect(String(kept.result)).toBe('Acknowledged and kept: bbbb0002.')
+      expect(get(m, `${runs}/20260921-b.json`)).toBe(result(0.4, 40))
+      expect(JSON.parse(get(m, reg) ?? '[]')).toEqual([{ ...entries[1], reported: true, keep: true }])
     })
 
     test(`${p.name}, helper auto: a retire deletes only regular files directly in the runs folder: a .. path, an absolute outside path, a symlinked folder, a symlinked file, a subfolder, a directory, a shared file and a non-clean outcome leave every file where it is, and are named`, { options }, async ($, on) => {

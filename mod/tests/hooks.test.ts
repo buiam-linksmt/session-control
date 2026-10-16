@@ -6,7 +6,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { RULES_BLOCK, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
+import { RULES_BLOCK, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
 import { auditFindings } from '../hooks/audit'
 import { isRegistrySound } from '../hooks/notices'
 import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
@@ -1911,6 +1911,38 @@ describe('platform', () => {
     ].join('\n')
   const PS_SETTINGS = '--settings "{\\"crossSessionInbound\\":\\"accept\\"}" --dangerously-skip-permissions --output-format json'
 
+  test('Windows, launchRoute powershell: the worker starts through the PowerShell tool, Start-Process with the prompt on standard input; found and registered as by the Bash route', { options: PS_OPTIONS }, async ($, on) => {
+    const w = winWorld(on, '')
+    await boot($, `C:${ORCH_DIR}`)
+    const out = await settled(w, launchTool($, winArgs))
+    expect(String(out.result)).toBe(
+      `Launched pid 7001, session abcdabcd-0000-4000-8000-000000000001, config_dir ${WIN_HOME_CLAUDE}, registered. ` +
+        `Name: w-new-260921141320; socket: none. ` +
+        `Result: ${WIN_RUNS}/20260921141320-new.json; errors: ${WIN_RUNS}/20260921141320-new.err.`,
+    )
+    expect(w.bash).toEqual([])
+    expect(w.powershell.length).toBe(1)
+    expect(w.powershell[0]).toMatchObject({ description: 'session-control worker: new', run_in_background: true, timeout: 180 * 60_000 })
+    // No picker: the worker inherits the config dir, so no CLAUDE_CONFIG_DIR line.
+    expect(w.powershell[0]?.command).toBe(psCommand(undefined, `-p --model opus -n w-new-260921141320 ${PS_SETTINGS}`, `${WIN_RUNS}/20260921141320-new`))
+    expect(lastRegistry(w).at(-1)).toEqual({
+      title: 'new',
+      pid: 7001,
+      session_id: 'abcdabcd-0000-4000-8000-000000000001',
+      name: 'w-new-260921141320',
+      config_dir: WIN_HOME_CLAUDE,
+      cwd: 'C:/work/new',
+      model: 'opus',
+      effort: 'high',
+      result_file: `${WIN_RUNS}/20260921141320-new.json`,
+      err_file: `${WIN_RUNS}/20260921141320-new.err`,
+      started_at: NOW_MS / 1000,
+    })
+    // The pid came from the probe, and the pid file was read beside it; every command is still one of the mod's scripts.
+    expect(w.reads).toContain(`${WIN_RUNS}/20260921141320-new.pid`)
+    expect(w.runs.every(argv => argv[0] === 'node' || (argv[0] === POWERSHELL && /\/(probe|files)\.ps1$/.test(String(argv[6]))))).toBe(true)
+  })
+
   test('Windows, launchRoute powershell: a resume passes --resume after the model and sets the entry\'s config dir', { options: PS_OPTIONS }, async ($, on) => {
     const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_DEAD ? { ...one, config_dir: 'C:/fixture/lic/b' } : one)))
     WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\b'
@@ -2649,6 +2681,19 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
   /** What the mod wrote to its own prompt file, if anything. */
   const ownPrompt = (w: World) => w.writes.filter(one => one.path === OWN).at(-1)?.text
 
+  test('an inline prompt that lacks the items gets the rules block once, and then passes the guard', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await boot($)
+    const out = await launchTool($, { ...fresh, prompt: 'Reply PONG.' })
+    expect(String(out.result)).toEndWith(`Prompt: ${OWN} (written by the mod; rules block appended).`)
+    expect(ownPrompt(w)).toBe(`Reply PONG.\n\n${RULES_BLOCK}\n`)
+    expect(missingPromptItems(ownPrompt(w) ?? '')).toEqual([])
+    // Each item of the block, as CLAUDE.md's worker prompt lists them.
+    for (const phrase of ['no AI attribution trailer', 'never mention an agent', 'No human answers during the run', 'never for a sign-off item', 'Never read, print or pass a credential', '`run_in_background: true`', 'explicit `timeout`', 'until <check>; do sleep 30; done', 'under ten minutes', 'Never end the turn while a run', '`git status -sb`', '`git log --oneline @{u}..HEAD`', 'exit code']) {
+      expect(RULES_BLOCK).toContain(phrase)
+    }
+  })
+
   test('rules false: an inline prompt that lacks the items is refused as a prompt file would be, and nothing is written', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await boot($)
@@ -2736,6 +2781,24 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
   })
 
   describe('a resume', () => {
+    // Its cwd and model are those of the fixture's new worker process, so the launch finds it.
+    const entry = { title: 'parser work', session_id: SID_UNREPORTED, name: 'w-parser-work-260920100000', config_dir: '/fixture/lic/a', cwd: '/work/new', model: 'opus', effort: 'medium', reported: false }
+    const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? entry : one)))
+    test('takes dir, model, effort and title from its entry, and says so', { options: OPTIONS }, async ($, on) => {
+      WORKER.sid = SID_UNREPORTED
+      try {
+        const w = world(on, '/fixture/lic/a\n', true, registry)
+        await boot($)
+        const out = await launchTool($, { resume_sid: SID_UNREPORTED, prompt: `${FULL} Continue.` })
+        expect(String(out.result)).toEndWith('From the entry: dir, model, effort, title.')
+        expect(String(w.bash[0]?.command)).toStartWith(`cd '/work/new' && CLAUDE_CONFIG_DIR='/fixture/lic/a' CLAUDE_CODE_EFFORT_LEVEL='medium' claude -p --model 'opus' --resume '${SID_UNREPORTED}' -n 'w-parser-work-260920100000'`)
+        expect(lastRegistry(w).find(one => one.session_id === SID_UNREPORTED)).toMatchObject({ title: 'parser work', cwd: '/work/new', model: 'opus', effort: 'medium', pid: 7001 })
+        expect(String(w.bash[0]?.command)).toContain(`"$(cat '${RUNS}/w-parser-work-260920100000-260921141320.prompt.md')"`)
+        expect(w.runs.some(argv => argv[0] === '/fixture/bin/pick')).toBe(false)
+      } finally {
+        WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
+      }
+    })
     test('of an entry without those fields, or of an unknown id, is refused as before', { options: OPTIONS }, async ($, on) => {
       world(on)
       await boot($)
@@ -2923,6 +2986,29 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
   const LIST = 'mcp__session-control__list_sessions'
   const TRACED = { ...OPTIONS, debug: true }
   const probes = (w: World) => w.calls.filter(one => one.op === 'probe').length
+
+  test('a poll tick during a probe skips its refresh', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    await boot($)
+    let release = () => {}
+    HELD.probe = new Promise<void>(resolve => {
+      release = resolve
+    })
+    try {
+      const before = probes(w)
+      const first = $.tool.call({ tool: LIST } as never)
+      await w.clock.advance(5000)
+      expect(probes(w)).toBe(before + 1)
+      expect(traceOf(w).filter(line => line.event === 'poll.skip').map(line => line.isProbing)).toContain(true)
+      release()
+      HELD.probe = undefined
+      expect(String(((await first) as { result?: unknown }).result)).toStartWith('7 session rows: 1 running, ')
+      expect(PROBES.max).toBe(1)
+    } finally {
+      release()
+      HELD.probe = undefined
+    }
+  })
 
   test('Windows: two tools at once probe one after the other, the second waiting in the helper\'s short pauses: never two probes at once', { options: { ...OPTIONS, orchestratorDir: `C:${ORCH_DIR}` } }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, REGISTRY_TEXT, { OS: 'Windows_NT', USERPROFILE: 'C:\\fixture\\home' })

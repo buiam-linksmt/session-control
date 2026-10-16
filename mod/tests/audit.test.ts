@@ -5,7 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { MAX_FINDINGS, auditFindings, auditText, decisionSections, licenceWait } from '../hooks/audit'
+import { MAX_FINDINGS, auditFindings, auditText, backupKind, decisionSections, licenceWait } from '../hooks/audit'
 import type { AuditInput } from '../hooks/audit'
 import { parseProcFacts } from '../hooks/core'
 import { nodeAnswer } from './fake-helper'
@@ -132,6 +132,22 @@ describe('audit findings, one fixture per kind', () => {
     expect(auditFindings({ ...BASE, git: { changed: [] } }).filter(one => one.kind === 'git-branch').map(one => one.evidence)).toEqual(['HEAD is detached; 1 worker alive'])
     const silent = auditFindings({ ...BASE, git: undefined } as AuditInput)
     expect(silent.filter(one => one.kind.startsWith('git'))).toEqual([])
+  })
+
+  test('backups/: per kind, the files older than 2 days besides the newest; a kind of one file is fine', () => {
+    expect(of('backups').map(one => [one.subject, one.evidence])).toEqual([
+      ['backups of kind task-queue-before-queue-task.json', '3 files; 2 are older than 2 days besides the newest: task-queue-before-queue-task-2026-01-07.json, task-queue-before-queue-task-2026-01-06.json'],
+    ])
+    // A file name is redacted as a path is: dated names read whole, a token-like word goes.
+    const token = ['ghp', 'CANARY0123456789abcdefABCDEF'].join('_')
+    const tokenName = auditFindings({ ...BASE, backups: [file(`${token}-2026-01-09.json`, 0), file(`${token}-2026-01-01.json`, 5 * DAY)] }).filter(one => one.kind === 'backups')
+    expect(tokenName.map(one => [one.subject, one.evidence])).toEqual([['backups of kind [redacted].json', '2 files; 1 is older than 2 days besides the newest: [redacted]-2026-01-01.json']])
+    expect(auditText({ ...BASE, backups: [file(`${token}-2026-01-09.json`, 0)] })).not.toContain('CANARY')
+    const loose = auditFindings({ ...BASE, runs: [file(`${token}.json`, DAY)] }).filter(one => one.kind === 'runs')
+    expect(loose.map(one => one.evidence)).toEqual(['1 file (1 KiB) that no registry entry names, the oldest 24h00m old: [redacted].json'])
+    expect(backupKind('headless-sessions-before-completion-2026-10-10.json')).toBe('headless-sessions-before-completion.json')
+    expect(backupKind('license-lib.sh.orig-2026-10-10b')).toBe('license-lib.sh.orig')
+    expect(backupKind('sheet-notes-1.2.8-2026-10-09.md')).toBe('sheet-notes-1.2.8.md')
   })
 
   test('the runs directory: the files no registry entry names, the mod\'s own files aside; reports/: every saved report', () => {
