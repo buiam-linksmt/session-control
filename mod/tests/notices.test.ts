@@ -37,6 +37,7 @@ import {
   repoStep,
   retireStep,
   stallStep,
+  unitStep,
   waitKey,
 } from '../hooks/notices'
 import type { Notice, NoticeKind } from '../hooks/notices'
@@ -556,6 +557,17 @@ describe('retire-due: queued tasks whose wait audit_state cannot check', () => {
   const entries = [{ title: 'kept', session_id: SID_KEPT, config_dir: `${HOME}/.claude`, reported: true, keep: true, outcome: { kind: 'clean' }, ended_at: NOW_SEC - 600 }]
   const text = '2 queue tasks look stale (q-groups, q-steps): run audit_state'
 
+  test('retireStep counts the free-text waits as stale queue tasks and names their ids; a licence wait and no wait are not counted', () => {
+    const state = freshNoticeState()
+    const told = retireStep(state, { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: queue }) })
+    expect(told).toEqual([{ kind: 'retire-due', message: text, fields: { retirable: 0, keptOld: 0, staleTasks: 2 } }])
+    expect(state.retireAt).toBe(NOW_MS)
+    expect(retireStep(freshNoticeState(), { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: queue.slice(2) }) })).toEqual([])
+    // With a done task as well: one group, the ids in audit_state's order.
+    const mixed = retireStep(freshNoticeState(), { entries, facts: facts([]), nowMs: NOW_MS, queueText: JSON.stringify({ tasks: [...queue, { id: 'q-done', status: 'done', title: 'Done' }] }) })
+    expect(mixed[0]?.message).toBe('3 queue tasks look stale (q-done, q-groups, q-steps): run audit_state')
+  })
+
   let leftByFirstLoad: unknown
 
   test('from the poll, at most once per hour, naming the task ids', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
@@ -918,6 +930,18 @@ describe('notices.ts', () => {
     expect(harvestNotices(state, { ...entry, pid: 6 }, { kind: 'error', summary: '' }, queue).length).toBe(3)
     pruneHarvested(state, [], JSON.stringify({ tasks: [{ id: 'full', status: 'queued' }] }))
     expect(state.queueReady).toEqual([`full ${SID_UNIT}:5`, `full ${SID_UNIT}:6`])
+  })
+
+  test('unitStep: told on a trigger only, once, re-armed by a task queued or running; an unreadable queue changes nothing', () => {
+    const state = freshNoticeState()
+    const empty = JSON.stringify({ tasks: [{ id: 'd', status: 'done' }] })
+    expect(unitStep(state, empty, false)).toEqual([])
+    expect(unitStep(state, empty, true).map(one => one.message)).toEqual(['queue empty: run audit_state and report'])
+    expect(unitStep(state, empty, true)).toEqual([])
+    expect(unitStep(state, '{ broken', true)).toEqual([])
+    expect(state.isUnitTold).toBe(true)
+    expect(unitStep(state, JSON.stringify({ tasks: [{ status: 'running' }] }), false)).toEqual([])
+    expect(unitStep(state, empty, true).length).toBe(1)
   })
 
   test('pointStep: the earlier of the end of the raised day and the first sight counts; once per day', () => {

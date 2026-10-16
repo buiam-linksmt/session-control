@@ -5,6 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On, ProcessRunResult } from 'claude-code'
 
+import { parseProcFacts } from '../hooks/core'
 import type { HostPort, RotatePlan } from '../hooks/host'
 import { CALL_CODES, HELPER_MIN_NODE, HELPER_REDETECT_MS, NODE_REFUSAL, NODE_WARNING, appendText, newerAnswer, nodeMajor, readAnswer, rejectionCode, treeAnswer, withHelper } from '../hooks/host-helper'
 import { TAIL_SHAPED_MAX_BYTES } from '../hooks/host-shared'
@@ -159,6 +160,52 @@ describe('helper answers', () => {
 })
 
 describe('withHelper on Linux', () => {
+  test('Node is looked for once, untraced, at the first operation; each operation is one helper call with its request', async () => {
+    const sim = machine()
+    const host = helped()
+    const port = portOf(sim)
+    sim.files.set('/m/reg.json', '[]\n')
+    sim.files.set('/m/runs/t.jsonl', 'a\nb\n')
+    sim.files.set('/m/a.tmp', 'A')
+    sim.files.set('/m/gone', 'x')
+
+    const facts = await host.probe(port, [{ pid: 4242, session_id: SID, config_dir: '/m/cfg' }])
+    expect(facts).toEqual(parseProcFacts(PROBE_OUT))
+    expect(await host.writeAtomic(port, '/m/reg.json', '[1]\n', '[]\n')).toBe(true)
+    expect(await host.writeAtomic(port, '/m/reg.json', '[2]\n', '[]\n')).toBe(false)
+    await host.renameOver(port, '/m/a.tmp', '/m/a')
+    expect(await host.removeFile(port, '/m/gone')).toBe(true)
+    const codes: number[] = []
+    expect(await host.append(port, '/m/runs/log.jsonl', ['{"a":1}', '{"b":2}'], false, code => codes.push(code))).toBeUndefined()
+    expect(await host.tail(port, '/m/runs/t.jsonl')).toBe('a\nb\n')
+    await host.rotate(port, { ...PLAN, path: '/m/runs/t.jsonl', moves: [['/m/runs/t.jsonl', '/m/runs/t.jsonl.1']] })
+
+    expect(lookups(sim).map(one => one.isQuiet)).toEqual([true])
+    expect(sim.runs[0]?.argv).toEqual([NODE, '--version'])
+    expect(sim.notes).toEqual([{ kind: 'node', isActive: true, version: 'v24.14.0' }])
+    expect(calls(sim)).toEqual([
+      { op: 'probe', request: { args: [`pid:4242|/m/cfg`, `t:${SID}|/m/cfg`] } },
+      { op: 'writeAtomic', request: { path: '/m/reg.json', text: '[1]\n', expected: '[]\n' } },
+      { op: 'writeAtomic', request: { path: '/m/reg.json', text: '[2]\n', expected: '[]\n' } },
+      { op: 'renameOver', request: { from: '/m/a.tmp', to: '/m/a' } },
+      { op: 'removeFile', request: { path: '/m/gone' } },
+      { op: 'append', request: { path: '/m/runs/log.jsonl', text: '{"a":1}\n{"b":2}\n' } },
+      { op: 'tail', request: { path: '/m/runs/t.jsonl', lines: 600, width: 20000 } },
+      { op: 'rotate', request: { path: '/m/runs/t.jsonl', adding: 10, maxBytes: 8, moves: [['/m/runs/t.jsonl', '/m/runs/t.jsonl.1']] } },
+    ])
+    // No adapter command ran: one process per operation, the helper's.
+    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
+    expect([sim.files.get('/m/reg.json'), sim.files.get('/m/a'), sim.files.has('/m/gone'), sim.files.get('/m/runs/log.jsonl'), sim.files.get('/m/runs/t.jsonl.1')]).toEqual([
+      '[1]\n',
+      'A',
+      false,
+      '{"a":1}\n{"b":2}\n',
+      'a\nb\n',
+    ])
+    expect(codes).toEqual([0])
+    expect(failures(sim)).toEqual([])
+  })
+
   test('the trace sees the operation and its path, never the request: the text written stays out', async () => {
     const sim = machine()
     const port = portOf(sim)
@@ -654,6 +701,21 @@ describe('withHelper: hashTrees', () => {
       },
     }
   }
+
+  test('one helper batch hashes both folders with the same method, at the listing\'s 30 s limit; no fallback', async () => {
+    const sim = machine()
+    const port = trees(sim)
+    const timeouts: (number | undefined)[] = []
+    const timed: HostPort = { ...port, run: (argv, init, isQuiet, shown) => (timeouts.push(init?.timeoutMs), port.run(argv, init, isQuiet, shown)) }
+    const found = await helped().hashTrees(timed, ['/m/loaded', '/m/source'], SPEC)
+    expect(found?.map(one => one.method)).toEqual(['sha256', 'sha256'])
+    expect(Object.keys(found?.[0]?.files ?? {})).toEqual(['.claude-plugin/plugin.json', 'hooks/a.ts', 'hooks/b.ts', 'types/index.d.ts'])
+    expect(found?.[0]?.files['hooks/a.ts']).toBe(found?.[1]?.files['hooks/a.ts'])
+    expect(found?.[0]?.files['hooks/b.ts']).not.toBe(found?.[1]?.files['hooks/b.ts'])
+    expect(calls(sim)).toEqual([{ op: 'batch', request: { ops: ['/m/loaded', '/m/source'].map(root => ({ op: 'hashTree', root, dirs: SPEC.dirs, files: SPEC.files })) } }])
+    expect(timeouts).toEqual([5_000, 30_000])
+    expect(failures(sim)).toEqual([])
+  })
 
   for (const code of ['NOT_FOUND', 'NOT_DIR', 'TOO_LARGE', 'ACCESS', 'IO']) {
     test(`a ${code} from the helper is the answer: nothing compared, no native hash, no fallback note`, async () => {

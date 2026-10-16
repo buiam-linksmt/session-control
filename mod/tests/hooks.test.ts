@@ -1525,6 +1525,46 @@ describe('launch_worker', () => {
     expect(await ui.find({ type: 'Text', text: /^\u2022 Queued one$/ })).toBeDefined()
   })
 
+  describe('retire_workers with reviewed', () => {
+    const stuck = (n: number, kind: string, extra: object = {}) => ({ title: `stuck ${kind}`, session_id: `5757575${n}-0000-4000-8000-00000000000${n}`, config_dir: '/fixture/lic/a', reported: true, outcome: { kind, summary: `${kind}: old label` }, ...extra })
+    const login = stuck(1, 'login')
+    const limit = stuck(2, 'limit')
+    const killed = stuck(3, 'killed')
+    const kept = stuck(4, 'login', { keep: true })
+    // The first eight characters of a queued task's title name this session.
+    const queued = { ...stuck(5, 'limit'), session_id: 'Queued o-0000-4000-8000-000000000005' }
+    const setup = async (on: Parameters<typeof world>[0], $: Parameters<Parameters<typeof test>[2]>[0]) => {
+      const w = world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), login, limit, killed, kept, queued]))
+      await boot($)
+      return w
+    }
+    const retire = async ($: Parameters<Parameters<typeof test>[2]>[0], input: object) =>
+      String((await $.tool.call({ tool: 'mcp__session-control__retire_workers', ...input } as never)).result)
+    const clears = (w: World) => w.writes.filter(one => one.path.endsWith('/cleared.jsonl'))
+
+    test('login, limit and killed outcomes are retired on a reason; the log and the answer carry the original outcome and the reason', { options: OPTIONS }, async ($, on) => {
+      const w = await setup(on, $)
+      const out = await retire($, {
+        session_ids: [login.session_id.slice(0, 8), limit.session_id, killed.session_id.slice(0, 8)],
+        reviewed: { [login.session_id.slice(0, 8)]: 'run succeeded, label from the old classifier', [limit.session_id]: 'work done, limit text was quoted', [killed.session_id.slice(0, 8)]: 'abandoned on purpose' },
+      })
+      expect(out).toBe('Retired: 57575751, 57575752, 57575753. Retired with review: 57575751 (was login: run succeeded, label from the old classifier); 57575752 (was limit: work done, limit text was quoted); 57575753 (was killed: abandoned on purpose).')
+      expect(clears(w).length).toBe(1)
+      const lines = clears(w)[0]?.text.trimEnd().split('\n').map(line => JSON.parse(line)) ?? []
+      expect(lines.map(one => [one.session_id, one.outcome.kind, one.reviewed_outcome, one.reviewed_reason])).toEqual([
+        [login.session_id, 'login', 'login', 'run succeeded, label from the old classifier'],
+        [limit.session_id, 'limit', 'limit', 'work done, limit text was quoted'],
+        [killed.session_id, 'killed', 'killed', 'abandoned on purpose'],
+      ])
+      // The entry is logged as it was, with the two fields appended last.
+      expect(Object.keys(lines[0]).slice(-2)).toEqual(['reviewed_outcome', 'reviewed_reason'])
+      expect(Object.keys(lines[0]).slice(0, -2)).toEqual(Object.keys(login))
+      const left = lastRegistry(w).map(one => one.session_id)
+      for (const gone of [login, limit, killed]) expect(left).not.toContain(gone.session_id)
+      expect(left).toContain(kept.session_id)
+    })
+  })
+
   test('open_point and record_decision edit the helper files, back them up first, and report a refusal', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await boot($)

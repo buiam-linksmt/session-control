@@ -9,7 +9,7 @@ import { TOAST_TITLES } from '../hooks/core'
 import { digestText } from '../hooks/digest'
 import { clean, readResultText, workerTailText } from '../hooks/inspect'
 import { freshNoticeState, parseNoticeState, pruneHarvested, secretNotice } from '../hooks/notices'
-import { PRIVATE_KEY_MAX_BODY, findSecrets, maskSecrets } from '../hooks/secrets'
+import { PRIVATE_KEY_MAX_BODY, addTallies, findSecrets, maskSecrets, secretScanLine, tallyFromAnswer, tallyOf } from '../hooks/secrets'
 import type { SecretKind } from '../hooks/secrets'
 import { parseProcFacts } from '../hooks/core'
 import { NOW_MS } from './fixtures'
@@ -83,6 +83,16 @@ describe('secrets.ts: the detector', () => {
     expect(clean(READABLE[0] ?? '')).toBe(READABLE[0])
     expect(clean(READABLE[2] ?? '')).toBe(READABLE[2])
     expect(clean(READABLE[3] ?? '')).toBe(READABLE[3])
+  })
+
+  test('the scan line: count and kinds only, in a fixed order; read back from an answer; tallies add', () => {
+    const tally = tallyOf(findSecrets(CANARIES.map(one => one[1]).join('\n')))
+    expect(tally.count).toBe(CANARIES.length)
+    expect(secretScanLine(tally)).toBe('secret scan: 13 likely secrets redacted (kinds: private-key, github-token, sk-key, slack-token, aws-key, bearer-token, url-credentials, secret-assignment, keyed-blob)')
+    expect(secretScanLine({ count: 1, kinds: ['aws-key'] })).toBe('secret scan: 1 likely secret redacted (kinds: aws-key)')
+    expect(tallyFromAnswer(`x\n${secretScanLine(tally)}`)).toEqual(tally)
+    expect(tallyFromAnswer('x\nno scan')).toBeUndefined()
+    expect(addTallies({ count: 1, kinds: ['keyed-blob'] }, { count: 2, kinds: ['aws-key', 'keyed-blob'] })).toEqual({ count: 3, kinds: ['aws-key', 'keyed-blob'] })
   })
 
   test('a private key without its END line: masked to the first blank line after a body line, or at most 4000 characters after the header; with END, to the END line', () => {

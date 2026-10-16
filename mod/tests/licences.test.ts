@@ -18,6 +18,7 @@ import {
   hasProbeRoom,
   isUnderLicence,
   isUsageFresh,
+  licenceCandidates,
   licenceDirsOf,
   licenceName,
   licenceOf,
@@ -102,6 +103,26 @@ describe('list_licences', () => {
       '1 licenceDirs entry is not an absolute path and ignored.',
     ])
     expectNoIdentity(text)
+  })
+
+  test('the scan is kept 60 s in memory: a call within answers from it and lists nothing; a call after rescans', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seed(world)
+    seedLicences(world)
+    await startOrch($)
+    await answerOf($, 'list_licences')
+    const listed = world.listed.length
+    licence(world, `${CLAUDE}/third`)
+    await world.clock.advance(30_000)
+    const cached = await answerOf($, 'list_licences')
+    expect(cached.split('\n')[0]).toBe('3 licences (directory scan cached, 30 s old; logged_in says only that .credentials.json and .claude.json are there: neither is opened).')
+    expect(world.listed.length).toBe(listed)
+    expect(cached.includes('third')).toBe(false)
+    await world.clock.advance(SCAN_CACHE_MS)
+    const fresh = await answerOf($, 'list_licences')
+    expect(fresh.split('\n')[0]).toBe('4 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).')
+    expect(fresh).toContain(`- third | config_dir ${CLAUDE}/third | source child`)
+    expect(world.listed.length).toBeGreaterThan(listed)
   })
 
   test('the answer comes from presence alone: with every licence file unreadable it is the same, and it holds nothing of their content', { options: OPTIONS }, async ($, on) => {
@@ -208,6 +229,25 @@ function seedUsage(world: World): void {
 }
 
 describe('probe_licence_usage', () => {
+  test('kept 60 s per licence (a failed probe 15 s): a call within answers from memory with its age and says cached', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seedUsage(world)
+    await startOrch($)
+    await answerOf($, 'probe_licence_usage')
+    await world.clock.advance(USAGE_FAIL_CACHE_MS + 1000)
+    const again = (await answerOf($, 'probe_licence_usage')).split('\n')
+    expect(again[0]).toBe('Usage of 3 licences (1 probed now, 2 from the cache): highest five_hour 42% (second), highest seven_day 41% (default).')
+    expect(again.slice(1, 4)).toEqual([
+      `- default (config_dir ${CLAUDE}) | ${MAIN_ROW} | age_seconds 16 | cached yes`,
+      `- second (config_dir ${CLAUDE}/second) | ${SECOND_ROW} | age_seconds 16 | cached yes`,
+      `- .claude-work (config_dir ${HOME}/.claude-work) | error NOT_LOGGED_IN | age_seconds 0 | cached no`,
+    ])
+    expect(world.usageRuns.length).toBe(4)
+    await world.clock.advance(USAGE_CACHE_MS)
+    expect((await answerOf($, 'probe_licence_usage')).split('\n')[0]).toBe('Usage of 3 licences (3 probed now, 0 from the cache): highest five_hour 42% (second), highest seven_day 41% (default).')
+    expect(world.usageRuns.length).toBe(7)
+  })
+
   test('config_dir: one discovered licence by its path or its name; anything else is refused with the fixed text and probes nothing', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seedUsage(world)
@@ -493,6 +533,38 @@ function winWorld(on: On, env: Record<string, string> = {}) {
 
 const WIN_OPTIONS = { orchestratorDir: WIN_ORCH, registryPath: '~/.claude/headless-sessions.json', licenceDirs: 'D:\\Lic\\Extra, d:/lic/extra/, C:\\w\\home\\.claude\\Second' }
 
+describe('list_licences on Windows', () => {
+  test('a licence holds both files as regular files: directories, a link to a folder and a broken link are no licence; a link to a regular file counts', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {
+    const w = winWorld(on)
+    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
+    w.files.set(WIN_REGISTRY, '[]\n')
+    w.files.set('C:/w/home/.claude/.credentials.json', credentialsText())
+    w.files.set('C:/w/home/.claude/.claude.json', configText())
+    w.files.set('C:/w/home/.claude/Dirs/.credentials.json/x', credentialsText())
+    w.files.set('C:/w/home/.claude/Dirs/.claude.json/x', configText())
+    w.files.set('C:/w/store/c.json', credentialsText())
+    w.files.set('C:/w/store/a.json', configText())
+    w.files.set('C:/w/store/d1/x', credentialsText())
+    w.files.set('C:/w/home/.claude/LinkFile/notes.txt', 'x')
+    w.links.set('C:/w/home/.claude/LinkFile/.credentials.json', 'C:/w/store/c.json')
+    w.links.set('C:/w/home/.claude/LinkFile/.claude.json', 'C:/w/store/a.json')
+    w.files.set('C:/w/home/.claude/LinkDir/notes.txt', 'x')
+    w.links.set('C:/w/home/.claude/LinkDir/.credentials.json', 'C:/w/store/d1')
+    w.links.set('C:/w/home/.claude/LinkDir/.claude.json', 'C:/w/store/d1')
+    w.files.set('C:/w/home/.claude-Broken/notes.txt', 'x')
+    w.links.set('C:/w/home/.claude-Broken/.credentials.json', 'C:/w/store/gone.json')
+    w.links.set('C:/w/home/.claude-Broken/.claude.json', 'C:/w/store/gone.json')
+    await startWinOrch($)
+    const text = await answerOf($, 'list_licences')
+    expect(text.split('\n')).toEqual([
+      '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
+      '- default | config_dir C:/w/home/.claude | source default | logged_in yes | sessions 0 live, 0 in all',
+      '- LinkFile | config_dir C:/w/home/.claude/LinkFile | source child | logged_in yes | sessions 0 live, 0 in all',
+    ])
+    expectNoIdentity(text)
+  })
+})
+
 describe('the process probe on Windows', () => {
   const seedLicences = (w: ReturnType<typeof winWorld>) => {
     w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
@@ -553,6 +625,28 @@ describe('licences.ts', () => {
   test('licenceDirsOf: comma separated, trimmed, ~ expanded, only absolute paths kept, trailing separators dropped', () => {
     expect(licenceDirsOf(' /a/b/ ,, ~/x, rel, ~ ,C:/y', '/h', path => path.startsWith('/'))).toEqual({ dirs: ['/a/b', '/h/x', '/h'], ignored: 2 })
     expect(licenceDirsOf('', '/h', () => true)).toEqual({ dirs: [], ignored: 0 })
+  })
+
+  test('licenceCandidates: sources in their order, each directory once, links and files never candidates, listings capped', () => {
+    const got = licenceCandidates({
+      home: '/h',
+      defaultDir: '/h/.claude',
+      children: [{ name: 'a', kind: 'dir' }, { name: 'l', kind: 'other' }, { name: 'f.json', kind: 'file' }],
+      homeEntries: [{ name: '.claude-b', kind: 'dir' }, { name: '.claude-', kind: 'dir' }, { name: '.claude', kind: 'dir' }, { name: '.claude-c', kind: 'other' }],
+      explicit: ['/h/.claude/a/', '/x'],
+      isSame: same,
+    })
+    expect(got).toEqual({
+      candidates: [
+        { configDir: '/h/.claude', source: 'default', isHomeDefault: true },
+        { configDir: '/h/.claude/a', source: 'child', isHomeDefault: false },
+        { configDir: '/h/.claude-b', source: 'dash', isHomeDefault: false },
+        { configDir: '/x', source: 'explicit', isHomeDefault: false },
+      ],
+      skipped: 0,
+    })
+    const many = Array.from({ length: SCAN_MAX_DIRS + 5 }, (_, at) => ({ name: `d${at}`, kind: 'dir' }))
+    expect(licenceCandidates({ home: '/h', defaultDir: '/h/.claude', children: many, homeEntries: [], explicit: [], isSame: same }).skipped).toBe(5)
   })
 
   test('licenceOf: both files, or the default directory alone; the home .claude.json counts for <home>/.claude only', () => {

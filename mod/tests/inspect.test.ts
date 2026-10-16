@@ -18,6 +18,7 @@ import {
   panelSnapshotText,
   plainText,
   redactCounted,
+  sessionWritesText,
   shownName,
   shownSessionId,
   transcriptWrites,
@@ -687,6 +688,22 @@ describe('inspect.ts', () => {
     expect(isUnder('c:\\Work\\Orch\\a.json', 'C:/work/orch', true)).toBe(true)
     expect(isSamePath('C:\\Users\\U\\.claude\\headless-sessions.json', 'c:/users/u/.claude/headless-sessions.json', true)).toBe(true)
     expect(isSamePath('/a/B', '/a/b', false)).toBe(false)
+  })
+
+  test('session_writes on Windows: a path under the orchestrator directory and the registry are flagged in any case and separator', () => {
+    const text = sessionWritesText({
+      entry: { session_id: SID_WRITER, title: 'w', cwd: 'C:/work' },
+      start: { ms: T0 * 1000, source: "the transcript's first timestamp" },
+      listing: { files: [{ path: 'C:/work/Orch/open-points.json', mtimeMs: (T0 + 5) * 1000 }, { path: 'C:/work/reg.json', mtimeMs: (T0 + 4) * 1000 }, { path: 'C:/work/a.txt', mtimeMs: (T0 + 3) * 1000 }], total: 3 },
+      orchestratorDir: 'C:/work/orch',
+      registryPath: 'C:/WORK/REG.json',
+      isWindows: true,
+      transcript: { text: toolUse('e', 'Write', { file_path: 'c:\\work\\orch\\task-queue.json' }, 'x'), isWhole: true },
+    })
+    expect(text).toContain('flagged among those shown: 1 under the orchestrator directory C:/work/orch; 1 the registry file C:/WORK/REG.json')
+    expect(text).toContain('C:/work/Orch/open-points.json  [ORCHESTRATOR DIR]')
+    expect(text).toContain('C:/work/reg.json  [REGISTRY]')
+    expect(text).toContain('- Write of c:\\work\\orch\\task-queue.json')
   })
 
   test('worker_tail tells the age in whole seconds, and from a minute up also as the elapsed column does', () => {

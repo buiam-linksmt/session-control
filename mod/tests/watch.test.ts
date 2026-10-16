@@ -5,8 +5,8 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { TOAST_TITLES } from '../hooks/core'
-import { LOCK_EVERY_SEC, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from '../hooks/locks'
+import { TOAST_TITLES, parseProcFacts } from '../hooks/core'
+import { LOCK_EVERY_SEC, holderState, isHolderDead, lockCandidates, lockDirsOf, lockFingerprint, lockHolder } from '../hooks/locks'
 import { REGISTRY_UNREADABLE_SEC, freshNoticeState, lockStep, noticeStoreKey, parseNoticeState, registryStep } from '../hooks/notices'
 import type { LockSeen, RegistryWatch } from '../hooks/notices'
 import { nodeAnswer } from './fake-helper'
@@ -315,6 +315,19 @@ describe('locks.ts', () => {
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, true)).toBe(true)
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, false)).toBe(false)
     expect(isHolderDead({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '' }, true)).toBe(false)
+  })
+
+  test('holderState: gone, reused (Linux, a JSON pid_start that differs), zombie (Linux, state Z), alive; a zombie and a reused pid are dead; Windows compares neither', () => {
+    expect(holderState({ pid: 1, isJson: false }, { isAlive: false }, true)).toBe('gone')
+    expect(holderState({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '6' }, true)).toBe('reused')
+    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe('zombie')
+    expect(holderState({ pid: 1, start: '5', isJson: true }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe('zombie')
+    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'S' }, true)).toBe('alive')
+    expect(holderState({ pid: 1, isJson: false }, { isAlive: true, state: 'Z' }, false)).toBe('alive')
+    expect(isHolderDead({ pid: 1, isJson: false }, { isAlive: true, startTicks: '5', state: 'Z' }, true)).toBe(true)
+    // The probe's A line carries the state as its seventh column; an older line without it has none.
+    expect(parseProcFacts('A\t7\tpython3\t100\t\t\tZ\n').pidProof.get(7)?.state).toBe('Z')
+    expect(parseProcFacts('A\t7\tpython3\t100\t\t\n').pidProof.get(7)?.state).toBeUndefined()
   })
 
   test('lockStep: told once per content; a changed content re-arms; a lock gone or alive again is forgotten; a folder not read keeps its locks', () => {
