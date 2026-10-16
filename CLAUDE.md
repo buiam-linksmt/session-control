@@ -198,6 +198,7 @@ Every launch prompt carries, addressed to the worker, each item below that appli
    part. Never invent an answer.
 8. Never read, print or pass a credential; report, without quoting it, any secret seen in output.
    Durable facts go to the file the prompt names, never to Claude memory; report file and lines.
+   Scratch files, copies and logs go under `<control>/scratch/<unit>/` (git-ignored), never under `$HOME`.
 9. Launch no `claude` session unless the task is to, and list every one launched with its
    `session_id`, `config_dir` and `cwd`; write nothing to the registry or under the orchestrator's
    directory (give both paths); arm no Monitor or cron.
@@ -444,7 +445,9 @@ session. Nothing is removed by itself or because the user wrote a message.
 
 Retire only on those two grounds: the goal is met, or the work is deliberately abandoned. A session
 killed mid-work is not retired — it is a resumable session with no pid, and its entry stays (step 3).
-If the session was the last one using a worktree, remove the worktree as part of retiring it.
+If the session was the last one using a worktree, remove the worktree as part of retiring it. When a unit
+of work closes, remove its `<control>/scratch/<unit>/` directory (a worker with a delete-only prompt does it);
+a deliverable the user has not seen stays.
 
 ### 8. Licences
 
