@@ -332,12 +332,36 @@ describe('toast order on a surface other than the terminal (decision mod-28)', (
     'Queued task ready \u00B7 queued task q-id8 waited for w-unit-worker-261011090000, which finished',
   ]
   const DUE = 'Compliance check due \u00B7 compliance check due for section Unit X (user, 2026-10-11) (session w-unit-worker-261011090000)'
+  // The hourly reminder of the poll's first tick (its tasks wait on a session that finished): raised during the hold, held after the others.
+  const HOUSEKEEPING = 'Housekeeping due \u00B7 2 queue tasks look stale (q-next, q-id8): run audit_state'
   const QUEUE = [
     { id: 'q-next', status: 'queued', title: 'Next step', waits_for: 'w-unit-worker-261011090000 to finish' },
     { id: 'q-id8', status: 'queued', title: 'By id', waits_for: `session ${SID_UNIT.slice(0, 8)}` },
   ]
   /** The surfaces the session draws on, as $.session.surfaces answers them. */
   const drawsOn = (on: On, surfaces: readonly string[]) => on('session.surfaces', () => ({ value: surfaces }) as never)
+
+  test('on the desktop a second completion waits for the first, and holds the toasts after it in turn', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    drawsOn(on, ['terminal', 'desktop'])
+    const second = { ...UNIT_ENTRY, title: 'second worker', pid: 4301, session_id: SID_FREE, name: 'w-second-worker-261011090000', section: undefined, result_file: `${RUNS}/second.json` }
+    seed(world, { entries: [UNIT_ENTRY, second], queue: QUEUE })
+    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
+    world.files.set(`${RUNS}/second.json`, RESULTS.clean)
+    await start($)
+    const secondToast = COMPLETION.replace('unit worker', 'second worker')
+    expect(world.toasts).toEqual([COMPLETION])
+    // The notice toasts of the first harvest, one each 8 s, then the second completion, which holds the next in turn.
+    for (const [at, shown] of [[8000, 2], [16000, 3], [24000, 4], [32000, 5]] as const) {
+      await world.clock.set(NOW_MS + at)
+      expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast].slice(0, shown))
+    }
+    await world.clock.advance(7999)
+    expect(world.toasts.length).toBe(5)
+    await world.clock.advance(1)
+    expect(world.toasts).toEqual([COMPLETION, ...READY, DUE, secondToast, HOUSEKEEPING])
+  })
 
   /** Three open points two days old: three open-point-age notices of one pass, the poll's cap. */
   const threePoints = (world: World) => {

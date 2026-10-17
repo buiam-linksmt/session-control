@@ -675,6 +675,21 @@ describe('helper options, through the plugin', () => {
     ])
     expect(trace.filter(line => line.event === 'helper.failed')).toEqual([])
   })
+
+  test('a helper call that fails: a helper.failed trace line with the operation and the code, no toast of its own; the failed probe is a tracking problem', { options: { ...PLUGIN_OPTIONS, debug: true } }, async ($, on) => {
+    const w = world(on, 'node', (op, request) => {
+      if (op === 'probe') return ran('{"ok":false,"code":"ACCESS"}', 1)
+      const answer = helperAnswer(w.sim.files, op, request)
+      return ran(JSON.stringify(answer), answer.ok === true ? 0 : 1)
+    })
+    await startOrch($)
+    await w.clock.advance(5000)
+    const trace = (w.sim.files.get('/m/home/.claude/session-control/runs/trace.log') ?? '').trimEnd().split('\n').filter(line => line !== '').map(line => JSON.parse(line) as Record<string, unknown>)
+    const lines = trace.filter(line => line.event === 'helper.failed')
+    expect(lines.length).toBeGreaterThan(1)
+    expect(lines.every(line => Object.keys(line).sort().join() === 'code,event,op,seq,ts' && line.op === 'probe' && line.code === 'ACCESS')).toBe(true)
+    expect(w.toasts).toEqual(['Tracking problem \u00B7 Error: the process probe failed (ACCESS)'])
+  })
 })
 
 // ---------------------------------------------------------------- hashTrees (the drift band, feature/drift-digest)
@@ -726,6 +741,22 @@ describe('withHelper: hashTrees', () => {
       expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
     })
   }
+
+  test('a helper that cannot hash (node not starting, a timeout, no answer, an older helper, a wrong shape): nothing compared, told by its code', async () => {
+    for (const [answering, code] of [
+      ['spawn', 'SPAWN'],
+      ['timeout', 'TIMEOUT'],
+      [() => ran('', 1, 'Error: Cannot find module'), 'BAD_JSON'],
+      [() => ran('{"ok":false,"code":"BAD_OP","at":0,"results":[]}', 1), 'BAD_OP'],
+      [() => ran('{"ok":true,"results":[{"ok":true,"files":[{"path":"a","sha256":"x"}]},{"ok":true,"files":[]}]}'), 'BAD_ANSWER'],
+    ] as const) {
+      const sim = machine(answering)
+      const port = trees(sim)
+      expect(await helped().hashTrees(port, ['/m/loaded', '/m/source'], SPEC)).toBeUndefined()
+      expect(failures(sim)).toEqual([{ kind: 'failed', op: 'hashTree', code, isQuiet: false }])
+      expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
+    }
+  })
 
   test('on Windows the helper hashes too (node.exe takes the same request)', async () => {
     const sim = machine()

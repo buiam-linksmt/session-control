@@ -264,6 +264,34 @@ describe('list_sessions', () => {
     ])
   })
 
+  test('the session names the launch gives and the session ids are shown as they are; a title keeps its redaction', { options: OPTIONS }, async ($, on) => {
+    // Real-shaped names: what workerName gives for real titles, a uniqueness suffix among them. Each is a run of 32 or
+    // more letters, digits and dashes, which the redaction takes for a token in free text.
+    const at = Date.UTC(2026, 9, 11, 12, 0, 0)
+    const names = [
+      workerName('session-control T2a write tools', at),
+      workerName('NADIR manual tests for 946665, 946670 and 946671', at),
+      `${workerName('Windows support for the mod panel', at)}-2`,
+      workerName('fix token refresh', at),
+    ]
+    expect(names).toEqual(['w-session-control-t2a-writ-261011120000', 'w-nadir-manual-tests-for-9-261011120000', 'w-windows-support-for-the-261011120000-2', 'w-fix-token-refresh-261011120000'])
+    expect(names.slice(0, 3).every(name => redact(name) === REDACTED)).toBe(true)
+    const sids = ['5e551011-aaaa-4aaa-8aaa-aaaaaaaaaaa1', '5e551011-bbbb-4bbb-8bbb-bbbbbbbbbbb2', '5e551011-cccc-4ccc-8ccc-ccccccccccc3', '5e551011-dddd-4ddd-8ddd-ddddddddddd4']
+    const entries = names.map((name, n) => ({ title: n === 0 ? `T2a with ${CANARIES.github} in the title` : `worker ${n}`, session_id: sids[n], name, config_dir: CFG, cwd: '/m/work/named', model: 'haiku', effort: 'low', reported: true }))
+    // A name the launch never gives (a hand edit, another tool) is free text: a token in it goes.
+    entries.push({ title: 'foreign', session_id: '5e551011-eeee-4eee-8eee-eeeeeeeeeee5', name: `my ${CANARIES.anthropic}`, config_dir: CFG, cwd: '/m/work/named', model: 'haiku', effort: 'low', reported: true })
+    const w = world(on, entries)
+    const got = await call($, w, 'list_sessions')
+    expectReadOnly(got)
+    for (const [n, name] of names.entries()) expect(got.text).toContain(`| session_id ${sids[n]} | name ${name} | pid -`)
+    expect(got.text).toContain(`- finished | T2a with ${REDACTED} in the title | session_id ${sids[0]} | name ${names[0]} |`)
+    expect(got.text).toContain(`| name my ${REDACTED} | pid -`)
+    expectNoCanary(got.text)
+    // The headings of the tools that name one session show the id as it is too.
+    const tail = await $.tool.call({ tool: tool('worker_tail'), session_id: sids[0] } as never)
+    expect(String((tail as { result?: unknown }).result).split('\n')[0]).toBe(`worker_tail for session ${sids[0]} "T2a with ${REDACTED} in the title"`)
+  })
+
   test('shownName and shownSessionId: the mod\'s forms as they are, anything else cleaned and redacted', () => {
     expect(shownName('w-session-control-t2a-writ-261011120000')).toBe('w-session-control-t2a-writ-261011120000')
     expect(shownName('w-a-261011120000-12')).toBe('w-a-261011120000-12')

@@ -331,6 +331,34 @@ describe('host contract', () => {
     }
     const signalsOf = (steps: StopReport['steps']) => steps.flatMap(step => (step.kind === 'signal' ? [`${step.pid} ${step.signal}`] : []))
 
+    test(`${one.name}: stopProcessTree lists the tree before the first signal, stops the root, then the descendant still there; nothing outside the tree is signalled`, async () => {
+      const m = machine(one.env)
+      seedTree(m)
+      const notes: string[] = []
+      const report = await host.stopProcessTree(portOf(m, runs, notes), { pid: 5000, start: '100' })
+      expect(report.tree.root).toMatchObject({ pid: 5000, ppid: 1, start: '100', comm: 'claude' })
+      expect(report.tree.descendants.map(proc => [proc.pid, proc.ppid, proc.start, proc.comm])).toEqual([
+        [5001, 5000, '101', 'bash'],
+        [5002, 5001, '102', 'sleep'],
+      ])
+      expect(report.tree.ancestors).toEqual([900, 1])
+      // The listing ran before any signal: the first signal is recorded after it.
+      const listedAt = m.runs.findIndex(argv => argv.some(arg => arg.endsWith('/tree.ps1')) || argv.includes('processTree'))
+      const firstSignal = m.runs.findIndex(argv => argv[0]?.endsWith('\\taskkill.exe') === true || argv.includes('stopProcesses'))
+      expect(listedAt).toBeGreaterThanOrEqual(0)
+      expect(firstSignal).toBeGreaterThan(listedAt)
+      // Windows sends no gentle taskkill first (a console process without a window refuses it): /T /F to the root takes
+      // its whole Windows tree, the one that ignores the gentle signal with it.
+      expect(signalsOf(report.steps)).toEqual(one.platform === 'linux' ? ['5000 TERM', '5001 TERM', '5002 TERM', '5002 KILL'] : ['5000 taskkill /T /F'])
+      expect(report.steps.filter(step => step.kind === 'check' && step.status === 'gone').map(step => step.pid).sort()).toEqual(one.platform === 'linux' ? [5000, 5001, 5002] : [5000])
+      if (one.platform === 'windows') expect(m.table.signals.every(sent => sent.signal === 'taskkill /F')).toBe(true)
+      expect(report.final).toEqual([5000, 5001, 5002].map(pid => ({ pid, status: 'gone', state: '' })))
+      expect([...m.table.procs.keys()]).toEqual([6000])
+      expect(m.table.signals.some(sent => sent.pid === 6000)).toBe(false)
+      expect(notes).toEqual([])
+      expect(report.notes).toEqual([])
+    })
+
     if (one.platform === 'windows') {
       test(`${one.name}: stopProcessTree takes an MSYS process table with no row of a table (a ps.exe that exits 0 and prints garbage) as one that cannot be read, and stops what the Windows tree reaches`, async () => {
         const m = machine(one.env)

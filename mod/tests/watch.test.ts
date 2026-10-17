@@ -11,7 +11,7 @@ import { REGISTRY_UNREADABLE_SEC, freshNoticeState, lockStep, noticeStoreKey, pa
 import type { LockSeen, RegistryWatch } from '../hooks/notices'
 import { nodeAnswer } from './fake-helper'
 import { NOW_MS } from './fixtures'
-import { OPTIONS, ORCH, POWERSHELL, REGISTRY, WIN_ENV, WIN_ORCH, WIN_REGISTRY, mockWorld, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
+import { HOME, OPTIONS, ORCH, POWERSHELL, REGISTRY, WIN_ENV, WIN_ORCH, WIN_REGISTRY, mockWorld, startWinOrch, winBase, winFiles, winGiven as given } from './mock-world'
 import type { World } from './mock-world'
 import { echoPrompt, noticeLines, poll, seedOrch, startOrch, storeOf, toastsOf, userPrompt } from './notice-kit'
 
@@ -179,6 +179,32 @@ describe('lock-holder', () => {
 const UNREADABLE_TEXT = 'the registry has been unreadable for 5 min: the registry-based notices are paused'
 
 describe('registry-unreadable', () => {
+  test('flapping every other poll for 7 minutes: never told; the episode is kept in memory, never in the stored notice state', { options: POLL_OPTIONS, timeoutMs: 30_000 }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    seedOrch(world)
+    const good = world.files.get(REGISTRY) ?? '[]'
+    await startOrch($)
+    for (let at = 0; at < 42; at++) {
+      if (at % 2 === 0) world.files.set(REGISTRY, '')
+      else world.files.set(REGISTRY, good)
+      await poll(world, 10)
+    }
+    expect(toastsOf(world.toasts, 'registry-unreadable')).toEqual([])
+    expect(Object.keys(store.get(noticeStoreKey(ORCH)) as object).filter(key => !Object.keys(freshNoticeState()).includes(key)).sort()).toEqual(['repoAt', 'retireCheckAt'])
+  })
+
+  test('the registry-based notices stay frozen through the episode: a live unregistered claude is not told while the registry is unreadable', { options: POLL_OPTIONS, timeoutMs: 30_000 }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    seedOrch(world)
+    world.table.procs.set(5555, { ppid: 1, start: '42', state: 'S', comm: 'claude', claude: { cwd: '/w/other', configDir: `${HOME}/.claude`, cmdline: 'claude -p --model opus --output-format json', elapsedSec: 600 } })
+    world.files.set(REGISTRY, '')
+    await startOrch($)
+    await poll(world, REGISTRY_UNREADABLE_SEC + 30)
+    expect(toastsOf(world.toasts, 'registry-unreadable').length).toBe(1)
+    expect(toastsOf(world.toasts, 'orphan')).toEqual([])
+  })
 
   test('registryStep: a registry file that is not there and was never seen is no episode (a fresh machine); seen once, then gone, it is; an existing unreadable or empty one is', () => {
     const fresh: RegistryWatch = {}

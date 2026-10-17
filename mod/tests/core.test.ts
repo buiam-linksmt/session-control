@@ -1449,6 +1449,17 @@ describe('worker-report check', () => {
     // Without a number after the arrow there is no exit code.
     expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD -> none`)).toBe('report lacks git log --oneline @{u}..HEAD with its exit code')
   })
+  test('the log\'s exit code sits in or right after its block, not later in the report', () => {
+    const status = '`git status -sb` (exit 0):\n```\n## main...origin/main\n```\n'
+    const lacking = 'report lacks git log --oneline @{u}..HEAD with its exit code'
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n\nThe build script ended with exit 0.`)).toBe(lacking)
+    expect(reportCheck(`${status}\`git log --oneline @{u}..HEAD\`: no output.\n\nLater: tests ran (exit 0).`)).toBe(lacking)
+    // After the output, on an exit marker line or the line after the fence that ends the block.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix(toast): drop the plugin name\nexit 0`)).toBe('git log @{u}..HEAD lists 1 unpushed commit')
+    expect(reportCheck(`${status}\`\`\`\n$ git log --oneline @{u}..HEAD\n\`\`\`\nexit 0`)).toBeUndefined()
+    // A commit subject holding an exit-like word is not the log's exit code.
+    expect(reportCheck(`${status}$ git log --oneline @{u}..HEAD\n9b6e367 fix: exit 0 on cancel`)).toBe(lacking)
+  })
   // Layouts of real worker reports (results and transcripts of earlier workers) that the check flagged although they
   // carry both reads with their exit codes; each is a correct report.
   test('real layouts: the exit code on the line after the status or after its fence, in backticks, as => or a number alone; both commands above one block; a table', () => {
@@ -1507,6 +1518,8 @@ describe('worker-report check', () => {
 })
 
 describe('the inbox fields of the registry entry', () => {
+  const args: LaunchArgs = { dir: '/work/new/', prompt_file: '/tmp/p.md', model: 'haiku', effort: 'low', title: 'new' }
+  const files = { result: '/r/new.json', err: '/r/new.err' }
   test('sessionFileFacts reads sessionId, name and messagingSocketPath; anything else is undefined', () => {
     expect(sessionFileFacts(JSON.stringify({ pid: 7, sessionId: SID_DEAD, name: N, messagingSocketPath: '/run/user/1000/cc-socks/7.sock', kind: 'interactive' }))).toEqual({
       sessionId: SID_DEAD,
@@ -1516,6 +1529,14 @@ describe('the inbox fields of the registry entry', () => {
     expect(sessionFileFacts(JSON.stringify({ sessionId: SID_DEAD, procStart: '1' }))).toEqual({ sessionId: SID_DEAD })
     expect(sessionFileFacts(JSON.stringify({ sessionId: SID_DEAD, name: '', messagingSocketPath: 5 }))).toEqual({ sessionId: SID_DEAD })
     for (const text of ['', '{', 'null', '[1]', '"x"']) expect(sessionFileFacts(text)).toEqual({})
+  })
+  test('a fresh entry: name after the session id, socket_path when known, none otherwise', () => {
+    expect(Object.keys(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N, socketPath: '/s.sock' }, NOW_SEC - 9))).toEqual([
+      'title', 'pid', 'session_id', 'name', 'socket_path', 'config_dir', 'cwd', 'model', 'effort', 'result_file', 'err_file', 'started_at',
+    ])
+    expect(newRegistryEntry(args, { configDir: '/c/a' }, 7, SID_DEAD, files, { name: N }, NOW_SEC - 9)).toEqual({
+      title: 'new', pid: 7, session_id: SID_DEAD, name: N, config_dir: '/c/a', cwd: '/work/new', model: 'haiku', effort: 'low', result_file: '/r/new.json', err_file: '/r/new.err', started_at: NOW_SEC - 9,
+    })
   })
 })
 
