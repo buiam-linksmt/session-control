@@ -48,6 +48,8 @@ import {
   parseOpenPoints,
   expandHome,
   formatHeader,
+  desktopRowLines,
+  DESKTOP_HEADER,
   holdOffset,
   formatRow,
   paneWidths,
@@ -505,6 +507,19 @@ describe('pane columns', () => {
     const widths = paneWidths(rows, 70)
     expect(formatRow(rows[0]!, 70, widths).length).toBeLessThanOrEqual(70)
   })
+
+  test('the desktop row: the title, then the same cells in the same order, whole, joined by a middle dot, with no padding and no cut', () => {
+    const rows = buildRows(REGISTRY, facts, NOW_SEC)
+    expect(DESKTOP_HEADER).toEqual(['title', 'sid \u00B7 status \u00B7 model \u00B7 effort \u00B7 elapsed'])
+    expect(desktopRowLines(rows[0]!)).toEqual(['alive worker', `${rows[0]!.sid8} \u00B7 running \u00B7 opus \u00B7 high \u00B7 2m05s`])
+    const long = { ...rows[0]!, title: 'a title much longer than any column the terminal would give it, kept whole' }
+    expect(desktopRowLines(long)[0]).toBe(long.title)
+    expect(desktopRowLines(long)[1]).toEndWith(' \u00B7 2m05s')
+    // A row with no session id and no elapsed: a dash for each, as the terminal shows them.
+    const orphan = rows.find(row => row.status === 'orphan')!
+    expect(desktopRowLines({ ...orphan, sid8: '', elapsedSec: undefined })).toEqual([orphan.title, '- \u00B7 orphan \u00B7 ? \u00B7 ? \u00B7 -'])
+    for (const row of rows) for (const line of desktopRowLines(row)) expect(line).not.toMatch(/ {2}|\u2026/)
+  })
 })
 
 describe('fixed session columns (decision mod-33)', () => {
@@ -851,6 +866,16 @@ describe('panel layout', () => {
       expect(lines.join('').replace(/\s+/g, '')).toBe(entry.replace(/\s+/g, ''))
       return lines
     }
+    /** Short pieces of text a log line holds, blanks and control characters among them. */
+    const PIECES = ['a', 'bc', 'word', 'x'.repeat(30), ' ', '  ', '\t', '\n', '\r\n', '漢字', '\u{1F600}', 'é', '\u0007', '\u001b[31m', '>', '<', '[redacted]', 'API_KEY=[redacted]']
+    const generated = (count: number): string[] => {
+      let seed = 7
+      const next = (n: number) => {
+        seed = (seed * 1103515245 + 12345) % 2147483648
+        return seed % n
+      }
+      return Array.from({ length: count }, () => Array.from({ length: next(40) }, () => PIECES[next(PIECES.length)]).join(''))
+    }
 
     test('a wrapped tool call and tool result keep their continuation lines two columns in, under the text after the marker; the worker\'s own text wraps at column 0', () => {
       expect(wrapLogLine(`> Bash ${'word '.repeat(12)}`, 24)).toEqual(['> Bash word word word', '  word word word word', '  word word word word', '  word'])
@@ -864,6 +889,29 @@ describe('panel layout', () => {
       // At the snapshot's width (116) and a terminal's: the same rule.
       expectHung(`> Bash ${'git log --oneline origin/main..HEAD && '.repeat(8)}`, 116)
       expectHung(`  < ${'## feature/x...origin/feature/x '.repeat(10)}`, 56)
+    })
+
+    test('a log line that fits is unchanged byte for byte, and the first line of a wrapped one is as before; wrapText without a hang is as before', () => {
+      for (const line of ['> Bash git status -sb', '  < ## develop', '  < ', 'Reading the suite files.', `> ${'a'.repeat(22)}`, '  < ok'])
+        expect(wrapLogLine(line, 24)).toEqual(wrapBefore(line, 24))
+      expect(wrapLogLine('> Bash git status -sb', 116)).toEqual(['> Bash git status -sb'])
+      // A result that fit as two lines may take three: its continuation has two columns less.
+      expect(wrapBefore('  < ## develop...origin/develop', 24)).toEqual(['< ##', 'develop...origin/develop'])
+      expect(wrapLogLine('  < ## develop...origin/develop', 24)).toEqual(['< ##', '  develop...origin/devel', '  op'])
+      for (const entry of generated(400)) {
+        for (const width of [8, 20, 21, 24, 56, 116]) {
+          expect(wrapText(entry, width)).toEqual(wrapBefore(entry, width))
+          const before = wrapBefore(entry, width)
+          const after = wrapLogLine(entry, width)
+          expect(after[0]).toBe(before[0])
+          if (before.length === 1) expect(after).toEqual(before)
+          for (const marked of [`> ${entry}`, `  < ${entry}`]) {
+            const lines = wrapLogLine(marked, width)
+            expect(lines[0]).toBe(wrapBefore(marked, width)[0])
+            for (const line of lines) expect(line.length).toBeLessThanOrEqual(Math.max(8, width))
+          }
+        }
+      }
     })
 
     test('a word longer than the room is cut, and each piece after the first line carries the indent', () => {

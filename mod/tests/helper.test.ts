@@ -314,6 +314,23 @@ describe('withHelper on Linux', () => {
     expect(sim.files.get('/m/runs/trace.log')).toBe('one\ntwo\nthree\n')
   })
 
+  test('a batch that failed after its rotation is not made again: the trace rotated once, the problem said', async () => {
+    const sim = machine((_, request) => {
+      // The rotation goes through, the append fails.
+      const steps = request.ops as Request[]
+      helperAnswer(sim.files, 'rotate', steps[0] ?? {})
+      return ran(JSON.stringify({ ok: false, code: 'NO_SPACE', at: 1, results: [{ ok: true, rotated: true }] }), 1)
+    })
+    const port = portOf(sim)
+    sim.files.set('/m/runs/trace.log', 'old\n')
+    sim.files.set('/m/runs/trace.log.1', 'older\n')
+    expect(await helped().rotateAndAppend(port, '/m/runs/trace.log', ['new'], PLAN)).toBe('/m/runs/trace.log cannot be appended to (NO_SPACE)')
+    expect(calls(sim).map(one => one.op)).toEqual(['batch'])
+    expect(sim.runs.filter(one => one.argv[0] !== NODE)).toEqual([])
+    expect([sim.files.get('/m/runs/trace.log'), sim.files.get('/m/runs/trace.log.1'), sim.files.get('/m/runs/trace.log.2')]).toEqual([undefined, 'old\n', 'older\n'])
+    expect(failures(sim)).toEqual([{ kind: 'failed', op: 'batch', code: 'NO_SPACE', isQuiet: true }])
+  })
+
   const NO_NODE: [string, string | null, Record<string, unknown>][] = [
     ['no Node', null, { kind: 'node', isActive: false, reason: 'not-found' }],
     ['Node 20', 'v20.18.1\n', { kind: 'node', isActive: false, version: 'v20.18.1', reason: 'too-old' }],

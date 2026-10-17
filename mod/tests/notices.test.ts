@@ -1116,11 +1116,29 @@ describe('notices.ts: the caps', () => {
 // ---------------------------------------------------------------- completion notes redacted (decision mod-20)
 
 describe('completion notes', () => {
+  const TITLE_CANARY = ['sk', 'canarytitle00000000'].join('-')
+  const RESULT_CANARY = ['ghp', 'canaryresult0000000000'].join('_')
   const ERROR_CANARY = ['sk', 'canaryerror000000000'].join('-')
   const notification = ($: { prompt: { submit: (e: never) => Promise<unknown> } }) =>
     $.prompt.submit({ text: 'notification', wait: false, origin: { kind: 'task-notification' } } as never) as Promise<{ context?: readonly unknown[] }>
   const completions = (sent: { context?: readonly unknown[] }) => (sent.context ?? []).map(String).filter(line => line.startsWith('session-control completions: '))
   const REPORT_CHECK = 'report check: report lacks git status -sb and git log --oneline @{u}..HEAD with their exit codes'
+
+  test('a canary in the title and one in the result summary: redacted in the note and the toast; the rest of the wording as before', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries: [{ ...UNIT_ENTRY, title: `rotate ${TITLE_CANARY} worker` }] })
+    world.files.set(`${RUNS}/unit.json`, JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: `Done; the canary ${RESULT_CANARY} was revoked and replaced.`, session_id: SID_UNIT }))
+    await start($)
+    const toast = world.toasts.find(text => text.startsWith('Session finished · '))
+    expect(toast).toBe('Session finished · rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.')
+    const notes = completions(await notification($))
+    // The secret scan (decision win-22) adds its line last: kinds only.
+    expect(notes).toEqual([`session-control completions: rotate [redacted] worker: clean: Done; the canary [redacted] was revoked and replaced.; rotate [redacted] worker: ${REPORT_CHECK}; rotate [redacted] worker: secret scan: 1 likely secret redacted (kinds: github-token)`])
+    const everything = JSON.stringify([world.toasts, notes])
+    for (const canary of [TITLE_CANARY, RESULT_CANARY]) expect(everything).not.toContain(canary)
+  })
 
   test('a canary in a failed run\'s message: redacted; no title: the session id\'s first 8 characters, readable; a usual title and summary unchanged', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)

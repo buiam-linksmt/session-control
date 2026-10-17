@@ -813,6 +813,17 @@ describe('launch_worker', () => {
     }
   })
 
+  test('a settings hook that denies the Bash call (classic PreToolUse) is a refusal of the launch too', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    // Its input is the call's envelope (the tool and its arguments), as a settings hook's PreToolUse sees it.
+    on('classic.PreToolUse', ($, e) => (String((e as { tool?: unknown }).tool) === 'Bash' ? { deny: 'blocked by a PreToolUse hook' } : {}))
+    await boot($)
+    const out = await launchTool($, args)
+    expect(String(out.deny)).toBe(`session-control: the Bash tool refused the launch: blocked by a PreToolUse hook${ALLOW_HINT}`)
+    expect(w.bash.length).toBe(0)
+    expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+  })
+
   test('a refusal reason past 500 characters is cut there; an empty one is said as none given', { options: OPTIONS }, async ($, on) => {
     WORKER.bashAnswer = { deny: `x${'y'.repeat(700)}` }
     try {
@@ -1697,6 +1708,7 @@ describe('expanding a section', () => {
 
 describe('row hover', () => {
   type Ui = Awaited<ReturnType<typeof mountPane>>
+  const SID = 'aaaaaaaa-1111-4111-8111-111111111111'
   /**
    * Every pressable row of the sessions and open points: its label fills the rows' column, the box's inner width
    * less the scroll bar, so the light under the pointer spans the row and not only its text. (The mock leaves out
@@ -1715,6 +1727,26 @@ describe('row hover', () => {
     await runCommand($, 'side')
     return $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: 'session-control', props: props as never })
   }
+
+  test('docked, every pressable row spans its box to the scroll bar, in the three boxes, each expanded section and the log view', { options: OPTIONS }, async ($, on) => {
+    const ui = await open($, on)
+    // 120 body columns: the box's two borders and the scroll bar leave 117 for the rows.
+    const keys = (await expectFullRows(ui, 117)).map(one => one.key)
+    expect(keys).toContain(`s:${SID}`)
+    expect(keys).toContain('p:a:0')
+    await ui.press({ key: 'p:a:0' })
+    expect((await expectFullRows(ui, 117)).some(one => /^p:a:t:/.test(one.key ?? ''))).toBe(true)
+    for (const id of ['sessions', 'points']) {
+      await ui.press({ key: `x:${id}` })
+      await expectFullRows(ui, 117)
+      await ui.press({ key: `x:${id}` })
+    }
+    await ui.press({ key: `s:${SID}` })
+    expect(await ui.find({ type: 'Text', text: /Reading the suite files/ })).toBeDefined()
+    await expectFullRows(ui, 117)
+    // The padding is trailing: the row still reads and presses as before.
+    expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toMatch(/^\u25B8 alive worker/)
+  })
 
   test('seated inline, with no border, a pressable row spans the body to the scroll bar', { options: OPTIONS }, async ($, on) => {
     const ui = await open($, on, { ...PANE_PROPS, placement: 'inline', scroll: { offset: 0, bodyRows: 40 } })
@@ -2307,6 +2339,33 @@ describe('debug trace', () => {
     expect(events[0]).toEqual({ event: 'tool.call', tool: 'retire_workers', session_ids: ['57575751'] })
     expect(events).toContainEqual({ event: 'guard', tool: 'retire_workers', removable: [login.session_id], refused: [], reviewed: [{ session_id: login.session_id, was: 'login', reason: 'wrong label' }] })
     expect(events.at(-1)).toEqual({ event: 'tool.result', tool: 'retire_workers', result: 'Retired: 57575751. Retired with review: 57575751 (was login: wrong label).' })
+  })
+
+  test('a poll tick with a failing probe: the tick, the failed run, the error caught, the warning; renders are counted', { options: TRACED }, async ($, on) => {
+    const w = world(on)
+    stubPanel(on)
+    await boot($)
+    await runCommand($, '')
+    const ui = await mountPane($)
+    await ui.findAll({})
+    LINUX_FIXTURE.isProbeBroken = true
+    try {
+      const before = traceOf(w).length
+      await w.clock.advance(5000)
+      const tick = bare(traceOf(w)).slice(before)
+      // The helper's probe answers a fixed code; the mod says the probe failed, never what the system said.
+      const message = 'the process probe failed (IO)'
+      expect(tick).toEqual([
+        { event: 'ui.render', count: 1 },
+        { event: 'poll.tick' },
+        { ...PROBE, exitCode: 1 },
+        { event: 'helper.failed', op: 'probe', code: 'IO' },
+        { event: 'error', where: 'refresh', message },
+        { event: 'error', where: 'panel', message: `Error: ${message}` },
+      ])
+    } finally {
+      LINUX_FIXTURE.isProbeBroken = false
+    }
   })
 
   test('SESSION_CONTROL_DEBUG=1 switches it on; otherwise nothing is written and no trace command runs', { options: OPTIONS }, async ($, on) => {

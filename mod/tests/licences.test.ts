@@ -105,6 +105,20 @@ describe('list_licences', () => {
     expectNoIdentity(text)
   })
 
+  test('the default directory is listed even with neither file; its .claude.json may be the home one', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    seed(world)
+    await startOrch($)
+    expect((await answerOf($, 'list_licences')).split('\n').slice(0, 2)).toEqual([
+      '1 licence (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
+      `- default | config_dir ${CLAUDE} | source default | logged_in no | sessions 1 live, 1 in all`,
+    ])
+    world.files.set(`${CLAUDE}/.credentials.json`, credentialsText())
+    world.files.set(`${HOME}/.claude.json`, configText())
+    await world.clock.advance(SCAN_CACHE_MS + 1000)
+    expect((await answerOf($, 'list_licences')).split('\n')[1]).toBe(`- default | config_dir ${CLAUDE} | source default | logged_in yes | sessions 1 live, 1 in all`)
+  })
+
   test('the scan is kept 60 s in memory: a call within answers from it and lists nothing; a call after rescans', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seed(world)
