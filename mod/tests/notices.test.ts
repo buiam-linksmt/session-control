@@ -1088,6 +1088,43 @@ describe('notices.ts: the registry read', () => {
 
 // ---------------------------------------------------------------- many at once (decision mod-20)
 
+const MORE_TITLE = TOAST_TITLES.moreNotices
+
+/** `count` live headless claudes no entry claims, pids from 7000 up, each with a sessions file of its own. */
+function seedOrphans(world: World, count: number): number[] {
+  const pids = Array.from({ length: count }, (_, at) => 7000 + at)
+  for (const pid of pids) seedOrphan(world, `7a7a7a7a-0000-4000-8000-${String(pid).padStart(12, '0')}`, pid)
+  return pids
+}
+
+describe('many notices at once', () => {
+  test('45 orphans in one poll: 5 told one by one and the other 40 in one notice; 3 toasts and one summary toast; every pid recorded, none told again', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    ownSession(on)
+    echoPrompt(on)
+    seed(world)
+    const pids = seedOrphans(world, 45)
+    await start($)
+    await poll(world, ORPHAN_GRACE_SEC)
+    const toasts = world.toasts.filter(text => text.startsWith(`${TOAST_TITLES.orphan} · `) || text.startsWith(`${MORE_TITLE} · `))
+    expect(toasts.length).toBe(4)
+    expect(toasts.slice(0, 3).every(text => text.startsWith(`${TOAST_TITLES.orphan} · pid 700`))).toBe(true)
+    expect(toasts[3]).toBe(`${MORE_TITLE} · 3 more notices: see the next prompt`)
+    const lines = noticeLines(await userPrompt($))
+    expect(lines.length).toBe(6)
+    expect(lines.slice(0, 5).map(line => line.slice(0, `${NOTICE_PREFIX} orphan: pid 7000 `.length))).toEqual([7000, 7001, 7002, 7003, 7004].map(pid => `${NOTICE_PREFIX} orphan: pid ${pid} `))
+    expect(lines[5]).toBe(`${NOTICE_PREFIX} orphan: 40 more unregistered sessions: 7005, 7006, 7007, 7008, 7009, 7010, 7011, 7012, 7013, 7014 and 30 not listed; list_sessions shows each; raise an open point naming them`)
+    const orphans = parseNoticeState(store.get(KEY)).orphans
+    expect(Object.keys(orphans).sort()).toEqual(pids.map(String).sort())
+    expect(Object.values(orphans).every(one => one.isTold === true)).toBe(true)
+    await poll(world, 120)
+    expect(noticeToasts(world).length).toBe(3)
+    expect(world.toasts.filter(text => text.startsWith(`${MORE_TITLE} · `)).length).toBe(1)
+    expect(noticeLines(await userPrompt($))).toEqual([])
+  })
+})
+
 describe('notices.ts: the caps', () => {
   test('pendingWith: under the cap the lines are kept as they come; past it 29 stay and the more line counts the rest, over several additions', () => {
     const line = (at: number) => `${NOTICE_PREFIX} stall: line ${at}`

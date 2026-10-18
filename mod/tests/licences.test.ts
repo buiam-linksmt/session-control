@@ -119,6 +119,19 @@ describe('list_licences', () => {
     expect((await answerOf($, 'list_licences')).split('\n')[1]).toBe(`- default | config_dir ${CLAUDE} | source default | logged_in yes | sessions 1 live, 1 in all`)
   })
 
+  test("the orchestrator's own CLAUDE_CONFIG_DIR is the default (as the registry records a launch without a picker); ~/.claude is then `home`", { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on, { env: { CLAUDE_CONFIG_DIR: `${CLAUDE}/second` } })
+    seed(world)
+    seedLicences(world)
+    await startOrch($)
+    const lines = (await answerOf($, 'list_licences')).split('\n')
+    expect(lines.slice(1, 4)).toEqual([
+      `- default | config_dir ${CLAUDE}/second | source default | logged_in yes | sessions 0 live, 1 in all`,
+      `- .claude | config_dir ${CLAUDE} | source home | logged_in yes | sessions 1 live, 1 in all`,
+      `- .claude-work | config_dir ${HOME}/.claude-work | source dash | logged_in yes | sessions 0 live, 0 in all`,
+    ])
+  })
+
   test('the scan is kept 60 s in memory: a call within answers from it and lists nothing; a call after rescans', { options: OPTIONS }, async ($, on) => {
     const world = mockWorld(on)
     seed(world)
@@ -576,6 +589,24 @@ describe('list_licences on Windows', () => {
       '- LinkFile | config_dir C:/w/home/.claude/LinkFile | source child | logged_in yes | sessions 0 live, 0 in all',
     ])
     expectNoIdentity(text)
+  })
+
+  test('registry config_dir paths are matched normalised in both separators and without case; a trailing separator and .\\ dropped', { options: { ...WIN_OPTIONS, licenceDirs: '' } }, async ($, on) => {
+    const w = winWorld(on)
+    w.files.set(`${WIN_ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n')
+    const entries = ['c:\\w\\home\\.claude\\.\\second\\\\', 'C:/w/home/.claude//Second/./', 'C:\\w\\home\\.claude\\other'].map((configDir, n) => ({ title: `w${n}`, session_id: `6000000${n}-aaaa-4bbb-8ccc-00000000000${n}`, config_dir: configDir, cwd: 'C:/w/work', reported: true }))
+    w.files.set(WIN_REGISTRY, `${JSON.stringify(entries)}\n`)
+    for (const dir of ['C:/w/home/.claude', 'C:/w/home/.claude/Second']) {
+      w.files.set(`${dir}/.credentials.json`, credentialsText())
+      w.files.set(`${dir}/.claude.json`, configText())
+    }
+    await startWinOrch($)
+    expect((await answerOf($, 'list_licences')).split('\n')).toEqual([
+      '2 licences (directory scan fresh; logged_in says only that .credentials.json and .claude.json are there: neither is opened).',
+      '- default | config_dir C:/w/home/.claude | source default | logged_in yes | sessions 0 live, 0 in all',
+      '- Second | config_dir C:/w/home/.claude/Second | source child | logged_in yes | sessions 0 live, 2 in all',
+      '1 registry entry is under no discovered licence.',
+    ])
   })
 })
 

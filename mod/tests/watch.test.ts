@@ -172,6 +172,22 @@ describe('lock-holder', () => {
     expect(world.listed.filter(path => path === LOCKS).length).toBe(3)
     expect(world.listed.filter(path => path === OTHER_LOCKS).length).toBe(3)
   })
+
+  test('a lock that goes is forgotten: one written again by a dead pid is told again', { options: LOCK_OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    const store = storeOf(on)
+    seedOrch(world)
+    world.files.set(`${LOCKS}/stack.lock`, '12345\n')
+    await startOrch($)
+    await poll(world, 10)
+    expect(toastsOf(world.toasts, 'lock-holder').length).toBe(1)
+    world.files.delete(`${LOCKS}/stack.lock`)
+    await poll(world, LOCK_EVERY_SEC)
+    expect(parseNoticeState(store.get(noticeStoreKey(ORCH))).locks).toBeUndefined()
+    world.files.set(`${LOCKS}/stack.lock`, '12345\n')
+    await poll(world, LOCK_EVERY_SEC)
+    expect(toastsOf(world.toasts, 'lock-holder').length).toBe(2)
+  })
 })
 
 // ---------------------------------------------------------------- registry-unreadable

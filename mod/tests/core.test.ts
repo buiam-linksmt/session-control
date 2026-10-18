@@ -403,6 +403,23 @@ describe('completion classifier', () => {
 })
 
 describe('registry merge in place', () => {
+  test('drops pid, sets reported:false, keeps resume and unknown fields, leaves others alone', () => {
+    const merged = mergeCompletion(REGISTRY_TEXT, SID_DEAD, classifyResult(RESULTS.limit), NOW_SEC)
+    expect(merged.changed).toBe(true)
+    if (!merged.changed) return
+    const after = JSON.parse(merged.text) as Record<string, unknown>[]
+    const entry = after[1]!
+    expect('pid' in entry).toBe(false)
+    expect(entry.reported).toBe(false)
+    expect(entry.resume).toEqual(DAEMON_RESUME)
+    expect(entry.unknown_future_field).toEqual([1, 2, 3])
+    expect(entry.result_file).toBe('/fixture/results/limit.json')
+    expect((entry.outcome as { kind: string }).kind).toBe('limit')
+    expect(entry.ended_at).toBe(NOW_SEC)
+    expect(after.length).toBe(REGISTRY.length)
+    expect(after.filter((_, i) => i !== 1)).toEqual(REGISTRY.filter((_, i) => i !== 1))
+  })
+
   test('refuses an entry already harvested or missing', () => {
     expect(mergeCompletion(REGISTRY_TEXT, SID_UNREPORTED, classifyResult(RESULTS.clean), NOW_SEC).changed).toBe(false)
     expect(mergeCompletion(REGISTRY_TEXT, 'nope', classifyResult(RESULTS.clean), NOW_SEC).changed).toBe(false)

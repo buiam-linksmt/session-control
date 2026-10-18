@@ -586,6 +586,20 @@ const TOOL_CALLS: [string, Record<string, unknown>][] = [
 ]
 
 describe('helper options, through the plugin', () => {
+  test('auto (the default) with Node 24 on the PATH: the probe and the registry write go through the helper in the plugin\'s folder', { options: PLUGIN_OPTIONS }, async ($, on) => {
+    const w = world(on, 'node')
+    await startOrch($)
+    expect(nodeRuns(w)[0]).toEqual(['node', '--version'])
+    const helper = nodeRuns(w).filter(argv => argv[1] !== '--version')
+    expect(helper.length).toBeGreaterThan(0)
+    // The helper in the plugin's own folder ($.plugin.root), by absolute path: /... on Linux, C:\... on Windows.
+    const absolute = w.isWindowsHost ? /^[A-Za-z]:\\[^/]+\/helper\/host\.mjs$/ : /^\/.+\/helper\/host\.mjs$/
+    expect(helper.every(argv => argv.length === 3 && absolute.test(String(argv[1])) && !argv[1]?.includes('//'))).toBe(true)
+    expect(probes(w)).toEqual([['node', helper[0]?.[1] ?? '', 'probe']])
+    expect(w.argv.filter(argv => argv[0] === 'sh')).toEqual([])
+    expect(w.toasts).toEqual([])
+  })
+
   test('a leftover helper option (off) is ignored without an error: Node is looked for and the helper runs', { options: { ...PLUGIN_OPTIONS, helper: 'off' } }, async ($, on) => {
     const w = world(on, 'node')
     await startOrch($)

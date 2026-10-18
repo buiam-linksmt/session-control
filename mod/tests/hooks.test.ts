@@ -945,6 +945,48 @@ describe('launch_worker', () => {
   })
 
   const LAUNCH_RUNS = `${HOME}/.claude/session-control/runs`
+  test('a worker that appears only after the 30 s of the launch: answered as started and not registered yet, then registered by the poll that finds it', { options: OPTIONS }, async ($, on) => {
+    LINUX_FIXTURE.isWorkerHidden = true
+    try {
+      const w = world(on)
+      await boot($)
+      const before = lastRegistry(w).length
+      const out = await launchTool($, args)
+      expect(String(out.result)).toBe(
+        'Started in the background, but no claude process for it appeared within 30 s: it is not registered yet. ' +
+          "Check it with list_sessions: while it runs unregistered it is an orphan row (cwd /work/new); the mod's poll registers it as soon as it finds it " +
+          '(up to 10 min after the launch), and its entry then takes the orphan row\'s place. ' +
+          `If neither row appears, it did not start: read ${LAUNCH_RUNS}/20260921141320-new.err. Result: ${LAUNCH_RUNS}/20260921141320-new.json.`,
+      )
+      // Fifteen checks at most, each after a `sleep 2` process: the Linux wait as it was.
+      expect(w.runs.filter(argv => argv.join(' ') === 'sleep 2').length).toBe(15)
+      expect(lastRegistry(w).some(one => one.pid === 7001)).toBe(false)
+      // The worker shows up: the next poll registers it with what the launch would have written.
+      LINUX_FIXTURE.isWorkerHidden = false
+      await w.clock.advance(5000)
+      const after = lastRegistry(w)
+      expect(after.length).toBe(before + 1)
+      expect(after.at(-1)).toMatchObject({
+        title: 'new',
+        pid: 7001,
+        session_id: 'abcdabcd-0000-4000-8000-000000000001',
+        name: 'w-new-260921141320',
+        socket_path: '/run/user/1000/cc-socks/7001.sock',
+        config_dir: '/fixture/lic/a',
+        cwd: '/work/new',
+        model: 'opus',
+        effort: 'high',
+        result_file: `${LAUNCH_RUNS}/20260921141320-new.json`,
+        err_file: `${LAUNCH_RUNS}/20260921141320-new.err`,
+        started_at: NOW_MS / 1000,
+      })
+      // Registered once: later polls leave it as it is.
+      await w.clock.advance(5000)
+      expect(lastRegistry(w).filter(one => one.pid === 7001).length).toBe(1)
+    } finally {
+      LINUX_FIXTURE.isWorkerHidden = false
+    }
+  })
 
   test('a worker still not seen 10 minutes after its launch is no longer looked for', { options: OPTIONS }, async ($, on) => {
     LINUX_FIXTURE.isWorkerHidden = true
@@ -1948,6 +1990,20 @@ describe('platform', () => {
       })
     } finally {
       WINDOWS.isWorkerHidden = false
+    }
+  })
+
+  test('Windows: an orchestrator with its own CLAUDE_CONFIG_DIR: no variable on the line, its dir in native form in the registry', { options: NO_PICKER }, async ($, on) => {
+    WINDOWS.workerConfigDir = 'C:\\fixture\\lic\\a'
+    try {
+      const w = world(on, '', true, REGISTRY_TEXT, { ...WINDOWS_ENV, CLAUDE_CONFIG_DIR: 'C:\\fixture\\lic\\a\\' })
+      await boot($, `C:${ORCH_DIR}`)
+      const out = await settled(w, launchTool($, winArgs))
+      expect(String(out.result)).toContain('config_dir C:/fixture/lic/a, registered.')
+      expect(String(w.bash[0]?.command)).not.toContain('CLAUDE_CONFIG_DIR')
+      expect(lastRegistry(w).at(-1)).toMatchObject({ pid: 7001, config_dir: 'C:/fixture/lic/a' })
+    } finally {
+      WINDOWS.workerConfigDir = 'C:\\fixture\\home\\.claude'
     }
   })
 
