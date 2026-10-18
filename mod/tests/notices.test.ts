@@ -684,8 +684,12 @@ describe('retire-due: each free-text wait told once', () => {
   })
 
   let leftByLoad: unknown
+  // A poll an hour in the two tests below: each tick is a whole refresh, so the first test's 14 hours are 14 ticks (665
+  // with a poll a minute, over 5 s under load); an hour is one tick, so each hourly check falls on one. The look
+  // interval is pinned by the test after them, on a poll a minute; its own load is paid for by the ticks saved here.
+  const POLL_SEC = 3600
 
-  test('through the poll: told once over 6 hours, again after its text changes, a task added later alone, a removed and re-added task again; no free text in the store', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+  test('through the poll: told once over 6 hours, again after its text changes, a task added later alone, a removed and re-added task again; no free text in the store', { options: { ...OPTIONS, pollSeconds: POLL_SEC } }, async ($, on) => {
     const canary = ['wait', Date.now().toString(36), 'marker'].join('-')
     const own = { ...steps, waits_for: `the ${canary} release` }
     const world = mockWorld(on)
@@ -693,26 +697,26 @@ describe('retire-due: each free-text wait told once', () => {
     echoPrompt(on)
     seed(world, { entries: [kept], queue: [groups, own] })
     await start($)
-    await poll(world, 60, 60)
+    await poll(world, POLL_SEC, POLL_SEC)
     expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps'])])
     expect(noticeLines(await userPrompt($))).toEqual([`session-control notice: retire-due: ${stale(['q-groups', 'q-steps'])}`])
-    await poll(world, 6 * 3600, 60)
+    await poll(world, 6 * 3600, POLL_SEC)
     expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps'])])
     expect(noticeLines(await userPrompt($))).toEqual([])
     expect(JSON.stringify(store.get(KEY))).not.toContain(canary)
     setQueue(world, [groups, { ...own, waits_for: `the ${canary} release, then the merge` }])
-    await poll(world, 120, 60)
+    await poll(world, POLL_SEC, POLL_SEC)
     expect(noticeToasts(world)).toEqual([toast(['q-groups', 'q-steps']), toast(['q-steps'])])
     const later = { id: 'q-later', status: 'queued', title: 'Added later', waits_for: 'the customer answer' }
     setQueue(world, [groups, { ...own, waits_for: `the ${canary} release, then the merge` }, later])
-    await poll(world, 3600, 60)
+    await poll(world, 3600, POLL_SEC)
     expect(noticeToasts(world).slice(2)).toEqual([toast(['q-later'])])
     setQueue(world, [{ ...own, waits_for: `the ${canary} release, then the merge` }, later])
-    await poll(world, 120, 60)
+    await poll(world, POLL_SEC, POLL_SEC)
     setQueue(world, [{ ...own, waits_for: `the ${canary} release, then the merge` }, later, groups])
-    await poll(world, 3600, 60)
+    await poll(world, 3600, POLL_SEC)
     expect(noticeToasts(world).slice(3)).toEqual([toast(['q-groups'])])
-    await poll(world, 3 * 3600, 60)
+    await poll(world, 3 * 3600, POLL_SEC)
     expect(noticeToasts(world).length).toBe(4)
     const left = store.get(KEY) as { freeWaits?: string[] }
     expect(JSON.stringify(left)).not.toContain(canary)
@@ -721,7 +725,7 @@ describe('retire-due: each free-text wait told once', () => {
     leftByLoad = left
   })
 
-  test('a fresh load with the store the last one left, two hours later: nothing is told again', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+  test('a fresh load with the store the last one left, two hours later: nothing is told again', { options: { ...OPTIONS, pollSeconds: POLL_SEC } }, async ($, on) => {
     expect(leftByLoad).toBeDefined()
     const world = mockWorld(on)
     storeOf(on, { [KEY]: leftByLoad })
@@ -731,9 +735,45 @@ describe('retire-due: each free-text wait told once', () => {
     seed(world, { entries: [kept], queue: [groups, { id: 'q-later', status: 'queued', title: 'Added later', waits_for: 'the customer answer' }] })
     await world.clock.advance(2 * HOUR_MS)
     await start($)
-    await poll(world, 2 * 3600, 60)
+    await poll(world, 2 * 3600, POLL_SEC)
     expect(noticeToasts(world)).toEqual([])
     expect(noticeLines(await userPrompt($))).toEqual([])
+  })
+
+  // The hourly poll above lets any look interval up to an hour pass; a poll a minute pins it, from a stored state
+  // whose last notice is an hour back (no hour of ticks to get there): the look of the first tick tells nothing.
+  test('through a poll a minute, an hour after the last notice: a changed wait text is told within two minutes (the findings looked at once a minute)', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    const state = freshNoticeState()
+    expect(stepAt(state, [groups, steps], NOW_MS)).toHaveLength(1)
+    const world = mockWorld(on)
+    storeOf(on, { [KEY]: state })
+    seed(world, { entries: [kept], queue: [groups, steps] })
+    await world.clock.advance(HOUR_MS)
+    await start($)
+    await poll(world, 60, 60)
+    expect(noticeToasts(world)).toEqual([])
+    setQueue(world, [groups, { ...steps, waits_for: 'mod steps 1 to 5 complete' }])
+    await poll(world, 120, 60)
+    expect(noticeToasts(world)).toEqual([toast(['q-steps'])])
+  })
+
+  // The look at the hour prunes on its own; within the hour only the poll's own prune forgets a dropped task. Ticks at
+  // 58 minutes (dropped: forgotten), 59 and 60 (re-added, then the look): told again.
+  test('through a poll a minute, a told task dropped within the hour after the notice: forgotten at the next tick and told again once re-added (the free waits pruned on every poll)', { options: { ...OPTIONS, pollSeconds: 60 } }, async ($, on) => {
+    const state = freshNoticeState()
+    expect(stepAt(state, [groups, steps], NOW_MS)).toHaveLength(1)
+    const world = mockWorld(on)
+    const store = storeOf(on, { [KEY]: state })
+    seed(world, { entries: [kept], queue: [groups, steps] })
+    await world.clock.advance(HOUR_MS - 180_000)
+    await start($)
+    setQueue(world, [groups])
+    await poll(world, 60, 60)
+    expect((store.get(KEY) as { freeWaits?: string[] }).freeWaits).toEqual([waitKey('q-groups', groups.waits_for)])
+    expect(noticeToasts(world)).toEqual([])
+    setQueue(world, [groups, steps])
+    await poll(world, 120, 60)
+    expect(noticeToasts(world)).toEqual([toast(['q-steps'])])
   })
 
   test('the notices option off: never told, nothing stored', { options: { ...OPTIONS, pollSeconds: 60, notices: 'off' } }, async ($, on) => {
