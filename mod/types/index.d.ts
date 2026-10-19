@@ -75,6 +75,8 @@ declare module 'claude-code' {
       snapshot: SessionSnapshot | null
       /** The display clock of the elapsed column (epoch seconds), moved on by the one-second tick while the panel is shown; 0 before the first tick. */
       now: number
+      /** The orchestrator directory an earlier load of this session turned the board on for, kept across a hot reload (which starts again from the session's current directory); '' while none did. */
+      boardDir: string
       /** Completion lines not yet handed to the model. */
       pendingNotes: string[]
       /** Notice lines (`session-control notice: <kind>: ...`) not yet handed to the model; the next prompt of any origin carries them. */

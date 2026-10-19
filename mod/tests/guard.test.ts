@@ -75,3 +75,25 @@ describe('record_decision and the decisions archive', () => {
     expect(world.files.get(`${ORCH}/agreed-decisions.md`)).not.toContain('free-10.')
   })
 })
+
+describe('a hot reload after a cd', () => {
+  // Without the orchestratorDir option the orchestrator directory is the session's own; a hot reload runs session.start
+  // again from the session's current directory, which a cd in Bash may have moved into a subfolder.
+  const { orchestratorDir, ...unset } = OPTIONS
+  test('the reload keeps the orchestrator directory an earlier load turned the board on for: the board is on and record_decision writes the orchestrator\'s file', { options: unset }, async ($, on) => {
+    expect(orchestratorDir).toBe(ORCH)
+    const world = mockWorld(on)
+    seedOrchestrator(world)
+    // What the session's earlier load left: it turned the board on for the orchestrator directory.
+    on('state.get', ($, e, next) => (e.plugin === 'session-control' && e.key === 'boardDir' ? { value: { value: ORCH, version: 1 } } : next(e)))
+    await $.session.start({ cwd: `${ORCH}/scratch/port43`, surface: null, isInteractive: true })
+    const recorded = answerOf(await $.tool.call({ tool: 'mcp__session-control__record_decision', section: 'Free unit', id: 'free-2', text: 'After the reload.' } as never))
+    expect(recorded).toEqual({ text: 'agreed-decisions.md: recorded free-2 in Free unit.', isRefused: false })
+    expect(world.files.get(`${ORCH}/agreed-decisions.md`)).toContain('free-2. After the reload.')
+    expect([...world.files.keys()].filter(path => !path.startsWith('/w/'))).toEqual([])
+    // The board is on again, with the sign-off guard on the session's own commands.
+    const forced = answerOf(await $.tool.call({ tool: 'Bash', command: 'git push --force origin x' } as never))
+    expect(forced.text).toStartWith('session-control: refused by the sign-off guard: git push --force')
+    expect(world.passed.filter(one => one.tool === 'Bash')).toEqual([])
+  })
+})

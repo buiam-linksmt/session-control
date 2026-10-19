@@ -221,6 +221,7 @@ const selected = atom({ plugin: 'session-control', key: 'selected' } as const, n
 const points = atom({ plugin: 'session-control', key: 'points' } as const, null)
 const expanded = atom({ plugin: 'session-control', key: 'expanded' } as const, null)
 const now = atom({ plugin: 'session-control', key: 'now' } as const, 0)
+const boardDir = atom({ plugin: 'session-control', key: 'boardDir' } as const, '')
 
 type Config = {
   orchestratorDir: string
@@ -2809,11 +2810,15 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
   // Both are taken in the host's path form and compared as the host compares paths.
   const machine = await hostOf($)
   const cwd = machine.sessionDir(sessionCwd)
+  // A hot reload runs session.start again from the session's current directory, which a cd in Bash may have moved: the
+  // directory an earlier load of this session turned the board on for stays the session's own.
+  const earlier = await read($, boardDir)
+  if (config.orchestratorDir === '' && earlier !== '') config.orchestratorDir = earlier
   if (config.orchestratorDir === '' && (await $.fs.read(`${cwd}/CLAUDE.md`).catch(() => '')).startsWith(ORCHESTRATOR_HEADING)) {
     config.orchestratorDir = cwd
   }
   if (config.orchestratorDir !== '') config.orchestratorDir = machine.nativePath(config.orchestratorDir)
-  const isHere = machine.isSameDir(cwd, config.orchestratorDir)
+  const isHere = machine.isSameDir(earlier === '' ? cwd : earlier, config.orchestratorDir)
   if (isTraceWanted) {
     // The picker command is a command line of its own: the trace says only whether one is set. modSource and lockDirs
     // are left to the drift and locks lines (whether a source is there, how many folders were read).
@@ -2822,6 +2827,7 @@ async function startSession($: EngineInterface, sessionCwd: string): Promise<voi
     traceStart = { cwd, platform: machine.platform, isOrchestratorDir: config.orchestratorDir !== '' && isHere, options }
   }
   if (config.orchestratorDir !== '' && isHere) {
+    if (earlier !== config.orchestratorDir) await update($, boardDir, () => config.orchestratorDir)
     await activate($)
     isGuarded = true
   }
