@@ -458,7 +458,7 @@ describe('tool surface', () => {
     // The first six as they were; later tools come after them.
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     // The whole tool surface in one pin: it moves only on purpose (each past move and its old value is in git log).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('18019:a6c83dd2')
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('18876:c90d8e1b')
   })
 })
 

@@ -87,6 +87,7 @@ import {
   plainText,
   readResultText,
   sessionWritesText,
+  snapshotDetail,
   workerTailText,
 } from './inspect'
 import {
@@ -2397,11 +2398,28 @@ async function sessionWrites($: EngineInterface, id: unknown) {
   }
 }
 
+/** The entries of a registry's text; null when it does not parse. */
+function registryEntries(text: string): SessionEntry[] | null {
+  const parsed = parseRegistry(text)
+  return parsed.ok ? parsed.entries : null
+}
+
 /** panel_snapshot: the panel's own atoms, as the last poll left them, drawn as text; nothing gathered. */
-async function panelSnapshot($: EngineInterface) {
+async function panelSnapshot($: EngineInterface, asked: unknown) {
+  const detail = snapshotDetail(asked)
+  if ('error' in detail) return { deny: `${PLUGIN}: ${detail.error}` }
+  // detail full: the same reads as the list actions (one read of each file, nothing created or written) and the registry's text; no probe, so the tool answers without Node too.
+  const full =
+    detail.detail === 'full'
+      ? {
+          pointsText: (await $.fs.read(orchPath('open-points.json')).catch(() => undefined)) ?? freshText('open-points.json') ?? '',
+          queueText: (await $.fs.read(orchPath('task-queue.json')).catch(() => undefined)) ?? freshText('task-queue.json') ?? '',
+          entries: registryEntries(await readRegistryText($)),
+        }
+      : undefined
   const [snap, queue, list, sel, view, pointSel, exp] = await Promise.all([read($, snapshot), read($, queued), read($, points), read($, selected), read($, watch), read($, selectedPoint), read($, expanded)])
   const log = sel !== null && view !== null ? { title: view.title, lines: view.lines } : null
-  return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, log, expanded: log === null ? exp : null, nowMs: await $.clock.now(), ...(polledAt === undefined ? {} : { polledAt }) }) }
+  return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, log, expanded: log === null ? exp : null, nowMs: await $.clock.now(), ...(polledAt === undefined ? {} : { polledAt }), ...(full === undefined ? {} : { full }) }) }
 }
 
 /**
@@ -2715,7 +2733,7 @@ async function activate($: EngineInterface): Promise<void> {
         "Read-only. The files a session wrote under its cwd since its transcript's first timestamp (by mtime, .git left out, newest first, at most 200 with the true count), each one under the orchestrator directory or the registry flagged, and the transcript's own writes to either.",
         SESSION_WRITES_SCHEMA,
       ],
-      ['panel_snapshot', 'Read-only. The text the side panel shows now: the sessions rows, the queued work and the open points (and the log, when one is open), as plain text.', PANEL_SNAPSHOT_SCHEMA],
+      ['panel_snapshot', 'Read-only. The text the side panel shows now: the sessions rows, the queued work and the open points (and the log, when one is open), as plain text. detail titles (default) is the panel as drawn, the points and tasks as titles. detail full prints each open point and each queued task as the open_point and queue_task list actions return it (those blocks are not wrapped to the panel width) and, under each session row, its session id, pid, cwd, config dir and outcome (wrapped to the panel width), read from the files when called, without a probe; the rows and the poll age stay those of the last poll. Free text is redacted as the rest of this answer is; the list actions do not redact.', PANEL_SNAPSHOT_SCHEMA],
       [
         'audit_state',
         'Read-only. The end-of-unit audit of the helper files as findings (kind, subject, evidence, suggested action), the most important first: queue statuses, running tasks with no live session, queued tasks waiting on a finished session, done tasks, sessions to retire or acknowledge, old kept sessions, held or old open points, spent backups, run files and reports, stale decision sections, and the orchestrator directory\'s git state. Changes nothing.',
@@ -3189,7 +3207,7 @@ export const register: Register = (on, options) => {
     return next.called ? next(e) : { deny: `${PLUGIN}: session_writes failed` }
   })
 
-  on('tool.call', { tool: SNAPSHOT_TOOL }, ($, e) => tracedTool($, 'panel_snapshot', e, [], () => panelSnapshot($), true)).catch(($, e, next) => {
+  on('tool.call', { tool: SNAPSHOT_TOOL }, ($, e) => tracedTool($, 'panel_snapshot', e, ['detail'], () => panelSnapshot($, plain(e).detail), true)).catch(($, e, next) => {
     traceError($, 'panel_snapshot', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: panel_snapshot failed` }
   })

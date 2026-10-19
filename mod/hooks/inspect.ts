@@ -11,6 +11,7 @@ import { classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, isG
 import type { PresentedPoint, ProcFacts, QueuedTask } from './core'
 import type { NewerFiles } from './host'
 import { REDACTED, redact } from './trace'
+import { formatPoint, formatTask, readPointRecords, readTaskRecords, selectPoints } from './bookkeeping'
 import { maskSecrets, secretScanLine, tallyOf } from './secrets'
 import type { SecretFind } from './secrets'
 
@@ -59,7 +60,29 @@ export const SESSION_WRITES_SCHEMA = {
   properties: { session_id: SESSION_ID },
 } as const
 
-export const PANEL_SNAPSHOT_SCHEMA = { type: 'object', additionalProperties: false, properties: {} } as const
+/** panel_snapshot's `detail` values: the panel's titles, or each section's full blocks. */
+export const SNAPSHOT_DETAILS = ['titles', 'full'] as const
+export type SnapshotDetail = (typeof SNAPSHOT_DETAILS)[number]
+
+export const PANEL_SNAPSHOT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    detail: {
+      type: 'string',
+      enum: SNAPSHOT_DETAILS,
+      description:
+        'titles (default): the panel as it is drawn. full: each open point and each queued task as the open_point and queue_task list actions return it, and the session id, pid, cwd, config dir and outcome of each session row; read from the files when called.',
+    },
+  },
+} as const
+
+/** The detail a panel_snapshot call asks for (titles when none), or why the value is refused. */
+export function snapshotDetail(value: unknown): { detail: SnapshotDetail } | { error: string } {
+  if (value === undefined) return { detail: 'titles' }
+  const hit = SNAPSHOT_DETAILS.find(one => one === value)
+  return hit === undefined ? { error: `unknown detail ${oneLine(typeof value === 'string' ? value : JSON.stringify(value) ?? String(value), 40)} (${SNAPSHOT_DETAILS.join(', ')})` } : { detail: hit }
+}
 
 /** read_result's default and its bounds. */
 export const READ_RESULT_CHARS = { default: 12000, min: 500, max: 50000 } as const
@@ -197,6 +220,19 @@ export function rowEntries(rows: readonly SessionRow[], entries: readonly Sessio
   return rows.map(row => (row.status === 'orphan' ? undefined : row.sid !== undefined ? bySid.get(row.sid) : waiting.get(row.status)?.shift()))
 }
 
+/** What list_sessions and the full panel_snapshot show of a registry row: its session id, pid, cwd, config dir and outcome. */
+function entryFields(row: SessionRow, entry: SessionEntry): { sid: string; pid: string; cwd: string; configDir: string; outcome: string } {
+  const outcome = entry.outcome as { kind?: unknown; summary?: unknown } | undefined
+  const field = (value: unknown) => (typeof value === 'string' && value !== '' ? oneLine(value, 300) : '-')
+  return {
+    sid: row.sid === undefined ? '-' : shownSessionId(row.sid),
+    pid: String(row.pid ?? '-'),
+    cwd: field(entry.cwd),
+    configDir: oneLine(row.configDir, 300),
+    outcome: outcome === undefined ? '-' : `${String(outcome.kind)}${typeof outcome.summary === 'string' ? ` (${oneLine(outcome.summary, 200)})` : ''}`,
+  }
+}
+
 const FINISHED: readonly SessionRowStatus[] = ['dead', 'unreported', 'done']
 
 /** The statuses in the order list_sessions counts them. */
@@ -224,21 +260,19 @@ export function listSessionsText(rows: readonly SessionRow[], entries: readonly 
       return
     }
     const entry = owners[rows.indexOf(row)] ?? {}
-    const outcome = entry.outcome as { kind?: unknown; summary?: unknown } | undefined
-    const outcomeText = outcome === undefined ? '-' : `${String(outcome.kind)}${typeof outcome.summary === 'string' ? ` (${oneLine(outcome.summary, 200)})` : ''}`
-    const field = (value: unknown) => (typeof value === 'string' && value !== '' ? oneLine(value, 300) : '-')
+    const fields = entryFields(row, entry)
     lines.push(
       [
         `- ${statusLabel(row.status)}`,
         oneLine(row.title, 120),
-        `session_id ${row.sid === undefined ? '-' : shownSessionId(row.sid)}`,
+        `session_id ${fields.sid}`,
         `name ${typeof entry.name === 'string' && entry.name !== '' ? shownName(entry.name) : '-'}`,
-        `pid ${row.pid ?? '-'}`,
+        `pid ${fields.pid}`,
         `elapsed ${elapsed}`,
         `model ${oneLine(row.model, 40)}/${oneLine(row.effort, 20)}`,
-        `cwd ${field(entry.cwd)}`,
-        `config_dir ${oneLine(row.configDir, 300)}`,
-        `outcome ${outcomeText}`,
+        `cwd ${fields.cwd}`,
+        `config_dir ${fields.configDir}`,
+        `outcome ${fields.outcome}`,
         `cost ${money(row.costUsd)}`,
         ...(entry.keep === true ? ['keep'] : []),
       ].join(' | '),
@@ -541,6 +575,11 @@ export function sessionWritesText(input: {
 /** The panel's width this text is drawn at. */
 export const SNAPSHOT_COLUMNS = 120
 
+/** The blocks the list actions return, redacted like every text from a file, one blank line apart; the note for the rows past MAX_ROWS. */
+function fullBlocks(blocks: readonly string[], total: number): string[] {
+  return [clean(blocks.join('\n\n')), ...(total > MAX_ROWS ? [`(${total - MAX_ROWS} more not shown)`] : [])]
+}
+
 /** panel_snapshot's answer: the text of the three sections (and the open log), from the panel's own atoms and row builders. */
 export function panelSnapshotText(input: {
   snap: SessionSnapshot | null
@@ -553,12 +592,18 @@ export function panelSnapshotText(input: {
   nowMs: number
   /** When the board last gathered (epoch ms), which moves at every poll; the snapshot's own `at` moves only with its rows. */
   polledAt?: number
+  /**
+   * detail full: the helper files' texts and the registry's entries as read when the tool was called (entries null: the
+   * registry cannot be read). The open points and the queued work are then drawn as the list actions draw them, the
+   * session rows get a line of their fields.
+   */
+  full?: { pointsText: string; queueText: string; entries: readonly SessionEntry[] | null }
 }): string {
   const { snap } = input
   if (snap === null) return 'panel_snapshot: the panel has no rows yet (the board has not gathered once).'
   const width = SNAPSHOT_COLUMNS - 4
   const ago = Math.max(0, Math.round((input.nowMs - Math.max(snap.at, input.polledAt ?? snap.at)) / 1000))
-  const out = [`panel_snapshot: the panel's text as of its last poll ${ago} s ago, at ${SNAPSHOT_COLUMNS} columns${input.expanded === null ? '' : `; the ${input.expanded} section is expanded`}${input.log === null ? '' : '; a log is open'}.`, '']
+  const out = [`panel_snapshot: the panel's text as of its last poll ${ago} s ago, at ${SNAPSHOT_COLUMNS} columns${input.expanded === null ? '' : `; the ${input.expanded} section is expanded`}${input.log === null ? '' : '; a log is open'}${input.full === undefined ? '' : '; detail full: the open points, the queued work and the session fields are read when called'}.`, '']
   const clock = { nowSec: Math.floor(input.nowMs / 1000), probedSec: Math.floor(snap.at / 1000) }
   const rows = snap.rows.map(row => ({ ...row, title: oneLine(row.title, 200) }))
   const widths = paneWidths(rows, width - 2, clock)
@@ -566,7 +611,15 @@ export function panelSnapshotText(input: {
   if (snap.error !== undefined) out.push(wrapText(`! session-control: ${oneLine(snap.error, 400)}`, width)[0] ?? '')
   out.push(`  ${formatHeader(width - 2, widths)}`)
   if (rows.length === 0) out.push('No workers in the registry.')
-  for (const row of rows.slice(0, MAX_ROWS)) out.push(`  ${formatRow(row, width - 2, widths, clock)}`)
+  // The entries of the rows by session id; a row without one is matched in the registry's order, as the probe's facts would match it (none are read here).
+  const owners = input.full?.entries == null ? [] : rowEntries(rows, input.full.entries, { claude: [], pidComm: new Map(), pidProof: new Map(), transcriptMtime: new Map() })
+  if (input.full?.entries === null) out.push('  (session fields not shown: the registry cannot be read)')
+  rows.slice(0, MAX_ROWS).forEach((row, index) => {
+    out.push(`  ${formatRow(row, width - 2, widths, clock)}`)
+    if (input.full === undefined || input.full.entries === null) return
+    const fields = entryFields(row, owners[index] ?? {})
+    wrapText(`session_id ${fields.sid} | pid ${fields.pid} | cwd ${fields.cwd} | config_dir ${fields.configDir} | outcome ${fields.outcome}`, width - 4).forEach(text => out.push(`    ${text}`))
+  })
   if (rows.length > MAX_ROWS) out.push(`  (${rows.length - MAX_ROWS} more rows not shown)`)
   if (input.log !== null) {
     out.push('', `LOG ${oneLine(input.log.title, 100)}`)
@@ -574,11 +627,22 @@ export function panelSnapshotText(input: {
     out.push(...(lines.length === 0 ? ['Waiting for output.'] : lines))
   }
   out.push('', 'QUEUED WORK')
-  if (input.queue === null) out.push('task queue unreadable.')
+  if (input.full !== undefined) {
+    const tasks = readTaskRecords(input.full.queueText)?.filter(task => task.status === 'queued')
+    if (tasks === undefined) out.push('task queue unreadable.')
+    else if (tasks.length === 0) out.push('none')
+    else out.push(...fullBlocks(tasks.slice(0, MAX_ROWS).map(formatTask), tasks.length))
+  } else if (input.queue === null) out.push('task queue unreadable.')
   else if (input.queue.length === 0) out.push('none')
   else for (const task of input.queue.slice(0, MAX_ROWS)) wrapText(clean(task.title), width - 2).forEach((text, i) => out.push((i === 0 ? '• ' : '  ') + text))
   out.push('', 'OPEN POINTS')
-  if (input.points === null) out.push('open points unreadable.')
+  if (input.full !== undefined) {
+    const parsed = readPointRecords(input.full.pointsText)
+    const chosen = parsed.ok ? selectPoints(parsed.records, 'open') : []
+    if (!parsed.ok) out.push('open points unreadable.')
+    else if (chosen.length === 0) out.push('none')
+    else out.push(...fullBlocks(chosen.slice(0, MAX_ROWS).map(formatPoint), chosen.length))
+  } else if (input.points === null) out.push('open points unreadable.')
   else if (input.points.length === 0) out.push('none')
   else {
     input.points.slice(0, MAX_ROWS).forEach((point, index) => {

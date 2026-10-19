@@ -5,11 +5,14 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { formatPoint, formatTask, listOpenPoints, listQueue, readPointRecords, readTaskRecords, selectPoints } from '../hooks/bookkeeping'
 import { cellWidth, workerName } from '../hooks/core'
 import {
   MAX_ANSWER_CHARS,
+  PANEL_SNAPSHOT_SCHEMA,
   assistantMessages,
   bounded,
+  clean,
   firstTimestamp,
   isSamePath,
   isUnder,
@@ -580,6 +583,189 @@ describe('panel_snapshot', () => {
     expect(text).not.toContain('LOG ')
     expect(text).not.toContain('\u001b')
     expectNoCanary(text)
+  })
+
+  // The panel's text of a fixed input, as the titles view drew it before the detail option existed (captured from the commit before it).
+  const TITLES_FIXTURE_ROW = { sid8: 'abcdef12', model: 'claude-opus-5-5', effort: 'high', configDir: '/c', status: 'alive' as const }
+  const TITLES_FIXTURE_INPUT = {
+    snap: {
+      at: NOW_MS,
+      rows: [
+        { ...TITLES_FIXTURE_ROW, title: 'alive worker', sid: 'abcdef12-1111-4111-8111-111111111111', pid: 4101, startedAt: NOW_SEC - 125, elapsedSec: 125 },
+        { ...TITLES_FIXTURE_ROW, title: 'finished worker', status: 'done' as const, sid: 'bcdef123-1111-4111-8111-111111111111', startedAt: NOW_SEC - 900, endedAt: NOW_SEC - 600 },
+        { ...TITLES_FIXTURE_ROW, title: '(no entry) /m/elsewhere', status: 'orphan' as const, pid: 4999, elapsedSec: 2400 },
+      ],
+    },
+    queue: [{ title: 'Queued task' }, { title: 'A long queued task title '.repeat(8) }],
+    points: [{ id: 'p1', title: 'Rotate the key', detail: 'Found in a transcript.', recommendation: 'Rotate it.' }, { id: 'p2', title: 'Second point', detail: '', recommendation: '' }],
+    selectedPoint: 'p1',
+    log: null,
+    expanded: null,
+    nowMs: NOW_MS,
+  }
+  const TITLES_FIXTURE = [
+    "panel_snapshot: the panel's text as of its last poll 0 s ago, at 120 columns.",
+    '',
+    'SESSIONS',
+    '  title                     sid        status                 model       effort   elapsed',
+    '  alive worker              abcdef12   running                opus        high     2m05s',
+    '  finished worker           abcdef12   finished               opus        high     5m00s',
+    '  (no entry) /m/elsewhere   abcdef12   orphan                 opus        high     40m00s',
+    '',
+    'QUEUED WORK',
+    '• Queued task',
+    '• A long queued task title A long queued task title A long queued task title A long queued task title A long queued',
+    '  task title A long queued task title A long queued task title A long queued task title',
+    '',
+    'OPEN POINTS',
+    '▸ 1. Rotate the key',
+    '    Found in a transcript.',
+    '    Recommendation: Rotate it.',
+    '  2. Second point',
+  ].join('\n')
+
+  test('detail titles, given or left out, is the panel\'s text byte for byte as before the option (decision mod-42)', { options: OPTIONS }, async ($, on) => {
+    expect(panelSnapshotText(TITLES_FIXTURE_INPUT)).toBe(TITLES_FIXTURE)
+    const w = world(on)
+    const plain = await call($, w, 'panel_snapshot')
+    const titles = await call($, w, 'panel_snapshot', { detail: 'titles' })
+    expect(titles.text).toBe(plain.text)
+    expect(titles.text).not.toContain('detail full')
+    expect(titles.text).not.toContain('session_id')
+  })
+
+  // A points file and a queue file of every shape the readers keep: held, answered, a resolution, a multi-line detail, task fields of several types, an untitled task.
+  const FULL_POINTS = JSON.stringify({
+    points: [
+      { id: 'o1', status: 'open', title: 'Open one', detail: 'Why\nmore', recommendation: 'Do A' },
+      { id: 'h1', status: 'open', hold: true, title: 'Held one', detail: 'd', recommendation: 'r' },
+      { id: 'a1', status: 'answered', title: 'Answered one', detail: 'd', recommendation: 'r', resolution: 'Yes' },
+      { id: 'o2', status: 'open', title: 'Open two', detail: '', recommendation: '', resolution: 'kept' },
+      { id: 'x', status: 'open', title: 5, detail: 'odd' },
+    ],
+  })
+  const FULL_QUEUE = JSON.stringify({
+    tasks: [
+      { id: 'q1', title: 'First', status: 'queued', model: 'opus', effort: 'high', waits_for: 'licence a', note: 'two\nlines' },
+      { id: 'r1', title: 'Running', status: 'running', pid: 12 },
+      { id: 'q2', status: 'queued', nested: { a: 1 } },
+      { id: 'd1', title: 'Done', status: 'done' },
+    ],
+  })
+  const blocksOf = (listing: { ok: boolean; text?: string }) => String(listing.text).split('\n\n').slice(1)
+  const section = (text: string, name: string, next: string) => text.slice(text.indexOf(`\n${name}\n`) + name.length + 2, next === '' ? undefined : text.indexOf(`\n\n${next}\n`))
+
+  test('detail full: the open points and the queued work are the list actions\' blocks, one blank line apart (decision mod-42)', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    w.files.set(`${ORCH}/open-points.json`, FULL_POINTS)
+    w.files.set(`${ORCH}/task-queue.json`, FULL_QUEUE)
+    const got = await call($, w, 'panel_snapshot', { detail: 'full' })
+    expect(got.writes).toEqual([])
+    expect(got.runs).toEqual([])
+    expect(got.text.split('\n')[0]).toBe("panel_snapshot: the panel's text as of its last poll 0 s ago, at 120 columns; detail full: the open points, the queued work and the session fields are read when called.")
+    // The panel draws the open, not held points and the queued tasks; the list actions return the same blocks for the same filter.
+    const points = (await call($, w, 'open_point', { action: 'list', status: 'open' })).text
+    const queue = (await call($, w, 'queue_task', { action: 'list' })).text
+    expect(section(got.text, 'OPEN POINTS', '')).toBe(blocksOf({ ok: true, text: points }).join('\n\n'))
+    expect(blocksOf({ ok: true, text: points }).length).toBe(3)
+    expect(section(got.text, 'QUEUED WORK', 'OPEN POINTS')).toBe(blocksOf({ ok: true, text: queue }).filter(block => block.includes('\n  status: queued')).join('\n\n'))
+    expect(section(got.text, 'QUEUED WORK', 'OPEN POINTS')).toBe(['task q1', '  title: First', '  status: queued', '  model: opus', '  effort: high', '  waits_for: licence a', '  note: two', '    lines', '', 'task q2', '  title: (untitled)', '  status: queued', '  nested: {"a":1}'].join('\n'))
+    expect(got.text).not.toContain('Running')
+    expect(got.text).not.toContain('Held one')
+    expect(got.text).not.toContain('Answered one')
+  })
+
+  test('detail full redacts what the titles view redacts; an empty or unreadable file reads as the titles view says; the list action does not redact', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    const full = await call($, w, 'panel_snapshot', { detail: 'full' })
+    expect(full.text).toContain('\nopen point p1\n  status: open\n  title: Rotate the key [redacted]\n  detail: Found in a transcript.\n  recommendation: Rotate it.\n\nopen point p2\n')
+    expectNoCanary(full.text)
+    // The list action returns the file's words as they are.
+    expect((await call($, w, 'open_point', { action: 'list' })).text).toContain(CANARIES.anthropic)
+    w.files.set(`${ORCH}/open-points.json`, JSON.stringify({ points: [] }))
+    w.files.set(`${ORCH}/task-queue.json`, JSON.stringify({ tasks: [{ id: 'd', status: 'done' }] }))
+    const empty = await call($, w, 'panel_snapshot', { detail: 'full' })
+    expect(empty.text).toContain('\nQUEUED WORK\nnone\n\nOPEN POINTS\nnone')
+    w.files.set(`${ORCH}/open-points.json`, 'not json')
+    w.files.set(`${ORCH}/task-queue.json`, '{')
+    const broken = await call($, w, 'panel_snapshot', { detail: 'full' })
+    expect(broken.text).toContain('\nQUEUED WORK\ntask queue unreadable.\n\nOPEN POINTS\nopen points unreadable.')
+  })
+
+  test('detail full adds each session row\'s id, pid, cwd, config dir and outcome, the values list_sessions shows, wrapped at the panel width; an orphan has no entry', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    const full = await call($, w, 'panel_snapshot', { detail: 'full' })
+    const listed = (await call($, w, 'list_sessions')).text.split('\n').slice(1)
+    const flat = section(full.text, 'SESSIONS', 'QUEUED WORK').replace(/\n {4}(?!session_id)/g, ' ')
+    let checked = 0
+    for (const line of listed) {
+      const fields = /^- (?!orphan).*? \| session_id (\S+) \| name .*? \| pid (\S+) \| elapsed \S+ \| model \S+ \| cwd (.*?) \| config_dir (.*?) \| outcome (.*?) \| cost/.exec(line)
+      if (fields === null) continue
+      checked++
+      expect(flat).toContain(`    session_id ${fields[1]} | pid ${fields[2]} | cwd ${fields[3]} | config_dir ${fields[4]} | outcome ${fields[5]}`)
+    }
+    expect(checked).toBe(9)
+    expect(flat).toContain(`    session_id ${SID_ALIVE} | pid 4101 | cwd /m/work/alive | config_dir ${CFG} | outcome -`)
+    expect(flat).toContain(`session_id ${SID_CLEAN} | pid - | cwd /m/work/clean | config_dir ${CFG} | outcome clean (clean: Implemented the parser)`)
+    expect(flat).toContain('    session_id - | pid 4999 | cwd - | config_dir /m/lic/b | outcome -')
+    for (const line of section(full.text, 'SESSIONS', 'QUEUED WORK').split('\n')) expect(cellWidth(line)).toBeLessThanOrEqual(120)
+    expectNoCanary(full.text)
+  })
+
+  test('detail full with a registry that does not parse says so and draws the rest', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    const got = await call($, w, 'panel_snapshot', { detail: 'full' })
+    w.files.set(REG, '{ not json')
+    const broken = await call($, w, 'panel_snapshot', { detail: 'full' })
+    expect(broken.text).toContain('  (session fields not shown: the registry cannot be read)')
+    expect(broken.text).not.toContain('session_id ')
+    expect(section(broken.text, 'OPEN POINTS', '')).toBe(section(got.text, 'OPEN POINTS', ''))
+  })
+
+  test('an unknown detail is refused with the allowed values, and nothing is written or run', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    for (const [detail, shown] of [['verbose', 'verbose'], ['FULL', 'FULL'], ['', ''], [7, '7'], [null, 'null']] as const) {
+      const got = await call($, w, 'panel_snapshot', { detail })
+      expect(got.deny).toBe(`session-control: unknown detail ${shown} (titles, full)`)
+      expect(got.text).toBe('')
+      expect(got.writes).toEqual([])
+      expect(got.runs).toEqual([])
+    }
+    expect(PANEL_SNAPSHOT_SCHEMA.properties.detail.enum).toEqual(['titles', 'full'])
+  })
+
+  test('the panel\'s full blocks and the list actions are the same formatter functions over the same readers (decision mod-42)', () => {
+    const cases = [FULL_POINTS, JSON.stringify({ points: [] }), JSON.stringify({ points: [{ id: 'only', status: 'open', title: `T ${CANARIES.password}`, detail: 'a\nb\nc', recommendation: 'r', resolution: 'z' }, null, [], 'a'] })]
+    for (const pointsText of cases) {
+      for (const queueText of [FULL_QUEUE, JSON.stringify({ tasks: [] }), JSON.stringify({ tasks: [{ id: 'q', status: 'queued', title: 't', fields: { a: [1, 'b'] }, empty: '' }, 'x', { status: 'queued', n: 1.5, t: true, z: null }] })]) {
+        const text = panelSnapshotText({ ...TITLES_FIXTURE_INPUT, full: { pointsText, queueText, entries: [] } })
+        const read = readPointRecords(pointsText)
+        const tasks = readTaskRecords(queueText)
+        if (!read.ok || tasks === null) throw new Error('unreadable')
+        const chosen = selectPoints(read.records, 'open')
+        const queued = tasks.filter(task => task.status === 'queued')
+        // Written out from the shared readers and formatters, redacted as the panel redacts.
+        expect(section(text, 'OPEN POINTS', '')).toBe(chosen.length === 0 ? 'none' : clean(chosen.map(formatPoint).join('\n\n')))
+        expect(section(text, 'QUEUED WORK', 'OPEN POINTS')).toBe(queued.length === 0 ? 'none' : clean(queued.map(formatTask).join('\n\n')))
+        // And the list actions' own text is the head, then those blocks.
+        const points = listOpenPoints(pointsText, { status: 'open' })
+        const queue = listQueue(queueText)
+        if (!points.ok || !queue.ok) throw new Error('unlisted')
+        expect(points.text.split('\n\n').slice(1)).toEqual(chosen.map(formatPoint))
+        expect(queue.text.split('\n\n').slice(1)).toEqual(tasks.map(formatTask))
+      }
+    }
+  })
+
+  test('detail full stops at 100 points and 100 tasks and says how many more', () => {
+    const points = JSON.stringify({ points: Array.from({ length: 103 }, (_, i) => ({ id: `p${i}`, status: 'open', title: `P${i}`, detail: '', recommendation: '' })) })
+    const queue = JSON.stringify({ tasks: Array.from({ length: 102 }, (_, i) => ({ id: `q${i}`, status: 'queued', title: `Q${i}` })) })
+    const text = panelSnapshotText({ ...TITLES_FIXTURE_INPUT, full: { pointsText: points, queueText: queue, entries: [] } })
+    expect(section(text, 'OPEN POINTS', '').split('\n\n').length).toBe(100)
+    expect(section(text, 'OPEN POINTS', '')).toEndWith('\n(3 more not shown)')
+    expect(section(text, 'QUEUED WORK', 'OPEN POINTS')).toEndWith('\n(2 more not shown)')
+    expect(text).toContain('open point p99\n')
+    expect(text).not.toContain('open point p100\n')
   })
 
   test('the age is that of the last poll, which runs at every interval while the rows stay the same', { options: WORLD_OPTIONS }, async ($, on) => {
