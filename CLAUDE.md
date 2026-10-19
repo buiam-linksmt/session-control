@@ -141,6 +141,11 @@ names. State each inference as an inference. Run that trace in the same step as 
 
 If the request splits cleanly into independent parts, launch parallel sessions — one per part.
 
+**A running worker is not stopped, restarted or replaced merely to add a task that arrived after its launch.** A
+worker whose assignment is wrong is stopped. A new task on work that builds on a running worker's output is queued
+with `queue_task`; when that worker finishes, all tasks queued on that work launch together in one worker and one
+version.
+
 **Consequential claims get a second, independent worker to verify them.** A worker reporting "done,
 verified, works" on something costly to be wrong about — a fix about to be pushed, a security-relevant
 number (leak counts, masking coverage), a claim you would otherwise just relay as fact — gets checked
@@ -539,6 +544,8 @@ the compaction digest show the titles of open, not-held points; read `open-point
 
 - Call `add` (`id`, `title`, `detail`, `recommendation`) the moment a blocking item arises. The title is
   one plain sentence with no ids or shorthand.
+- An open point holds only an item that needs a user decision. A follow-up that waits on a running worker
+  or another event is queued work (`queue_task`), never an open point.
 - Call `answer` or `close` with the `resolution` in the turn the user decides.
 - A topic the user puts on hold goes through `hold`; the panel and the chat leave it out until `release`.
 - Usage figures never go in an open point; report usage as state, or not at all.
