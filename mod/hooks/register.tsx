@@ -2705,8 +2705,8 @@ async function activate($: EngineInterface): Promise<void> {
       inputSchema: RETIRE_SCHEMA as unknown as Record<string, unknown>,
     })
     for (const [name, description, schema] of [
-      ['open_point', 'Add, answer, close, hold or release an open point in open-points.json, or list them (action list, optional status open, held, answered, closed or all; without it the open and held ones; id, status, title, detail, recommendation, resolution; read-only, writes nothing); settled entries older than 7 days rotate into the archive; the file is backed up once per day.', POINT_SCHEMA],
-      ['queue_task', 'Add, update or remove a task in task-queue.json, or list them (action list: every task with id, title, status and its fields; read-only, writes nothing); the file is backed up once per day.', QUEUE_SCHEMA],
+      ['open_point', 'Add, answer, close, hold or release an open point in open-points.json, or list them (action list, optional status open, held, answered, closed or all; without it the open and held ones; id, status, title, detail, recommendation, resolution; read-only, writes nothing); settled entries older than 7 days rotate into the archive; the file is backed up once per day. The list action does not redact secrets; ids, session ids and paths stay readable.', POINT_SCHEMA],
+      ['queue_task', 'Add, update or remove a task in task-queue.json, or list them (action list: every task with id, title, status and its fields; read-only, writes nothing); the file is backed up once per day. The list action does not redact secrets; ids, session ids and paths stay readable.', QUEUE_SCHEMA],
       ['record_decision', 'Append one numbered line to a unit section of agreed-decisions.md (the section is created when missing); backed up once per day.', DECISION_SCHEMA],
     ] as const) {
       await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })

@@ -458,7 +458,16 @@ describe('tool surface', () => {
     // The first six as they were; later tools come after them.
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     // The whole tool surface in one pin: it moves only on purpose (each past move and its old value is in git log).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('18876:c90d8e1b')
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('19042:69ab2361')
+  })
+
+  test('the open_point and queue_task descriptions say the list action does not redact', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await boot($)
+    for (const name of ['open_point', 'queue_task']) {
+      const tool = w.tools.find(one => one.name === name)
+      expect(JSON.stringify(tool)).toContain('The list action does not redact secrets; ids, session ids and paths stay readable.')
+    }
   })
 })
 
