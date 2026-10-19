@@ -9,6 +9,7 @@ import type {
   SessionRow,
   SessionRowStatus,
 } from '../types'
+import { readPointRecords, readTaskRecords, selectPoints } from './bookkeeping'
 
 // ---------------------------------------------------------------- registry
 
@@ -1881,24 +1882,11 @@ export type PresentedPoint = {
   recommendation: string
 }
 
-/** Open, not held points of open-points.json, in file order (raise order). */
+/** Open, not held points of open-points.json, in file order (raise order); read and filtered as the open_point list action does. */
 export function parseOpenPoints(text: string): { ok: true; points: PresentedPoint[] } | { ok: false; error: string } {
-  let doc: unknown
-  try {
-    doc = JSON.parse(text)
-  } catch {
-    return { ok: false, error: 'open-points.json does not parse' }
-  }
-  const list = (doc as { points?: unknown } | null)?.points
-  if (!Array.isArray(list)) return { ok: false, error: 'open-points.json has no points array' }
-  const points: PresentedPoint[] = []
-  for (const raw of list) {
-    const one = raw as Record<string, unknown> | null
-    if (one === null || typeof one !== 'object' || one.status !== 'open' || one.hold === true) continue
-    const str = (value: unknown) => (typeof value === 'string' ? value : '')
-    points.push({ id: str(one.id), title: str(one.title), detail: str(one.detail), recommendation: str(one.recommendation) })
-  }
-  return { ok: true, points }
+  const parsed = readPointRecords(text)
+  if (!parsed.ok) return parsed
+  return { ok: true, points: selectPoints(parsed.records, 'open').map(({ id, title, detail, recommendation }) => ({ id, title, detail, recommendation })) }
 }
 
 // --- report linter ----------------------------------------------------------
@@ -2048,19 +2036,9 @@ export function summarizeTranscript(tail: string, maxLines: number): string[] {
 
 export type QueuedTask = { title: string }
 
-/** Tasks of task-queue.json whose status is exactly queued, in file order: running work is a session, not queued work. */
+/** Tasks of task-queue.json whose status is exactly queued, in file order: running work is a session, not queued work. Read as the queue_task list action does. */
 export function parseQueuedWork(text: string): QueuedTask[] | null {
-  let doc: unknown
-  try {
-    doc = JSON.parse(text)
-  } catch {
-    return null
-  }
-  const list = (doc as { tasks?: unknown } | null)?.tasks
-  if (!Array.isArray(list)) return null
-  return list
-    .filter((one): one is Record<string, unknown> => typeof one === 'object' && one !== null && (one as { status?: unknown }).status === 'queued')
-    .map(one => ({ title: typeof one.title === 'string' ? one.title : '(untitled)' }))
+  return readTaskRecords(text)?.filter(task => task.status === 'queued').map(({ title }) => ({ title })) ?? null
 }
 
 /** Lines hidden below the window after a wheel move, kept inside the history. */

@@ -458,7 +458,7 @@ describe('tool surface', () => {
     // The first six as they were; later tools come after them.
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     // The whole tool surface in one pin: it moves only on purpose (each past move and its old value is in git log).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('17298:d6106e35')
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('18019:a6c83dd2')
   })
 })
 
@@ -1629,6 +1629,46 @@ describe('launch_worker', () => {
     expect(JSON.parse(written?.text ?? '{}').points.some((p: { id: string }) => p.id === 'fresh')).toBe(true)
     const refused = await $.tool.call({ tool: 'mcp__session-control__open_point', action: 'close', id: 'nope', resolution: 'x' } as never)
     expect(JSON.stringify(refused)).toContain('no open point nope')
+  })
+
+  test('open_point list and queue_task list read the helper files without a write, a backup or a refresh, and the panel shows the same points and tasks', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    stubPanel(on)
+    await boot($)
+    const before = w.writes.length
+    const all = (await $.tool.call({ tool: 'mcp__session-control__open_point', action: 'list' } as never)) as { result?: string }
+    expect(all.result?.split('\n')[0]).toBe('open-points.json: 3 points (open and held)')
+    expect([...String(all.result).matchAll(/^open point (\S+)$/gm)].map(one => one[1])).toEqual(['a', 'c', 'd'])
+    expect(all.result).toContain('  held: yes\n  title: Held')
+    const open = (await $.tool.call({ tool: 'mcp__session-control__open_point', action: 'list', status: 'open' } as never)) as { result?: string }
+    const bad = await $.tool.call({ tool: 'mcp__session-control__open_point', action: 'list', status: 'archived' } as never)
+    expect(JSON.stringify(bad)).toContain('unknown status archived')
+    const queue = (await $.tool.call({ tool: 'mcp__session-control__queue_task', action: 'list' } as never)) as { result?: string }
+    expect(queue.result).toBe('task-queue.json: 2 tasks\n\ntask q1\n  title: Queued one\n  status: queued\n\ntask q2\n  title: Finished\n  status: done')
+    // Nothing was written: no helper file, no backup, no archive.
+    expect(w.writes.length).toBe(before)
+    // The panel's open points and queued work are what the same readers give.
+    const snapshot = String(((await $.tool.call({ tool: 'mcp__session-control__panel_snapshot' } as never)) as { result?: string }).result)
+    const titles = (text: string) => [...text.matchAll(/^ {2}title: (.*)$/gm)].map(one => one[1])
+    const panel = snapshot.slice(snapshot.indexOf('OPEN POINTS')).split('\n').filter(line => /^ {2}\d+\. /.test(line)).map(line => line.replace(/^ {2}\d+\. /, ''))
+    expect(panel).toEqual(titles(String(open.result)))
+    expect(snapshot).toContain('QUEUED WORK\n\u2022 Queued one\n')
+  })
+
+  test('open_point list and queue_task list on missing helper files answer empty and create nothing', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await boot($)
+    for (const file of ['open-points.json', 'task-queue.json']) MISSING.add(`${ORCH_DIR}/${file}`)
+    try {
+      const before = w.writes.length
+      const points = (await $.tool.call({ tool: 'mcp__session-control__open_point', action: 'list' } as never)) as { result?: string }
+      expect(points.result).toBe('open-points.json: 0 points (open and held)')
+      const queue = (await $.tool.call({ tool: 'mcp__session-control__queue_task', action: 'list' } as never)) as { result?: string }
+      expect(queue.result).toBe('task-queue.json: 0 tasks')
+      expect(w.writes.length).toBe(before)
+    } finally {
+      MISSING.clear()
+    }
   })
 
   test('seated inline the panel is one box behind tabs, at most 11 rows, and a tab switches the box', { options: OPTIONS }, async ($, on) => {

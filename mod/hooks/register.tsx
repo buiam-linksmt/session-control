@@ -2,8 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessRunInit, ProcessRunResult, Register } from 'claude-code'
 
 import type { SessionEntry, SessionOutcome, SessionRow } from '../types'
-import { ARCHIVE_SCHEMA, ARCHIVED_HEADING, DECISIONS_ARCHIVE, DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, archiveDecisions, editOpenPoints, editQueue, findDecisionSection } from './bookkeeping'
-import type { Edit } from './bookkeeping'
+import { ARCHIVE_SCHEMA, ARCHIVED_HEADING, DECISIONS_ARCHIVE, DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, archiveDecisions, editOpenPoints, editQueue, findDecisionSection, listOpenPoints, listQueue } from './bookkeeping'
+import type { Edit, Listing } from './bookkeeping'
 import { backupName, freshText, localDate } from './store'
 import {
   TRACE_FILE,
@@ -1705,6 +1705,15 @@ async function editHelper(
   return { deny: `${PLUGIN}: ${file} changed while it was being edited; nothing written, try again` }
 }
 
+/** One read of a helper file for a list action: nothing is created, backed up, written or refreshed; a file that is not there reads as a fresh one. */
+async function listHelper($: EngineInterface, file: string, list: (text: string) => Listing): Promise<{ result: string } | { deny: string }> {
+  const path = orchPath(file)
+  const text = await $.fs.read(path).catch(() => undefined)
+  if (text === undefined && (await $.fs.exists(path).catch(() => true))) return { deny: `${PLUGIN}: ${file} cannot be read` }
+  const listed = list(text ?? freshText(file) ?? '')
+  return listed.ok ? { result: listed.text } : { deny: `${PLUGIN}: ${listed.error}` }
+}
+
 /**
  * record_decision: one line appended to agreed-decisions.md, its id checked against the file and against the
  * decisions archive (archive_decisions moved those sections there; their ids stay taken). An archive that is there but
@@ -2678,8 +2687,8 @@ async function activate($: EngineInterface): Promise<void> {
       inputSchema: RETIRE_SCHEMA as unknown as Record<string, unknown>,
     })
     for (const [name, description, schema] of [
-      ['open_point', 'Add, answer, close, hold or release an open point in open-points.json; settled entries older than 7 days rotate into the archive; the file is backed up once per day.', POINT_SCHEMA],
-      ['queue_task', 'Add, update or remove a task in task-queue.json; the file is backed up once per day.', QUEUE_SCHEMA],
+      ['open_point', 'Add, answer, close, hold or release an open point in open-points.json, or list them (action list, optional status open, held, answered, closed or all; without it the open and held ones; id, status, title, detail, recommendation, resolution; read-only, writes nothing); settled entries older than 7 days rotate into the archive; the file is backed up once per day.', POINT_SCHEMA],
+      ['queue_task', 'Add, update or remove a task in task-queue.json, or list them (action list: every task with id, title, status and its fields; read-only, writes nothing); the file is backed up once per day.', QUEUE_SCHEMA],
       ['record_decision', 'Append one numbered line to a unit section of agreed-decisions.md (the section is created when missing); backed up once per day.', DECISION_SCHEMA],
     ] as const) {
       await $.tool.register({ name, description, inputSchema: schema as unknown as Record<string, unknown> })
@@ -3076,7 +3085,11 @@ export const register: Register = (on, options) => {
   })
 
   on('tool.call', { tool: POINT_TOOL }, ($, e) =>
-    tracedTool($, 'open_point', e, ['action', 'id'], () => editHelper($, 'open-points.json', 'open-point', (text, today) => editOpenPoints(text, plain(e), today))),
+    tracedTool($, 'open_point', e, ['action', 'id'], () =>
+      plain(e).action === 'list'
+        ? listHelper($, 'open-points.json', text => listOpenPoints(text, plain(e)))
+        : editHelper($, 'open-points.json', 'open-point', (text, today) => editOpenPoints(text, plain(e), today)),
+    ),
   ).catch(($, e, next) => {
     traceError($, 'open_point', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: open_point failed` }
@@ -3084,6 +3097,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: QUEUE_TOOL }, ($, e) =>
     tracedTool($, 'queue_task', e, ['action', 'id', 'status'], async () => {
+      if (plain(e).action === 'list') return listHelper($, 'task-queue.json', listQueue)
       const answer = await editHelper($, 'task-queue.json', 'queue-task', text => editQueue(text, plain(e)))
       if ('result' in answer) await queueChanged($)
       return answer

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { ARCHIVED_HEADING, appendDecision, archiveDecisions, archivedLine, decisionIds, decisionSectionsOf, editOpenPoints, editQueue, findDecisionSection, namesSection, sectionUsers } from '../hooks/bookkeeping'
+import { ARCHIVED_HEADING, appendDecision, archiveDecisions, archivedLine, decisionIds, decisionSectionsOf, editOpenPoints, editQueue, findDecisionSection, listOpenPoints, listQueue, namesSection, readPointRecords, readTaskRecords, sectionUsers, selectPoints } from '../hooks/bookkeeping'
+import { parseOpenPoints, parseQueuedWork } from '../hooks/core'
 
 const POINTS = JSON.stringify({
   _cleanup: 'x',
@@ -200,5 +201,108 @@ describe('decision sections and their archive', () => {
         '"Archived sections" holds the summary lines of archived sections; agreed-decisions.md has no section "Nope"; "Last unit" is named twice; ' +
         '"T58 - requirement 946677 - branch feature/req-946677" is still named: queue task q (queued) names it by T58',
     })
+  })
+})
+
+describe('list actions', () => {
+  const LISTED = JSON.stringify({
+    points: [
+      { id: 'o1', raised: '2026-10-01', title: 'Open one', detail: 'Why\nmore', recommendation: 'Do A', status: 'open' },
+      { id: 'h1', raised: '2026-10-02', title: 'Held one', detail: 'd', recommendation: 'r', status: 'open', hold: true },
+      { id: 'a1', raised: '2026-10-03', title: 'Answered one', detail: 'd', recommendation: 'r', status: 'answered', resolution: 'Yes', closed: '2026-10-09' },
+      { id: 'c1', raised: '2026-10-04', title: 'Closed one', detail: 'd', recommendation: 'r', status: 'closed', resolution: 'No', closed: '2026-10-09' },
+      { id: 'o2', raised: '2026-10-05', title: 'Open two', detail: 'd2', recommendation: 'r2', status: 'open' },
+    ],
+  })
+  const ids = (text: string) => [...text.matchAll(/^open point (\S+)$/gm)].map(one => one[1])
+  const listed = (input: Record<string, unknown> = {}) => {
+    const out = listOpenPoints(LISTED, { action: 'list', ...input })
+    if (!out.ok) throw new Error(out.error)
+    return out.text
+  }
+
+  test('open_point list on an empty file names the filter and holds no block', () => {
+    expect(listOpenPoints(JSON.stringify({ points: [] }), { action: 'list' })).toEqual({ ok: true, text: 'open-points.json: 0 points (open and held)' })
+    expect(listOpenPoints(JSON.stringify({ points: [] }), { action: 'list', status: 'all' })).toEqual({ ok: true, text: 'open-points.json: 0 points (all)' })
+  })
+
+  test('open_point list without a status shows the open and the held points in file order, one block each with every field', () => {
+    const text = listed()
+    expect(text.split('\n')[0]).toBe('open-points.json: 3 points (open and held)')
+    expect(ids(text)).toEqual(['o1', 'h1', 'o2'])
+    expect(text.split('\n\n')[1]).toBe(
+      ['open point o1', '  status: open', '  title: Open one', '  detail: Why', '    more', '  recommendation: Do A'].join('\n'),
+    )
+    expect(text.split('\n\n')[2]).toBe(['open point h1', '  status: open', '  held: yes', '  title: Held one', '  detail: d', '  recommendation: r'].join('\n'))
+  })
+
+  test('open_point list: the status filter picks open (not held), held, answered, closed or all', () => {
+    expect(ids(listed({ status: 'open' }))).toEqual(['o1', 'o2'])
+    expect(ids(listed({ status: 'held' }))).toEqual(['h1'])
+    expect(ids(listed({ status: 'answered' }))).toEqual(['a1'])
+    expect(ids(listed({ status: 'closed' }))).toEqual(['c1'])
+    expect(ids(listed({ status: 'all' }))).toEqual(['o1', 'h1', 'a1', 'c1', 'o2'])
+    expect(listed({ status: 'held' }).split('\n')[0]).toBe('open-points.json: 1 point (held)')
+  })
+
+  test('open_point list shows the resolution of a settled point', () => {
+    expect(listed({ status: 'answered' })).toContain('  status: answered\n  title: Answered one\n  detail: d\n  recommendation: r\n  resolution: Yes')
+    expect(listed({ status: 'closed' })).toContain('  resolution: No')
+    expect(listed({ status: 'open' })).not.toContain('resolution')
+  })
+
+  test('open_point list refuses an unknown status and a file that is no points file', () => {
+    expect(listOpenPoints(LISTED, { action: 'list', status: 'archived' })).toEqual({ ok: false, error: 'unknown status archived (open, held, answered, closed, all)' })
+    expect(listOpenPoints('not json', { action: 'list' })).toEqual({ ok: false, error: 'open-points.json does not parse' })
+    expect(listOpenPoints('{"points":1}', { action: 'list' })).toEqual({ ok: false, error: 'open-points.json has no points array' })
+  })
+
+  const TASKS = JSON.stringify({
+    tasks: [
+      { id: 'q1', title: 'First', status: 'queued', model: 'opus', effort: 'high', waits_for: 'licence a', note: 'two\nlines' },
+      { id: 'r1', title: 'Second', status: 'running', pid: 12, nested: { a: 1 } },
+      { id: 'd1', status: 'done' },
+    ],
+  })
+
+  test('queue_task list on an empty queue holds no block', () => {
+    expect(listQueue(JSON.stringify({ tasks: [] }))).toEqual({ ok: true, text: 'task-queue.json: 0 tasks' })
+  })
+
+  test('queue_task list shows every task in file order whatever its status, with id, title, status and all fields', () => {
+    const out = listQueue(TASKS)
+    if (!out.ok) throw new Error(out.error)
+    const blocks = out.text.split('\n\n')
+    expect(blocks[0]).toBe('task-queue.json: 3 tasks')
+    expect(blocks[1]).toBe(['task q1', '  title: First', '  status: queued', '  model: opus', '  effort: high', '  waits_for: licence a', '  note: two', '    lines'].join('\n'))
+    expect(blocks[2]).toBe(['task r1', '  title: Second', '  status: running', '  pid: 12', '  nested: {"a":1}'].join('\n'))
+    expect(blocks[3]).toBe(['task d1', '  title: (untitled)', '  status: done'].join('\n'))
+  })
+
+  test('queue_task list refuses a file that is no queue file', () => {
+    expect(listQueue('{').ok).toBe(false)
+    expect(listQueue('{"tasks":{}}').ok).toBe(false)
+  })
+
+  test('every action but list refuses a missing id', () => {
+    for (const action of ['add', 'answer', 'close', 'hold', 'release']) expect(editOpenPoints(LISTED, { action }, '2026-10-09')).toEqual({ ok: false, error: `${action} needs id` })
+    for (const action of ['add', 'update', 'remove']) expect(editQueue(TASKS, { action })).toEqual({ ok: false, error: `${action} needs id` })
+  })
+
+  test('the panel reads the points and the queue with the readers the list actions use', () => {
+    const odd = JSON.stringify({ points: [{ id: 'x', status: 'open', title: 5, detail: 'd' }, null, [], 'a', { status: 'open', hold: true, id: 'h' }, { id: 'y', status: 'open', title: 'Y', recommendation: 'r' }] })
+    for (const text of [LISTED, odd, JSON.stringify({ points: [] })]) {
+      const read = readPointRecords(text)
+      const panel = parseOpenPoints(text)
+      if (!read.ok || !panel.ok) throw new Error('unreadable')
+      expect(panel.points).toEqual(selectPoints(read.records, 'open').map(({ id, title, detail, recommendation }) => ({ id, title, detail, recommendation })))
+    }
+    expect(parseOpenPoints('{').ok).toBe(false)
+    expect(parseOpenPoints('{"points":1}')).toEqual(readPointRecords('{"points":1}'))
+    const queue = JSON.stringify({ tasks: [{ id: 'a', title: 'A', status: 'queued' }, { status: 'queued' }, 'x', { title: 'B', status: 'running' }, { title: 3, status: 'queued' }] })
+    expect(parseQueuedWork(queue)).toEqual(readTaskRecords(queue)?.filter(task => task.status === 'queued').map(({ title }) => ({ title })))
+    expect(parseQueuedWork(queue)).toEqual([{ title: 'A' }, { title: '(untitled)' }, { title: '(untitled)' }])
+    expect(parseQueuedWork('{')).toBeNull()
+    expect(readTaskRecords('{')).toBeNull()
   })
 })

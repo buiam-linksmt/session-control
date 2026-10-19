@@ -7,13 +7,18 @@ export const KEEP_CLOSED_DAYS = 7
 type Obj = Record<string, unknown>
 export type Edit = { ok: true; text: string; note: string; archive?: string } | { ok: false; error: string }
 
+/** The `status` filter values of open_point list; a point is held when it is open and has hold set. */
+export const POINT_FILTERS = ['open', 'held', 'answered', 'closed', 'all'] as const
+export type PointFilter = (typeof POINT_FILTERS)[number]
+
 export const POINT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['action', 'id'],
+  required: ['action'],
   properties: {
-    action: { type: 'string', enum: ['add', 'answer', 'close', 'hold', 'release'], description: 'add a blocking item; answer or close one with its resolution; hold or release a topic the user put on hold.' },
-    id: { type: 'string', minLength: 1, description: 'Entry id (a short slug).' },
+    action: { type: 'string', enum: ['add', 'answer', 'close', 'hold', 'release', 'list'], description: 'add a blocking item; answer or close one with its resolution; hold or release a topic the user put on hold; list reads the points (read-only, writes nothing).' },
+    id: { type: 'string', minLength: 1, description: 'Entry id (a short slug); every action but list needs it.' },
+    status: { type: 'string', enum: POINT_FILTERS, description: 'list: which points to show: open (not held), held, answered, closed or all; without it the open and the held ones.' },
     title: { type: 'string', description: 'add: one plain sentence.' },
     detail: { type: 'string', description: 'add: what is blocked and the facts the decision rests on.' },
     recommendation: { type: 'string', description: 'add: the recommended option.' },
@@ -24,10 +29,10 @@ export const POINT_SCHEMA = {
 export const QUEUE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['action', 'id'],
+  required: ['action'],
   properties: {
-    action: { type: 'string', enum: ['add', 'update', 'remove'], description: 'add a task, update fields of one, or remove it.' },
-    id: { type: 'string', minLength: 1 },
+    action: { type: 'string', enum: ['add', 'update', 'remove', 'list'], description: 'add a task, update fields of one, or remove it; list reads every task with its fields (read-only, writes nothing).' },
+    id: { type: 'string', minLength: 1, description: 'Task id; every action but list needs it.' },
     title: { type: 'string' },
     status: { type: 'string', description: 'Exactly queued, running or done (the panel shows queued tasks only; running work is a session); waiting detail goes in fields.note.' },
     fields: { type: 'object', description: 'Any other fields (model, effort, dir, prompt_file, session_id, config_dir, waits_for, note).' },
@@ -67,12 +72,107 @@ function archiveSection(point: Obj): string {
   )
 }
 
+// ---------------------------------------------------------------- the one reader of the points and of the queue
+
+/** One entry of open-points.json as every consumer (the panel, the list action) reads it. */
+export type PointRecord = { id: string; title: string; detail: string; recommendation: string; resolution: string; status: string; held: boolean }
+
+/** One task of task-queue.json: `fields` holds every key but id, title and status, as the file has them. */
+export type TaskRecord = { id: string; title: string; status: string; fields: Obj }
+
+const isObj = (value: unknown): value is Obj => value !== null && typeof value === 'object' && !Array.isArray(value)
+
+/** The points of open-points.json in file order, or why the text is no points file. */
+export function readPointRecords(text: string): { ok: true; records: PointRecord[] } | { ok: false; error: string } {
+  let doc: unknown
+  try {
+    doc = JSON.parse(text)
+  } catch {
+    return { ok: false, error: 'open-points.json does not parse' }
+  }
+  const list = (doc as { points?: unknown } | null)?.points
+  if (!Array.isArray(list)) return { ok: false, error: 'open-points.json has no points array' }
+  const records = list
+    .filter(isObj)
+    .map(one => ({ id: str(one.id), title: str(one.title), detail: str(one.detail), recommendation: str(one.recommendation), resolution: str(one.resolution), status: str(one.status), held: one.hold === true }))
+  return { ok: true, records }
+}
+
+/** The points a filter keeps, in order: open is open and not held, held is open and held, no filter is both; all keeps every point. */
+export function selectPoints(records: readonly PointRecord[], filter?: PointFilter): PointRecord[] {
+  return records.filter(one => (filter === 'all' ? true : filter === undefined ? one.status === 'open' : filter === 'open' ? one.status === 'open' && !one.held : filter === 'held' ? one.status === 'open' && one.held : one.status === filter))
+}
+
+/** The tasks of task-queue.json in file order, or null when the text is no queue file. */
+export function readTaskRecords(text: string): TaskRecord[] | null {
+  let doc: unknown
+  try {
+    doc = JSON.parse(text)
+  } catch {
+    return null
+  }
+  const list = (doc as { tasks?: unknown } | null)?.tasks
+  if (!Array.isArray(list)) return null
+  return list.filter(isObj).map(one => {
+    const { id, title, status, ...fields } = one
+    return { id: str(id), title: typeof title === 'string' ? title : '(untitled)', status: str(status), fields }
+  })
+}
+
+const line = (label: string, value: string) => `  ${label}: ${value.replace(/\n/g, '\n    ')}`
+
+/** A point as the list action shows it: one block, a line per field; resolution and the held marker only when there is one. */
+export function formatPoint(record: PointRecord): string {
+  return [
+    `open point ${record.id}`,
+    line('status', record.status),
+    ...(record.held ? [line('held', 'yes')] : []),
+    line('title', record.title),
+    line('detail', record.detail),
+    line('recommendation', record.recommendation),
+    ...(record.resolution === '' ? [] : [line('resolution', record.resolution)]),
+  ].join('\n')
+}
+
+/** A task as the list action shows it: one block, id, title, status, then each field. */
+export function formatTask(record: TaskRecord): string {
+  const value = (one: unknown) => (typeof one === 'string' ? one : JSON.stringify(one))
+  return [`task ${record.id}`, line('title', record.title), line('status', record.status), ...Object.entries(record.fields).map(([key, one]) => line(key, value(one)))].join('\n')
+}
+
+/** open_point list: read-only, nothing to write. */
+export type Listing = { ok: true; text: string } | { ok: false; error: string }
+
+export function listOpenPoints(text: string, input: Obj): Listing {
+  const filter = str(input.status)
+  if (filter !== '' && !(POINT_FILTERS as readonly string[]).includes(filter)) return { ok: false, error: `unknown status ${filter} (${POINT_FILTERS.join(', ')})` }
+  const parsed = readPointRecords(text)
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  const chosen = selectPoints(parsed.records, filter === '' ? undefined : (filter as PointFilter))
+  const head = `open-points.json: ${chosen.length} ${chosen.length === 1 ? 'point' : 'points'} (${filter === '' ? 'open and held' : filter})`
+  return { ok: true, text: [head, ...chosen.map(formatPoint)].join('\n\n') }
+}
+
+/** queue_task list: read-only, nothing to write. */
+export function listQueue(text: string): Listing {
+  const tasks = readTaskRecords(text)
+  if (tasks === null) return { ok: false, error: 'task-queue.json does not parse or has no tasks array' }
+  const head = `task-queue.json: ${tasks.length} ${tasks.length === 1 ? 'task' : 'tasks'}`
+  return { ok: true, text: [head, ...tasks.map(formatTask)].join('\n\n') }
+}
+
+/** Every action but list names the entry it works on. */
+const needsId = (action: string, id: string, actions: readonly string[]): Edit | undefined =>
+  id === '' && actions.includes(action) ? { ok: false, error: `${action} needs id` } : undefined
+
 export function editOpenPoints(text: string, input: Obj, today: string): Edit {
   const parsed = parseDoc(text, 'points')
   if (typeof parsed === 'string') return { ok: false, error: `open-points.json: ${parsed}` }
   const { doc, list } = parsed
   const action = str(input.action)
   const id = str(input.id)
+  const missing = needsId(action, id, ['add', 'answer', 'close', 'hold', 'release'])
+  if (missing !== undefined) return missing
   const at = list.findIndex(one => one.id === id)
   let note = ''
   if (action === 'add') {
@@ -117,6 +217,8 @@ export function editQueue(text: string, input: Obj): Edit {
   const { doc, list } = parsed
   const action = str(input.action)
   const id = str(input.id)
+  const missing = needsId(action, id, ['add', 'update', 'remove'])
+  if (missing !== undefined) return missing
   const at = list.findIndex(one => one.id === id)
   if (input.fields !== undefined && (input.fields === null || typeof input.fields !== 'object' || Array.isArray(input.fields))) {
     return { ok: false, error: 'fields must be an object' }
