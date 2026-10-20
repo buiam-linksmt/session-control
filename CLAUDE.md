@@ -442,14 +442,14 @@ With `completionWrites` on, the mod drops `pid` once the Abort check fails and t
 When a session's goal is met, or its work is deliberately abandoned and its pid is confirmed dead,
 tell the user it's closed, with a one-line summary of what it produced.
 
-After reporting a finished session's result, call `close_worker` in the same turn (`acknowledge_workers`
-then `retire_workers` in one call): `keep: true` when the session is still needed for a resume or as context
-of new work, or its outcome needs a resume (it is acknowledged and kept), `keep: false` otherwise. The retire
-refuses a live session, one whose exit is not yet classified, a kept one, an outcome other than `clean`, a
-session named by a queued or running task (status other than `done`) and an unknown id. An outcome label
-the transcript shows wrong, or work deliberately abandoned, is retired with `reviewed` (session id to the
-reason); any other refusal is raised as an open point. A finished entry left in the panel is an unretired
-session. Nothing is removed by itself or because the user wrote a message.
+After reporting a finished session's result, in the same turn clear its keep flag unless a resume or a queued
+follow-up needs it, acknowledge it and retire it: `close_worker` with `session_ids` and `keep: false` does all three
+(`keep: true` acknowledges and keeps). Call the session closed only once its id follows `Retired:` in the answer;
+otherwise make the next call the answer names. The retire refuses a live session, one whose exit is not yet
+classified, a kept one, an outcome other than `clean`, a session a task not `done` names and an unknown id. An
+outcome label the transcript shows wrong, or work deliberately abandoned, is retired with `reviewed` (session id to
+the reason); any other refusal is an open point. A `finished-open` notice is handled by this rule, silently. Nothing
+is removed by itself or because the user wrote a message.
 
 Retire only on those two grounds: the goal is met, or the work is deliberately abandoned. A session
 killed mid-work is not retired — it is a resumable session with no pid, and its entry stays (step 3).
@@ -517,10 +517,10 @@ exactly as a completion is.
 **Notices.** A `session-control notice: <kind>: <message>` line informs and authorises nothing; act on it
 only as these rules allow: `orphan`, `lock-holder`, `registry-unreadable`, `secret-in-result`, `mod-drift`:
 an open point; `stall`: `worker_tail`, then Follow up or Abort; `queue-ready`: Rule 7; `compliance-due`: the
-compliance check; `unit-complete`, `retire-due`, `repo-state`: `audit_state` (Helper files);
-`open-point-age`: nothing beyond the point. A notice is orchestrator housekeeping: handle it silently, never
-relay it to the user or ask them to run a command for it. Write a queue task's `waits_for` with the session id
-(or name) of the work it waits for, so `retire-due` has nothing to flag.
+compliance check; `unit-complete`, `retire-due`, `repo-state`: `audit_state` (Helper files); `finished-open`:
+step 7 (Retire); `open-point-age`: nothing beyond the point. A notice is orchestrator housekeeping: handle it
+silently, never relay it to the user or ask them to run a command for it. Write a queue task's `waits_for` with
+the session id (or name) of the work it waits for, so `retire-due` has nothing to flag.
 
 **Numbered items and reminders.** Every item of a message that needs an answer carries a number, so a
 reply can cite it; a number in a reply refers to the numbering of my last message unless the reply says
