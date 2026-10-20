@@ -33,6 +33,8 @@ import {
   wrapLogLine,
   LOG_HANG_MIN_WIDTH,
   retireVerdict,
+  closeNextCalls,
+  sessionIdsProblem,
   buildRows,
   nextBack,
   parseQueuedWork,
@@ -1819,5 +1821,55 @@ describe('retire cleanup', () => {
     const figures = new Map([['a', { cost_usd: 0.25, duration_ms: 1200 }], ['b', { cost_usd: 1, duration_ms: 5 }]])
     expect(withRunFigures(lines, figures)).toBe('{"session_id":"a","title":"t","cost_usd":0.25,"duration_ms":1200}\n{"session_id":"b","cost_usd":9,"duration_ms":5}\n')
     expect(withRunFigures(lines, new Map())).toBe(lines)
+  })
+})
+
+// ---------------------------------------------------------------- close_worker's answers (decision mod-51)
+
+describe("close_worker's next calls", () => {
+  const none = parseProcFacts('')
+  const entry = (sid: string, kind: string, extra: object = {}) => ({ title: sid, session_id: sid, reported: true, outcome: { kind, summary: kind }, ...extra })
+
+  test('every refusal of retireVerdict gets its session and its exact next call', () => {
+    const list = [
+      entry('keep0001-1', 'clean', { keep: true }),
+      entry('queued01-1', 'clean'),
+      entry(SID_ALIVE, 'clean', { pid: 4101, config_dir: '/fixture/lic/a' }),
+      { title: 'dead', session_id: 'dead0001-1', config_dir: '/fixture/lic/a', pid: 999999 },
+      entry('login001-1', 'login'),
+      entry('empty001-1', 'login'),
+    ]
+    const ids = ['keep0001-1', 'queued01-1', SID_ALIVE, 'unknown1', 'dead0001-1', 'login001-1', 'empty001-1']
+    const v = retireVerdict(list, parseProcFacts(PROBE_STDOUT), JSON.stringify({ tasks: [{ id: 't', status: 'queued', waits_for: 'queued01' }] }), ids, { empty001: ' ', other001: 'x' })
+    expect(v.removable).toEqual([])
+    expect(closeNextCalls(v.refused).split('; ')).toEqual([
+      ' Next: other001: key reviewed by an id that session_ids lists',
+      'keep0001: marked keep: when no resume or queued follow-up needs it, acknowledge_workers with session_ids ["keep0001"] and keep false, then retire_workers with session_ids ["keep0001"]',
+      'queued01: a task not done names it: launch or finish that task, or correct it with queue_task',
+      'then retire_workers with session_ids ["queued01"]',
+      'aaaaaaaa: not acknowledged, its process is alive: wait for its exit (stop_worker when it must end), then close_worker with session_ids ["aaaaaaaa"] again',
+      'unknown1: no registry entry: list_sessions shows the registry, and a retired session is in cleared.jsonl',
+      'nothing to retire',
+      'dead0001: its exit is not classified yet: after the next poll\'s harvest (list_sessions shows it finished), close_worker with session_ids ["dead0001"] again',
+      'login001: outcome login needs a resume: resume it with launch_worker resume_sid when its work is unfinished',
+      'else, after reading its transcript, close_worker with session_ids ["login001"] and reviewed {"login001": "<reason>"}',
+      'empty001: give reviewed a non-empty reason for "empty001".',
+    ])
+  })
+
+  test('nothing refused: no sentence', () => {
+    expect(closeNextCalls([])).toBe('')
+  })
+
+  test('sessionIdsProblem: a usable list passes; a missing, empty or wrong one is named with the call to make', () => {
+    expect(sessionIdsProblem('close_worker', { tool: 'x', session_ids: ['aaaaaaaa'] })).toBeUndefined()
+    expect(sessionIdsProblem('close_worker', { tool: 'x', tool_use_id: 'u', session_id: 'abcdef12-0000-4000-8000-000000000001', keep: false })).toBe(
+      'close_worker needs session_ids, a non-empty list of session ids; the call gave no session_ids (it gave session_id, keep), so nothing was acknowledged or retired. Call close_worker with session_ids ["abcdef12"]',
+    )
+    expect(sessionIdsProblem('retire_workers', { session_ids: [] })).toContain('the call gave an empty session_ids')
+    expect(sessionIdsProblem('retire_workers', { session_ids: [5] })).toContain('the call gave a session_ids that is not a list of strings')
+    expect(sessionIdsProblem('acknowledge_workers', {})).toBe(
+      'acknowledge_workers needs session_ids, a non-empty list of session ids; the call gave no session_ids, so nothing was acknowledged or retired. Call acknowledge_workers with session_ids ["<session id>"]',
+    )
   })
 })

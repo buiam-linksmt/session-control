@@ -1,13 +1,13 @@
 // Pure part of the poll-based notices (decisions win-20, win-21, win-22, win-27, win-36, win-38 and mod-3): what the mod
 // already knows at a poll, a harvest or a queue change, told to the orchestrator sparingly. Each notice is one line,
 // `session-control notice: <kind>: <message>`, which register.tsx adds to the notes the next prompt carries, shows as a
-// toast titled by its kind and traces. Each kind has its own debounce, kept in NoticeState, which register.tsx keeps in
+// toast titled by its kind and traces. Each kind but finished-open (a line on every prompt, no toast) has its own debounce, kept in NoticeState, which register.tsx keeps in
 // $.store so a reload of the mod fires nothing again. Nothing here reads, writes, probes or runs a process.
 
 import type { SessionEntry, SessionOutcome } from '../types'
-import { formatAge, orphanProcs, rowStatus } from './core'
+import { activeQueueText, formatAge, orphanProcs, rowStatus } from './core'
 import type { ProcFact, ProcFacts } from './core'
-import { auditFindings, gitFindings, namesSession, oldestChangeMs } from './audit'
+import { STALE_KEPT_SEC, auditFindings, gitFindings, lastActiveSec, namesSession, oldestChangeMs } from './audit'
 import type { Finding, GitState } from './audit'
 import { clean } from './inspect'
 import { localDate } from './store'
@@ -26,6 +26,7 @@ export type NoticeKind =
   | 'registry-unreadable'
   | 'mod-drift'
   | 'secret-in-result'
+  | 'finished-open'
 
 /** One notice: its kind, its message (one line) and the trace's fields (ids, counts and switches only, never free text). */
 export type Notice = { kind: NoticeKind; message: string; fields: Record<string, string | number | boolean> }
@@ -60,6 +61,8 @@ export const PENDING_NOTICES_MAX = 30
  * change's; the rest of a refresh go to one summary toast (moreToastText).
  */
 export const TOASTS_PER_PASS = 3
+/** The finished-open lines one prompt carries, one per session; the rest are counted in one more line (finishedOpenNotices). */
+export const FINISHED_OPEN_SHOWN = 10
 /** The orphans of one poll told one by one; the rest are grouped into one notice (orphanGroupNotice). */
 export const ORPHANS_SHOWN = 5
 /** How many pids the grouped orphan notice lists. */
@@ -71,7 +74,7 @@ export const ORPHAN_PIDS_LISTED = 10
  */
 const RETIRE_GROUPS: readonly { kinds: readonly string[]; label: (n: number) => string }[] = [
   { kinds: ['retirable'], label: n => `${n} finished ${n === 1 ? 'session' : 'sessions'} can be retired` },
-  { kinds: ['kept-old'], label: n => `${n} kept ${n === 1 ? 'session' : 'sessions'} idle over 6 hours` },
+  { kinds: ['stale-kept', 'kept-old'], label: n => `${n} kept ${n === 1 ? 'session' : 'sessions'} idle over 6 hours` },
   { kinds: ['queue-status', 'running-task-no-session', 'waits-for-finished', 'done-in-queue', 'queued-free-wait'], label: n => `${n} queue ${n === 1 ? 'task looks' : 'tasks look'} stale` },
 ]
 
@@ -672,4 +675,63 @@ export function driftStep(state: NoticeState, changed: readonly string[] | undef
   if (state.drift === key) return []
   state.drift = key
   return [{ kind: 'mod-drift', message, fields: { changed: changed.length } }]
+}
+
+// ---------------------------------------------------------------- finished-open
+
+/**
+ * The call that disposes of a finished session, by its state: a harvest still to come; a kept one (its keep flag
+ * cleared, then retired); one whose outcome is not clean (resumed, or retired with `reviewed`); else close_worker.
+ */
+function disposal(id8: string, status: string, isKept: boolean, isClean: boolean, isAcked: boolean): string {
+  const ids = `session_ids ["${id8}"]`
+  const review = `reviewed {"${id8}": "<reason>"}`
+  if (status === 'dead') return 'its exit is not classified yet: the next poll harvests it; if it stays, read_result and raise an open point'
+  if (isKept) {
+    const retire = isClean ? `retire_workers with ${ids}` : `retire_workers with ${ids} and ${review} after reading its transcript`
+    return `when no resume or queued follow-up needs it: acknowledge_workers with ${ids} and keep false, then ${retire}`
+  }
+  const report = isAcked ? '' : 'report it, then '
+  if (isClean) return `${report}close_worker with ${ids} and keep false`
+  return `${report}resume it if its work is unfinished; else, after reading its transcript, close_worker with ${ids}, keep false and ${review}`
+}
+
+/**
+ * finished-open (decision mod-50): every registry entry whose process is gone and that is not retired (still in the
+ * registry), whatever its outcome, acknowledged or kept, unless a task not done names it (its wait is real). One line
+ * per session, the longest finished first, at most FINISHED_OPEN_SHOWN, then one line counting the rest. No debounce
+ * and no state: register.tsx adds the lines to every prompt, worked out from the last refresh's registry, probe and
+ * queue, so they repeat until each session is retired. A kept session finished more than STALE_KEPT_SEC ago is marked
+ * stale-kept.
+ */
+export function finishedOpenNotices(input: { entries: readonly SessionEntry[]; facts: ProcFacts; nowMs: number; queueText?: string }): Notice[] {
+  const active = activeQueueText(input.queueText ?? '')
+  const nowSec = Math.floor(input.nowMs / 1000)
+  const open = input.entries
+    .filter(entry => str(entry.session_id) !== '' && ['dead', 'unreported', 'done'].includes(rowStatus(entry, input.facts)) && !namesSession(active, entry))
+    .map(entry => ({ entry, since: lastActiveSec(entry, input.facts) }))
+    .sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity))
+  const notices: Notice[] = open.slice(0, FINISHED_OPEN_SHOWN).map(({ entry, since }) => {
+    const sid = str(entry.session_id)
+    const id8 = sid.slice(0, 8)
+    const status = rowStatus(entry, input.facts)
+    const kind = (entry.outcome as { kind?: unknown } | undefined)?.kind
+    const outcome = typeof kind === 'string' ? oneLine(kind, 20) : undefined
+    const isKept = entry.keep === true
+    const isStale = isKept && since !== undefined && nowSec - since > STALE_KEPT_SEC
+    const isClean = outcome === undefined || outcome === 'clean'
+    const isAcked = status === 'done'
+    const age = since === undefined ? 'at an unknown time' : `${formatAge(Math.max(0, nowSec - since))} ago`
+    const state = status === 'dead' ? 'exit not classified' : `${outcome ?? 'no outcome'}, ${isKept ? 'kept' : isAcked ? 'acknowledged' : 'unacknowledged'}${isStale ? ', stale-kept: kept and finished over 24 hours' : ''}`
+    return {
+      kind: 'finished-open',
+      message: `session ${id8} "${oneLine(str(entry.title) || '(untitled)')}" finished ${age} (${state}): ${disposal(id8, status, isKept, isClean, isAcked)}`,
+      fields: { session_id: sid, isKept, isStale, isAcked },
+    }
+  })
+  const rest = open.slice(FINISHED_OPEN_SHOWN).map(one => str(one.entry.session_id).slice(0, 8))
+  if (rest.length > 0) {
+    notices.push({ kind: 'finished-open', message: `${rest.length} more finished ${rest.length === 1 ? 'session is' : 'sessions are'} not retired (${idList(rest)}): list_sessions shows them`, fields: { count: rest.length, isGroup: true } })
+  }
+  return notices
 }

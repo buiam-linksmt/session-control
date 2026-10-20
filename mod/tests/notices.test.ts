@@ -16,6 +16,8 @@ import {
   PENDING_NOTICES_MAX,
   STALL_SEC,
   TOASTS_PER_PASS,
+  FINISHED_OPEN_SHOWN,
+  finishedOpenNotices,
   freshNoticeState,
   harvestNotices,
   isRegistrySound,
@@ -102,10 +104,23 @@ async function poll(world: World, seconds: number, step = 5): Promise<void> {
 /** The toasts of the notices (by their titles). */
 const noticeToasts = (world: World) => world.toasts.filter(text => TITLES.some(title => text.startsWith(`${title} \u00B7 `)))
 
-/** The notice lines a prompt carried: every context line that starts with the notice prefix. */
+/**
+ * The notice lines a prompt carried: every context line that starts with the notice prefix, the finished-open lines
+ * left out (every prompt carries them while a finished session is not retired; finishedOpenLines reads them).
+ */
 function noticeLines(sent: { context?: readonly unknown[] }): string[] {
+  return allNoticeLines(sent).filter(line => !line.startsWith(FINISHED_OPEN))
+}
+
+const FINISHED_OPEN = `${NOTICE_PREFIX} finished-open: `
+
+/** Every notice line a prompt carried, the finished-open lines included. */
+function allNoticeLines(sent: { context?: readonly unknown[] }): string[] {
   return (sent.context ?? []).flatMap(one => String(one).split('\n')).filter(line => line.startsWith(NOTICE_PREFIX))
 }
+
+/** The finished-open lines a prompt carried, without their prefix and kind. */
+const finishedOpenLines = (sent: { context?: readonly unknown[] }) => allNoticeLines(sent).filter(line => line.startsWith(FINISHED_OPEN)).map(line => line.slice(FINISHED_OPEN.length))
 
 const userPrompt = ($: { prompt: { submit: (e: never) => Promise<unknown> } }) =>
   $.prompt.submit({ text: 'what is new?', wait: false, origin: { kind: 'composer' } } as never) as Promise<{ context?: readonly unknown[] }>
@@ -529,6 +544,116 @@ describe('open-point-age', () => {
     expect(day.filter(one => one.includes('op-old')).length).toBe(1)
     expect(day.filter(one => one.includes('op-new')).length).toBe(1)
     expect(day.some(one => one.includes('op-held') || one.includes('op-closed'))).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------- finished-open (decision mod-50)
+
+describe('finished-open', () => {
+  const UNACKED = '61616161-aaaa-4bbb-8ccc-616161616161'
+  const ACKED = '62626262-aaaa-4bbb-8ccc-626262626262'
+  const KEPT = '63636363-aaaa-4bbb-8ccc-636363636363'
+  const NAMED = '64646464-aaaa-4bbb-8ccc-646464646464'
+  const cfg = `${HOME}/.claude`
+  const clean = { kind: 'clean', summary: 'clean: done' }
+  const finished = [
+    { title: 'unacked worker', session_id: UNACKED, config_dir: cfg, reported: false, outcome: clean, ended_at: NOW_SEC - 3600 },
+    { title: 'acked worker', session_id: ACKED, config_dir: cfg, reported: true, outcome: clean, ended_at: NOW_SEC - 1800 },
+    { title: 'kept worker', session_id: KEPT, config_dir: cfg, reported: true, keep: true, outcome: clean, ended_at: NOW_SEC - 7200 },
+    { title: 'named worker', session_id: NAMED, config_dir: cfg, reported: true, outcome: clean, ended_at: NOW_SEC - 9000 },
+  ]
+  const queue = [{ id: 'q-wait', status: 'queued', title: 'Waits', waits_for: `session ${NAMED.slice(0, 8)}` }]
+  const KEPT_LINE = 'session 63636363 "kept worker" finished 2h00m ago (clean, kept): when no resume or queued follow-up needs it: acknowledge_workers with session_ids ["63636363"] and keep false, then retire_workers with session_ids ["63636363"]'
+  const UNACKED_LINE = 'session 61616161 "unacked worker" finished 1h00m ago (clean, unacknowledged): report it, then close_worker with session_ids ["61616161"] and keep false'
+  const ACKED_LINE = 'session 62626262 "acked worker" finished 30m00s ago (clean, acknowledged): close_worker with session_ids ["62626262"] and keep false'
+
+  test('every prompt names each finished session not retired, the longest finished first, until it is retired; a live one and one a queued task names are left out', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    const live = seedLiveWorker(world, SID_LIVE)
+    seed(world, { entries: [live, ...finished], queue })
+    await start($)
+    expect(finishedOpenLines(await userPrompt($))).toEqual([KEPT_LINE, UNACKED_LINE, ACKED_LINE])
+    // No once-only memory: the next prompt carries them again, and no toast is raised for them.
+    expect(finishedOpenLines(await userPrompt($))).toEqual([KEPT_LINE, UNACKED_LINE, ACKED_LINE])
+    expect(world.toasts.filter(text => text.startsWith(`${TOAST_TITLES['finished-open']} \u00B7 `))).toEqual([])
+    // Retired, a session leaves the lines at the next prompt.
+    const closed = await $.tool.call({ tool: 'mcp__session-control__close_worker', session_ids: [ACKED.slice(0, 8)], keep: false } as never)
+    expect(String((closed as { result?: unknown }).result)).toStartWith('Acknowledged: 62626262. Retired: 62626262.')
+    expect(finishedOpenLines(await userPrompt($))).toEqual([KEPT_LINE, UNACKED_LINE])
+    // The task done, the session it named is told too.
+    await $.tool.call({ tool: QUEUE_TOOL, action: 'update', id: 'q-wait', status: 'done' } as never)
+    expect(finishedOpenLines(await userPrompt($))[0]).toBe('session 64646464 "named worker" finished 2h30m ago (clean, acknowledged): close_worker with session_ids ["64646464"] and keep false')
+  })
+
+  test('a completion: the task notification\'s prompt names the session its harvest finished, by its outcome', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries: [{ ...UNIT_ENTRY, section: undefined }], queue: [] })
+    world.files.set(`${RUNS}/unit.json`, RESULTS.clean)
+    await start($)
+    const sent = (await $.prompt.submit({ text: 'notification', wait: false, origin: { kind: 'task-notification' } } as never)) as { context?: readonly unknown[] }
+    expect(String(sent.context?.[0])).toStartWith('session-control completions: unit worker: clean: ')
+    expect(finishedOpenLines(sent)).toEqual(['session 22222222 "unit worker" finished 0s ago (clean, unacknowledged): report it, then close_worker with session_ids ["22222222"] and keep false'])
+    await poll(world, 30)
+    expect(finishedOpenLines(await userPrompt($))).toEqual(['session 22222222 "unit worker" finished 30s ago (clean, unacknowledged): report it, then close_worker with session_ids ["22222222"] and keep false'])
+  })
+
+  test('stale-kept: a kept session finished more than 24 hours ago, on the mod\'s clock', { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries: [{ ...finished[2], ended_at: NOW_SEC - 24 * 3600 + 60 }] })
+    await start($)
+    expect(finishedOpenLines(await userPrompt($))).toEqual([KEPT_LINE.replace('2h00m', '23h59m')])
+    await poll(world, 120)
+    expect(finishedOpenLines(await userPrompt($))).toEqual([
+      'session 63636363 "kept worker" finished 24h01m ago (clean, kept, stale-kept: kept and finished over 24 hours): when no resume or queued follow-up needs it: acknowledge_workers with session_ids ["63636363"] and keep false, then retire_workers with session_ids ["63636363"]',
+    ])
+  })
+
+  test(`at most ${FINISHED_OPEN_SHOWN} lines, then one counting the rest`, { options: OPTIONS }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    const many = Array.from({ length: 13 }, (_, at) => ({ title: `w${at}`, session_id: `${String(at).padStart(2, '0')}aaaaaa-aaaa-4bbb-8ccc-aaaaaaaaaaaa`, config_dir: cfg, reported: true, outcome: clean, ended_at: NOW_SEC - 3600 * (13 - at) }))
+    seed(world, { entries: many })
+    await start($)
+    const lines = finishedOpenLines(await userPrompt($))
+    expect(lines.length).toBe(FINISHED_OPEN_SHOWN + 1)
+    expect(lines[0]).toStartWith('session 00aaaaaa "w0" finished 13h00m ago')
+    expect(lines[FINISHED_OPEN_SHOWN - 1]).toStartWith('session 09aaaaaa "w9" finished 4h00m ago')
+    expect(lines[FINISHED_OPEN_SHOWN]).toBe('3 more finished sessions are not retired (10aaaaaa, 11aaaaaa, 12aaaaaa): list_sessions shows them')
+  })
+
+  test('the notices option off: no line', { options: { ...OPTIONS, notices: 'off' } }, async ($, on) => {
+    const world = mockWorld(on)
+    storeOf(on)
+    echoPrompt(on)
+    seed(world, { entries: finished })
+    await start($)
+    expect(allNoticeLines(await userPrompt($))).toEqual([])
+  })
+
+  test('retire-due counts a stale-kept session with the kept sessions idle over 6 hours, as before', () => {
+    const kept = { title: 'kept', session_id: SID_KEPT, config_dir: cfg, reported: true, keep: true, outcome: clean, ended_at: NOW_SEC - 30 * 3600 }
+    expect(retireStep(freshNoticeState(), { entries: [kept], facts: facts([]), nowMs: NOW_MS })[0]?.message).toBe(`1 kept session idle over 6 hours (${SID_KEPT.slice(0, 8)}): run audit_state`)
+  })
+
+  test('finishedOpenNotices: the call by state (exit not classified, an outcome that is not clean, kept with one), nothing for an entry without a session id', () => {
+    const entries = [
+      { title: 'dead', session_id: UNACKED, config_dir: cfg, pid: 999999 },
+      { title: 'limited', session_id: ACKED, config_dir: cfg, reported: false, outcome: { kind: 'limit' }, ended_at: NOW_SEC - 60 },
+      { title: 'kept login', session_id: KEPT, config_dir: cfg, reported: true, keep: true, outcome: { kind: 'login' }, ended_at: NOW_SEC - 120 },
+      { title: 'no id', config_dir: cfg, reported: true },
+    ]
+    expect(finishedOpenNotices({ entries, facts: facts([]), nowMs: NOW_MS }).map(one => [one.kind, one.message])).toEqual([
+      ['finished-open', 'session 63636363 "kept login" finished 2m00s ago (login, kept): when no resume or queued follow-up needs it: acknowledge_workers with session_ids ["63636363"] and keep false, then retire_workers with session_ids ["63636363"] and reviewed {"63636363": "<reason>"} after reading its transcript'],
+      ['finished-open', 'session 62626262 "limited" finished 1m00s ago (limit, unacknowledged): report it, then resume it if its work is unfinished; else, after reading its transcript, close_worker with session_ids ["62626262"], keep false and reviewed {"62626262": "<reason>"}'],
+      ['finished-open', 'session 61616161 "dead" finished at an unknown time (exit not classified): its exit is not classified yet: the next poll harvests it; if it stays, read_result and raise an open point'],
+    ])
   })
 })
 

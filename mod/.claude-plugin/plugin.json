@@ -64,7 +64,7 @@
     "notices": {
       "type": "string",
       "title": "Notices",
-      "description": "on: the poll-based notices (orphan, stall, queue-ready, unit-complete, compliance-due, open-point-age, retire-due, repo-state, lock-holder, registry-unreadable, mod-drift, secret-in-result) reach the model with the next prompt, as a toast and in the debug trace. off: none of them; the completion notes stay, and so does the drift band above the prompt (modSource off hides it). Any other value counts as on.",
+      "description": "on: the poll-based notices (orphan, stall, queue-ready, unit-complete, compliance-due, open-point-age, retire-due, repo-state, lock-holder, registry-unreadable, mod-drift, secret-in-result, finished-open) reach the model with the next prompt, as a toast and in the debug trace. off: none of them; the completion notes stay, and so does the drift band above the prompt (modSource off hides it). Any other value counts as on.",
       "default": "on"
     },
     "modSource": {

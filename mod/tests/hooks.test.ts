@@ -30,6 +30,17 @@ import {
 } from './fixtures'
 import { echoPrompt } from './notice-kit'
 
+/**
+ * A prompt's context without the finished-open notice lines, which every prompt carries while a fixture entry is finished
+ * and not retired (notices.test.ts tests them); undefined when nothing else is left.
+ */
+function withoutFinishedOpen(context: readonly unknown[] | undefined): unknown[] | undefined {
+  const left = (context ?? [])
+    .map(one => String(one).split('\n').filter(line => !line.startsWith('session-control notice: finished-open: ')).join('\n'))
+    .filter(one => one !== '')
+  return left.length === 0 ? undefined : left
+}
+
 const PICKER = '/fixture/bin/pick --need {need}'
 const OPTIONS = { orchestratorDir: ORCH_DIR, registryPath: '~/.claude/headless-sessions.json', completionWrites: true, licencePickCommand: PICKER }
 const TOOL = 'mcp__session-control__launch_worker'
@@ -607,7 +618,7 @@ describe('completion', () => {
     echoPrompt(on)
     await boot($)
     const sent = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
-    expect(sent.context?.length).toBe(1)
+    expect(withoutFinishedOpen(sent.context)?.length).toBe(1)
     expect(String(sent.context?.[0])).not.toContain('report check')
   })
 
@@ -623,9 +634,9 @@ describe('completion', () => {
     echoPrompt(on)
     await boot($)
     const first = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
-    expect(first.context).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
+    expect(withoutFinishedOpen(first.context)).toEqual(['session-control completions: limited worker: limit: rate limit hit'])
     const second = await $.prompt.submit({ text: TASK_NOTIFICATION_KILLED, wait: false, origin: { kind: 'task-notification' } })
-    expect(second.context).toBeUndefined()
+    expect(withoutFinishedOpen(second.context)).toBeUndefined()
   })
 })
 
@@ -1421,7 +1432,7 @@ describe('launch_worker', () => {
           // Back at the bound, 3000 ms on the clock, without the note: the harvest has not ended.
           expect(prompt.isDone).toBe(true)
           expect(w.clock.now() - at).toBe(PROMPT_HARVEST_SEC * 1000)
-          expect((await prompt.sent).context).toBeUndefined()
+          expect(withoutFinishedOpen((await prompt.sent).context)).toBeUndefined()
           expect(w.toasts).not.toContain(KILLED_TOAST)
           if (host.name === 'Linux') expect(traceOf(w).filter(line => line.event === 'prompt.harvest').map(line => [line.isInTime, line.ms])).toEqual([[false, PROMPT_HARVEST_SEC * 1000]])
           // The harvest goes on behind the prompt and ends with its probe; its note rides on the next prompt of any origin.
@@ -1538,7 +1549,7 @@ describe('launch_worker', () => {
     expect(JSON.stringify(first.context)).toContain('after compaction')
     expect(JSON.stringify(first.context)).toContain('1. First question')
     const second = await $.prompt.submit({ text: 'again', wait: false, origin: { kind: 'user' } } as never)
-    expect(second.context).toBeUndefined()
+    expect(withoutFinishedOpen(second.context)).toBeUndefined()
   })
 
   test('the ledger opens on a model send to a peer and closes on its reply', { options: OPTIONS }, async ($, on) => {
@@ -3033,12 +3044,17 @@ describe('close_worker', () => {
     'Acknowledged: f1f1f1f1, 57575751, c3c3c3c3. Refused: aaaaaaaa (its process is alive); 12345678 (no registry entry). ' +
     'Retired: f1f1f1f1, 57575751. Retired with review: 57575751 (was login: the transcript shows the run succeeded). ' +
     'Refused: c3c3c3c3 (marked keep: a resume or follow-up is expected); aaaaaaaa (its process is alive); 12345678 (no registry entry).'
+  // close_worker alone ends on the next call for each session it did not retire (decision mod-51).
+  const NEXT =
+    ' Next: c3c3c3c3: marked keep: when no resume or queued follow-up needs it, acknowledge_workers with session_ids ["c3c3c3c3"] and keep false, then retire_workers with session_ids ["c3c3c3c3"]; ' +
+    'aaaaaaaa: not acknowledged, its process is alive: wait for its exit (stop_worker when it must end), then close_worker with session_ids ["aaaaaaaa"] again; ' +
+    '12345678: no registry entry: list_sessions shows the registry, and a retired session is in cleared.jsonl; nothing to retire.'
 
   test('keep false is acknowledge_workers then retire_workers: their answers one after the other, their writes', { options: OPTIONS }, async ($, on) => {
     const w = world(on, '/fixture/lic/a\n', true, registry)
     await boot($)
     const out = await $.tool.call({ tool: CLOSE, session_ids: ids, reviewed } as never)
-    expect(String(out.result)).toBe(EXPECTED)
+    expect(String(out.result)).toBe(`${EXPECTED}${NEXT}`)
     const after = lastRegistry(w)
     expect(after.some(one => [finished.session_id, login.session_id].includes(String(one.session_id)))).toBe(false)
     expect(after.some(one => one.session_id === SID_ALIVE)).toBe(true)
@@ -3069,7 +3085,25 @@ describe('close_worker', () => {
     world(on, '/fixture/lic/a\n', true, registry)
     await boot($)
     const out = await $.tool.call({ tool: CLOSE, session_ids: ['57575751'] } as never)
-    expect(String(out.result)).toBe('Acknowledged: 57575751. Retired: none. Refused: 57575751 (outcome login needs a resume).')
+    expect(String(out.result)).toBe(
+      'Acknowledged: 57575751. Retired: none. Refused: 57575751 (outcome login needs a resume). ' +
+        'Next: 57575751: outcome login needs a resume: resume it with launch_worker resume_sid when its work is unfinished; else, after reading its transcript, close_worker with session_ids ["57575751"] and reviewed {"57575751": "<reason>"}.',
+    )
+  })
+
+  test('a call without a usable session_ids is refused with what it gave and the call to make, for the three tools; nothing is written', { options: OPTIONS }, async ($, on) => {
+    const w = world(on, '/fixture/lic/a\n', true, registry)
+    await boot($)
+    const writes = w.writes.length
+    const misspelt = await $.tool.call({ tool: CLOSE, session_id: finished.session_id, keep: false } as never)
+    expect(String(misspelt.deny)).toBe(
+      'session-control: close_worker needs session_ids, a non-empty list of session ids; the call gave no session_ids (it gave session_id, keep), so nothing was acknowledged or retired. Call close_worker with session_ids ["f1f1f1f1"]',
+    )
+    const empty = await $.tool.call({ tool: ACK, session_ids: [] } as never)
+    expect(String(empty.deny)).toBe('session-control: acknowledge_workers needs session_ids, a non-empty list of session ids; the call gave an empty session_ids, so nothing was acknowledged or retired. Call acknowledge_workers with session_ids ["<session id>"]')
+    const text = await $.tool.call({ tool: RETIRE, session_ids: 'f1f1f1f1' } as never)
+    expect(String(text.deny)).toBe('session-control: retire_workers needs session_ids, a non-empty list of session ids; the call gave a session_ids that is not a list, so nothing was acknowledged or retired. Call retire_workers with session_ids ["<session id>"]')
+    expect(w.writes.length).toBe(writes)
   })
 })
 

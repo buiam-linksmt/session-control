@@ -118,6 +118,18 @@ describe('audit findings, one fixture per kind', () => {
     expect(of('kept-old').map(one => [one.subject, one.evidence])).toEqual([['session f0f0f0f0 "kept long"', 'marked keep, last active 7h00m ago (more than 6 hours)']])
   })
 
+  test('stale-kept: a kept session finished more than 24 hours ago is flagged stale-kept instead of kept-old; the transcript mtime counts when it has no end', () => {
+    const kept = (sid: string, extra: object) => ({ title: `kept ${sid.slice(0, 2)}`, session_id: sid, config_dir: '/c', reported: true, keep: true, outcome: { kind: 'clean', summary: 'clean: ok' }, ...extra })
+    const entries = [kept(SID_DONE, { ended_at: NOWS - 25 * 3600 }), kept(SID_UNREP, { ended_at: NOWS - 23 * 3600 }), kept(SID_KEPT, {})]
+    const found = auditFindings({ entries, facts: FACTS, nowMs: NOW })
+    expect(found.filter(one => one.kind === 'stale-kept').map(one => [one.ref, one.evidence, one.action])).toEqual([
+      ['d0d0d0d0', 'marked keep, last active 25h00m ago (more than 24 hours): stale-kept', 'resume it if the follow-up is still due; else acknowledge_workers with keep false, then retire_workers'],
+      ['f0f0f0f0', 'marked keep, last active 30h00m ago (more than 24 hours): stale-kept', 'resume it if the follow-up is still due; else acknowledge_workers with keep false, then retire_workers'],
+    ])
+    expect(found.filter(one => one.kind === 'kept-old').map(one => one.ref)).toEqual(['e0e0e0e0'])
+    expect(auditText({ entries, facts: FACTS, nowMs: NOW })).toContain('[medium] stale-kept | session d0d0d0d0 "kept d0" | marked keep, last active 25h00m ago (more than 24 hours): stale-kept')
+  })
+
   test('the open points: an open one raised more than 7 days ago, a held one; closed and fresh ones are fine', () => {
     expect(of('open-point-old').map(one => [one.subject, one.evidence])).toEqual([['open point old "An old question"', 'raised 2026-01-01, 9 days ago']])
     expect(of('open-point-held').map(one => one.subject)).toEqual(['open point held "A held question"'])

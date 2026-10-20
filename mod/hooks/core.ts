@@ -529,6 +529,7 @@ export const TOAST_TITLES = {
   'registry-unreadable': 'Registry unreadable',
   'mod-drift': 'Mod out of date',
   'secret-in-result': 'Secret in a result',
+  'finished-open': 'Finished session open',
   // The one summary toast of the notices past the toast cap of a refresh.
   moreNotices: 'More notices',
 } as const satisfies Record<
@@ -1682,6 +1683,46 @@ export function retireVerdict(
     }
   }
   return verdict
+}
+
+/** The keys a tool.call event carries beside the tool's own arguments (the engine's envelope). */
+const CALL_ENVELOPE_KEYS: ReadonlySet<string> = new Set(['tool', 'tool_use_id', 'consent', 'agentId', 'requestMeta'])
+
+/**
+ * Why a call of acknowledge_workers, retire_workers or close_worker names no session: `session_ids` missing, not a
+ * list of strings or empty (the engine hands the call on as given, a misspelt `session_id` included). The refusal names
+ * what the call gave (its keys, never a value but a session id's first 8 characters) and the call to make instead;
+ * undefined when the list is usable.
+ */
+export function sessionIdsProblem(tool: string, input: Readonly<Record<string, unknown>>): string | undefined {
+  const ids = input.session_ids
+  if (Array.isArray(ids) && ids.length > 0 && ids.every(one => typeof one === 'string')) return undefined
+  const keys = Object.keys(input).filter(key => !CALL_ENVELOPE_KEYS.has(key) && key !== 'session_ids')
+  const single = typeof input.session_id === 'string' ? input.session_id.replace(/[^0-9a-fA-F-]/g, '').slice(0, 8) : ''
+  const given = ids === undefined ? `no session_ids${keys.length === 0 ? '' : ` (it gave ${keys.join(', ')})`}` : Array.isArray(ids) ? (ids.length === 0 ? 'an empty session_ids' : 'a session_ids that is not a list of strings') : 'a session_ids that is not a list'
+  return `${tool} needs session_ids, a non-empty list of session ids; the call gave ${given}, so nothing was acknowledged or retired. Call ${tool} with session_ids ["${single === '' ? '<session id>' : single}"]`
+}
+
+/**
+ * close_worker's closing sentence for the sessions retire_workers refused (decision mod-51): per session its id's first 8
+ * characters and the exact next call that disposes of it, by the refusal's reason; '' when nothing was refused.
+ */
+export function closeNextCalls(refused: readonly { id: string; reason: string }[]): string {
+  if (refused.length === 0) return ''
+  const next = refused.map(({ id, reason }) => {
+    const id8 = id.slice(0, 8)
+    const ids = `session_ids ["${id8}"]`
+    if (reason === 'no registry entry') return `${id8}: no registry entry: list_sessions shows the registry, and a retired session is in cleared.jsonl; nothing to retire`
+    if (reason === 'its process is alive') return `${id8}: not acknowledged, its process is alive: wait for its exit (stop_worker when it must end), then close_worker with ${ids} again`
+    if (reason === 'its exit was not classified yet') return `${id8}: its exit is not classified yet: after the next poll's harvest (list_sessions shows it finished), close_worker with ${ids} again`
+    if (reason.startsWith('marked keep')) return `${id8}: marked keep: when no resume or queued follow-up needs it, acknowledge_workers with ${ids} and keep false, then retire_workers with ${ids}`
+    if (/^outcome .* needs a resume$/.test(reason)) return `${id8}: ${reason}: resume it with launch_worker resume_sid when its work is unfinished; else, after reading its transcript, close_worker with ${ids} and reviewed {"${id8}": "<reason>"}`
+    if (reason === 'a queued or running task names it') return `${id8}: a task not done names it: launch or finish that task, or correct it with queue_task; then retire_workers with ${ids}`
+    if (reason === 'reviewed needs a non-empty reason') return `${id8}: give reviewed a non-empty reason for "${id8}"`
+    if (reason === 'reviewed names no session of session_ids') return `${id8}: key reviewed by an id that session_ids lists`
+    return `${id8}: ${reason}`
+  })
+  return ` Next: ${next.join('; ')}.`
 }
 
 /** Cleared-log lines of removed entries: those of a reviewed retire get `reviewed_outcome` (the stored kind) and `reviewed_reason` at the end. */

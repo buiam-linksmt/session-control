@@ -30,6 +30,7 @@ import {
   ORPHANS_SHOWN,
   TOASTS_PER_PASS,
   driftStep,
+  finishedOpenNotices,
   harvestNotices,
   isRegistrySound,
   isRepoDue,
@@ -108,7 +109,9 @@ import {
   registerEntry,
   registerFinished,
   removeEntries,
+  closeNextCalls,
   retireVerdict,
+  sessionIdsProblem,
   annotateCleared,
   ackPeerNote,
   addPeerNote,
@@ -177,7 +180,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { ComposedPrompt, ExpandableId, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
+import type { ComposedPrompt, ExpandableId, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -262,6 +265,12 @@ let config: Config = {
   licenceDirs: '',
 }
 let isActive = false
+/**
+ * What the finished-open lines (notices.ts) are worked out from at each prompt: the registry as the last refresh left it
+ * (after its harvests), that refresh's probe and the queue it read. Kept from the last refresh that could read the
+ * registry; undefined until one has.
+ */
+let finishedInput: { entries: readonly SessionEntry[]; facts: ProcFacts; queueText?: string } | undefined
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
 let layout: { boxes: SectionBox[]; totals: Partial<Record<SectionId, { total: number; visible: number }>> } = { boxes: [], totals: {} }
 let isAfterCompact = false
@@ -893,14 +902,14 @@ function foldedSummary(): HeldToast | undefined {
   return { text: toastText(TOAST_TITLES.moreNotices, moreToastText(more)), timeoutMs: 10000, isCompletion: false, more }
 }
 
-/** A worker whose recorded pid is gone: classify, maybe merge into the registry, toast. */
-async function complete($: EngineInterface, entry: SessionEntry, taskStatus: string | undefined, toasts: ToastBudget): Promise<void> {
+/** A worker whose recorded pid is gone: classify, maybe merge into the registry, toast. Answers whether it harvested now. */
+async function complete($: EngineInterface, entry: SessionEntry, taskStatus: string | undefined, toasts: ToastBudget): Promise<boolean> {
   const sid = entry.session_id
-  if (typeof sid !== 'string') return
+  if (typeof sid !== 'string') return false
   // Keyed by session and pid: a resumed session finishes again under a new pid.
   const key = `${sid}:${entry.pid}`
-  if (harvested.has(key)) return
-  if (typeof entry.result_file !== 'string') return
+  if (harvested.has(key)) return false
+  if (typeof entry.result_file !== 'string') return false
   const resultText = await $.fs.read(entry.result_file).catch(() => '')
   const errText = typeof entry.err_file === 'string' ? await $.fs.read(entry.err_file).catch(() => '') : ''
   // A task notification's `killed` does not override a run its result file shows finished, a success or an error.
@@ -921,6 +930,7 @@ async function complete($: EngineInterface, entry: SessionEntry, taskStatus: str
     }
   }
   await announceCompletion($, entry, outcome, told, toasts)
+  return true
 }
 
 /**
@@ -1353,9 +1363,13 @@ async function gather($: EngineInterface, notice: TaskNotice | undefined, isTick
     if (notice !== undefined && (notice.resultFile === undefined || notice.resultFile === file)) return notice.status
     return file === undefined ? undefined : kept.get(file)
   }
+  let isHarvesting = false
   for (const entry of entries) {
-    if (!isNew(entry) && rowStatus(entry, facts) === 'dead') await complete($, entry, statusOf(entry), toasts)
+    if (!isNew(entry) && rowStatus(entry, facts) === 'dead' && (await complete($, entry, statusOf(entry), toasts))) isHarvesting = true
   }
+  // The finished-open lines read the registry after this refresh's harvests, so a session just harvested is named by its outcome.
+  const settled = isHarvesting && config.completionWrites ? parseRegistry(await readRegistryText($)) : undefined
+  finishedInput = { entries: (settled?.ok === true ? settled.entries : entries).filter(entry => !isNew(entry)), facts, ...(files.queueText === undefined ? {} : { queueText: files.queueText }) }
   const rows = buildRows(entries.filter(entry => !isNew(entry)), facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
   noteError($, next.error, now)
@@ -1752,7 +1766,13 @@ async function acknowledge($: EngineInterface, ids: readonly string[], keep: boo
 }
 
 /** The orchestrator retires finished workers it no longer needs; the guards keep any that could still be resumed. */
-async function retire($: EngineInterface, ids: readonly string[], reviewed: Readonly<Record<string, unknown>>) {
+async function retire($: EngineInterface, ids: readonly string[], reviewed: Readonly<Record<string, unknown>>): Promise<{ result: string } | { deny: string }> {
+  const run = await retireRun($, ids, reviewed)
+  return 'deny' in run ? run : { result: run.result }
+}
+
+/** retire_workers' work: its answer, and the sessions it refused with their reasons (close_worker's next calls). */
+async function retireRun($: EngineInterface, ids: readonly string[], reviewed: Readonly<Record<string, unknown>>): Promise<{ deny: string } | { result: string; refused: RetireVerdict['refused'] }> {
   const reg = await registryAndFacts($)
   if ('deny' in reg) return reg
   const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => '')
@@ -1795,7 +1815,7 @@ async function retire($: EngineInterface, ids: readonly string[], reviewed: Read
   const refused = verdict.refused.length === 0 ? '' : ` Refused: ${verdict.refused.map(one => `${one.id.slice(0, 8)} (${one.reason})`).join('; ')}.`
   const review = reviews.length === 0 ? '' : ` Retired with review: ${reviews.map(one => `${one.session_id.slice(0, 8)} (was ${one.was}: ${one.reason})`).join('; ')}.`
   const cleanup = removedEntries.length === 0 ? '' : await cleanRunFiles($, removedEntries, reviews.map(one => one.session_id), runs)
-  return { result: `Retired: ${removed}.${review}${refused}${cleanup}` }
+  return { result: `Retired: ${removed}.${review}${refused}${cleanup}`, refused: verdict.refused }
 }
 
 /**
@@ -1847,9 +1867,10 @@ async function close($: EngineInterface, ids: readonly string[], keep: boolean, 
   const acked = await acknowledge($, ids, keep)
   if ('deny' in acked) return acked
   if (keep) return { result: `${acked.result}${isReviewedGiven ? ' reviewed was not used: keep true retires nothing.' : ''}` }
-  const retired = await retire($, ids, reviewed)
+  const retired = await retireRun($, ids, reviewed)
   if ('deny' in retired) return { deny: `${acked.result} ${String(retired.deny)}` }
-  return { result: `${acked.result} ${retired.result}` }
+  // Each session not retired gets its next call (decision mod-51), so no answer ends on a bare refusal.
+  return { result: `${acked.result} ${retired.result}${closeNextCalls(retired.refused)}` }
 }
 
 /**
@@ -3082,6 +3103,10 @@ export const register: Register = (on, options) => {
         return []
       })
     }
+    // The finished sessions not retired ride on every prompt, after the other notices, until each is retired (mod-50).
+    const finished = config.notices === 'off' || finishedInput === undefined ? [] : finishedOpenNotices({ ...finishedInput, nowMs: await $.clock.now() })
+    if (finished.length > 0) trace($, 'notice', { kind: 'finished-open', count: finished.length })
+    notices = [...notices, ...finished.map(noticeLine)]
     if (notices.length > 0) extra.push(notices.join('\n'))
     // After a compaction the digest is made of the last poll's rows and points.
     if (isAfterCompact) {
@@ -3143,7 +3168,10 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: ACK_TOOL }, ($, e) => {
     const input = e as unknown as { session_ids?: unknown; keep?: unknown }
-    return tracedTool($, 'acknowledge_workers', e, ['session_ids', 'keep'], () => acknowledge($, (input.session_ids as string[] | undefined) ?? [], input.keep === true))
+    return tracedTool($, 'acknowledge_workers', e, ['session_ids', 'keep'], async () => {
+      const problem = sessionIdsProblem('acknowledge_workers', plain(e))
+      return problem !== undefined ? { deny: `${PLUGIN}: ${problem}` } : acknowledge($, input.session_ids as string[], input.keep === true)
+    })
   }).catch(($, e, next) => {
     traceError($, 'acknowledge_workers', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: acknowledge_workers failed` }
@@ -3152,7 +3180,10 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: RETIRE_TOOL }, ($, e) => {
     const input = e as unknown as { session_ids?: unknown; reviewed?: unknown }
     const reviewed = typeof input.reviewed === 'object' && input.reviewed !== null && !Array.isArray(input.reviewed) ? (input.reviewed as Record<string, unknown>) : {}
-    return tracedTool($, 'retire_workers', e, ['session_ids'], () => retire($, (input.session_ids as string[] | undefined) ?? [], reviewed))
+    return tracedTool($, 'retire_workers', e, ['session_ids'], async () => {
+      const problem = sessionIdsProblem('retire_workers', plain(e))
+      return problem !== undefined ? { deny: `${PLUGIN}: ${problem}` } : retire($, input.session_ids as string[], reviewed)
+    })
   }).catch(($, e, next) => {
     traceError($, 'retire_workers', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: retire_workers failed` }
@@ -3162,7 +3193,10 @@ export const register: Register = (on, options) => {
     const input = e as unknown as { session_ids?: unknown; keep?: unknown; reviewed?: unknown }
     const isReviewedGiven = typeof input.reviewed === 'object' && input.reviewed !== null && !Array.isArray(input.reviewed)
     const reviewed = isReviewedGiven ? (input.reviewed as Record<string, unknown>) : {}
-    return tracedTool($, 'close_worker', e, ['session_ids', 'keep'], () => close($, (input.session_ids as string[] | undefined) ?? [], input.keep === true, reviewed, isReviewedGiven))
+    return tracedTool($, 'close_worker', e, ['session_ids', 'keep'], async () => {
+      const problem = sessionIdsProblem('close_worker', plain(e))
+      return problem !== undefined ? { deny: `${PLUGIN}: ${problem}` } : close($, input.session_ids as string[], input.keep === true, reviewed, isReviewedGiven)
+    })
   }).catch(($, e, next) => {
     traceError($, 'close_worker', next.error?.message ?? next.error?.kind)
     return next.called ? next(e) : { deny: `${PLUGIN}: close_worker failed` }

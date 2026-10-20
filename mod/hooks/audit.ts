@@ -57,6 +57,7 @@ const KIND_ORDER = [
   'done-in-queue',
   'queued-free-wait',
   'retirable',
+  'stale-kept',
   'kept-old',
   'open-point-old',
   'git-uncommitted',
@@ -73,6 +74,8 @@ const SEVERITY_ORDER: Record<Severity, number> = { high: 0, medium: 1, low: 2 }
 export const MAX_FINDINGS = 40
 /** A kept session older than this is told. */
 export const KEPT_MAX_SEC = 6 * 3600
+/** A kept session finished longer ago than this is stale-kept: audit_state and the finished-open notice flag it. */
+export const STALE_KEPT_SEC = 24 * 3600
 /** An open point raised more than this many days ago is told. */
 export const POINT_MAX_DAYS = 7
 /** A backup older than this, other than the newest of its kind, is spent. */
@@ -180,6 +183,17 @@ export function namesSession(text: string, entry: SessionEntry): boolean {
 /** The session ids of the retired sessions in cleared.jsonl, lower case; undefined when it cannot be read. */
 export function retiredIds(clearedText: string | undefined): Set<string> | undefined {
   return clearedText === undefined ? undefined : new Set([...clearedText.matchAll(/"session_id":\s*"([0-9a-fA-F-]{36})"/g)].map(found => (found[1] ?? '').toLowerCase()))
+}
+
+/**
+ * When a finished session was last active (epoch seconds): its `ended_at`, else its transcript's mtime, else its
+ * `started_at`; undefined when none is known. The kept checks of audit_state and the finished-open notice read it.
+ */
+export function lastActiveSec(entry: SessionEntry, facts: ProcFacts): number | undefined {
+  const sid = str(entry.session_id)
+  if (typeof entry.ended_at === 'number') return entry.ended_at
+  const mtime = sid === '' ? undefined : facts.transcriptMtime.get(sid)
+  return mtime ?? (typeof entry.started_at === 'number' ? entry.started_at : undefined)
 }
 
 /** The mtime of the oldest tracked change git reports (epoch ms); undefined when none has one. */
@@ -333,9 +347,10 @@ export function auditFindings(input: AuditInput): Finding[] {
       add({ severity: 'medium', kind: 'retirable', ref: sid.slice(0, 8), subject: sessionName(entry), evidence: `finished clean, acknowledged, not kept, no queued or running task names it${ended === undefined ? '' : `; ended ${formatAge(nowSec - ended)} ago`}`, action: 'retire_workers when its goal is met' })
     }
     if (entry.keep === true && state !== 'alive') {
-      const mtime = sid === '' ? undefined : facts.transcriptMtime.get(sid)
-      const since = ended ?? mtime ?? (typeof entry.started_at === 'number' ? entry.started_at : undefined)
-      if (since !== undefined && nowSec - since > KEPT_MAX_SEC) {
+      const since = lastActiveSec(entry, facts)
+      if (since !== undefined && nowSec - since > STALE_KEPT_SEC) {
+        add({ severity: 'medium', kind: 'stale-kept', ref: sid.slice(0, 8), subject: sessionName(entry), evidence: `marked keep, last active ${formatAge(nowSec - since)} ago (more than 24 hours): stale-kept`, action: 'resume it if the follow-up is still due; else acknowledge_workers with keep false, then retire_workers' })
+      } else if (since !== undefined && nowSec - since > KEPT_MAX_SEC) {
         add({ severity: 'medium', kind: 'kept-old', ref: sid.slice(0, 8), subject: sessionName(entry), evidence: `marked keep, last active ${formatAge(nowSec - since)} ago (more than 6 hours)`, action: 'resume it if the follow-up is still due; else acknowledge_workers with keep false and retire it' })
       }
     }
