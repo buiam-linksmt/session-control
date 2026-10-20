@@ -188,7 +188,7 @@ Every launch prompt carries, addressed to the worker, each item below that appli
    project policy of "no gate"), fast-forward only, right after each commit; what it may stop,
    restart or tear down. Each sign-off item the task could touch: stop before it and report. Read the
    repo's own gates (its `CLAUDE.md`, `.claude/rules/`) before acting; give the answers the user settled.
-4. Commit messages follow the repo's rules, carry no AI attribution trailer and never mention an agent;
+4. Commit messages follow the repo's rules, carry no AI attribution trailer and never mention an agent; their language is the repo's: English in this repo and in any repo whose history already holds English commits (check `git log` before naming the language in the prompt), otherwise the language of its history;
    never stage `.claude.json*`, `projects/`, `memory/`, `.env` or key files.
 5. Compile, test and validate in the repo's devcontainer when it defines one (headless: its
    documented CLI equivalent on the same image; never assume validation cannot be done), otherwise
