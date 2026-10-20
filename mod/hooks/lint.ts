@@ -845,6 +845,45 @@ export function coversBranch(text: string, branch: string): boolean {
   return words.has(branch) || words.has(`${branch.slice(0, branch.indexOf('/'))}/*`)
 }
 
+/** A word of a go-ahead's line (tokensOf) that names a feature or bugfix branch or pattern: a line that holds one is a branch grant. */
+const BRANCH_WORD = /^(?:feature|bugfix)\//
+
+/**
+ * Where a go-ahead's line names the remotes of a leased push of main: `main` (bare, or in backticks or quotes), ` to `,
+ * then the remotes, either in parentheses right after `remote` or `remotes` (up to three of both, the, two, all, named
+ * before it; group 1) or as a plain list (group 2), each list `<remote>`, `<remote> and <remote>` or `<remote>, <remote>`.
+ */
+const MAIN_TO = /(?<![\w/.-])[`"'«“]?main[`"'»”]? to (?:(?:(?:both|the|two|all|named) ){0,3}remotes? \(([^()]*)\)|([A-Za-z0-9][\w.-]*(?:(?:,? and |, )[A-Za-z0-9][\w.-]*)*))/g
+
+/** The end of a clause of a go-ahead's line: `.`, `;`, `:`, `!` or `?` before a blank or the end. */
+const CLAUSE_END = /[.;:!?](?=\s|$)/g
+
+/**
+ * The remotes a go-ahead's line names for a leased push of main: the lists of its MAIN_TO places, each item without a
+ * trailing `.`, but none of a place whose clause holds a negation (GUARD_NEGATION) before `main`. Each clause is read
+ * once, so the work is linear in the length of the line.
+ */
+export function mainRemotes(text: string): Set<string> {
+  const remotes = new Set<string>()
+  const ends = new RegExp(CLAUSE_END)
+  let end = ends.exec(text)
+  let read = 0
+  let negated = false
+  for (const match of text.matchAll(MAIN_TO)) {
+    const at = match.index ?? 0
+    while (end !== null && end.index < at) {
+      read = end.index + 1
+      negated = false
+      end = ends.exec(text)
+    }
+    if (!negated) negated = GUARD_NEGATION.test(text.slice(read, at))
+    read = at
+    if (negated) continue
+    for (const item of (match[1] ?? match[2] ?? '').split(/,? and |, /)) remotes.add(item.trim().replace(/\.+$/, ''))
+  }
+  return remotes
+}
+
 /** The class and the remote of a line one form of BLOCK_FORMS or BRANCH_LEASE_FORM takes whole, and the branch of the latter; undefined for any other line. */
 function lineForm(line: string): { actionClass: SignoffClass; remote?: string; branch?: string } | undefined {
   for (const one of BLOCK_FORMS) {
@@ -949,8 +988,9 @@ export function hasSignoffBlock(prompt: string, ownLines = Number.POSITIVE_INFIN
  * What is wrong with a signoff block, checked against the Standing go-ahead lines: its id on none of them, no line,
  * more than BLOCK_MAX_LINES lines, or, at its first such line, a line no form takes whole (BLOCK_FORMS,
  * BRANCH_LEASE_FORM), a line of the other class, a leased push of main to a remote the go-ahead's line does not hold as a
- * word, or a leased push of a branch that line does not cover (coversBranch, read as no form of the class). Undefined
- * when nothing is.
+ * word, under a line that names a feature or bugfix branch (BRANCH_WORD) or to a remote the line does not name for main
+ * (mainRemotes), or a leased push of a branch that line does not cover (coversBranch, read as no form of the class).
+ * Undefined when nothing is.
  */
 function blockFault(block: SignoffBlock, grants: readonly StandingGrant[]): string | undefined {
   const grant = grants.find(one => one.id === block.id)
@@ -966,7 +1006,11 @@ function blockFault(block: SignoffBlock, grants: readonly StandingGrant[]): stri
       if (!coversBranch(grant.text, form.branch)) return `${where} is not one command in a form of the ${grant.actionClass} class`
       continue
     }
-    if (form.remote !== undefined && form.actionClass === 'force-push' && !holdsWord(grant.text, form.remote)) return `${where} pushes to ${form.remote}, a word the line of ${block.id} does not hold`
+    if (form.remote !== undefined && form.actionClass === 'force-push') {
+      if (!holdsWord(grant.text, form.remote)) return `${where} pushes to ${form.remote}, a word the line of ${block.id} does not hold`
+      if (tokensOf(grant.text).some(word => BRANCH_WORD.test(word))) return `${where} pushes main, and the line of ${block.id} names a feature or bugfix branch`
+      if (!mainRemotes(grant.text).has(form.remote)) return `${where} pushes main to ${form.remote}, which the line of ${block.id} does not name after main to (main to <remote>, main to <remote> and <remote>, main to the remotes (<remote> and <remote>)) in a clause with no negation before main`
+    }
   }
   return undefined
 }

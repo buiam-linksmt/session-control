@@ -9,7 +9,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { gitSignoffAction, signoffDenyText, signoffVerdict } from '../hooks/guard'
-import { BLOCK_HINT, BLOCK_MAX_LINES, NEGATION_WORDS_AFTER, NEGATION_WORDS_BEFORE, WARNED_COMMANDS, coversBranch, isNegatedAt, signoffLint, standingGrants } from '../hooks/lint'
+import { BLOCK_HINT, BLOCK_MAX_LINES, NEGATION_WORDS_AFTER, NEGATION_WORDS_BEFORE, WARNED_COMMANDS, coversBranch, isNegatedAt, mainRemotes, signoffLint, standingGrants } from '../hooks/lint'
 import type { StandingRead } from '../hooks/lint'
 import { OPTIONS, ORCH, REGISTRY, RUNS, mockWorld } from './mock-world'
 import type { World } from './mock-world'
@@ -785,6 +785,87 @@ describe('a signoff block: the leased push of one feature or bugfix branch (lint
     // The main form keeps its own rule: the remote is a word of the cited line, which the feature line does not hold.
     expect(branchFault(FEATURES_ID, 'git push --force-with-lease origin main')).toBe(`its line 1 (line 3 of the prompt) pushes to origin, a word the line of ${FEATURES_ID} does not hold`)
     expect(branchLint('signoff-main-only', 'git push --force-with-lease origin main').refusal).toBeUndefined()
+  })
+
+  // The main form under a line that is no go-ahead for main: the remote of a leased push of main is a remote the line
+  // names after `main to`, in a clause with no negation before main, and the line names no feature or bugfix branch.
+  const ROOT_AUTHOR_ID = 'signoff-rewrite-root-author'
+  const SQUASH_ID = 'signoff-squash-shaped'
+  const SQUASH_PLAIN_ID = 'signoff-squash-no-branch'
+  const MAIN_DECISIONS = [
+    BRANCH_DECISIONS,
+    '## Standing: main',
+    `${ROOT_AUTHOR_ID}. [signoff:force-push] User (2026-10-12), explicit permission and agreed order (after the branch cleanup): rewrite the author of the root commit of the session-control repository (8d0b3e9, Initial commit, authored by llakeethur) to Matteo Buia <matteo.buia@linksmt.it>, which changes every later hash, and force-push main to both remotes (origin and linksmt) with --force-with-lease so that both hold the same commits; the worker verifies the trees of all commits are identical before and after, backs up the old history in a local bundle outside the repository, and touches nothing else. Cited by this id, a worker prompt may instruct that one force-push (--force-with-lease only, to main of the two named remotes); the mod accepts the citation only for this action class. Mine, flagged: other clones of the repository diverge and must be re-fetched; GitHub may show the old contributor in cached statistics for a while.`,
+    `${SQUASH_ID}. [signoff:force-push] User (2026-10-20), «squash the two commits into one»: on the branch feature/italian-writing-skill of ai-process-transformation (created by this work, not merged, not protected, pushed with commits 311c310 and 850ea28 on top of origin/develop d921277) the two commits are squashed into one and the branch is force-pushed with lease to origin; nothing else is rewritten.`,
+    `${SQUASH_PLAIN_ID}. [signoff:force-push] User: squash the two commits of topic-x on top of origin/develop and force-push it with lease to origin and linksmt.`,
+    'signoff-main-and-branch. [signoff:force-push] User: push main to origin and feature/x with --force-with-lease.',
+    'signoff-never-main. [signoff:force-push] User: rewrite develop with lease to origin; never push main to origin.',
+    'signoff-not-main. [signoff:force-push] User: do not force-push main to origin or linksmt.',
+    'signoff-main-then-never. [signoff:force-push] User: push main to origin with lease; never develop.',
+    'signoff-main-list. [signoff:force-push] User: push `main` to origin, backup and mirror with --force-with-lease.',
+    '',
+  ].join('\n')
+  const mainFault = (id: string, ...lines: string[]) => faultOf(`${ITEMS}${block(id, ...lines)}`, { text: MAIN_DECISIONS })
+  const mainLint = (id: string, ...lines: string[]) => signoffLint(`${ITEMS}${block(id, ...lines)}`, { text: MAIN_DECISIONS })
+  const notNamed = (id: string, remote: string) => `its line 1 (line 3 of the prompt) pushes main to ${remote}, which the line of ${id} does not name after main to (main to <remote>, main to <remote> and <remote>, main to the remotes (<remote> and <remote>)) in a clause with no negation before main`
+  const notHeld = (id: string, remote: string) => `its line 1 (line 3 of the prompt) pushes to ${remote}, a word the line of ${id} does not hold`
+  const besideBranch = (id: string) => `its line 1 (line 3 of the prompt) pushes main, and the line of ${id} names a feature or bugfix branch`
+
+  test('a main block citing the feature-branch go-ahead is refused to every remote: with, feature, lease, branch (words of its line), origin, linksmt', () => {
+    for (const [remote, fault] of [
+      ['with', besideBranch(FEATURES_ID)], ['feature', besideBranch(FEATURES_ID)], ['lease', besideBranch(FEATURES_ID)], ['branch', besideBranch(FEATURES_ID)],
+      ['origin', notHeld(FEATURES_ID, 'origin')], ['linksmt', notHeld(FEATURES_ID, 'linksmt')],
+    ] as const) {
+      for (const line of [`git push --force-with-lease ${remote} main`, `git push --force-with-lease=main ${remote} main`, `git push --force-with-lease=refs/heads/main ${remote} main`]) {
+        expect({ line, fault: mainFault(FEATURES_ID, line) }).toEqual({ line, fault })
+      }
+    }
+  })
+
+  test('a main block citing a squash go-ahead for one branch (origin/develop, to origin, no main) is refused to origin, with or without a feature branch on the line', () => {
+    expect(mainFault(SQUASH_ID, 'git push --force-with-lease origin main')).toBe(besideBranch(SQUASH_ID))
+    for (const remote of ['with', 'lease', 'branch']) expect(mainFault(SQUASH_ID, `git push --force-with-lease ${remote} main`)).toBe(besideBranch(SQUASH_ID))
+    for (const remote of ['origin', 'linksmt', 'and', 'to']) expect({ remote, fault: mainFault(SQUASH_PLAIN_ID, `git push --force-with-lease ${remote} main`) }).toEqual({ remote, fault: notNamed(SQUASH_PLAIN_ID, remote) })
+  })
+
+  test('the root-author go-ahead still passes its own block, main to origin and linksmt; every other word of its line is refused as the remote', () => {
+    const lines = ['git push --force-with-lease origin main', 'git push --force-with-lease linksmt main']
+    expect(mainLint(ROOT_AUTHOR_ID, ...lines)).toEqual({ warnings: [MAIN_WARNING, `sign-off allowed by ${ROOT_AUTHOR_ID}: force-push: ${lines.join('; ')}`], allowed: [{ id: ROOT_AUTHOR_ID, actionClass: 'force-push', commands: lines }] })
+    for (const line of ['git push --force-with-lease=main origin main', 'git push --force-with-lease=refs/heads/main linksmt main']) expect(mainLint(ROOT_AUTHOR_ID, line).refusal).toBeUndefined()
+    for (const remote of ['with', 'both', 'and', 'Matteo', 'Buia', 'author', 'the', 'repository', 'mod', 'GitHub', 'bundle', 'commits']) {
+      expect({ remote, fault: mainFault(ROOT_AUTHOR_ID, `git push --force-with-lease ${remote} main`) }).toEqual({ remote, fault: notNamed(ROOT_AUTHOR_ID, remote) })
+    }
+    expect(mainFault(ROOT_AUTHOR_ID, 'git push --force-with-lease upstream main')).toBe(notHeld(ROOT_AUTHOR_ID, 'upstream'))
+  })
+
+  test('a line that names main to a remote beside a feature branch, or only in a negated clause, is no go-ahead for main; a negation in a later clause is', () => {
+    expect(mainFault('signoff-main-and-branch', 'git push --force-with-lease origin main')).toBe(besideBranch('signoff-main-and-branch'))
+    expect(mainFault('signoff-never-main', 'git push --force-with-lease origin main')).toBe(notNamed('signoff-never-main', 'origin'))
+    for (const remote of ['origin', 'linksmt']) expect(mainFault('signoff-not-main', `git push --force-with-lease ${remote} main`)).toBe(notNamed('signoff-not-main', remote))
+    expect(mainLint('signoff-main-then-never', 'git push --force-with-lease origin main').refusal).toBeUndefined()
+    for (const remote of ['origin', 'backup', 'mirror']) expect(mainLint('signoff-main-list', `git push --force-with-lease ${remote} main`).refusal).toBeUndefined()
+    expect(mainFault('signoff-main-list', 'git push --force-with-lease with main')).toBe(notNamed('signoff-main-list', 'with'))
+  })
+
+  test('mainRemotes: the remotes after main to, plain or in parentheses after remote(s), each clause with a negation before main left out', () => {
+    for (const [text, remotes] of [
+      ['push main to origin with lease.', ['origin']],
+      ['push main to origin.', ['origin']],
+      ['push main to origin and backup with lease', ['origin', 'backup']],
+      ['push main to origin, backup, and mirror', ['origin', 'backup', 'mirror']],
+      ['force-push main to both remotes (origin and linksmt) with lease', ['origin', 'linksmt']],
+      ['force-push main to the two named remotes (origin, linksmt)', ['origin', 'linksmt']],
+      ['push `main` to origin; push "main" to backup', ['origin', 'backup']],
+      ['never push main to origin', []],
+      ['rewrite develop; never main to origin. Then push main to backup', ['backup']],
+      ['do not push main to origin, but push main to backup', []],
+      ['push origin/main to origin', []],
+      ['push main into origin', []],
+      ['force-push main, develop and master to origin', []],
+      ['', []],
+    ] as const) {
+      expect({ text, remotes: [...mainRemotes(text)] }).toEqual({ text, remotes: [...remotes] })
+    }
   })
 
   test('the malformed branch forms are refused: .., slashes, +, :, wildcards, a second name, quoting, variables, substitutions, --force, -f, a plus refspec, the lease with a value, other remotes and options', () => {

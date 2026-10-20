@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BLOCK_FORMS, BRANCH_LEASE_FORM, NEAR_OPEN_MAX_CHARS, PROMPT_MAX_CHARS, hasSignoffBlock, isNearOpen, isNegatedAt, isNegatedAtBySlices, promptLint, quotedSpans, signoffLint, standingGrants, verbsOf } from '../hooks/lint'
+import { BLOCK_FORMS, BRANCH_LEASE_FORM, NEAR_OPEN_MAX_CHARS, PROMPT_MAX_CHARS, hasSignoffBlock, isNearOpen, isNegatedAt, isNegatedAtBySlices, mainRemotes, promptLint, quotedSpans, signoffLint, standingGrants, verbsOf } from '../hooks/lint'
 import { OPTIONS, ORCH, REGISTRY, mockWorld } from './mock-world'
 
 const MB = 1_000_000
@@ -67,6 +67,10 @@ const SHAPES: Readonly<Record<string, (n: number) => string>> = {
   'no-gap': n => `no${repeat(' any', n)} x`,
   'quotes-alternating': n => repeat('“’«`"‘»„「', n),
   'quotes-nested': n => repeat('““a”', n),
+  'main-to': n => repeat('main to a ', n),
+  'main-to-list': n => `main to ${repeat('a, ', n)}`,
+  'main-to-parens': n => `main to remotes (${repeat('a and ', n)}`,
+  'never-main-to': n => repeat('never main to a ', n),
 }
 
 /** The opening mark of each quote pair, by name: the pairs a quoted part is made of, and the others a prompt may hold. */
@@ -116,6 +120,7 @@ const FAMILY_SHAPES: Readonly<Record<string, readonly string[]>> = {
   blocks: ['gt', 'backticks-sign-of'],
   negation: ['parens', 'colons'],
   prompt: ['section', 'branch'],
+  main: ['main-to', 'main-to-list', 'main-to-parens', 'never-main-to', 'semicolons'],
   guard: ['gt', 'zero-width-gt', 'git-C', 'push', 'parens', 'colons', 'force-push', 'push-main', 'quotes', 'quotes-alternating', 'quotes-nested'],
 }
 const shapesOf = (family: string) => FAMILY_SHAPES[family] ?? []
@@ -127,6 +132,7 @@ describe('the sign-off guard on 1 MB lines: each family of its patterns within t
     [`the Standing parse (standingGrants: headings, fences, marked lines): at most ${FAMILY_MS} ms on each shape`, 'standing', line => standingGrants(`## Standing\n${line}`)],
     [`the fences and the block syntax (hasSignoffBlock): at most ${FAMILY_MS} ms on each shape`, 'blocks', line => hasSignoffBlock(`Do it.\n${line}\nReport.`)],
     [`the negation windows (isNegatedAt) at the end of a line: at most ${FAMILY_MS} ms on each shape`, 'negation', line => isNegatedAt(`${line} --force`, line.length + 1, line.length + 8, 0)],
+    [`the remotes of a leased push of main (mainRemotes): at most ${FAMILY_MS} ms on each shape`, 'main', line => mainRemotes(line)],
     // No run of `a.`: the secret scan's url pattern (secrets.ts, outside the guard) reads one in time that grows with its square.
     [`the prompt lint's patterns (promptLint of a skill test): at most ${FAMILY_MS} ms on each shape`, 'prompt', line => promptLint(`skill test\n${line}`)],
   ]
