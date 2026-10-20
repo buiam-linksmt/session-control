@@ -9,7 +9,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { gitSignoffAction, signoffDenyText, signoffVerdict } from '../hooks/guard'
-import { BLOCK_HINT, BLOCK_MAX_LINES, NEGATION_WORDS_AFTER, NEGATION_WORDS_BEFORE, WARNED_COMMANDS, isNegatedAt, signoffLint, standingGrants } from '../hooks/lint'
+import { BLOCK_HINT, BLOCK_MAX_LINES, NEGATION_WORDS_AFTER, NEGATION_WORDS_BEFORE, WARNED_COMMANDS, coversBranch, isNegatedAt, signoffLint, standingGrants } from '../hooks/lint'
 import type { StandingRead } from '../hooks/lint'
 import { OPTIONS, ORCH, REGISTRY, RUNS, mockWorld } from './mock-world'
 import type { World } from './mock-world'
@@ -358,7 +358,7 @@ const DELETE_ID = 'signoff-delete-branches'
 const LEASE_ID = 'signoff-rewrite-root-author'
 const MAIN_WARNING = "the prompt names a push to main: a push to a protected branch needs the user's go-ahead where the project's push policy asks (a Standing decision push-<project>); check it before the worker pushes"
 const FORMS_TEXT =
-  'a signoff block holds one command per line, nothing else, each of the class of its go-ahead: git push <remote> --delete refs/heads/<name>, git push <remote> :refs/heads/<name> or git branch -d <name> for delete-branch, git push --force-with-lease <remote> main for force-push (README, Sign-off guard)'
+  'a signoff block holds one command per line, nothing else, each of the class of its go-ahead: git push <remote> --delete refs/heads/<name>, git push <remote> :refs/heads/<name> or git branch -d <name> for delete-branch, git push --force-with-lease <remote> main or git push --force-with-lease <remote> <branch> (also refs/heads/<branch>), <branch> one feature/... or bugfix/... branch the go-ahead\'s line names or covers with feature/* or bugfix/*, for force-push (README, Sign-off guard)'
 
 /** A signoff block citing `id`, with these lines. */
 const block = (id: string, ...lines: string[]) => `\`\`\`signoff ${id}\n${lines.join('\n')}\n\`\`\``
@@ -693,6 +693,140 @@ describe('a signoff block (lint.ts)', () => {
   })
 })
 
+// The leased push of one feature or bugfix branch: a form of the force-push class only for a go-ahead whose line names
+// that branch or holds the pattern feature/* or bugfix/* as a word; every refusal above stays.
+const BRANCH_DECISIONS = [
+  '# Agreed decisions',
+  '',
+  '## A unit',
+  'signoff-unit-force. [signoff:force-push] Not standing: feature/* and bugfix/*.',
+  '',
+  '## Standing: force-push of feature branches',
+  'signoff-force-push-feature-branches. [signoff:force-push] User (2026-10-20), «the guard is too strict, you can force push on feature branches»: a push with lease that rewrites a feature/* or bugfix/* branch is allowed without asking again, on every repository; never main, develop, master, release/* or hotfix/*. Orchestrator reading, not asked: the guard keeps the signoff block (one exact branch per line, never a wildcard in the command) and the decision covers any branch matching the two patterns feature/* and bugfix/*; it also covers feature/italian-writing-skill.',
+  '',
+  '## Standing',
+  'signoff-bugfix-only. [signoff:force-push] User: force-push with lease any bugfix/* branch; never a feature branch.',
+  'signoff-named-branch. [signoff:force-push] User: force-push `feature/one-off` with lease, once.',
+  'signoff-other-wildcards. [signoff:force-push] User: force-push any branch: *, feature/**, feat*/*, */*, feature/?, feature/x*, bugfix/**, refs/heads/feature/*, feature/[a-z]*.',
+  'signoff-main-only. [signoff:force-push] User: rewrite the root author and push main to origin with --force-with-lease.',
+  'signoff-delete-features. [signoff:delete-branch] User: delete merged feature/* and bugfix/* branches.',
+  'signoff-plain-feature. User: force-push feature/* with lease (no marker).',
+  '',
+].join('\n')
+const BRANCH_STANDING: StandingRead = { text: BRANCH_DECISIONS }
+const FEATURES_ID = 'signoff-force-push-feature-branches'
+
+describe('a signoff block: the leased push of one feature or bugfix branch (lint.ts)', () => {
+  const branchLint = (id: string, ...lines: string[]) => signoffLint(`${ITEMS}${block(id, ...lines)}`, BRANCH_STANDING)
+  const branchFault = (id: string, ...lines: string[]) => faultOf(`${ITEMS}${block(id, ...lines)}`, BRANCH_STANDING)
+  const passes = (id: string, lines: string[]) => ({ warnings: [`sign-off allowed by ${id}: force-push: ${lines.join('; ')}`], allowed: [{ id, actionClass: 'force-push', commands: lines }] })
+
+  test('both spellings pass for a branch the cited line names, to any plain remote, which the line need not hold', () => {
+    for (const [id, branch] of [[FEATURES_ID, 'feature/italian-writing-skill'], ['signoff-named-branch', 'feature/one-off']] as const) {
+      for (const remote of ['origin', 'linksmt', 'upstream-2', 'my.remote']) {
+        for (const line of [`git push --force-with-lease ${remote} ${branch}`, `git push --force-with-lease ${remote} refs/heads/${branch}`]) {
+          expect({ line, lint: branchLint(id, line) }).toEqual({ line, lint: passes(id, [line]) })
+        }
+      }
+    }
+  })
+
+  test('a branch the pattern feature/* or bugfix/* of the cited line covers passes; one block may hold several, one per line', () => {
+    const branches = ['feature/x', 'feature/a/b-1.2_c', 'feature/JIRA-12', 'feature/0', 'bugfix/y', 'bugfix/a.b/c_d', 'bugfix/HEAD', `feature/${'x'.repeat(5000)}`]
+    for (const branch of branches) {
+      for (const line of [`git push --force-with-lease origin ${branch}`, `git push --force-with-lease origin refs/heads/${branch}`]) {
+        expect({ line, lint: branchLint(FEATURES_ID, line) }).toEqual({ line, lint: passes(FEATURES_ID, [line]) })
+      }
+    }
+    for (const line of ['git push --force-with-lease origin bugfix/z', 'git push --force-with-lease origin refs/heads/bugfix/a/b']) {
+      expect({ line, lint: branchLint('signoff-bugfix-only', line) }).toEqual({ line, lint: passes('signoff-bugfix-only', [line]) })
+    }
+    const lines = ['git push --force-with-lease origin feature/x', 'git push --force-with-lease linksmt feature/x', 'git push --force-with-lease origin refs/heads/bugfix/y']
+    expect(branchLint(FEATURES_ID, ...lines)).toEqual(passes(FEATURES_ID, lines))
+    // Prose around the block is checked as before: a force-push step outside it is refused.
+    expect(listedOf(signoffLint(`${ITEMS}${block(FEATURES_ID, lines[0] ?? '')}\nThen git push --force-with-lease origin feature/other.`, BRANCH_STANDING))).toBe('a force-push on line 5')
+  })
+
+  test('a branch the cited line neither names nor covers by feature/* or bugfix/* is refused', () => {
+    for (const [id, branch] of [
+      [FEATURES_ID, 'release/1'], [FEATURES_ID, 'fix/x'], [FEATURES_ID, 'hotfix/x'], [FEATURES_ID, 'feat/x'], [FEATURES_ID, 'features/x'], [FEATURES_ID, 'x'],
+      ['signoff-bugfix-only', 'feature/x'], ['signoff-bugfix-only', 'feature/bugfix'],
+      ['signoff-named-branch', 'feature/other'], ['signoff-named-branch', 'feature/one-off-2'], ['signoff-named-branch', 'feature/one'], ['signoff-named-branch', 'bugfix/one-off'], ['signoff-named-branch', 'feature/one-off/x'],
+      ['signoff-main-only', 'feature/x'], ['signoff-main-only', 'bugfix/x'],
+    ] as const) {
+      for (const line of [`git push --force-with-lease origin ${branch}`, `git push --force-with-lease origin refs/heads/${branch}`]) {
+        expect({ id, line, fault: branchFault(id, line) }).toEqual({ id, line, fault: notAForm('force-push') })
+      }
+    }
+    // The first line that fails is named, after one that passes.
+    expect(branchFault('signoff-bugfix-only', 'git push --force-with-lease origin bugfix/a', 'git push --force-with-lease origin feature/a')).toBe(notAForm('force-push', 2, 4))
+  })
+
+  test('no other wildcard of the cited line covers a branch: *, feature/**, feat*/*, */*, feature/?, feature/x*, bugfix/**, refs/heads/feature/*, feature/[a-z]*', () => {
+    for (const branch of ['feature/x', 'feature/xy', 'feature/a', 'bugfix/x', 'feat/x', 'feature/[a-z]*']) {
+      expect({ branch, fault: branchFault('signoff-other-wildcards', `git push --force-with-lease origin ${branch}`) }).toEqual({ branch, fault: notAForm('force-push') })
+    }
+    for (const [text, branch, covered] of [
+      ['feature/*', 'feature/x', true], ['(feature/*,', 'feature/x', true], ['`feature/x`.', 'feature/x', true], ['«bugfix/*»', 'bugfix/a/b', true],
+      ['feature/* only', 'bugfix/x', false], ['feature/x/y', 'feature/x', false], ['feature/xy', 'feature/x', false], ['feature/x-y', 'feature/x', false], ['refs/heads/feature/x', 'feature/x', false],
+      ['*', 'feature/x', false], ['feature/**', 'feature/x', false], ['feat*/*', 'feature/x', false], ['*/*', 'feature/x', false], ['feature/x*', 'feature/xy', false], ['Feature/*', 'feature/x', false], ['FEATURE/X', 'feature/x', false],
+    ] as const) {
+      expect({ text, branch, covered: coversBranch(text, branch) }).toEqual({ text, branch, covered })
+    }
+  })
+
+  test('main-like protected names in the branch form are refused under a line that names them too', () => {
+    const naming = `${BRANCH_DECISIONS}\n## Standing: names\nsignoff-names-protected. [signoff:force-push] User: develop, master, main, release/1, hotfix/x, HEAD, feature/*.\n`
+    for (const branch of ['develop', 'master', 'release/1', 'hotfix/x', 'HEAD', 'Develop', 'MASTER', 'Release/1', 'Hotfix/x', 'feature', 'bugfix', 'Feature/x', 'BUGFIX/x', 'heads/feature/x', 'refs/heads/develop', 'refs/heads/release/1', 'refs/heads/hotfix/x']) {
+      for (const id of [FEATURES_ID, 'signoff-names-protected']) {
+        expect({ id, branch, fault: faultOf(`${ITEMS}${block(id, `git push --force-with-lease origin ${branch}`)}`, { text: naming }) }).toEqual({ id, branch, fault: notAForm('force-push') })
+      }
+    }
+    // The main form keeps its own rule: the remote is a word of the cited line, which the feature line does not hold.
+    expect(branchFault(FEATURES_ID, 'git push --force-with-lease origin main')).toBe(`its line 1 (line 3 of the prompt) pushes to origin, a word the line of ${FEATURES_ID} does not hold`)
+    expect(branchLint('signoff-main-only', 'git push --force-with-lease origin main').refusal).toBeUndefined()
+  })
+
+  test('the malformed branch forms are refused: .., slashes, +, :, wildcards, a second name, quoting, variables, substitutions, --force, -f, a plus refspec, the lease with a value, other remotes and options', () => {
+    const REFUSED = [
+      'feature/..', 'feature/a..b', 'feature/../main', 'feature/x/', 'feature/', 'feature//x', 'feature/.x', 'feature/x.', 'feature/x.lock', 'feature/x.LOCK/y', 'feature/-x', 'feature/x/_y',
+      'feature/+x', '+feature/x', '+refs/heads/feature/x', 'feature/x:feature/x', 'feature/x:main', 'HEAD:feature/x', 'refs/heads/feature/x:refs/heads/feature/x', ':feature/x',
+      'feature/*', 'feature/x*', 'feature/?', 'feature/[ab]', 'feature/{a,b}', 'feature/x~1', 'feature/x^', 'feature/x@{1}', 'feature/café', 'feature/​x',
+      'feature/x feature/y', 'feature/x bugfix/y', 'feature/x main', 'feature/x +develop', 'feature/x "+develop"', 'feature/x, develop', 'feature/x and develop', 'feature/x then develop', 'feature/x; git push --force origin main',
+      '"feature/x"', "'feature/x'", '`feature/x`', 'feature/$B', '$B', '${B}', 'feature/${B}', '"$B"', '$(echo feature/x)', 'feature/$(echo x)', '`echo feature/x`',
+      'feature/x --no-verify', 'feature/x --force', 'feature/x ', ' feature/x', 'feature/x\r', 'refs/heads/feature/*', 'refs/heads/ feature/x', 'refs/tags/feature/x', 'refs/remotes/origin/feature/x', 'heads/feature/x',
+    ]
+    for (const branch of REFUSED) {
+      const line = `git push --force-with-lease origin ${branch}`
+      expect({ line, fault: branchFault(FEATURES_ID, line) }).toEqual({ line, fault: notAForm('force-push') })
+    }
+    const COMMANDS = [
+      'git push --force origin feature/x', 'git push -f origin feature/x', 'git push origin +feature/x', 'git push origin +refs/heads/feature/x', 'git push --force-with-lease --force origin feature/x',
+      'git push --force-with-lease=feature/x:abc1234 origin feature/x', 'git push --force-with-lease=refs/heads/feature/x:abc1234 origin feature/x', 'git push --force-with-lease=feature/x origin feature/x',
+      'git push --force-with-lease=refs/heads/feature/x origin feature/x', 'git push --force-with-lease=main origin feature/x', 'git push --force-with-lease=feature/x:$SHA origin feature/x', 'git push --force-with-lease --force-if-includes origin feature/x',
+      'git push origin feature/x --force-with-lease', 'git push origin --force-with-lease feature/x', 'git push --force-with-lease feature/x', 'git push --force-with-lease origin', 'git push --force-with-lease',
+      'git push --force-with-lease /tmp/r.git feature/x', 'git push --force-with-lease ../r feature/x', 'git push --force-with-lease . feature/x', 'git push --force-with-lease https://example.invalid/r.git feature/x',
+      'git push --force-with-lease git@example.invalid:r.git feature/x', 'git push --force-with-lease $REMOTE feature/x', 'git push --force-with-lease "origin" feature/x', 'git push --force-with-lease main feature/x',
+      'git push --force-with-lease heads feature/x', 'git push --force-with-lease Develop feature/x', 'git -C /r push --force-with-lease origin feature/x', 'git -c remote.origin.url=/tmp/x push --force-with-lease origin feature/x',
+      'push --force-with-lease origin feature/x', 'git push  --force-with-lease origin feature/x', 'git push --force-with-lease  origin feature/x', 'git\tpush --force-with-lease origin feature/x', 'GIT push --force-with-lease origin feature/x',
+      'git push --FORCE-WITH-LEASE origin feature/x', 'git push --mirror --force-with-lease origin', 'git push --force-with-lease origin feature/x --delete x', 'force-push feature/x to origin', 'echo feature/x | xargs git push --force-with-lease origin',
+    ]
+    for (const line of COMMANDS) expect({ line, fault: branchFault(FEATURES_ID, line) }).toEqual({ line, fault: notAForm('force-push') })
+  })
+
+  test('a wrong class, a missing or a non-Standing decision refuse; a deletion under the feature line is of the other class', () => {
+    const line = 'git push --force-with-lease origin feature/x'
+    expect(branchFault('signoff-delete-features', line)).toBe('its line 1 (line 3 of the prompt) is a force-push command, and signoff-delete-features covers delete-branch')
+    expect(branchFault(FEATURES_ID, 'git push origin --delete refs/heads/feature/x')).toBe(`its line 1 (line 3 of the prompt) is a delete-branch command, and ${FEATURES_ID} covers force-push`)
+    for (const id of ['signoff-unit-force', 'signoff-plain-feature', 'signoff-unknown', 'Signoff-force-push-feature-branches']) {
+      expect({ id, fault: branchFault(id, line) }).toEqual({ id, fault: `${id} is on no line of a Standing section as \`${id}. [signoff:<class>] <text>\` (the marker right after the id)` })
+    }
+    expect(signoffLint(`${ITEMS}${block(FEATURES_ID, line)}`)).toEqual({ refusal: `refused by the sign-off guard: the signoff block on line 2 cannot be checked: the Standing decisions file could not be read: it was not read`, warnings: [] })
+    // The id in prose lifts nothing, as for the other forms.
+    expect(listedOf(signoffLint(`${ITEMS}Per ${FEATURES_ID}: ${line}`, BRANCH_STANDING))).toBe('a force-push on line 2')
+  })
+})
+
 // The checker's attack set: 202 prompts that cite a go-ahead in prose, each with the old design's verdict (A accepted,
 // R refused). As prose each is now refused, or accepted as main accepts it; as a signoff block with the same id and
 // text each is refused, but for the lines the grammar takes.
@@ -932,5 +1066,35 @@ describe('a signoff block through the plugin', () => {
       expect({ command, isPassed: answer.isPassed, refused: answer.deny?.startsWith('session-control: refused by the sign-off guard: git ') }).toEqual({ command, isPassed: false, refused: true })
     }
     expect((await call('PowerShell', { command: 'git push origin --delete feature/old # signoff-delete-branches' })).deny).toContain('(PowerShell)')
+  })
+})
+
+describe('the leased push of one feature or bugfix branch through the plugin', () => {
+  test('launch_worker: a block under the feature-branch go-ahead is launched with its WARNING line; an uncovered branch is refused, nothing launched', { options: OPTIONS }, async ($, on) => {
+    const { world, call } = await started($, on)
+    world.files.set(`${ORCH}/agreed-decisions.md`, BRANCH_DECISIONS)
+    const launch = (prompt: string, title: string) => call('mcp__session-control__launch_worker', { dir: '/w/work', model: 'haiku', effort: 'low', title, prompt })
+    const lines = ['git push --force-with-lease origin feature/italian-writing-skill', 'git push --force-with-lease linksmt refs/heads/feature/italian-writing-skill']
+    const accepted = await launch(`${ITEMS}${block(FEATURES_ID, ...lines)}\nReport.`, 'feature lease')
+    expect(accepted.deny).toBeUndefined()
+    expect(String(accepted.result).split('\n')).toContain(`WARNING: sign-off allowed by ${FEATURES_ID}: force-push: ${lines.join('; ')}`)
+    expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
+    const refused = await launch(`${ITEMS}${block(FEATURES_ID, 'git push --force-with-lease origin release/1')}`, 'release lease')
+    expect(refused.deny).toStartWith(`session-control: refused by the sign-off guard: the signoff block on line 2 (signoff ${FEATURES_ID}): ${notAForm('force-push')};`)
+    expect(refused.deny).toEndWith('; nothing was launched')
+    expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
+  })
+
+  test('the orchestrator session: its own leased push of a feature branch stays refused, whatever id or block its command text holds', { options: OPTIONS }, async ($, on) => {
+    const { world, call } = await started($, on)
+    world.files.set(`${ORCH}/agreed-decisions.md`, BRANCH_DECISIONS)
+    for (const command of [
+      'git push --force-with-lease origin feature/italian-writing-skill',
+      `git push --force-with-lease origin feature/italian-writing-skill # ${FEATURES_ID}`,
+      `cat <<'EOF'\n\`\`\`signoff ${FEATURES_ID}\ngit push --force-with-lease origin feature/x\n\`\`\`\nEOF\ngit push --force-with-lease origin feature/x`,
+    ]) {
+      const answer = await call('Bash', { command })
+      expect({ command, isPassed: answer.isPassed, refused: answer.deny?.startsWith('session-control: refused by the sign-off guard: git push --force') }).toEqual({ command, isPassed: false, refused: true })
+    }
   })
 })

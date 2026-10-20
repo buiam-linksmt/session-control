@@ -819,13 +819,40 @@ export const BLOCK_FORMS: readonly { actionClass: SignoffClass; form: RegExp }[]
   { actionClass: 'force-push', form: new RegExp(`^git push --force-with-lease(?:=main|=refs/heads/main)? (${REMOTE}) main$`) },
 ]
 
-/** The class and the remote of a line one form of BLOCK_FORMS takes whole; undefined for any other line. */
-function lineForm(line: string): { actionClass: SignoffClass; remote?: string } | undefined {
+/**
+ * One unprotected branch a leased push may name: `feature/` or `bugfix/`, in lower case, then segments (SEGMENT) joined
+ * by one `/`, with no `..` and no segment that ends in `.` or `.lock`; read as NAME reads its run, so no wildcard, `:`,
+ * `+`, quote, `$` or blank, and never main, develop, master, release/... or hotfix/....
+ */
+const BRANCH = String.raw`(?:feature|bugfix)\/(?!.*\.\.)(?!.*\.(?:\/|$))(?!.*\.${anyCase('lock')}(?:\/|$))(?!.*\/(?:[\/._-]|$))[A-Za-z0-9][A-Za-z0-9._\/-]*`
+
+/**
+ * The force-push line of one unprotected branch: the bare flag, one remote (group 1) and one BRANCH (group 2), bare or
+ * as `refs/heads/<branch>`. Kept out of BLOCK_FORMS: it is a form only for a go-ahead whose line covers its branch
+ * (coversBranch), and the go-ahead's line need not hold its remote.
+ */
+export const BRANCH_LEASE_FORM = new RegExp(`^git push --force-with-lease (${REMOTE}) (?:refs/heads/)?(${BRANCH})$`)
+
+/** The words of a go-ahead's line, between blanks, without the quotes, brackets and punctuation around each. */
+const tokensOf = (text: string) => text.split(/\s+/).map(word => word.replace(/^[("'`«“‘[{]+/, '').replace(/[)"'`»”’\]},;:.!?]+$/, ''))
+
+/**
+ * Whether a go-ahead's line covers a branch of BRANCH_LEASE_FORM: one of its words (tokensOf) is that exact branch, or
+ * `feature/*` for a feature branch, `bugfix/*` for a bugfix one. No other wildcard covers anything.
+ */
+export function coversBranch(text: string, branch: string): boolean {
+  const words = new Set(tokensOf(text))
+  return words.has(branch) || words.has(`${branch.slice(0, branch.indexOf('/'))}/*`)
+}
+
+/** The class and the remote of a line one form of BLOCK_FORMS or BRANCH_LEASE_FORM takes whole, and the branch of the latter; undefined for any other line. */
+function lineForm(line: string): { actionClass: SignoffClass; remote?: string; branch?: string } | undefined {
   for (const one of BLOCK_FORMS) {
     const match = one.form.exec(line)
     if (match !== null) return { actionClass: one.actionClass, ...(match[1] === undefined ? {} : { remote: match[1] }) }
   }
-  return undefined
+  const branch = BRANCH_LEASE_FORM.exec(line)
+  return branch === null ? undefined : { actionClass: 'force-push', remote: branch[1] ?? '', branch: branch[2] ?? '' }
 }
 
 /** A signoff block's opening line: three backticks at the start of the line, `signoff`, one blank, the decision id, nothing more. */
@@ -920,8 +947,10 @@ export function hasSignoffBlock(prompt: string, ownLines = Number.POSITIVE_INFIN
 
 /**
  * What is wrong with a signoff block, checked against the Standing go-ahead lines: its id on none of them, no line,
- * more than BLOCK_MAX_LINES lines, or, at its first such line, a line no form takes whole (BLOCK_FORMS), a line of the
- * other class, or a leased push to a remote the go-ahead's line does not hold as a word. Undefined when nothing is.
+ * more than BLOCK_MAX_LINES lines, or, at its first such line, a line no form takes whole (BLOCK_FORMS,
+ * BRANCH_LEASE_FORM), a line of the other class, a leased push of main to a remote the go-ahead's line does not hold as a
+ * word, or a leased push of a branch that line does not cover (coversBranch, read as no form of the class). Undefined
+ * when nothing is.
  */
 function blockFault(block: SignoffBlock, grants: readonly StandingGrant[]): string | undefined {
   const grant = grants.find(one => one.id === block.id)
@@ -933,6 +962,10 @@ function blockFault(block: SignoffBlock, grants: readonly StandingGrant[]): stri
     const form = lineForm(line.text)
     if (form === undefined) return `${where} is ${line.text === '' ? 'empty' : `not one command in a form of the ${grant.actionClass} class`}`
     if (form.actionClass !== grant.actionClass) return `${where} is a ${form.actionClass} command, and ${block.id} covers ${grant.actionClass}`
+    if (form.branch !== undefined) {
+      if (!coversBranch(grant.text, form.branch)) return `${where} is not one command in a form of the ${grant.actionClass} class`
+      continue
+    }
     if (form.remote !== undefined && form.actionClass === 'force-push' && !holdsWord(grant.text, form.remote)) return `${where} pushes to ${form.remote}, a word the line of ${block.id} does not hold`
   }
   return undefined
@@ -940,7 +973,7 @@ function blockFault(block: SignoffBlock, grants: readonly StandingGrant[]): stri
 
 /** What a signoff block's refusal ends with: the forms its lines may take. */
 const BLOCK_FORMS_TEXT =
-  'a signoff block holds one command per line, nothing else, each of the class of its go-ahead: git push <remote> --delete refs/heads/<name>, git push <remote> :refs/heads/<name> or git branch -d <name> for delete-branch, git push --force-with-lease <remote> main for force-push (README, Sign-off guard)'
+  'a signoff block holds one command per line, nothing else, each of the class of its go-ahead: git push <remote> --delete refs/heads/<name>, git push <remote> :refs/heads/<name> or git branch -d <name> for delete-branch, git push --force-with-lease <remote> main or git push --force-with-lease <remote> <branch> (also refs/heads/<branch>), <branch> one feature/... or bugfix/... branch the go-ahead\'s line names or covers with feature/* or bugfix/*, for force-push (README, Sign-off guard)'
 
 /** The class of the refusal labels a signoff block can cover. */
 const CLASS_OF: Readonly<Record<string, SignoffClass>> = { 'a remote branch or tag deletion': 'delete-branch', 'a force-push': 'force-push' }

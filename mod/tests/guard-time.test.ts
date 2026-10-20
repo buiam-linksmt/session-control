@@ -5,7 +5,7 @@
 
 import { describe, expect, test } from 'claude-code/testing'
 
-import { BLOCK_FORMS, NEAR_OPEN_MAX_CHARS, PROMPT_MAX_CHARS, hasSignoffBlock, isNearOpen, isNegatedAt, isNegatedAtBySlices, promptLint, quotedSpans, signoffLint, standingGrants, verbsOf } from '../hooks/lint'
+import { BLOCK_FORMS, BRANCH_LEASE_FORM, NEAR_OPEN_MAX_CHARS, PROMPT_MAX_CHARS, hasSignoffBlock, isNearOpen, isNegatedAt, isNegatedAtBySlices, promptLint, quotedSpans, signoffLint, standingGrants, verbsOf } from '../hooks/lint'
 import { OPTIONS, ORCH, REGISTRY, mockWorld } from './mock-world'
 
 const MB = 1_000_000
@@ -135,6 +135,12 @@ describe('the sign-off guard on 1 MB lines: each family of its patterns within t
   for (const [at, start] of ['git push origin --delete refs/heads/', 'git push origin :refs/heads/', 'git branch -d ', 'git push --force-with-lease '].entries()) {
     test(`the block grammar (BLOCK_FORMS: the names, the remotes) after \`${start}\`: at most ${FAMILY_MS} ms on each shape`, () => {
       expect(slowShapes(shapesOf('forms'), line => BLOCK_FORMS[at]?.form.test(`${start}${line}`))).toEqual({})
+    })
+  }
+
+  for (const start of ['git push --force-with-lease origin feature/', 'git push --force-with-lease origin refs/heads/bugfix/', 'git push --force-with-lease ']) {
+    test(`the leased branch form (BRANCH_LEASE_FORM: the branch, the remote) after \`${start}\`: at most ${FAMILY_MS} ms on each shape`, () => {
+      expect(slowShapes(shapesOf('forms'), line => BRANCH_LEASE_FORM.test(`${start}${line}`))).toEqual({})
     })
   }
 
