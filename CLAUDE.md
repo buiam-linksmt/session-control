@@ -352,8 +352,11 @@ report headroom as state, and size `need` to the run's length.
 
 **Never read, print or pass a credential yourself**: no credential-helper output, no token or
 auth-config file, no secret on a command line, in a prompt file or in a report; a missing credential is
-an open point. A secret seen in a transcript, or a token-bearing file inside a repo tree, is an open
-point naming where, never the value; removal and rotation wait for the user.
+an open point. Asking the user for a credential names the file where the user saves it (outside any
+repo, mode 600) and gives an interactive command that writes it from a silent prompt; the value is never
+requested in chat, and a worker prompt carries only the path. A secret seen in a transcript, or a
+token-bearing file inside a repo tree, is an open point naming where, never the value; removal and
+rotation wait for the user.
 
 ### 4. Monitor
 
