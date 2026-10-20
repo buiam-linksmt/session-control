@@ -794,9 +794,11 @@ describe('launch_worker', () => {
             expect({ start, deny: deny.slice(0, 'session-control: '.length + start.length) }).toEqual({ start, deny: `session-control: ${start}` })
             expect({ start, end: deny.endsWith('; nothing was launched') }).toEqual({ start, end: true })
           }
-          // A refusal of the check outside the blocks ends with how a block is written when a block could cover the action.
-          expect(String((await launch(`${HEAD}\n${LINES[0]}`)).deny)).toEndWith('write its commands, one per line, in a fenced block whose info line is signoff <id>; nothing was launched')
-          expect(String((await launch(`${HEAD}\ngit reset --hard`)).deny)).toEndWith('(never, do not, stop before) passes; nothing was launched')
+          // A refusal of the check outside the blocks ends with how a block is written when a block could cover the action,
+          // then the detail: the command shape and its line, and the ways out.
+          const SHAPE_WAYS = 'is refused wherever it stands, a describe block included; the ways out are a negation in its sentence (never, do not, stop before) or, for a class the user has recorded a Standing go-ahead for (a remote branch deletion, a leased push), its commands in a signoff block; nothing was launched'
+          expect(String((await launch(`${HEAD}\n${LINES[0]}`)).deny)).toEndWith(`write its commands, one per line, in a fenced block whose info line is signoff <id>. The command shape \`git push origin --delete\` on line 2 ${SHAPE_WAYS}`)
+          expect(String((await launch(`${HEAD}\ngit reset --hard`)).deny)).toEndWith(`(never, do not, stop before) passes. The command shape \`git reset --hard\` on line 2 ${SHAPE_WAYS}`)
           expect([w.bash.length, w.powershell.length]).toEqual([0, 0])
           // The decisions file is read for each prompt that holds a well-formed block, and for no other: three of them so far.
           expect(decisionReads() - readsBefore).toBe(3)

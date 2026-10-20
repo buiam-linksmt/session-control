@@ -71,6 +71,8 @@ const SHAPES: Readonly<Record<string, (n: number) => string>> = {
   'main-to-list': n => `main to ${repeat('a, ', n)}`,
   'main-to-parens': n => `main to remotes (${repeat('a and ', n)}`,
   'never-main-to': n => repeat('never main to a ', n),
+  'worktree-remove': n => repeat('git worktree remove -f ', n),
+  'false-negations': n => `${repeat("don't forget to never skip ", n)} git push -f`,
 }
 
 /** The opening mark of each quote pair, by name: the pairs a quoted part is made of, and the others a prompt may hold. */
@@ -121,7 +123,7 @@ const FAMILY_SHAPES: Readonly<Record<string, readonly string[]>> = {
   negation: ['parens', 'colons'],
   prompt: ['section', 'branch'],
   main: ['main-to', 'main-to-list', 'main-to-parens', 'never-main-to', 'semicolons'],
-  guard: ['gt', 'zero-width-gt', 'git-C', 'push', 'parens', 'colons', 'force-push', 'push-main', 'quotes', 'quotes-alternating', 'quotes-nested'],
+  guard: ['gt', 'zero-width-gt', 'git-C', 'push', 'parens', 'colons', 'force-push', 'push-main', 'quotes', 'quotes-alternating', 'quotes-nested', 'worktree-remove', 'false-negations'],
 }
 const shapesOf = (family: string) => FAMILY_SHAPES[family] ?? []
 
@@ -186,6 +188,69 @@ describe('the sign-off guard on 1 MB lines: each family of its patterns within t
       expect(slowShapes([name], line => signoffLint(`Do it.\n${line}\nReport.`, STANDING), GUARD_MS)).toEqual({})
     })
   }
+})
+
+/** A prompt of about `n` characters made of lines of `unit`. */
+const linesOf = (unit: string, n: number) => Array.from({ length: Math.ceil(n / (unit.length + 1)) }, () => unit).join('\n')
+
+/** Three backticks: a fence. */
+const FENCE_MARKS = '```'
+
+/**
+ * Prompts of about `n` characters around the describe block's fence rules: harmless text, one block of it all, short
+ * blocks, openings that no line closes (each line closing the one before, or all of them under a longer fence), fences
+ * nested `n` / 26 deep (38461 at 1 MB) and closed in reverse, and lines of fence marks, of `>`, of format characters and of
+ * lookalikes where a closing line is read, and of HTML comment marks.
+ */
+const DESCRIBE_SHAPES: Readonly<Record<string, (n: number) => string>> = {
+  'harmless line': n => repeat('The worker reads the files and reports what it found. ', n),
+  'harmless lines': n => linesOf('The worker reads the files and reports what it found.', n),
+  'one describe block': n => `${FENCE_MARKS}describe\n${linesOf('A force-push signoff names one feature branch; the force-push class.', n)}\n${FENCE_MARKS}`,
+  'one describe line': n => `${FENCE_MARKS}describe\n${repeat('the force-push class ', n)}\n${FENCE_MARKS}`,
+  'short describe blocks': n => linesOf(`${FENCE_MARKS}describe\nforce-push\n${FENCE_MARKS}`, n),
+  'unclosed openings': n => linesOf(`${FENCE_MARKS}describe`, n),
+  'unclosed under a long fence': n => `${'`'.repeat(12)}describe\n${linesOf(`${FENCE_MARKS}describe`, n)}`,
+  'nested fences': n => {
+    const depth = Math.floor(n / 26)
+    const marks = (at: number) => (at % 2 === 0 ? '`' : '~').repeat(3 + (at % 7))
+    return [...Array.from({ length: depth }, (_, at) => `${marks(at)}describe`), ...Array.from({ length: depth }, (_, at) => marks(depth - 1 - at))].join('\n')
+  },
+  'backtick run line': n => `${FENCE_MARKS}describe\nx\n${repeat('`', n)}`,
+  'tilde run line': n => `~~~describe\nx\n${repeat('~', n)}`,
+  'backtick run opening': n => `${repeat('`', n)}describe\nx\n${repeat('`', n)}`,
+  'quote marks then a fence': n => `${FENCE_MARKS}describe\nx\n${repeat('>', n)}${FENCE_MARKS}`,
+  'zero-width then a fence': n => `${FENCE_MARKS}describe\nx\n${repeat('​', n)}${FENCE_MARKS}`,
+  'zero-width inside the marks': n => `${FENCE_MARKS}describe\nx\n${repeat('`​', n)}`,
+  'lookalikes': n => `${FENCE_MARKS}describe\nx\n${repeat('｀ˋ‵', n)}`,
+  'comment openings': n => linesOf('<!-- a', n),
+  'comment marks on a line': n => `${repeat('<!--', n)}\n${FENCE_MARKS}describe\nx\n${FENCE_MARKS}`,
+}
+
+/** The milliseconds the whole guard takes on a prompt, measured once more when over the bound, the shorter counting. */
+function guardMs(prompt: string): number {
+  const measure = () => {
+    const start = performance.now()
+    signoffLint(`Do it.\n${prompt}\nReport.`, STANDING)
+    return Math.round(performance.now() - start)
+  }
+  const first = measure()
+  return first > GUARD_MS ? Math.min(first, measure()) : first
+}
+
+describe('the describe blocks on 1 MB prompts: the whole guard within the bound', () => {
+  for (const [name, make] of Object.entries(DESCRIBE_SHAPES)) {
+    test(`the whole guard (signoffLint) on a 1 MB prompt of ${name}: at most ${GUARD_MS} ms`, () => expect(guardMs(make(MB))).toBeLessThanOrEqual(GUARD_MS))
+  }
+  test(`the whole guard on 100000 short describe blocks, 100000 openings no line closes and fences nested 10000 deep: at most ${GUARD_MS} ms each`, () => {
+    const counted: Record<string, string> = {
+      'short blocks': Array.from({ length: 100_000 }, () => `${FENCE_MARKS}describe\nx\n${FENCE_MARKS}`).join('\n'),
+      'openings': Array.from({ length: 100_000 }, () => `${FENCE_MARKS}describe`).join('\n'),
+      'openings under a longer fence': `${'`'.repeat(4)}describe\n${Array.from({ length: 100_000 }, () => `${FENCE_MARKS}describe`).join('\n')}`,
+      'nested': (DESCRIBE_SHAPES['nested fences'] ?? (() => ''))(26 * 10_000),
+    }
+    const slow = Object.entries(counted).filter(([, prompt]) => guardMs(prompt) > GUARD_MS).map(([name]) => name)
+    expect(slow).toEqual([])
+  })
 })
 
 /** A seeded generator (xorshift32): the same corpus at every run. */

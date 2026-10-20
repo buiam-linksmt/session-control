@@ -1960,7 +1960,8 @@ async function launch($: EngineInterface, given: LaunchInput) {
   // The prompt lint (lint.ts): a likely secret or a prompt over the size cap is refused before anything runs, the
   // licence picker included; a missing branch or decision section is a warning in the answer.
   // The sign-off guard (lint.ts, README Sign-off guard) refuses a prompt that instructs a force-push, a remote deletion,
-  // reset --hard, a forced clean or branch -D as a step, a skill test's too; it warns on a push to main or develop.
+  // reset --hard, a forced clean, branch -D or a forced worktree remove as a step, a skill test's too; it warns on a push
+  // to main or develop. The words of a describe block are not read for a force-push; its command shapes are.
   // A signoff block in the prompt as given (never in the section's block or the rules block appended after it) is
   // checked against the Standing go-ahead lines of agreed-decisions.md, read only then: its lines pass, named in a warning.
   const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text)
@@ -1971,7 +1972,9 @@ async function launch($: EngineInterface, given: LaunchInput) {
   const lintRefusal = lint.refusal ?? signoff.refusal
   if (lintRefusal !== undefined) {
     trace($, 'guard', { tool: 'launch_worker', isOk: false, check: lint.refusal === undefined ? 'sign-off' : 'prompt-lint', ...messageFields(lintRefusal, 'reason') })
-    return { deny: `${PLUGIN}: ${lintRefusal}; nothing was launched` }
+    // The detail of a refusal of steps (what made it, the way out of each) goes after the refusal itself.
+    const detail = lint.refusal === undefined && signoff.detail !== undefined ? `. ${signoff.detail}` : ''
+    return { deny: `${PLUGIN}: ${lintRefusal}${detail}; nothing was launched` }
   }
   // What a signoff block allowed: the go-ahead's id, its class and how many commands, never a branch or a command.
   for (const one of signoff.allowed ?? []) trace($, 'guard', { tool: 'launch_worker', isOk: true, check: 'sign-off', allowedBy: one.id, actionClass: one.actionClass, commands: one.commands.length })
