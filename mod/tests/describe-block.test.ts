@@ -258,7 +258,7 @@ describe('the denial detail: the words or the shape, the line, the way out (lint
     expect(both).toStartWith('The words «Force-push» on line 1 read as a step.')
     expect(both).toContain('. The command shape `git push --force` on line 1 is refused wherever it stands')
     const many = signoffLint(Array.from({ length: 7 }, (_, at) => `git push origin --delete b${at}`).join('\n')).detail ?? ''
-    expect(many).toStartWith('The command shape `git push origin --delete` on line 1, `git push origin --delete` on line 2, `git push origin --delete` on line 3, `git push origin --delete` on line 4, `git push origin --delete` on line 5 and 2 more is refused')
+    expect(many).toStartWith('The command shapes `git push origin --delete` on line 1, `git push origin --delete` on line 2, `git push origin --delete` on line 3, `git push origin --delete` on line 4, `git push origin --delete` on line 5 and 2 more are refused')
     const long = signoffLint(`git push ${'origin '.repeat(4)}${'x'.repeat(80)} --force`).detail ?? ''
     expect(long).toStartWith(`The command shape \`git push origin origin origin origin ${'x'.repeat(23)}…\` on line 1`)
     expect(signoffLint('Never force-push.').detail).toBeUndefined()
@@ -328,5 +328,196 @@ describe('a forced worktree remove is a command shape (lint.ts)', () => {
   })
   test('a plain remove, list, prune and add pass; so do a negation, an introduced example, a past form, another word than remove and a bare short flag', () => {
     for (const prompt of ACCEPTED) expect({ prompt, lint: signoffLint(prompt) }).toEqual({ prompt, lint: { warnings: [] } })
+  })
+})
+
+// The hole the independent check of the describe block found: a fence-looking line that the describe blocks do not read
+// as a fence (four or more spaces, a tab, a no-break or em space before the marks, a backtick in a backtick fence's info
+// string) opened an example fence in the guard's reading that the block's own fence lines left open, so every line after
+// the block went unread. The guard now reads a prompt with a describe block three ways and refuses what any refuses: as
+// the describe blocks read, no fenced block open across a block; as main reads it, the block's fence lines toggling; and
+// with the block's lines as blank lines. A describe block hides only the words of its own lines.
+
+/** The prompt with every describe opening line renamed, so it holds no describe block and is read as main reads it. */
+const asMain = (prompt: string) => prompt.replace(/^( {0,3}(?:`{3,}|~{3,}))describe$/gm, '$1descrive')
+/** The prompt with the lines of its describe blocks as blank lines. */
+const blanked = (prompt: string) => {
+  const lines = prompt.split('\n')
+  const kinds = describeBlocks(lines)
+  return lines.map((line, at) => (kinds[at] === 0 ? line : '')).join('\n')
+}
+
+/** The fence-looking lines that are no fence for the describe blocks and are one for the guard's reading. */
+const STRAY: readonly (readonly [string, string])[] = [
+  ['four spaces', `    ${B}`],
+  ['six spaces', `      ${B}`],
+  ['a tab', `\t${B}`],
+  ['a no-break space', ` ${B}`],
+  ['an em space', ` ${B}`],
+  ['a backtick in the info string', `${B}a\`b`],
+  ['a tilde fence with extra marks, indented four spaces', '    ~~~~~~'],
+]
+/** The lines that make the fence after them an example: introducing words and negating heads. */
+const HEADS: readonly string[] = ['Example:', 'For example:', 'e.g.', "Don't forget:", 'Never skip these:', 'Steps:']
+/** What the lines after the block instruct. */
+const PAYLOADS: readonly (readonly [string, string])[] = [
+  ['a command shape', S],
+  ['prose', 'Force-push the branch feature/x.'],
+  ['both', `${S}\nForce-push the branch feature/x.`],
+]
+
+describe('a describe block hides only its own lines: no fence-looking line around it hides the lines after it (lint.ts)', () => {
+  test('the minimal case of the check is refused, as on main', () => {
+    const prompt = `Example:\n    ${B}\n${described('harmless')}\n${S}\nForce-push the branch feature/x.`
+    expect(listedOf(signoffLint(prompt))).toBe('a force-push on line 6, a force-push on line 7')
+    expect(listedOf(signoffLint(asMain(prompt)))).toBe('a force-push on line 6, a force-push on line 7')
+  })
+
+  test('each of 7 stray lines x 6 heads x 3 payloads before a closed describe block: refused, with main\'s verdict', () => {
+    let count = 0
+    for (const [stray, line] of STRAY) {
+      for (const head of HEADS) {
+        for (const [payload, text] of PAYLOADS) {
+          const prompt = `${ITEMS}${head}\n${line}\n${described('harmless')}\n${text}`
+          const main = signoffLint(asMain(prompt))
+          expect({ stray, head, payload, verdict: verdictOf(signoffLint(prompt)) }).toEqual({ stray, head, payload, verdict: 'refused' })
+          expect({ stray, head, payload, listed: listedOf(signoffLint(prompt)) }).toEqual({ stray, head, payload, listed: listedOf(main) })
+          count++
+        }
+      }
+    }
+    expect(count).toBe(126)
+  })
+
+  test('the stray line inside an HTML comment, the payload 200 lines later, a tail of 3000 force-pushes, and the numbered list of the check', () => {
+    expect(listedOf(signoffLint(`<!-- For example:\n    ${B}\n-->\n${described('harmless')}\n${S}`))).toBe('a force-push on line 7')
+    const later = `Example:\n    ${B}\n${described('harmless')}\n${Array.from({ length: 200 }, () => 'The worker reads the files.').join('\n')}\n${S}`
+    expect(listedOf(signoffLint(later))).toBe('a force-push on line 206')
+    const tail = `Example:\n\t${B}\n${described('harmless')}\n${Array.from({ length: 3000 }, () => S).join('\n')}`
+    expect(signoffLint(tail).refusal).toStartWith('refused by the sign-off guard: the prompt instructs a force-push on line 6, a force-push on line 7')
+    const list = [
+      '1. Prepare the release, for example:',
+      `    ${B}`,
+      '    make release',
+      '2. The class:',
+      described('the force-push class'),
+      '3. Force-push the branch feature/x.',
+      `4. Run ${S}.`,
+    ].join('\n')
+    expect(listedOf(signoffLint(list))).toBe('a force-push on line 8, a force-push on line 9')
+    // Main reads the block's words too.
+    expect(listedOf(signoffLint(asMain(list)))).toBe('a force-push on line 6, a force-push on line 8, a force-push on line 9')
+  })
+
+  test('the stray line before the first of two blocks, between them, and inside the second: the lines after both are read', () => {
+    for (const [stray, line] of STRAY) {
+      const variants: Record<string, string> = {
+        before: `Example:\n${line}\n${described('one')}\n${described('two')}\n${S}`,
+        between: `${described('one')}\nExample:\n${line}\n${described('two')}\n${S}`,
+        inside: `${described('one')}\n\`\`\`\`describe\nExample:\n${line}\n\`\`\`\`\n${S}`,
+      }
+      for (const [where, prompt] of Object.entries(variants)) {
+        expect({ stray, where, verdict: verdictOf(signoffLint(prompt)) }).toEqual({ stray, where, verdict: 'refused' })
+      }
+    }
+  })
+
+  test('the parity of fences across a block: a stray line after it closes the fence main still holds open, and one before it opens one main reads', () => {
+    // As main reads it: the longer block's inner fence line closes the block's fence and its closing line opens another,
+    // which the stray line after the block closes.
+    expect(listedOf(signoffLint(`\`\`\`\`describe\n${B}\n\`\`\`\`\nExample:\n    ${B}\n${S}`))).toBe('a force-push on line 6')
+    // With the block's lines blank: the stray line before the block opens a fence the stray line after it closes.
+    expect(listedOf(signoffLint(`Do this:\n    ${B}\n${described('x')}\nExample:\n    ${B}\n${S}`))).toBe('a force-push on line 8')
+  })
+
+  test('the descriptions stay accepted: a valid block with nothing stray before it, a stray line with no step after the block, and the spec\'s wrapped false positives', () => {
+    expect(signoffLint(`${ITEMS}${described('A force-push signoff names one branch.')}\nReport.`)).toEqual({ warnings: [] })
+    expect(signoffLint(`${ITEMS}Example:\n    ${B}\n${described('the force-push class')}\nReport.`)).toEqual({ warnings: [] })
+    for (const [name, prompt] of FALSE_POSITIVES) expect({ name, refusal: signoffLint(`${ITEMS}Example:\n    ${B}\n${described(prompt)}\nReport.`).refusal }).toEqual({ name, refusal: undefined })
+  })
+
+  test('the property: over 300 generated prompts, a prompt main refuses with its describe blocks blank, or with its blocks read as fences, is refused', () => {
+    const random = seeded(20261020)
+    const harmless = ['The worker reads the files.', 'Report what you found.', '', '- a list item', '<!-- a note -->']
+    const fenceLike = [...STRAY.map(([, line]) => line), B, T, '````', `${B}text`, '> ```', '｀｀｀']
+    const openings = [`${B}describe`, `${T}describe`, '````describe', '  ```describe']
+    const payloads = [...PAYLOADS.map(([, text]) => text), `Run ${S} now.`, 'git reset --hard origin/main']
+    let refused = 0
+    let withBlock = 0
+    for (let at = 0; at < 300; at++) {
+      const parts: string[] = []
+      for (let part = 0, parts_ = 4 + Math.floor(random.next() * 8); part < parts_; part++) {
+        const roll = random.next()
+        if (roll < 0.2) parts.push(random.pick(HEADS))
+        else if (roll < 0.45) parts.push(random.pick(fenceLike))
+        else if (roll < 0.65) {
+          const open = random.pick(openings)
+          const marks = (/^ *([`~]+)/.exec(open)?.[1] ?? B)
+          const body = Array.from({ length: Math.floor(random.next() * 4) }, () => (random.next() < 0.5 ? random.pick(fenceLike) : random.pick([...HEADS, 'the force-push class', 'harmless'])))
+          parts.push([open, ...body.filter(line => !line.startsWith(marks[0] === '`' ? '```' : '~~~') && !line.includes('｀') && !line.startsWith('> ')), marks].join('\n'))
+        } else if (roll < 0.85) parts.push(random.pick(payloads))
+        else parts.push(random.pick(harmless))
+      }
+      const prompt = parts.join('\n')
+      const kinds = describeBlocks(prompt.split('\n'))
+      const blank = blanked(prompt)
+      // The blanked prompt and the renamed one hold no describe block: the guard reads them as main does.
+      expect(describeBlocks(blank.split('\n')).every(kind => kind === 0)).toBe(true)
+      expect(describeBlocks(asMain(prompt).split('\n')).every(kind => kind === 0)).toBe(true)
+      const verdict = verdictOf(signoffLint(prompt))
+      if (verdict === 'refused') refused++
+      if (kinds.some(kind => kind !== 0)) withBlock++
+      if (verdictOf(signoffLint(blank)) === 'refused') expect({ prompt, blank: verdict }).toEqual({ prompt, blank: 'refused' })
+      // A block's lines hold no force-push word outside 'the force-push class', which main reads: the renamed prompt is
+      // compared only when its blocks hold none.
+      const words = prompt.split('\n').some((line, index) => kinds[index] === 2 && /force-push/.test(line))
+      if (!words && verdictOf(signoffLint(asMain(prompt))) === 'refused') expect({ prompt, main: verdict }).toEqual({ prompt, main: 'refused' })
+    }
+    expect(withBlock).toBeGreaterThan(150)
+    expect(refused).toBeGreaterThan(100)
+  })
+})
+
+/** A seeded generator (xorshift32): the same prompts at every run. */
+function seeded(seed: number) {
+  let state = seed
+  const next = () => {
+    state ^= state << 13
+    state ^= state >>> 17
+    state ^= state << 5
+    return (state >>> 0) / 4294967296
+  }
+  return { next, pick: <T,>(list: readonly T[]): T => list[Math.floor(next() * list.length)] as T }
+}
+
+describe('the denial detail: the number of the shapes, the ways out of a shape no signoff block covers, a describe block that did not count (lint.ts)', () => {
+  test('two or more shapes are refused, in the plural', () => {
+    const detail = signoffLint('git push origin --delete a\ngit push origin --delete b').detail ?? ''
+    expect(detail).toBe(
+      'The command shapes `git push origin --delete` on line 1, `git push origin --delete` on line 2 are refused wherever they stand, a describe block included; the ways out are a negation in each one\'s sentence (never, do not, stop before) or, for a class the user has recorded a Standing go-ahead for (a remote branch deletion, a leased push), its commands in a signoff block',
+    )
+  })
+
+  test('a shape of no class a signoff block covers offers a negation, an introduced example or leaving the step out', () => {
+    expect(signoffLint('git reset --hard origin/main').detail).toBe(
+      'The command shape `git reset --hard` on line 1 is refused wherever it stands, a describe block included; the ways out are a negation in its sentence (never, do not, stop before), a quoted example after an introducing word (for example, such as), or leaving the step out; no signoff block covers it',
+    )
+    expect(signoffLint('git clean -fdx\ngit branch -D x\ngit worktree remove --force ../x').detail).toEndWith('; no signoff block covers them')
+    expect(signoffLint('git reset --hard\ngit push --force-with-lease origin feature/x').detail).toEndWith('its commands in a signoff block')
+  })
+
+  test('a describe block that did not count is named with its line and why, after the words', () => {
+    const missOf = (prompt: string) => /\. (A describe block opens on line \d+ and was not honoured: [^.]*|Line \d+ closes a describe block[^.]*)/.exec(signoffLint(prompt).detail ?? '')?.[1]
+    expect(missOf(`Intro.\n${B}describe\n${P}`)).toBe('A describe block opens on line 2 and was not honoured: no line closes it before the end of the prompt as given, and a block that is not closed lifts nothing')
+    expect(missOf(`${B}Describe\n${P}\n${B}`)).toBe('A describe block opens on line 1 and was not honoured: its info string is not exactly describe (in lower case, right after three or more backticks or tildes, with nothing after it)')
+    expect(missOf(`${B}describe:\n${P}\n${B}`)).toStartWith('A describe block opens on line 1 and was not honoured: its info string is not exactly describe')
+    expect(missOf(`${B}describe\r\n${P}\r\n${B}\r\n`)).toBe('A describe block opens on line 1 and was not honoured: its opening line ends with a carriage return (CRLF line ends); write the prompt with LF line ends')
+    for (const open of [`${B}describe `, `    ${B}describe`, `\t${B}describe`, `${B}desc​ribe`, `> ${B}describe`]) {
+      expect({ open, miss: missOf(`${open}\n${P}\n${B}`) }).toEqual({ open, miss: 'A describe block opens on line 1 and was not honoured: its opening line has extra characters (a blank, a tab, an invisible character, a > quote or more than three blanks before the marks); it holds up to three blanks, three or more backticks or tildes and the word describe, nothing else' })
+    }
+    expect(missOf(`${B}text\n${B}describe\n${P}\n${B}\n${B}`)).toBe('A describe block opens on line 2 and was not honoured: its opening line stands inside another fenced block or an HTML comment, where it opens nothing')
+    expect(missOf(`${B}describe\nx\n${B} ${P}`)).toBe('Line 3 closes a describe block and the text after its closing marks is read as prose')
+    expect(missOf(`${described('x')}\n${P}`)).toBeUndefined()
+    expect(signoffLint(`${B}describe\ngit reset --hard`).detail).not.toContain('was not honoured')
   })
 })

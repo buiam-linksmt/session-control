@@ -780,6 +780,15 @@ const DESCRIBE_CLOSING = 3
 const DESCRIBE_CLOSING_MORE = 4
 
 /**
+ * The readings of a prompt that holds a describe block (signoffLint): as the describe blocks read, the words of a
+ * block's lines left out and no fenced block open across it; as main reads it, its fence lines and the fence lines among
+ * its lines opening and closing fenced blocks, the words of its lines left out; and with its lines as blank lines.
+ */
+const DESCRIBED_READING = 0
+const MAIN_READING = 1
+const BLANK_READING = 2
+
+/**
  * How a line inside a describe block opened with the marks `run` reads: 0 a line of the block, DESCRIBE_CLOSING its
  * closing line, DESCRIBE_CLOSING_MORE a closing line with more after its marks. A line closes the block when, after any
  * blanks, `>` and format characters, it starts with at least as many marks as `run` of its kind, lookalikes and format
@@ -1191,80 +1200,99 @@ export function signoffLint(prompt: string, standing?: StandingRead, ownLines = 
   const causes: Cause[] = []
   const causeKeys = new Map<string, number>()
   const warned = new Set<string>()
-  // A fenced block (FENCE) and whether it is an example: for the words, and for the command shapes, whose negating head
-  // is read without its false negations (`Don't forget:` heads no example of a command).
-  let fence: { isExample: boolean; isShapeExample: boolean } | undefined
-  // A list under a negating head line, and whether that head negates the command shapes too.
-  let list: { headIndent: number; negatesShapes: boolean } | undefined
-  let previous = ''
-  for (const [index, line] of lines.entries()) {
-    const kind = described[index] ?? PROSE
-    // The words of a line in a describe block are not read; its command shapes are, as any line's.
-    let readsWords = kind !== DESCRIBED
-    if (kind !== PROSE) {
-      // A describe block's own fence lines touch no fenced block of the lines around it; a closing line with more on it is read.
-      if (kind !== DESCRIBED) {
-        list = undefined
-        previous = ''
-        if (kind !== DESCRIBE_CLOSING_MORE) continue
+  // The prompt is read once as the describe blocks read (DESCRIBED_READING) and, when it holds one, twice more: as main
+  // reads it (MAIN_READING) and with each block's lines as blank lines (BLANK_READING); each reading's refusals count.
+  const readings = described.some(kind => kind !== PROSE) ? [DESCRIBED_READING, MAIN_READING, BLANK_READING] : [DESCRIBED_READING]
+  // How the first reading read each line (a bit each: read, its words read, in a negated list, in a list that negates
+  // the shapes): a later reading that reads the same text the same way finds nothing new.
+  const howRead = new Uint8Array(readings.length > 1 ? lines.length : 0)
+  for (const reading of readings) {
+    // A fenced block (FENCE) and whether it is an example: for the words, and for the command shapes, whose negating head
+    // is read without its false negations (`Don't forget:` heads no example of a command).
+    let fence: { isExample: boolean; isShapeExample: boolean } | undefined
+    // A list under a negating head line, and whether that head negates the command shapes too.
+    let list: { headIndent: number; negatesShapes: boolean } | undefined
+    let previous = ''
+    for (const [index, given] of lines.entries()) {
+      const kind = described[index] ?? PROSE
+      // The blank reading reads each line of a describe block as a blank line, the main reading reads it as main does.
+      const line = reading === BLANK_READING && kind !== PROSE ? '' : given
+      // The words of a line in a describe block are not read; its command shapes are, as any line's.
+      let readsWords = kind !== DESCRIBED
+      if (kind !== PROSE && reading === DESCRIBED_READING) {
+        // A describe block's own fence lines touch no fenced block of the lines around it, and its opening line ends any
+        // fenced block open before it: no example fence before the block reaches past it. A closing line with more on it is read.
+        if (kind !== DESCRIBED) {
+          if (kind === DESCRIBE_OPENING) fence = undefined
+          list = undefined
+          previous = ''
+          if (kind !== DESCRIBE_CLOSING_MORE) continue
+        }
+      } else {
+        if (FENCE.test(line)) {
+          fence = fence === undefined ? { isExample: INTRODUCER.test(previous) || isNegatingHead(previous), isShapeExample: INTRODUCER.test(previous) || isNegatingHead(withoutFalseNegations(previous)) } : undefined
+          list = undefined
+          previous = ''
+          continue
+        }
+        if (fence?.isShapeExample === true) continue
+        if (fence?.isExample === true) readsWords = false
       }
-    } else {
-      if (FENCE.test(line)) {
-        fence = fence === undefined ? { isExample: INTRODUCER.test(previous) || isNegatingHead(previous), isShapeExample: INTRODUCER.test(previous) || isNegatingHead(withoutFalseNegations(previous)) } : undefined
+      if (line.trim() === '') {
         list = undefined
-        previous = ''
         continue
       }
-      if (fence?.isShapeExample === true) continue
-      if (fence?.isExample === true) readsWords = false
-    }
-    if (line.trim() === '') {
-      list = undefined
-      continue
-    }
-    const bullet = BULLET.exec(line)
-    const indent = (/^\s*/.exec(line)?.[0] ?? '').length
-    if (list !== undefined && !(bullet !== null ? indent > list.headIndent : indent > Math.max(list.headIndent, 0))) list = undefined
-    const isListed = list !== undefined
-    const isShapeListed = list?.negatesShapes === true
-    // A line of a sound signoff block: its form was matched whole (blockFault), so only the push warning reads it.
-    const isBlockLine = blockLines.has(index)
-    const lx = lineIndex(line)
-    for (const range of sentenceRanges(line)) {
-      // Every action and every push to main or develop holds one of these words: a sentence without them names none.
-      const sentence = line.slice(range.start, range.end)
-      if (!ACTION_WORD.test(sentence)) continue
-      const ix = sentenceIndex(sentence)
-      // A command shape's negation window reads the sentence without its false negations (don't forget to).
-      const shapeIx = once(() => {
-        const masked = withoutFalseNegations(sentence)
-        return masked === sentence ? ix : sentenceIndex(masked)
-      })
-      for (const action of isBlockLine ? [] : actionsOf(ix)) {
-        if (!action.isShape && !readsWords) continue
-        if (negatedAt(action.isShape ? shapeIx() : ix, action.at, action.end, action.from)) continue
-        if ((action.isShape ? isShapeListed : isListed) && !hasContrastBefore(lx, range.start + action.at)) continue
-        if (isQuotedExample(lx, range.start, range.start + action.at)) continue
-        // One cause of each kind per label and line: the shortest text, so a flag two verbs reach is named with the nearer.
-        const causeKey = `${action.label}\n${index + 1}\n${action.isShape}`
-        const cause = { isShape: action.isShape, text: sentence.slice(action.isShape ? action.from : action.at, action.end), line: index + 1 }
-        const known = causeKeys.get(causeKey)
-        if (known === undefined) {
-          causeKeys.set(causeKey, causes.length)
-          causes.push(cause)
-        } else if (cause.text.length < (causes[known]?.text.length ?? 0)) causes[known] = cause
-        const key = `${action.label}\n${index + 1}`
-        if (foundKeys.has(key)) continue
-        foundKeys.add(key)
-        found.push({ label: action.label, line: index + 1 })
+      const bullet = BULLET.exec(line)
+      const indent = (/^\s*/.exec(line)?.[0] ?? '').length
+      if (list !== undefined && !(bullet !== null ? indent > list.headIndent : indent > Math.max(list.headIndent, 0))) list = undefined
+      const isListed = list !== undefined
+      const isShapeListed = list?.negatesShapes === true
+      const how = 1 | (readsWords ? 2 : 0) | (isListed ? 4 : 0) | (isShapeListed ? 8 : 0)
+      const isRead = reading !== DESCRIBED_READING && line === given && howRead[index] === how
+      if (reading === DESCRIBED_READING && howRead.length > 0) howRead[index] = how
+      // A line of a sound signoff block: its form was matched whole (blockFault), so only the push warning reads it.
+      const isBlockLine = blockLines.has(index)
+      const lx = lineIndex(line)
+      for (const range of isRead ? [] : sentenceRanges(line)) {
+        // Every action and every push to main or develop holds one of these words: a sentence without them names none.
+        const sentence = line.slice(range.start, range.end)
+        if (!ACTION_WORD.test(sentence)) continue
+        const ix = sentenceIndex(sentence)
+        // A command shape's negation window reads the sentence without its false negations (don't forget to).
+        const shapeIx = once(() => {
+          const masked = withoutFalseNegations(sentence)
+          return masked === sentence ? ix : sentenceIndex(masked)
+        })
+        for (const action of isBlockLine ? [] : actionsOf(ix)) {
+          if (!action.isShape && !readsWords) continue
+          if (negatedAt(action.isShape ? shapeIx() : ix, action.at, action.end, action.from)) continue
+          if ((action.isShape ? isShapeListed : isListed) && !hasContrastBefore(lx, range.start + action.at)) continue
+          if (isQuotedExample(lx, range.start, range.start + action.at)) continue
+          // One cause of each kind per label and line: the shortest text, so a flag two verbs reach is named with the nearer.
+          const causeKey = `${action.label}\n${index + 1}\n${action.isShape}`
+          const cause = { label: action.label, isShape: action.isShape, text: sentence.slice(action.isShape ? action.from : action.at, action.end), line: index + 1 }
+          const known = causeKeys.get(causeKey)
+          if (known === undefined) {
+            causeKeys.set(causeKey, causes.length)
+            causes.push(cause)
+          } else if (cause.text.length < (causes[known]?.text.length ?? 0)) causes[known] = cause
+          const key = `${action.label}\n${index + 1}`
+          if (foundKeys.has(key)) continue
+          foundKeys.add(key)
+          found.push({ label: action.label, line: index + 1 })
+        }
+        for (const match of ix.text.matchAll(PROTECTED_PUSH)) {
+          const at = match.index ?? 0
+          if (!negatedAt(ix, at, at + match[0].length, at)) warned.add((match[1] ?? match[2] ?? '').toLowerCase())
+        }
       }
-      for (const match of ix.text.matchAll(PROTECTED_PUSH)) {
-        const at = match.index ?? 0
-        if (!negatedAt(ix, at, at + match[0].length, at)) warned.add((match[1] ?? match[2] ?? '').toLowerCase())
-      }
+      if (isNegatingHead(line)) list = { headIndent: bullet === null ? -1 : indent, negatesShapes: isNegatingHead(withoutFalseNegations(line)) }
+      previous = line
     }
-    if (isNegatingHead(line)) list = { headIndent: bullet === null ? -1 : indent, negatesShapes: isNegatingHead(withoutFalseNegations(line)) }
-    previous = line
+  }
+  if (readings.length > 1) {
+    found.sort((one, other) => one.line - other.line)
+    causes.sort((one, other) => one.line - other.line)
   }
   const warnings = [...warned].sort().map(branch => `the prompt names a push to ${branch}: a push to a protected branch needs the user's go-ahead where the project's push policy asks (a Standing decision push-<project>); check it before the worker pushes`)
   if (found.length === 0) {
@@ -1278,13 +1306,13 @@ export function signoffLint(prompt: string, standing?: StandingRead, ownLines = 
       `refused by the sign-off guard: the prompt instructs ${listed} as a step for the worker; that needs the user's go-ahead in this conversation, a sign-off item the mod cannot see. ` +
       'Raise an open point for the go-ahead and launch without the step; with the go-ahead the user runs it or says how, and a prompt may tell the worker to stop before it and report. ' +
       `A sentence that tells the worker not to do it (never, do not, stop before) passes${isCoverable ? `; ${BLOCK_HINT}` : ''}`,
-    detail: refusalDetail(causes),
+    detail: refusalDetail(causes, describeMiss(lines, described, ownLines, causes)),
     warnings,
   }
 }
 
-/** What made a refusal: the force-push words or a command shape, its text and its line. */
-type Cause = { isShape: boolean; text: string; line: number }
+/** What made a refusal: the force-push words or a command shape, its label, its text and its line. */
+type Cause = { label: string; isShape: boolean; text: string; line: number }
 
 /** How many causes of each kind the detail of a refusal names before `and N more`. */
 const CAUSES_NAMED = 5
@@ -1301,13 +1329,52 @@ function causesNamed(causes: readonly Cause[], open: string, close: string): str
   return causes.length > CAUSES_NAMED ? `${named.join(', ')} and ${causes.length - CAUSES_NAMED} more` : named.join(', ')
 }
 
+/** A line written as a describe block's opening line, format characters left out: fence marks or their lookalikes, then desc. */
+const NEAR_DESCRIBE = /^[\s>]*[`~ˋ‵｀˜～]{3,}\s*desc/i
+
+/** A describe block's opening line with only blanks, tabs, `>` or more indentation added, format characters left out. */
+const LOOSE_DESCRIBE = /^[\s>]*(?:`{3,}|~{3,})[ \t]*describe[ \t]*$/
+
+/**
+ * Why a prompt's describe block did not count, for the detail of a refusal by the words: the first line among its first
+ * `ownLines` lines that is written as an opening line (NEAR_DESCRIBE) and opens no block, and why (an opening line no
+ * line closes, one inside another fenced block or an HTML comment, a carriage return, other characters added, another
+ * info string); else the first closing line with more on it that holds a cause, whose rest is read. Undefined when none is.
+ */
+function describeMiss(lines: readonly string[], kinds: Uint8Array, ownLines: number, causes: readonly Cause[]): string | undefined {
+  const end = Math.min(lines.length, ownLines)
+  for (let index = 0; index < end; index++) {
+    const line = lines[index] ?? ''
+    if (kinds[index] !== PROSE || line.length > NEAR_OPEN_MAX_CHARS) continue
+    const bare = line.replace(/\p{Cf}/gu, '')
+    if (!NEAR_DESCRIBE.test(bare)) continue
+    const at = `A describe block opens on line ${index + 1} and was not honoured: `
+    const run = DESCRIBE_OPEN.exec(line)?.[1]
+    if (run !== undefined) {
+      let close = index + 1
+      while (close < end && describeCloseOf(run, lines[close] ?? '') === PROSE) close++
+      return close < end
+        ? `${at}its opening line stands inside another fenced block or an HTML comment, where it opens nothing`
+        : `${at}no line closes it before the end of the prompt as given, and a block that is not closed lifts nothing`
+    }
+    if (DESCRIBE_OPEN.test(line.replace(/\r$/, ''))) return `${at}its opening line ends with a carriage return (CRLF line ends); write the prompt with LF line ends`
+    if (LOOSE_DESCRIBE.test(bare.replace(/\r$/, '')) || bare !== line) {
+      return `${at}its opening line has extra characters (a blank, a tab, an invisible character, a > quote or more than three blanks before the marks); it holds up to three blanks, three or more backticks or tildes and the word describe, nothing else`
+    }
+    return `${at}its info string is not exactly describe (in lower case, right after three or more backticks or tildes, with nothing after it)`
+  }
+  const closing = causes.find(one => !one.isShape && kinds[one.line - 1] === DESCRIBE_CLOSING_MORE)
+  return closing === undefined ? undefined : `Line ${closing.line} closes a describe block and the text after its closing marks is read as prose`
+}
+
 /**
  * The detail of a refusal, which the launch's denial carries after it: the force-push words and the command shapes that
  * made it, each with its line, and the way out of each: a describe block for the words (an example of its two fence
- * lines), a signoff block when the action is meant, and quoting that does not help; a negation or a signoff block for a
- * command shape, which a describe block does not lift.
+ * lines), a signoff block when the action is meant, and quoting that does not help, with why a describe block of the
+ * prompt did not count (`miss`, describeMiss); a negation for a command shape, which a describe block does not lift, and a
+ * signoff block when a shape named is of a class one covers (CLASS_OF), else an introduced example or leaving it out.
  */
-function refusalDetail(causes: readonly Cause[]): string {
+function refusalDetail(causes: readonly Cause[], miss: string | undefined): string {
   const words = causes.filter(one => !one.isShape)
   const shapes = causes.filter(one => one.isShape)
   const parts: string[] = []
@@ -1317,10 +1384,15 @@ function refusalDetail(causes: readonly Cause[]): string {
         `${DESCRIBE_EXAMPLE}\n` +
         'the words inside it are not read (its command shapes are); when the action is meant, write its commands in a signoff block instead. Quoting the words alone (backticks, quotes, guillemets) does not help',
     )
+    if (miss !== undefined) parts.push(miss)
   }
   if (shapes.length > 0) {
+    const isOne = shapes.length === 1
+    const outs = shapes.some(one => CLASS_OF[one.label] !== undefined)
+      ? ' or, for a class the user has recorded a Standing go-ahead for (a remote branch deletion, a leased push), its commands in a signoff block'
+      : `, a quoted example after an introducing word (for example, such as), or leaving the step out; no signoff block covers ${isOne ? 'it' : 'them'}`
     parts.push(
-      `The command shape ${causesNamed(shapes, '`', '`')} is refused wherever it stands, a describe block included; the ways out are a negation in its sentence (never, do not, stop before) or, for a class the user has recorded a Standing go-ahead for (a remote branch deletion, a leased push), its commands in a signoff block`,
+      `The command ${isOne ? 'shape' : 'shapes'} ${causesNamed(shapes, '`', '`')} ${isOne ? 'is refused wherever it stands' : 'are refused wherever they stand'}, a describe block included; the ways out are a negation in ${isOne ? 'its' : 'each one\'s'} sentence (never, do not, stop before)${outs}`,
     )
   }
   return parts.join('. ')

@@ -399,3 +399,13 @@ describe('the launch of a 1 MB prompt of `>`', () => {
     expect(world.passed.filter(one => one.tool === 'Bash').length).toBe(1)
   })
 })
+
+describe('the readings of a prompt with describe blocks on 1 MB prompts: the whole guard within the bound', () => {
+  // A prompt of 30000 refused lines: building its refusal is main's work too; the time allows two measurements (guardMs).
+  test(`a stray fence line, a describe block and a 1 MB tail of force-pushes: at most ${GUARD_MS} ms`, { timeoutMs: 3 * GUARD_MS }, () => {
+    expect(guardMs(`Example:\n    ${FENCE_MARKS}\n${FENCE_MARKS}describe\nharmless\n${FENCE_MARKS}\n${linesOf('git push --force origin feature/x', MB)}`)).toBeLessThanOrEqual(GUARD_MS)
+  })
+  test(`1 MB of stray fence lines and describe blocks in turn: at most ${GUARD_MS} ms`, { timeoutMs: 3 * GUARD_MS }, () => {
+    expect(guardMs(linesOf(`Example:\n    ${FENCE_MARKS}\n${FENCE_MARKS}describe\nthe force-push class\n${FENCE_MARKS}\nForce-push the branch.`, MB))).toBeLessThanOrEqual(GUARD_MS)
+  })
+})

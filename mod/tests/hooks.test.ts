@@ -798,7 +798,7 @@ describe('launch_worker', () => {
           // then the detail: the command shape and its line, and the ways out.
           const SHAPE_WAYS = 'is refused wherever it stands, a describe block included; the ways out are a negation in its sentence (never, do not, stop before) or, for a class the user has recorded a Standing go-ahead for (a remote branch deletion, a leased push), its commands in a signoff block; nothing was launched'
           expect(String((await launch(`${HEAD}\n${LINES[0]}`)).deny)).toEndWith(`write its commands, one per line, in a fenced block whose info line is signoff <id>. The command shape \`git push origin --delete\` on line 2 ${SHAPE_WAYS}`)
-          expect(String((await launch(`${HEAD}\ngit reset --hard`)).deny)).toEndWith(`(never, do not, stop before) passes. The command shape \`git reset --hard\` on line 2 ${SHAPE_WAYS}`)
+          expect(String((await launch(`${HEAD}\ngit reset --hard`)).deny)).toEndWith('(never, do not, stop before) passes. The command shape `git reset --hard` on line 2 is refused wherever it stands, a describe block included; the ways out are a negation in its sentence (never, do not, stop before), a quoted example after an introducing word (for example, such as), or leaving the step out; no signoff block covers it; nothing was launched')
           expect([w.bash.length, w.powershell.length]).toEqual([0, 0])
           // The decisions file is read for each prompt that holds a well-formed block, and for no other: three of them so far.
           expect(decisionReads() - readsBefore).toBe(3)
