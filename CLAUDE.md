@@ -444,12 +444,12 @@ tell the user it's closed, with a one-line summary of what it produced.
 
 After reporting a finished session's result, in the same turn clear its keep flag unless a resume or a queued
 follow-up needs it, acknowledge it and retire it: `close_worker` with `session_ids` and `keep: false` does all three
-(`keep: true` acknowledges and keeps). Call the session closed only once its id follows `Retired:` in the answer;
-otherwise make the next call the answer names. The retire refuses a live session, one whose exit is not yet
-classified, a kept one, an outcome other than `clean`, a session a task not `done` names and an unknown id. An
-outcome label the transcript shows wrong, or work deliberately abandoned, is retired with `reviewed` (session id to
-the reason); any other refusal is an open point. A `finished-open` notice is handled by this rule, silently. Nothing
-is removed by itself or because the user wrote a message.
+(`keep: true` acknowledges and keeps). Call the session closed only once its id follows `Retired:` in the answer.
+The retire refuses a live session, one whose exit is not yet classified, a kept one, an outcome other than `clean`, a
+session a task not `done` names, any while the queue cannot be read, and an unknown id. A refusal with a `Next:` call
+in the answer is resolved by that call (a label the transcript shows wrong, or abandoned work: `reviewed`, session id
+to the reason); a refusal without one is an open point. A `finished-open` notice is handled by this rule, silently.
+Nothing is removed by itself or because the user wrote a message.
 
 Retire only on those two grounds: the goal is met, or the work is deliberately abandoned. A session
 killed mid-work is not retired — it is a resumable session with no pid, and its entry stays (step 3).
