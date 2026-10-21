@@ -340,7 +340,7 @@ rotation wait for the user.
   and the compaction digest and read `task-queue.json` and `open-points.json` for the ids and task `fields`, which
   the panel never shows; run the Abort check on every registry pid without a classified outcome and classify each
   dead one by the exit list (Launch), from its transcript when scratchpad files are gone; raise an open point for
-  each orphan, naming its pid and session id (no tool adopts it); launch every `queued` task whose blocker has
+  each orphan (not one inside the late-launch window, see Register), naming its pid and session id (no tool adopts it); launch every `queued` task whose blocker has
   cleared, and start the reset `sleep` for one still waiting with none running. Report only what this check changed.
 
 ### 5. Follow up
