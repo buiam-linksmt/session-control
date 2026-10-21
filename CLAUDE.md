@@ -118,7 +118,8 @@ anything outside the repo. A non-protected branch the worker created or the user
 right after each commit, with no gate. The mod refuses a force, delete, mirror or pruning push, `reset --hard`, a
 forced `clean` and `branch -D` as your own command. Mark a decision `[signoff:<class>]` only for the user's explicit go-ahead of
 exactly that class. Write each covered action into the worker prompt in a fenced block whose info line is
-`signoff <id>` (the guard's refusal gives the line forms), and read the launch answer's `sign-off allowed by` warning
+`signoff <id>`, one command per line, remote branches written as `refs/heads/<name>` (the guard's refusal lists every
+form), and read the launch answer's `sign-off allowed by` warning
 against that decision before trusting the worker's report.
 A branch fully merged into its target (remote and local, `branch -d`) is deleted as routine cleanup right after
 its merge, with no question, under the Standing decision `signoff-merged-branches`; an unmerged branch is never covered.
@@ -181,7 +182,8 @@ Every launch prompt carries, addressed to the worker, each item below that appli
    state is a premise to check before acting on it; a false one is reported, never acted on. Before
    blaming another repo, `git fetch` there and state how far behind its remote the checkout is.
 3. Scope as exact paths, branches, services and commands, never a topic: the paths it may commit; the
-   push of its branch as the Sign-off list and the push policy allow it; what it may stop,
+   push of its branch as the Sign-off list and the push policy allow it, fast-forward only, right after each commit;
+   what it may stop,
    restart or tear down. Each sign-off item the task could touch: stop before it and report. Read the
    repo's own gates (its `CLAUDE.md`, `.claude/rules/`) before acting; give the answers the user settled.
 4. Commit messages follow the repo's rules, carry no AI attribution trailer and never mention an agent; their language
@@ -203,8 +205,8 @@ Every launch prompt carries, addressed to the worker, each item below that appli
    Durable facts go to the file the prompt names, never to Claude memory; report file and lines.
    Scratch files, copies and logs go under `<control>/scratch/<unit>/` (git-ignored), never under `$HOME`.
 9. Launch no `claude` session unless the task is to, and list every one launched with its
-   `session_id`, `config_dir` and `cwd`; write nothing to the registry or under the orchestrator's
-   directory (give both paths); arm no Monitor or cron.
+   `session_id`, `config_dir` and `cwd`; write nothing to the registry (`~/.claude/headless-sessions.json`, the mod's
+   `registryPath` option) or under the orchestrator's directory (give both paths); arm no Monitor or cron.
 10. Start a long run with `run_in_background: true`, an explicit `timeout` and output to a log, then
     wait in repeated foreground calls under ten minutes each (`until <check>; do sleep 30; done`,
     with the Bash `timeout` under 600000). Never end the turn while its run, watcher or lock is
@@ -217,7 +219,7 @@ Every launch prompt carries, addressed to the worker, each item below that appli
 A resume prompt states what changed since the last run, repeats items 4, 7, 10 and 11 (a skill
 test: item 11 only, and the prompt says "skill test"), and tells the worker to `git fetch`, re-read branch, PR and
 lock state, re-establish its state from the files and trust them over its recollection. Raise a session a worker
-reports it launched as an open point (step 3)
+reports it launched as an open point (turn start)
 before relaying the report. Report work as pushed only when the worker's recorded `git status -sb` names an upstream and
 `git log --oneline @{u}..HEAD` exited 0 with no output; this read is not the verification a
 consequential claim needs.
@@ -235,7 +237,7 @@ repo's tree, written with a quoted heredoc (`<<'PROMPT_EOF'`) and checked non-em
 
 `launch_worker`'s schema lists its parameters. `title` is the session's **purpose**, never its state; size
 `timeout_minutes` and `need` to the run; pass the unit's section as `section`. A resume passes `resume_sid` and the
-entry's own `cwd` as `dir`; the entry fills the rest.
+entry's own `cwd` as `dir`; the entry fills the rest; give `model`, `effort` or `title` only to repeat the entry's values.
 
 When `launch_worker` refuses a prompt, rewrite it as the refusal says (missing items: pass `rules`) and launch
 again; a step the sign-off guard
@@ -314,9 +316,10 @@ In a new worktree of a repo with submodules, run `git submodule update --init` b
 ### 3. Register
 
 When `launch_worker` answers that the worker is not registered yet, the mod's poll registers it as soon as it
-appears (up to 10 minutes after the launch); until then the orphan row with the launch's `cwd` is that worker and
-needs no open point. A worker still unregistered after that window is an orphan like any other (turn start); one
-that never appears did not start: read the err file the answer names.
+appears, within the window the answer names; until then the orphan row with the launch's `cwd` is that worker and
+needs no open point, and an `orphan` notice for it within that window is checked with `list_sessions` after the window
+instead. A reload of the mod ends the window. A worker still unregistered after that window is an orphan like any
+other (turn start); one that never appears did not start: read the err file the answer names.
 
 **Never read, print or pass a credential yourself**: no credential-helper output, no token or
 auth-config file, no secret on a command line, in a prompt file or in a report; a missing credential is
