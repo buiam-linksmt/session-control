@@ -25,7 +25,7 @@ import type { Host, HostEnvName, HostPort, RemoveOutcome, TailShape, WorkerWant 
 import { HELPER_SCRIPT, NODE_REFUSAL, NODE_WARNING, isNodeMissing, withHelper } from './host-helper'
 import type { HelperNote } from './host-helper'
 import { withPowerShellLaunch } from './host-powershell'
-import { AUDIT_SCHEMA, auditText, retiredIds } from './audit'
+import { AUDIT_SCHEMA, ORCHESTRATOR_HEADING, auditText, retiredIds } from './audit'
 import {
   ORPHANS_SHOWN,
   TOASTS_PER_PASS,
@@ -185,7 +185,6 @@ import type { ComposedPrompt, ExpandableId, RetireVerdict, LaunchArgs, LaunchInp
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
-const ORCHESTRATOR_HEADING = '# Role: Session Orchestrator'
 const TOOL = 'mcp__session-control__launch_worker'
 const RETIRE_TOOL = 'mcp__session-control__retire_workers'
 const ACK_TOOL = 'mcp__session-control__acknowledge_workers'
@@ -2538,7 +2537,7 @@ async function auditState($: EngineInterface) {
   const facts = await probe($, entries)
   const runs = await runsPath($)
   const text = (path: string) => $.fs.read(path).catch(() => undefined)
-  const [queueText, pointsText, decisionsText, clearedText] = await Promise.all([readQueue($), text(orchPath('open-points.json')), text(orchPath('agreed-decisions.md')), text(`${runs}/cleared.jsonl`)])
+  const [queueText, pointsText, decisionsText, clearedText, instructionsText] = await Promise.all([readQueue($), text(orchPath('open-points.json')), text(orchPath('agreed-decisions.md')), text(`${runs}/cleared.jsonl`), text(orchPath('CLAUDE.md'))])
   const retired = retiredIds(clearedText)
   const [backups, runFiles, reports] = await Promise.all([listed($, orchPath('backups')), listed($, runs), listed($, orchPath('reports'))])
   const git = await gitState($, config.orchestratorDir)
@@ -2556,6 +2555,7 @@ async function auditState($: EngineInterface) {
       ...(runFiles === undefined ? {} : { runs: runFiles }),
       ...(reports === undefined ? {} : { reports }),
       ...(git === undefined ? {} : { git }),
+      instructionsText: instructionsText ?? null,
     }),
   }
 }
@@ -2780,7 +2780,7 @@ async function activate($: EngineInterface): Promise<void> {
       ['panel_snapshot', 'Read-only. The text the side panel shows now: the sessions rows, the queued work and the open points (and the log, when one is open), as plain text. detail titles (default) is the panel as drawn, the points and tasks as titles. detail full prints each open point and each queued task as the open_point and queue_task list actions return it (those blocks are not wrapped to the panel width) and, under each session row, its session id, pid, cwd, config dir and outcome (wrapped to the panel width), read from the files when called, without a probe; the rows and the poll age stay those of the last poll. Free text is redacted as the rest of this answer is; the list actions do not redact.', PANEL_SNAPSHOT_SCHEMA],
       [
         'audit_state',
-        'Read-only. The end-of-unit audit of the helper files as findings (kind, subject, evidence, suggested action), the most important first: queue statuses, running tasks with no live session, queued tasks waiting on a finished session, done tasks, sessions to retire or acknowledge, old kept sessions, held or old open points, spent backups, run files and reports, stale decision sections, and the orchestrator directory\'s git state. Changes nothing.',
+        'Read-only. The end-of-unit audit of the helper files as findings (kind, subject, evidence, suggested action), the most important first: queue statuses, running tasks with no live session, queued tasks waiting on a finished session, done tasks, sessions to retire or acknowledge, old kept sessions, held or old open points, spent backups, run files and reports, stale decision sections, the orchestrator directory\'s git state, and its CLAUDE.md against its line and byte budget and its first-line heading. Changes nothing.',
         AUDIT_SCHEMA,
       ],
     ] as const) {

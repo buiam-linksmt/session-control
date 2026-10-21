@@ -1,7 +1,7 @@
 // Pure part of audit_state, the end-of-unit audit of the helper files CLAUDE.md asks the orchestrator to do by hand:
 // what register.tsx read (the registry with the probe, the queue, the open points, the decisions, the cleared log, the
-// listings of backups/, the runs directory and reports/, the orchestrator directory's git state) in, a list of
-// findings out, ordered by importance and bounded. Nothing here reads or writes; the tool changes nothing.
+// listings of backups/, the runs directory and reports/, the orchestrator directory's git state and its CLAUDE.md) in,
+// a list of findings out, ordered by importance and bounded. Nothing here reads or writes; the tool changes nothing.
 
 import type { SessionEntry } from '../types'
 import { formatAge, namesSession, rowStatus, taskNamer } from './core'
@@ -41,6 +41,8 @@ export type AuditInput = {
   runs?: readonly ListedFile[]
   reports?: readonly ListedFile[]
   git?: GitState
+  /** The orchestrator directory's CLAUDE.md; null when it is missing or cannot be read; undefined when not checked. */
+  instructionsText?: string | null
 }
 
 export type Severity = 'high' | 'medium' | 'low'
@@ -50,6 +52,8 @@ export type Finding = { severity: Severity; kind: string; subject: string; evide
 /** The kinds in the order they are told within a severity. */
 const KIND_ORDER = [
   'helper-file',
+  'instructions-heading',
+  'instructions-size',
   'queue-status',
   'running-task-no-session',
   'waits-for-finished',
@@ -80,6 +84,12 @@ export const STALE_KEPT_SEC = 24 * 3600
 export const POINT_MAX_DAYS = 7
 /** A backup older than this, other than the newest of its kind, is spent. */
 export const BACKUP_MAX_SEC = 2 * 86400
+/** The first line the orchestrator's CLAUDE.md starts with: the mod turns on in a directory whose CLAUDE.md starts so. */
+export const ORCHESTRATOR_HEADING = '# Role: Session Orchestrator'
+/** The line budget of the orchestrator's CLAUDE.md: its size after the in-place cleanup (534 lines) and about 10 percent. */
+export const INSTRUCTIONS_MAX_LINES = 590
+/** The byte budget of the orchestrator's CLAUDE.md (UTF-8): its size after the in-place cleanup (39,983) and about 10 percent. */
+export const INSTRUCTIONS_MAX_BYTES = 44_000
 
 /** The mod's own files in the runs directory, which no registry entry names: the trace, the cleared log, its scripts. */
 const OWN_RUN_FILE = /^(trace\.log(\.\d+)?|cleared\.jsonl|[a-z]+\.ps1)$/
@@ -110,6 +120,41 @@ const fileName = (name: string, width = 80) => {
 }
 const fileNames = (list: readonly string[], max = 5) => names(list, max, 80, fileName)
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
+
+/** A text's line count as `wc -l` gives it for a file that ends with a line break: a last line without one counts too. */
+export function lineCount(text: string): number {
+  return text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0)
+}
+
+/** A text's size in UTF-8 bytes (a lone surrogate counts as the three bytes of its replacement). */
+export function utf8Bytes(text: string): number {
+  let bytes = 0
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4
+  }
+  return bytes
+}
+
+/**
+ * The findings of the orchestrator's CLAUDE.md: missing, or without ORCHESTRATOR_HEADING as its start (high: the mod stays
+ * off in a new session there); over INSTRUCTIONS_MAX_LINES lines or INSTRUCTIONS_MAX_BYTES bytes (medium).
+ */
+export function instructionsFindings(text: string | null): Finding[] {
+  const subject = 'CLAUDE.md of the orchestrator directory'
+  if (text === null) return [{ severity: 'high', kind: 'instructions-heading', subject, evidence: 'missing or unreadable', action: `restore it, starting with the line "${ORCHESTRATOR_HEADING}": without it the mod stays off in a new session` }]
+  const out: Finding[] = []
+  if (!text.startsWith(ORCHESTRATOR_HEADING)) {
+    out.push({ severity: 'high', kind: 'instructions-heading', subject, evidence: `the first line is "${short(text.split('\n')[0] ?? '', 80)}", not "${ORCHESTRATOR_HEADING}"`, action: 'restore the heading as the first line: without it the mod stays off in a new session' })
+  }
+  const lines = lineCount(text)
+  const bytes = utf8Bytes(text)
+  const over = [...(lines > INSTRUCTIONS_MAX_LINES ? [`${lines} lines (budget ${INSTRUCTIONS_MAX_LINES})`] : []), ...(bytes > INSTRUCTIONS_MAX_BYTES ? [`${bytes} bytes (budget ${INSTRUCTIONS_MAX_BYTES})`] : [])]
+  if (over.length > 0) {
+    out.push({ severity: 'medium', kind: 'instructions-size', subject, evidence: `over its budget: ${over.join(', ')}`, action: 'merge or remove rules until it is within the budget: amend before you append, state each rule once' })
+  }
+  return out
+}
 
 /** The tasks of the queue file, or why it cannot be read. */
 function readTasks(text: string | null | undefined): Task[] | string {
@@ -280,6 +325,7 @@ export function auditFindings(input: AuditInput): Finding[] {
   for (const problem of [tasks, points]) {
     if (typeof problem === 'string') add({ severity: 'high', kind: 'helper-file', subject: problem.split(' ')[0] ?? 'a helper file', evidence: problem, action: 'raise an open point: a helper file that exists and does not parse is a blocker; its checks were skipped' })
   }
+  if (input.instructionsText !== undefined) for (const finding of instructionsFindings(input.instructionsText)) add(finding)
   const taskList = typeof tasks === 'string' ? [] : tasks
   const pointList = typeof points === 'string' ? [] : points
   const status = (entry: SessionEntry) => rowStatus(entry, facts)
@@ -448,6 +494,7 @@ function factsLine(input: AuditInput): string {
     `runs ${input.runs === undefined ? 'missing' : plural(input.runs.filter(file => file.kind === 'file').length, 'file')}`,
     `reports/ ${input.reports === undefined ? 'missing' : plural(input.reports.length, 'file')}`,
     `agreed-decisions.md ${sections === undefined ? 'missing' : `${(input.decisionsText ?? '').split('\n').length - ((input.decisionsText ?? '').endsWith('\n') ? 1 : 0)} lines, ${plural(sections.length, 'section')}`}`,
+    ...(input.instructionsText === undefined ? [] : [`CLAUDE.md ${input.instructionsText === null ? 'missing' : `${lineCount(input.instructionsText)} lines, ${utf8Bytes(input.instructionsText)} bytes (budget ${INSTRUCTIONS_MAX_LINES} lines, ${INSTRUCTIONS_MAX_BYTES} bytes)`}`]),
     `git ${input.git === undefined ? 'not checked (no git, or not a repository)' : `branch ${short(input.git.branch ?? 'detached HEAD', 60)}${input.git.defaultBranch === undefined ? '' : ` (default ${short(input.git.defaultBranch, 60)})`}, ${plural(input.git.changed.length, 'tracked file')} changed`}`,
   ]
   return `facts: ${parts.join('; ')}.`

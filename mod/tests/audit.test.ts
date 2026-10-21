@@ -5,7 +5,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { MAX_FINDINGS, auditFindings, auditText, backupKind, decisionSections, licenceWait } from '../hooks/audit'
+import { INSTRUCTIONS_MAX_BYTES, INSTRUCTIONS_MAX_LINES, MAX_FINDINGS, ORCHESTRATOR_HEADING, auditFindings, auditText, backupKind, decisionSections, instructionsFindings, licenceWait, lineCount, utf8Bytes } from '../hooks/audit'
 import type { AuditInput } from '../hooks/audit'
 import { parseProcFacts } from '../hooks/core'
 import { nodeAnswer } from './fake-helper'
@@ -327,6 +327,74 @@ describe('queued tasks whose wait the audit cannot check', () => {
   })
 })
 
+// ---------------------------------------------------------------- the orchestrator's CLAUDE.md
+
+/** A CLAUDE.md of exactly `lines` lines and `bytes` UTF-8 bytes, ending with a line break, its first line `head`. */
+function sizedText(lines: number, bytes: number, head = ORCHESTRATOR_HEADING): string {
+  const rows = [head, ...Array<string>(lines - 1).fill('x')]
+  const pad = bytes - utf8Bytes(`${rows.join('\n')}\n`)
+  if (pad < 0) throw new Error('too many lines for the bytes')
+  rows[rows.length - 1] += 'y'.repeat(pad)
+  return `${rows.join('\n')}\n`
+}
+
+describe('the orchestrator CLAUDE.md: heading and budget', () => {
+  const kinds = (text: string | null) => instructionsFindings(text).map(one => `${one.severity} ${one.kind}`)
+
+  test('the counts: lines as wc -l gives them, bytes in UTF-8', () => {
+    expect([lineCount(''), lineCount('a'), lineCount('a\n'), lineCount('a\nb'), lineCount('a\nb\n')]).toEqual([0, 1, 1, 2, 2])
+    expect(utf8Bytes('a\u00e9\u2014\u{1F600}')).toBe(10)
+    const text = sizedText(INSTRUCTIONS_MAX_LINES, INSTRUCTIONS_MAX_BYTES)
+    expect([lineCount(text), utf8Bytes(text)]).toEqual([INSTRUCTIONS_MAX_LINES, INSTRUCTIONS_MAX_BYTES])
+  })
+
+  test('at the budget and below it: no finding', () => {
+    expect(kinds(sizedText(INSTRUCTIONS_MAX_LINES, INSTRUCTIONS_MAX_BYTES))).toEqual([])
+    expect(kinds(sizedText(INSTRUCTIONS_MAX_LINES - 1, INSTRUCTIONS_MAX_BYTES - 1))).toEqual([])
+    expect(kinds(`${ORCHESTRATOR_HEADING}\n`)).toEqual([])
+  })
+
+  test('above the line budget, the byte budget or both: one medium instructions-size finding naming each', () => {
+    const lines = instructionsFindings(sizedText(INSTRUCTIONS_MAX_LINES + 1, INSTRUCTIONS_MAX_BYTES))
+    expect(lines.map(one => `${one.severity} ${one.kind}`)).toEqual(['medium instructions-size'])
+    expect(lines[0]?.evidence).toBe(`over its budget: ${INSTRUCTIONS_MAX_LINES + 1} lines (budget ${INSTRUCTIONS_MAX_LINES})`)
+    const bytes = instructionsFindings(sizedText(INSTRUCTIONS_MAX_LINES, INSTRUCTIONS_MAX_BYTES + 1))
+    expect(bytes[0]?.evidence).toBe(`over its budget: ${INSTRUCTIONS_MAX_BYTES + 1} bytes (budget ${INSTRUCTIONS_MAX_BYTES})`)
+    // Multibyte characters count by their UTF-8 bytes: the same characters over the byte budget, under it as UTF-16 units.
+    const wide = `${ORCHESTRATOR_HEADING}\n${'\u2014'.repeat(Math.ceil(INSTRUCTIONS_MAX_BYTES / 3))}\n`
+    expect(wide.length).toBeLessThan(INSTRUCTIONS_MAX_BYTES)
+    expect(kinds(wide)).toEqual(['medium instructions-size'])
+    const both = instructionsFindings(sizedText(INSTRUCTIONS_MAX_LINES + 10, INSTRUCTIONS_MAX_BYTES + 10))
+    expect(both).toHaveLength(1)
+    expect(both[0]?.evidence).toBe(`over its budget: ${INSTRUCTIONS_MAX_LINES + 10} lines (budget ${INSTRUCTIONS_MAX_LINES}), ${INSTRUCTIONS_MAX_BYTES + 10} bytes (budget ${INSTRUCTIONS_MAX_BYTES})`)
+  })
+
+  test('a first line other than the heading is a high instructions-heading finding; a size finding comes as well when it is over', () => {
+    expect(kinds('# Role: Worker\nrest\n')).toEqual(['high instructions-heading'])
+    expect(kinds(`\n${ORCHESTRATOR_HEADING}\n`)).toEqual(['high instructions-heading'])
+    expect(kinds('')).toEqual(['high instructions-heading'])
+    expect(instructionsFindings('# Role: Worker\n')[0]?.evidence).toBe(`the first line is "# Role: Worker", not "${ORCHESTRATOR_HEADING}"`)
+    expect(kinds(sizedText(INSTRUCTIONS_MAX_LINES + 1, INSTRUCTIONS_MAX_BYTES, '# Notes'))).toEqual(['high instructions-heading', 'medium instructions-size'])
+  })
+
+  test('a missing file is a high instructions-heading finding', () => {
+    const found = instructionsFindings(null)
+    expect(found.map(one => `${one.severity} ${one.kind}`)).toEqual(['high instructions-heading'])
+    expect(found[0]?.evidence).toBe('missing or unreadable')
+  })
+
+  test('in the audit: checked only when given, placed after helper-file, and told in the facts line', () => {
+    const base = { entries: [], facts: FACTS, nowMs: NOW }
+    expect(auditFindings(base).filter(one => one.kind.startsWith('instructions-'))).toEqual([])
+    expect(auditText(base).split('\n')[1]).not.toContain('CLAUDE.md')
+    const order = auditFindings({ ...base, queueText: '{', instructionsText: sizedText(INSTRUCTIONS_MAX_LINES + 1, 100 * INSTRUCTIONS_MAX_LINES, 'x') }).map(one => one.kind)
+    expect(order.slice(0, 3)).toEqual(['helper-file', 'instructions-heading', 'instructions-size'])
+    const text = auditText({ ...base, instructionsText: sizedText(10, 400) })
+    expect(text.split('\n')[1]).toContain(`CLAUDE.md 10 lines, 400 bytes (budget ${INSTRUCTIONS_MAX_LINES} lines, ${INSTRUCTIONS_MAX_BYTES} bytes)`)
+    expect(auditText({ ...base, instructionsText: null }).split('\n')[1]).toContain('CLAUDE.md missing')
+  })
+})
+
 // ---------------------------------------------------------------- through the plugin
 
 const HOME = '/m/home'
@@ -337,10 +405,10 @@ const OPTIONS = { orchestratorDir: ORCH, registryPath: '~/.claude/headless-sessi
 
 type Git = 'repo' | 'missing' | 'not-a-repo'
 
-function world(on: On, git: Git) {
+function world(on: On, git: Git, claudeMd: string | null = '# Role: Session Orchestrator\n') {
   const files = new Map<string, string>([
     [REG, JSON.stringify([{ title: 'clean done', session_id: SID_DONE, config_dir: '/c', reported: true, outcome: { kind: 'clean', summary: 'clean: ok' }, result_file: `${RUNS}/a.json` }])],
-    [`${ORCH}/CLAUDE.md`, '# Role: Session Orchestrator\n'],
+    ...(claudeMd === null ? [] : [[`${ORCH}/CLAUDE.md`, claudeMd] as [string, string]]),
     [`${ORCH}/open-points.json`, JSON.stringify({ points: [] })],
     [`${ORCH}/task-queue.json`, JSON.stringify({ tasks: [{ id: 'stale', status: 'pending', title: 'Stale entry' }, { id: 'fine', status: 'queued', title: 'Fine entry' }] })],
     [`${ORCH}/agreed-decisions.md`, '# Agreed decisions\n'],
@@ -429,6 +497,23 @@ describe('audit_state through the plugin', () => {
     expect(text).toContain('[low] backups | backups of kind task-queue-before-queue-task.json | 2 files; 1 is older than 2 days besides the newest: task-queue-before-queue-task-2026-09-17.json')
     expect(text).toContain('[low] runs | the runs directory | 1 file (1 KiB) that no registry entry names, the oldest 24h00m old: loose.json')
     expect(lines[1]).toContain('reports/ missing')
+  })
+
+  test('the orchestrator CLAUDE.md missing through the plugin: a high finding and the facts line says so', { options: OPTIONS }, async ($, on) => {
+    const call = async () => String(((await $.tool.call({ tool: 'mcp__session-control__audit_state' } as never)) as { result?: unknown }).result)
+    world(on, 'missing', null)
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const missing = await call()
+    expect(missing).toContain('[high] instructions-heading | CLAUDE.md of the orchestrator directory | missing or unreadable')
+    expect(missing.split('\n')[1]).toContain('CLAUDE.md missing')
+  })
+
+  test('the orchestrator CLAUDE.md over its line budget through the plugin', { options: OPTIONS }, async ($, on) => {
+    world(on, 'missing', sizedText(INSTRUCTIONS_MAX_LINES + 1, INSTRUCTIONS_MAX_BYTES))
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    const text = String(((await $.tool.call({ tool: 'mcp__session-control__audit_state' } as never)) as { result?: unknown }).result)
+    expect(text).toContain(`[medium] instructions-size | CLAUDE.md of the orchestrator directory | over its budget: ${INSTRUCTIONS_MAX_LINES + 1} lines (budget ${INSTRUCTIONS_MAX_LINES})`)
+    expect(text).not.toContain('instructions-heading')
   })
 
   test('git missing: no git finding and no error, the rest as before', { options: OPTIONS }, async ($, on) => {
