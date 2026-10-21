@@ -43,6 +43,8 @@ export type AuditInput = {
   git?: GitState
   /** The orchestrator directory's CLAUDE.md; null when it is missing or cannot be read; undefined when not checked. */
   instructionsText?: string | null
+  /** Whether the mod turns on by the CLAUDE.md heading (no orchestratorDir option set); true when not given. */
+  isHeadingNeeded?: boolean
 }
 
 export type Severity = 'high' | 'medium' | 'low'
@@ -137,14 +139,15 @@ export function utf8Bytes(text: string): number {
 }
 
 /**
- * The findings of the orchestrator's CLAUDE.md: missing, or without ORCHESTRATOR_HEADING as its start (high: the mod stays
- * off in a new session there); over INSTRUCTIONS_MAX_LINES lines or INSTRUCTIONS_MAX_BYTES bytes (medium).
+ * The findings of the orchestrator's CLAUDE.md: when the mod turns on by its heading, missing or without
+ * ORCHESTRATOR_HEADING as its start (high: the mod stays off in a new session there); over INSTRUCTIONS_MAX_LINES lines
+ * or INSTRUCTIONS_MAX_BYTES bytes (medium).
  */
-export function instructionsFindings(text: string | null): Finding[] {
+export function instructionsFindings(text: string | null, isHeadingNeeded = true): Finding[] {
   const subject = 'CLAUDE.md of the orchestrator directory'
-  if (text === null) return [{ severity: 'high', kind: 'instructions-heading', subject, evidence: 'missing or unreadable', action: `restore it, starting with the line "${ORCHESTRATOR_HEADING}": without it the mod stays off in a new session` }]
+  if (text === null) return !isHeadingNeeded ? [] : [{ severity: 'high', kind: 'instructions-heading', subject, evidence: 'missing or unreadable', action: `restore it, starting with the line "${ORCHESTRATOR_HEADING}": without it the mod stays off in a new session` }]
   const out: Finding[] = []
-  if (!text.startsWith(ORCHESTRATOR_HEADING)) {
+  if (isHeadingNeeded && !text.startsWith(ORCHESTRATOR_HEADING)) {
     out.push({ severity: 'high', kind: 'instructions-heading', subject, evidence: `the first line is "${short(text.split('\n')[0] ?? '', 80)}", not "${ORCHESTRATOR_HEADING}"`, action: 'restore the heading as the first line: without it the mod stays off in a new session' })
   }
   const lines = lineCount(text)
@@ -325,7 +328,7 @@ export function auditFindings(input: AuditInput): Finding[] {
   for (const problem of [tasks, points]) {
     if (typeof problem === 'string') add({ severity: 'high', kind: 'helper-file', subject: problem.split(' ')[0] ?? 'a helper file', evidence: problem, action: 'raise an open point: a helper file that exists and does not parse is a blocker; its checks were skipped' })
   }
-  if (input.instructionsText !== undefined) for (const finding of instructionsFindings(input.instructionsText)) add(finding)
+  if (input.instructionsText !== undefined) for (const finding of instructionsFindings(input.instructionsText, input.isHeadingNeeded ?? true)) add(finding)
   const taskList = typeof tasks === 'string' ? [] : tasks
   const pointList = typeof points === 'string' ? [] : points
   const status = (entry: SessionEntry) => rowStatus(entry, facts)

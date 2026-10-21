@@ -383,6 +383,12 @@ describe('the orchestrator CLAUDE.md: heading and budget', () => {
     expect(found[0]?.evidence).toBe('missing or unreadable')
   })
 
+  test('with the orchestratorDir option set the heading turns nothing on: no heading finding, the size still checked', () => {
+    expect(instructionsFindings(null, false)).toEqual([])
+    expect(instructionsFindings('# Role: Worker\n', false)).toEqual([])
+    expect(instructionsFindings(sizedText(INSTRUCTIONS_MAX_LINES + 1, INSTRUCTIONS_MAX_BYTES, '# Notes'), false).map(one => `${one.severity} ${one.kind}`)).toEqual(['medium instructions-size'])
+  })
+
   test('in the audit: checked only when given, placed after helper-file, and told in the facts line', () => {
     const base = { entries: [], facts: FACTS, nowMs: NOW }
     expect(auditFindings(base).filter(one => one.kind.startsWith('instructions-'))).toEqual([])
@@ -420,7 +426,7 @@ function world(on: On, git: Git, claudeMd: string | null = '# Role: Session Orch
     [`${ORCH}/backups`]: [{ name: 'task-queue-before-queue-task-2026-09-17.json', kind: 'file', size: 5, mtimeMs: NOW_MS - 4 * DAY, isLink: false }, { name: 'task-queue-before-queue-task-2026-09-21.json', kind: 'file', size: 5, mtimeMs: NOW_MS, isLink: false }],
     [RUNS]: [{ name: 'a.json', kind: 'file', size: 9, mtimeMs: NOW_MS, isLink: false }, { name: 'loose.json', kind: 'file', size: 9, mtimeMs: NOW_MS - DAY, isLink: false }],
   }
-  const w = { writes: [] as string[], runs: [] as string[][] }
+  const w = { writes: [] as string[], runs: [] as string[][], files }
   const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   mock.clock(on, { now: NOW_MS })
   machineBase(on, { HOME })
@@ -499,13 +505,26 @@ describe('audit_state through the plugin', () => {
     expect(lines[1]).toContain('reports/ missing')
   })
 
-  test('the orchestrator CLAUDE.md missing through the plugin: a high finding and the facts line says so', { options: OPTIONS }, async ($, on) => {
+  test('the orchestrator CLAUDE.md missing through the plugin, turned on by its heading: a high finding and the facts line says so', { options: { ...OPTIONS, orchestratorDir: '' } }, async ($, on) => {
+    const w = world(on, 'missing')
+    await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
+    w.files.delete(`${ORCH}/CLAUDE.md`)
+    const missing = String(((await $.tool.call({ tool: 'mcp__session-control__audit_state' } as never)) as { result?: unknown }).result)
+    expect(missing).toContain('[high] instructions-heading | CLAUDE.md of the orchestrator directory | missing or unreadable | action: restore it')
+    expect(missing).toContain('without it the mod stays off in a new session')
+    expect(missing.split('\n')[1]).toContain('CLAUDE.md missing')
+  })
+
+  test('the orchestrator CLAUDE.md missing or without the heading through the plugin, the orchestratorDir option set: no heading finding', { options: OPTIONS }, async ($, on) => {
     const call = async () => String(((await $.tool.call({ tool: 'mcp__session-control__audit_state' } as never)) as { result?: unknown }).result)
-    world(on, 'missing', null)
+    const w = world(on, 'missing', null)
     await $.session.start({ cwd: ORCH, surface: null, isInteractive: true })
     const missing = await call()
-    expect(missing).toContain('[high] instructions-heading | CLAUDE.md of the orchestrator directory | missing or unreadable')
+    expect(missing).not.toContain('instructions-heading')
+    expect(missing).not.toContain('stays off')
     expect(missing.split('\n')[1]).toContain('CLAUDE.md missing')
+    w.files.set(`${ORCH}/CLAUDE.md`, '# Notes\n')
+    expect(await call()).not.toContain('instructions-heading')
   })
 
   test('the orchestrator CLAUDE.md over its line budget through the plugin', { options: OPTIONS }, async ($, on) => {

@@ -265,6 +265,8 @@ let config: Config = {
   licenceDirs: '',
 }
 let isActive = false
+/** Whether the orchestratorDir option is set: the mod then turns on without the CLAUDE.md heading. */
+let isDirOptionSet = false
 /**
  * What the finished-open lines (notices.ts) are worked out from at each prompt: the registry as the last refresh left it
  * (after its harvests), that refresh's probe and the queue it read. Kept from the last refresh that could read the
@@ -2556,6 +2558,7 @@ async function auditState($: EngineInterface) {
       ...(reports === undefined ? {} : { reports }),
       ...(git === undefined ? {} : { git }),
       instructionsText: instructionsText ?? null,
+      isHeadingNeeded: !isDirOptionSet,
     }),
   }
 }
@@ -3015,6 +3018,7 @@ export const register: Register = (on, options) => {
   isToastHeldHere = false
   isUnattached = false
   unattachedToasts = []
+  isDirOptionSet = String(options.orchestratorDir ?? '') !== ''
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
     registrySetting: String(options.registryPath ?? config.registrySetting),
