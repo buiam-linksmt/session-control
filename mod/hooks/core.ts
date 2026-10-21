@@ -1630,24 +1630,47 @@ export function activeQueueText(queueText: string): string {
   }
 }
 
+/** Whether a text names a session: its full id, its first 8 characters or its session name (the queue checks, the queue-ready notice). */
+export function namesSession(text: string, entry: SessionEntry): boolean {
+  const sid = typeof entry.session_id === 'string' ? entry.session_id : ''
+  const name = typeof entry.name === 'string' ? entry.name : ''
+  return (sid !== '' && (text.includes(sid) || text.includes(sid.slice(0, 8)))) || (name !== '' && text.includes(name))
+}
+
 /**
- * Which of the named sessions may leave the registry: finished (no live pid), a clean outcome (anything that
- * needs a resume stays), not marked `keep`, and not named by a task of the queue file. The orchestrator calls
- * this when the work is acknowledged and the session is not needed for a resume or for new work with its context.
+ * The one rule by which a task names a session, for retire_workers, audit_state and the finished-open notice: a task
+ * not done (activeQueueText) holds the session's full id, its first 8 characters or its session name (namesSession).
+ * `queueText` undefined is no queue file (no task names a session); null is a queue file that is there and cannot be
+ * read, answered undefined: whether a task names a session is unknown, and each caller then retires or lists none.
  */
+export function taskNamer(queueText: string | null | undefined): ((entry: SessionEntry) => boolean) | undefined {
+  if (queueText === null) return undefined
+  const active = activeQueueText(queueText ?? '')
+  return entry => namesSession(active, entry)
+}
+
+/** retireVerdict's reason for a session it would retire while the queue file cannot be read. */
+export const QUEUE_UNREADABLE_REASON = 'task-queue.json cannot be read, so a task may name it'
+
 /** The entry a session id names: the full id or its first characters. */
 export function findBySid(entries: readonly SessionEntry[], id: string): (SessionEntry & { session_id: string }) | undefined {
   return entries.find((one): one is SessionEntry & { session_id: string } => typeof one.session_id === 'string' && (one.session_id === id || one.session_id.startsWith(id)))
 }
 
+/**
+ * Which of the named sessions may leave the registry: finished (no live pid), a clean outcome (anything that
+ * needs a resume stays), not marked `keep`, and not named by a task of the queue file (taskNamer; `rawQueueText` null,
+ * a queue file that cannot be read, retires none). The orchestrator calls this when the work is acknowledged and the
+ * session is not needed for a resume or for new work with its context.
+ */
 export function retireVerdict(
   entries: readonly SessionEntry[],
   facts: ProcFacts,
-  rawQueueText: string,
+  rawQueueText: string | null,
   ids: readonly string[],
   reviewed: Readonly<Record<string, unknown>> = {},
 ): RetireVerdict {
-  const queueText = activeQueueText(rawQueueText)
+  const isNamedByTask = taskNamer(rawQueueText)
   const verdict: RetireVerdict = { removable: [], refused: [] }
   // A reviewed key names the session by the same rule as an id; it must name one of the listed sessions, with a reason.
   const listed = new Set(ids.map(id => findBySid(entries, id)?.session_id).filter((sid): sid is string => sid !== undefined))
@@ -1676,7 +1699,8 @@ export function retireVerdict(
     else if (status === 'dead') verdict.refused.push({ id, reason: 'its exit was not classified yet' })
     else if (entry.keep === true) verdict.refused.push({ id, reason: 'marked keep: a resume or follow-up is expected' })
     else if (outcome !== undefined && outcome.kind !== 'clean' && !isReviewed) verdict.refused.push({ id, reason: `outcome ${String(outcome.kind)} needs a resume` })
-    else if (queueText.includes(sid) || queueText.includes(sid.slice(0, 8))) verdict.refused.push({ id, reason: 'a queued or running task names it' })
+    else if (isNamedByTask === undefined) verdict.refused.push({ id, reason: QUEUE_UNREADABLE_REASON })
+    else if (isNamedByTask(entry)) verdict.refused.push({ id, reason: 'a queued or running task names it' })
     else {
       verdict.removable.push(sid)
       if (isReviewed) (verdict.reviewed ??= []).push({ session_id: sid, was: String(outcome?.kind), reason: String(reason).trim() })
@@ -1705,7 +1729,8 @@ export function sessionIdsProblem(tool: string, input: Readonly<Record<string, u
 
 /**
  * close_worker's closing sentence for the sessions retire_workers refused (decision mod-51): per session its id's first 8
- * characters and the exact next call that disposes of it, by the refusal's reason; '' when nothing was refused.
+ * characters and the exact next call that disposes of it, by the refusal's reason; '' when nothing was refused. A `marked
+ * keep` refusal never reaches it: close_worker's acknowledgement with keep false clears the mark before the retire.
  */
 export function closeNextCalls(refused: readonly { id: string; reason: string }[]): string {
   if (refused.length === 0) return ''
@@ -1715,9 +1740,9 @@ export function closeNextCalls(refused: readonly { id: string; reason: string }[
     if (reason === 'no registry entry') return `${id8}: no registry entry: list_sessions shows the registry, and a retired session is in cleared.jsonl; nothing to retire`
     if (reason === 'its process is alive') return `${id8}: not acknowledged, its process is alive: wait for its exit (stop_worker when it must end), then close_worker with ${ids} again`
     if (reason === 'its exit was not classified yet') return `${id8}: its exit is not classified yet: after the next poll's harvest (list_sessions shows it finished), close_worker with ${ids} again`
-    if (reason.startsWith('marked keep')) return `${id8}: marked keep: when no resume or queued follow-up needs it, acknowledge_workers with ${ids} and keep false, then retire_workers with ${ids}`
     if (/^outcome .* needs a resume$/.test(reason)) return `${id8}: ${reason}: resume it with launch_worker resume_sid when its work is unfinished; else, after reading its transcript, close_worker with ${ids} and reviewed {"${id8}": "<reason>"}`
     if (reason === 'a queued or running task names it') return `${id8}: a task not done names it: launch or finish that task, or correct it with queue_task; then retire_workers with ${ids}`
+    if (reason === QUEUE_UNREADABLE_REASON) return `${id8}: ${reason}: raise an open point for the queue file; once it reads, retire_workers with ${ids}`
     if (reason === 'reviewed needs a non-empty reason') return `${id8}: give reviewed a non-empty reason for "${id8}"`
     if (reason === 'reviewed names no session of session_ids') return `${id8}: key reviewed by an id that session_ids lists`
     return `${id8}: ${reason}`

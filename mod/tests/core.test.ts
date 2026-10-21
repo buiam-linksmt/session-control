@@ -35,6 +35,7 @@ import {
   retireVerdict,
   closeNextCalls,
   sessionIdsProblem,
+  QUEUE_UNREADABLE_REASON,
   buildRows,
   nextBack,
   parseQueuedWork,
@@ -1830,21 +1831,20 @@ describe("close_worker's next calls", () => {
   const none = parseProcFacts('')
   const entry = (sid: string, kind: string, extra: object = {}) => ({ title: sid, session_id: sid, reported: true, outcome: { kind, summary: kind }, ...extra })
 
-  test('every refusal of retireVerdict gets its session and its exact next call', () => {
+  // A kept session is left out: close_worker's acknowledgement with keep false clears the mark before its retire.
+  test('every refusal of retireVerdict that close_worker can meet gets its session and its exact next call', () => {
     const list = [
-      entry('keep0001-1', 'clean', { keep: true }),
       entry('queued01-1', 'clean'),
       entry(SID_ALIVE, 'clean', { pid: 4101, config_dir: '/fixture/lic/a' }),
       { title: 'dead', session_id: 'dead0001-1', config_dir: '/fixture/lic/a', pid: 999999 },
       entry('login001-1', 'login'),
       entry('empty001-1', 'login'),
     ]
-    const ids = ['keep0001-1', 'queued01-1', SID_ALIVE, 'unknown1', 'dead0001-1', 'login001-1', 'empty001-1']
+    const ids = ['queued01-1', SID_ALIVE, 'unknown1', 'dead0001-1', 'login001-1', 'empty001-1']
     const v = retireVerdict(list, parseProcFacts(PROBE_STDOUT), JSON.stringify({ tasks: [{ id: 't', status: 'queued', waits_for: 'queued01' }] }), ids, { empty001: ' ', other001: 'x' })
     expect(v.removable).toEqual([])
     expect(closeNextCalls(v.refused).split('; ')).toEqual([
       ' Next: other001: key reviewed by an id that session_ids lists',
-      'keep0001: marked keep: when no resume or queued follow-up needs it, acknowledge_workers with session_ids ["keep0001"] and keep false, then retire_workers with session_ids ["keep0001"]',
       'queued01: a task not done names it: launch or finish that task, or correct it with queue_task',
       'then retire_workers with session_ids ["queued01"]',
       'aaaaaaaa: not acknowledged, its process is alive: wait for its exit (stop_worker when it must end), then close_worker with session_ids ["aaaaaaaa"] again',
@@ -1859,6 +1859,22 @@ describe("close_worker's next calls", () => {
 
   test('nothing refused: no sentence', () => {
     expect(closeNextCalls([])).toBe('')
+  })
+
+  test('a queue file that cannot be read: retireVerdict retires none, and the next call says to raise it, then retire', () => {
+    const v = retireVerdict([entry('clean001-1', 'clean'), entry('login001-1', 'login')], none, null, ['clean001', 'login001'], { login001: 'checked' })
+    expect(v).toEqual({ removable: [], refused: [{ id: 'clean001', reason: QUEUE_UNREADABLE_REASON }, { id: 'login001', reason: QUEUE_UNREADABLE_REASON }] })
+    expect(closeNextCalls(v.refused)).toBe(
+      ' Next: clean001: task-queue.json cannot be read, so a task may name it: raise an open point for the queue file; once it reads, retire_workers with session_ids ["clean001"]; ' +
+        'login001: task-queue.json cannot be read, so a task may name it: raise an open point for the queue file; once it reads, retire_workers with session_ids ["login001"].',
+    )
+  })
+
+  test('a task names a session by its session name too, as audit_state and the finished-open notice read it', () => {
+    const named = { ...entry('named001-1', 'clean'), name: 'w-named-261020' }
+    const queue = (status: string) => JSON.stringify({ tasks: [{ id: 't', status, waits_for: 'w-named-261020' }] })
+    expect(retireVerdict([named], none, queue('queued'), ['named001']).refused).toEqual([{ id: 'named001', reason: 'a queued or running task names it' }])
+    expect(retireVerdict([named], none, queue('done'), ['named001']).removable).toEqual(['named001-1'])
   })
 
   test('sessionIdsProblem: a usable list passes; a missing, empty or wrong one is named with the call to make', () => {

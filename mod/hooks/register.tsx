@@ -32,6 +32,7 @@ import {
   driftStep,
   finishedOpenNotices,
   harvestNotices,
+  promptNotices,
   isRegistrySound,
   isRepoDue,
   isRetireDue,
@@ -270,7 +271,7 @@ let isActive = false
  * (after its harvests), that refresh's probe and the queue it read. Kept from the last refresh that could read the
  * registry; undefined until one has.
  */
-let finishedInput: { entries: readonly SessionEntry[]; facts: ProcFacts; queueText?: string } | undefined
+let finishedInput: { entries: readonly SessionEntry[]; facts: ProcFacts; queueText?: string | null } | undefined
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over.
 let layout: { boxes: SectionBox[]; totals: Partial<Record<SectionId, { total: number; visible: number }>> } = { boxes: [], totals: {} }
 let isAfterCompact = false
@@ -1102,7 +1103,7 @@ async function pollNotices(
   entries: readonly SessionEntry[],
   facts: ProcFacts,
   nowMs: number,
-  files: { queueText?: string; pointsText?: string },
+  files: { queueText?: string; isQueueUnreadable?: boolean; pointsText?: string },
   isTick: boolean,
   isRegistryOk: boolean,
   toasts: ToastBudget,
@@ -1128,7 +1129,8 @@ async function pollNotices(
     if (isTick && isRetireDue(state, nowMs)) {
       const cleared = await $.fs.read(`${await runsPath($)}/cleared.jsonl`).catch(() => undefined)
       const retired = retiredIds(cleared)
-      notices.push(...retireStep(state, { entries, facts, nowMs, ...(files.queueText === undefined ? {} : { queueText: files.queueText }), ...(retired === undefined ? {} : { retired }) }))
+      const queueText = files.isQueueUnreadable === true ? null : files.queueText
+      notices.push(...retireStep(state, { entries, facts, nowMs, ...(queueText === undefined ? {} : { queueText }), ...(retired === undefined ? {} : { retired }) }))
     }
     const aliveCount = entries.filter(entry => rowStatus(entry, facts) === 'alive').length
     if (isTick && isRepoDue(state, nowMs, aliveCount)) notices.push(...repoStep(state, await gitState($, config.orchestratorDir), nowMs))
@@ -1307,16 +1309,32 @@ async function turnDigest($: EngineInterface) {
   return { result: text }
 }
 
+/**
+ * The task queue's text as the task checks read it (taskNamer): undefined when the file is not there, null when it is
+ * there and cannot be read.
+ */
+async function readQueue($: EngineInterface): Promise<string | null | undefined> {
+  const path = orchPath('task-queue.json')
+  const text = await $.fs.read(path).catch(() => undefined)
+  if (text !== undefined) return text
+  return (await $.fs.exists(path).catch(() => true)) ? null : undefined
+}
+
 /** Reads the points and the queue into the panel's atoms; answers the first problem with those files, and their text for the notices. */
-async function loadPoints($: EngineInterface): Promise<{ problem?: string; queueText?: string; pointsText?: string }> {
+async function loadPoints($: EngineInterface): Promise<{ problem?: string; queueText?: string; isQueueUnreadable?: boolean; pointsText?: string }> {
   const text = await $.fs.read(orchPath('open-points.json')).catch(() => undefined)
   const parsed = text === undefined ? ({ ok: true, points: [] } as const) : parseOpenPoints(text)
   const list: PresentedPoint[] | null = parsed.ok ? parsed.points : null
   if (!isSame(await read($, points), list)) await update($, points, () => list)
-  const queueRead = await $.fs.read(orchPath('task-queue.json')).catch(() => undefined)
+  const queueRead = await readQueue($)
   const queue = parseQueuedWork(queueRead ?? '')
   if (!isSame(await read($, queued), queue)) await update($, queued, () => queue)
-  return { ...(parsed.ok ? {} : { problem: parsed.error }), ...(queueRead === undefined ? {} : { queueText: queueRead }), ...(text === undefined ? {} : { pointsText: text }) }
+  return {
+    ...(parsed.ok ? {} : { problem: parsed.error }),
+    ...(typeof queueRead === 'string' ? { queueText: queueRead } : {}),
+    ...(queueRead === null ? { isQueueUnreadable: true } : {}),
+    ...(text === undefined ? {} : { pointsText: text }),
+  }
 }
 
 async function gather($: EngineInterface, notice: TaskNotice | undefined, isTick = false): Promise<void> {
@@ -1369,7 +1387,8 @@ async function gather($: EngineInterface, notice: TaskNotice | undefined, isTick
   }
   // The finished-open lines read the registry after this refresh's harvests, so a session just harvested is named by its outcome.
   const settled = isHarvesting && config.completionWrites ? parseRegistry(await readRegistryText($)) : undefined
-  finishedInput = { entries: (settled?.ok === true ? settled.entries : entries).filter(entry => !isNew(entry)), facts, ...(files.queueText === undefined ? {} : { queueText: files.queueText }) }
+  const queueText = files.isQueueUnreadable === true ? null : files.queueText
+  finishedInput = { entries: (settled?.ok === true ? settled.entries : entries).filter(entry => !isNew(entry)), facts, ...(queueText === undefined ? {} : { queueText }) }
   const rows = buildRows(entries.filter(entry => !isNew(entry)), facts, Math.floor(now / 1000))
   const next = problem === undefined ? { at: now, rows } : { at: now, rows, error: problem }
   noteError($, next.error, now)
@@ -1775,8 +1794,8 @@ async function retire($: EngineInterface, ids: readonly string[], reviewed: Read
 async function retireRun($: EngineInterface, ids: readonly string[], reviewed: Readonly<Record<string, unknown>>): Promise<{ deny: string } | { result: string; refused: RetireVerdict['refused'] }> {
   const reg = await registryAndFacts($)
   if ('deny' in reg) return reg
-  const queueText = await $.fs.read(orchPath('task-queue.json')).catch(() => '')
-  const verdict = retireVerdict(reg.entries, reg.facts, queueText, ids, reviewed)
+  const queueText = await readQueue($)
+  const verdict = retireVerdict(reg.entries, reg.facts, queueText === undefined ? '' : queueText, ids, reviewed)
   const reviews = verdict.reviewed ?? []
   trace($, 'guard', {
     tool: 'retire_workers',
@@ -2519,7 +2538,7 @@ async function auditState($: EngineInterface) {
   const facts = await probe($, entries)
   const runs = await runsPath($)
   const text = (path: string) => $.fs.read(path).catch(() => undefined)
-  const [queueText, pointsText, decisionsText, clearedText] = await Promise.all([text(orchPath('task-queue.json')), text(orchPath('open-points.json')), text(orchPath('agreed-decisions.md')), text(`${runs}/cleared.jsonl`)])
+  const [queueText, pointsText, decisionsText, clearedText] = await Promise.all([readQueue($), text(orchPath('open-points.json')), text(orchPath('agreed-decisions.md')), text(`${runs}/cleared.jsonl`)])
   const retired = retiredIds(clearedText)
   const [backups, runFiles, reports] = await Promise.all([listed($, orchPath('backups')), listed($, runs), listed($, orchPath('reports'))])
   const git = await gitState($, config.orchestratorDir)
@@ -3103,10 +3122,10 @@ export const register: Register = (on, options) => {
         return []
       })
     }
-    // The finished sessions not retired ride on every prompt, after the other notices, until each is retired (mod-50).
+    // The finished sessions not retired ride on every prompt, first among the notices and within their cap, until each is retired (mod-50).
     const finished = config.notices === 'off' || finishedInput === undefined ? [] : finishedOpenNotices({ ...finishedInput, nowMs: await $.clock.now() })
     if (finished.length > 0) trace($, 'notice', { kind: 'finished-open', count: finished.length })
-    notices = [...notices, ...finished.map(noticeLine)]
+    notices = promptNotices(finished.map(noticeLine), notices)
     if (notices.length > 0) extra.push(notices.join('\n'))
     // After a compaction the digest is made of the last poll's rows and points.
     if (isAfterCompact) {

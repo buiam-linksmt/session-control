@@ -5,7 +5,7 @@
 // $.store so a reload of the mod fires nothing again. Nothing here reads, writes, probes or runs a process.
 
 import type { SessionEntry, SessionOutcome } from '../types'
-import { activeQueueText, formatAge, orphanProcs, rowStatus } from './core'
+import { formatAge, orphanProcs, rowStatus, taskNamer } from './core'
 import type { ProcFact, ProcFacts } from './core'
 import { STALE_KEPT_SEC, auditFindings, gitFindings, lastActiveSec, namesSession, oldestChangeMs } from './audit'
 import type { Finding, GitState } from './audit'
@@ -534,10 +534,10 @@ export function pruneFreeWaits(state: NoticeState, queueText: string | undefined
  */
 export function retireStep(
   state: NoticeState,
-  input: { entries: readonly SessionEntry[]; facts: ProcFacts; nowMs: number; queueText?: string; retired?: ReadonlySet<string> },
+  input: { entries: readonly SessionEntry[]; facts: ProcFacts; nowMs: number; queueText?: string | null; retired?: ReadonlySet<string> },
 ): Notice[] {
   state.retireCheckAt = input.nowMs
-  pruneFreeWaits(state, input.queueText)
+  pruneFreeWaits(state, input.queueText ?? undefined)
   const findings: Finding[] = auditFindings({
     entries: input.entries,
     facts: input.facts,
@@ -546,7 +546,7 @@ export function retireStep(
     ...(input.retired === undefined ? {} : { retired: input.retired }),
   })
   const told = new Set(state.freeWaits ?? [])
-  const waitKeys = queuedWaitKeys(input.queueText) ?? new Map<string, string[]>()
+  const waitKeys = queuedWaitKeys(input.queueText ?? undefined) ?? new Map<string, string[]>()
   const freshKeys = (one: Finding) => (waitKeys.get(one.ref ?? '') ?? []).filter(key => !told.has(key))
   const counted = findings.filter(one => one.kind !== 'queued-free-wait' || freshKeys(one).length > 0)
   const parts: string[] = []
@@ -679,38 +679,55 @@ export function driftStep(state: NoticeState, changed: readonly string[] | undef
 
 // ---------------------------------------------------------------- finished-open
 
+/** The longest finished-open line, its notice prefix and kind included: the title is cut first, then the state; never the id or the call. */
+export const FINISHED_OPEN_LINE_MAX = 200
+
+/** A finished-open message's head and tail as one line, within FINISHED_OPEN_LINE_MAX: the title cut to fit, then the state. */
+function fittedMessage(id8: string, title: string, when: string, state: string, tail: string): string {
+  const prefix = noticeLine({ kind: 'finished-open', message: '', fields: {} })
+  const message = (shownTitle: string, shownState: string) => `${id8} "${shownTitle}" finished ${when} (${shownState}): ${tail}`
+  const cut = (text: string, room: number) => (text.length <= room ? text : room <= 0 ? '' : `${text.slice(0, room - 1)}…`)
+  const room = FINISHED_OPEN_LINE_MAX - prefix.length
+  const titleRoom = room - message('', state).length
+  if (titleRoom >= 1) return message(cut(title, titleRoom), state)
+  return message('', cut(state, room - message('', '').length))
+}
+
 /**
- * The call that disposes of a finished session, by its state: a harvest still to come; a kept one (its keep flag
- * cleared, then retired); one whose outcome is not clean (resumed, or retired with `reviewed`); else close_worker.
+ * The call that disposes of a finished session, by its state, after what comes before it: a harvest still to come; else
+ * close_worker with keep false (which clears a keep mark before the retire) and, for an outcome that is not clean,
+ * `reviewed`; `report it` first when it is not acknowledged, `unless resumed` when it is kept or not clean.
  */
 function disposal(id8: string, status: string, isKept: boolean, isClean: boolean, isAcked: boolean): string {
-  const ids = `session_ids ["${id8}"]`
-  const review = `reviewed {"${id8}": "<reason>"}`
-  if (status === 'dead') return 'its exit is not classified yet: the next poll harvests it; if it stays, read_result and raise an open point'
-  if (isKept) {
-    const retire = isClean ? `retire_workers with ${ids}` : `retire_workers with ${ids} and ${review} after reading its transcript`
-    return `when no resume or queued follow-up needs it: acknowledge_workers with ${ids} and keep false, then ${retire}`
-  }
-  const report = isAcked ? '' : 'report it, then '
-  if (isClean) return `${report}close_worker with ${ids} and keep false`
-  return `${report}resume it if its work is unfinished; else, after reading its transcript, close_worker with ${ids}, keep false and ${review}`
+  if (status === 'dead') return 'the next poll harvests it; if it stays, read_result and raise an open point'
+  const isResumable = isKept || !isClean
+  const lead = isAcked ? (isResumable ? 'unless resumed, ' : '') : isResumable ? 'report it; unless resumed, ' : 'report it, then '
+  return `${lead}close_worker session_ids ["${id8}"] keep false${isClean ? '' : ` reviewed {"${id8}": "<reason>"}`}`
 }
 
 /**
  * finished-open (decision mod-50): every registry entry whose process is gone and that is not retired (still in the
- * registry), whatever its outcome, acknowledged or kept, unless a task not done names it (its wait is real). One line
- * per session, the longest finished first, at most FINISHED_OPEN_SHOWN, then one line counting the rest. No debounce
- * and no state: register.tsx adds the lines to every prompt, worked out from the last refresh's registry, probe and
- * queue, so they repeat until each session is retired. A kept session finished more than STALE_KEPT_SEC ago is marked
- * stale-kept.
+ * registry), whatever its outcome, acknowledged or kept, unless a task not done names it (taskNamer: its wait is real).
+ * One line per session, the longest finished first, at most FINISHED_OPEN_SHOWN, then one line counting the rest; each
+ * line at most FINISHED_OPEN_LINE_MAX characters. A queue file that cannot be read (`queueText` null) gives one line
+ * saying so instead, naming the sessions none of which can be retired until it reads. No debounce and no state:
+ * register.tsx puts the lines first among the notices of every prompt (promptNotices), worked out from the last
+ * refresh's registry, probe and queue, so they repeat until each session is retired. A kept session finished more than
+ * STALE_KEPT_SEC ago is marked stale-kept.
  */
-export function finishedOpenNotices(input: { entries: readonly SessionEntry[]; facts: ProcFacts; nowMs: number; queueText?: string }): Notice[] {
-  const active = activeQueueText(input.queueText ?? '')
+export function finishedOpenNotices(input: { entries: readonly SessionEntry[]; facts: ProcFacts; nowMs: number; queueText?: string | null }): Notice[] {
+  const isNamedByTask = taskNamer(input.queueText)
   const nowSec = Math.floor(input.nowMs / 1000)
   const open = input.entries
-    .filter(entry => str(entry.session_id) !== '' && ['dead', 'unreported', 'done'].includes(rowStatus(entry, input.facts)) && !namesSession(active, entry))
+    .filter(entry => str(entry.session_id) !== '' && ['dead', 'unreported', 'done'].includes(rowStatus(entry, input.facts)) && isNamedByTask?.(entry) !== true)
     .map(entry => ({ entry, since: lastActiveSec(entry, input.facts) }))
     .sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity))
+  if (isNamedByTask === undefined) {
+    if (open.length === 0) return []
+    const ids = open.map(one => str(one.entry.session_id).slice(0, 8))
+    const sessions = `${ids.length} finished ${ids.length === 1 ? 'session' : 'sessions'}`
+    return [{ kind: 'finished-open', message: `task-queue.json cannot be read, so retire_workers refuses the ${sessions} (${idList(ids)}): raise an open point`, fields: { count: ids.length, isQueueUnreadable: true } }]
+  }
   const notices: Notice[] = open.slice(0, FINISHED_OPEN_SHOWN).map(({ entry, since }) => {
     const sid = str(entry.session_id)
     const id8 = sid.slice(0, 8)
@@ -721,11 +738,12 @@ export function finishedOpenNotices(input: { entries: readonly SessionEntry[]; f
     const isStale = isKept && since !== undefined && nowSec - since > STALE_KEPT_SEC
     const isClean = outcome === undefined || outcome === 'clean'
     const isAcked = status === 'done'
-    const age = since === undefined ? 'at an unknown time' : `${formatAge(Math.max(0, nowSec - since))} ago`
-    const state = status === 'dead' ? 'exit not classified' : `${outcome ?? 'no outcome'}, ${isKept ? 'kept' : isAcked ? 'acknowledged' : 'unacknowledged'}${isStale ? ', stale-kept: kept and finished over 24 hours' : ''}`
+    const ageSec = since === undefined ? undefined : Math.max(0, nowSec - since)
+    const when = ageSec === undefined ? 'at an unknown time' : ageSec >= 10000 * 3600 ? 'over 9999h ago' : `${formatAge(ageSec)} ago`
+    const state = status === 'dead' ? 'exit not classified' : [outcome ?? 'no outcome', ...(isStale ? ['stale-kept'] : isKept ? ['kept'] : [])].join(', ')
     return {
       kind: 'finished-open',
-      message: `session ${id8} "${oneLine(str(entry.title) || '(untitled)')}" finished ${age} (${state}): ${disposal(id8, status, isKept, isClean, isAcked)}`,
+      message: fittedMessage(id8, oneLine(str(entry.title) || '(untitled)'), when, state, disposal(id8, status, isKept, isClean, isAcked)),
       fields: { session_id: sid, isKept, isStale, isAcked },
     }
   })
@@ -734,4 +752,13 @@ export function finishedOpenNotices(input: { entries: readonly SessionEntry[]; f
     notices.push({ kind: 'finished-open', message: `${rest.length} more finished ${rest.length === 1 ? 'session is' : 'sessions are'} not retired (${idList(rest)}): list_sessions shows them`, fields: { count: rest.length, isGroup: true } })
   }
   return notices
+}
+
+/**
+ * The notice lines one prompt carries: the finished-open lines first, then the waiting notices (pendingWith's list,
+ * its count line last), within PENDING_NOTICES_MAX lines together; past the cap the last waiting notices are counted in
+ * the closing count line, added to the count it already held.
+ */
+export function promptNotices(finished: readonly string[], pending: readonly string[]): string[] {
+  return pendingWith([...finished, ...pending], [])
 }

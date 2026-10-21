@@ -3036,38 +3036,78 @@ describe('close_worker', () => {
   const ids = ['f1f1f1f1', '57575751', 'c3c3c3c3', SID_ALIVE, '12345678']
   const reviewed = { '57575751': 'the transcript shows the run succeeded' }
 
-  // The fixture's registry text does not change when the mod writes it: each call reads the fixture's entries, so the
-  // kept entry stays kept for the retire here (host.test.ts runs the same on a machine whose files do change).
+  // The registry is read back as the mod wrote it (REGISTRY_READS), as on a real machine: the acknowledgement with keep
+  // false clears the kept entry's mark, so the retire after it removes that entry too.
   const ACK = 'mcp__session-control__acknowledge_workers'
   const RETIRE = 'mcp__session-control__retire_workers'
   const EXPECTED =
     'Acknowledged: f1f1f1f1, 57575751, c3c3c3c3. Refused: aaaaaaaa (its process is alive); 12345678 (no registry entry). ' +
-    'Retired: f1f1f1f1, 57575751. Retired with review: 57575751 (was login: the transcript shows the run succeeded). ' +
-    'Refused: c3c3c3c3 (marked keep: a resume or follow-up is expected); aaaaaaaa (its process is alive); 12345678 (no registry entry).'
+    'Retired: f1f1f1f1, 57575751, c3c3c3c3. Retired with review: 57575751 (was login: the transcript shows the run succeeded). ' +
+    'Refused: aaaaaaaa (its process is alive); 12345678 (no registry entry).'
   // close_worker alone ends on the next call for each session it did not retire (decision mod-51).
   const NEXT =
-    ' Next: c3c3c3c3: marked keep: when no resume or queued follow-up needs it, acknowledge_workers with session_ids ["c3c3c3c3"] and keep false, then retire_workers with session_ids ["c3c3c3c3"]; ' +
-    'aaaaaaaa: not acknowledged, its process is alive: wait for its exit (stop_worker when it must end), then close_worker with session_ids ["aaaaaaaa"] again; ' +
+    ' Next: aaaaaaaa: not acknowledged, its process is alive: wait for its exit (stop_worker when it must end), then close_worker with session_ids ["aaaaaaaa"] again; ' +
     '12345678: no registry entry: list_sessions shows the registry, and a retired session is in cleared.jsonl; nothing to retire.'
 
-  test('keep false is acknowledge_workers then retire_workers: their answers one after the other, their writes', { options: OPTIONS }, async ($, on) => {
-    const w = world(on, '/fixture/lic/a\n', true, registry)
-    await boot($)
-    const out = await $.tool.call({ tool: CLOSE, session_ids: ids, reviewed } as never)
-    expect(String(out.result)).toBe(`${EXPECTED}${NEXT}`)
-    const after = lastRegistry(w)
-    expect(after.some(one => [finished.session_id, login.session_id].includes(String(one.session_id)))).toBe(false)
-    expect(after.some(one => one.session_id === SID_ALIVE)).toBe(true)
-    const cleared = w.writes.filter(one => one.path.endsWith('/cleared.jsonl')).map(one => one.text).join('')
-    expect(cleared).toContain('"reviewed_outcome":"login","reviewed_reason":"the transcript shows the run succeeded"')
+  test('keep false is acknowledge_workers then retire_workers: their answers one after the other, their writes; a kept session goes in this one call', { options: OPTIONS }, async ($, on) => {
+    REGISTRY_READS.isCurrent = true
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, registry)
+      await boot($)
+      const out = await $.tool.call({ tool: CLOSE, session_ids: ids, reviewed } as never)
+      expect(String(out.result)).toBe(`${EXPECTED}${NEXT}`)
+      const after = lastRegistry(w)
+      expect(after.some(one => [finished.session_id, login.session_id, kept.session_id].includes(String(one.session_id)))).toBe(false)
+      expect(after.some(one => one.session_id === SID_ALIVE)).toBe(true)
+      const cleared = w.writes.filter(one => one.path.endsWith('/cleared.jsonl')).map(one => one.text).join('')
+      expect(cleared).toContain('"reviewed_outcome":"login","reviewed_reason":"the transcript shows the run succeeded"')
+      expect(cleared).toContain(`"session_id":"${kept.session_id}"`)
+    } finally {
+      REGISTRY_READS.isCurrent = false
+    }
+  })
+
+  test('a kept session alone: one close_worker call with keep false retires it', { options: OPTIONS }, async ($, on) => {
+    REGISTRY_READS.isCurrent = true
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, registry)
+      await boot($)
+      const out = await $.tool.call({ tool: CLOSE, session_ids: ['c3c3c3c3'], keep: false } as never)
+      expect(String(out.result)).toBe('Acknowledged: c3c3c3c3. Retired: c3c3c3c3.')
+      expect(lastRegistry(w).some(one => one.session_id === kept.session_id)).toBe(false)
+    } finally {
+      REGISTRY_READS.isCurrent = false
+    }
   })
 
   test('the same two calls made one by one answer the same text', { options: OPTIONS }, async ($, on) => {
-    world(on, '/fixture/lic/a\n', true, registry)
-    await boot($)
-    const acked = await $.tool.call({ tool: ACK, session_ids: ids } as never)
-    const retired = await $.tool.call({ tool: RETIRE, session_ids: ids, reviewed } as never)
-    expect(`${String(acked.result)} ${String(retired.result)}`).toBe(EXPECTED)
+    REGISTRY_READS.isCurrent = true
+    try {
+      world(on, '/fixture/lic/a\n', true, registry)
+      await boot($)
+      const acked = await $.tool.call({ tool: ACK, session_ids: ids } as never)
+      const retired = await $.tool.call({ tool: RETIRE, session_ids: ids, reviewed } as never)
+      expect(`${String(acked.result)} ${String(retired.result)}`).toBe(EXPECTED)
+    } finally {
+      REGISTRY_READS.isCurrent = false
+    }
+  })
+
+  test('retire_workers refuses a session a queued task names by its session name only, and one while the queue file cannot be read', { options: OPTIONS }, async ($, on) => {
+    world(on, '/fixture/lic/a\n', true, JSON.stringify([...JSON.parse(REGISTRY_TEXT), { ...finished, reported: true, name: 'w-finished-clean-261020' }]))
+    QUEUE.text = JSON.stringify({ tasks: [{ id: 'q1', status: 'queued', title: 'Follow-up', waits_for: 'w-finished-clean-261020' }] })
+    try {
+      await boot($)
+      const named = await $.tool.call({ tool: RETIRE, session_ids: ['f1f1f1f1'] } as never)
+      expect(String(named.result)).toBe('Retired: none. Refused: f1f1f1f1 (a queued or running task names it).')
+      QUEUE.text = JSON.stringify({ tasks: [] })
+      UNREADABLE.add(`${ORCH_DIR}/task-queue.json`)
+      const unreadable = await $.tool.call({ tool: RETIRE, session_ids: ['f1f1f1f1'] } as never)
+      expect(String(unreadable.result)).toBe('Retired: none. Refused: f1f1f1f1 (task-queue.json cannot be read, so a task may name it).')
+    } finally {
+      UNREADABLE.delete(`${ORCH_DIR}/task-queue.json`)
+      QUEUE.text = QUEUE_TEXT
+    }
   })
 
   test('keep true only acknowledges and keeps; reviewed is then not used, and said so', { options: OPTIONS }, async ($, on) => {

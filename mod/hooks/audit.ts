@@ -4,7 +4,7 @@
 // findings out, ordered by importance and bounded. Nothing here reads or writes; the tool changes nothing.
 
 import type { SessionEntry } from '../types'
-import { activeQueueText, formatAge, rowStatus } from './core'
+import { formatAge, namesSession, rowStatus, taskNamer } from './core'
 import type { ProcFacts } from './core'
 import { bounded, clean } from './inspect'
 import { localDate } from './store'
@@ -31,8 +31,8 @@ export type AuditInput = {
   /** Why the registry could not be read or parsed; the registry checks then run on no entries. */
   registryError?: string
   nowMs: number
-  /** The helper files' text; undefined when missing. */
-  queueText?: string
+  /** The helper files' text; undefined when missing; the queue's null when it is there and cannot be read (taskNamer: no session is then retirable). */
+  queueText?: string | null
   pointsText?: string
   decisionsText?: string
   /** The session ids of cleared.jsonl (retired sessions); undefined when it cannot be read. */
@@ -112,8 +112,9 @@ const fileNames = (list: readonly string[], max = 5) => names(list, max, 80, fil
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`
 
 /** The tasks of the queue file, or why it cannot be read. */
-function readTasks(text: string | undefined): Task[] | string {
+function readTasks(text: string | null | undefined): Task[] | string {
   if (text === undefined) return []
+  if (text === null) return 'task-queue.json cannot be read'
   let doc: unknown
   try {
     doc = JSON.parse(text)
@@ -173,12 +174,7 @@ export function licenceWait(text: string, nowMs: number): { state: 'none' | 'ope
   return latest.ms > nowMs ? { state: 'open' } : { state: 'passed', reset: latest.shown }
 }
 
-/** Whether a text names a session: its full id, its first 8 characters or its session name (the queue checks, the queue-ready notice). */
-export function namesSession(text: string, entry: SessionEntry): boolean {
-  const sid = str(entry.session_id)
-  const name = str(entry.name)
-  return (sid !== '' && (text.includes(sid) || text.includes(sid.slice(0, 8)))) || (name !== '' && text.includes(name))
-}
+export { namesSession }
 
 /** The session ids of the retired sessions in cleared.jsonl, lower case; undefined when it cannot be read. */
 export function retiredIds(clearedText: string | undefined): Set<string> | undefined {
@@ -330,7 +326,7 @@ export function auditFindings(input: AuditInput): Finding[] {
   }
 
   // ---- the registry
-  const active = activeQueueText(input.queueText ?? '')
+  const isNamedByTask = taskNamer(input.queueText)
   for (const entry of entries) {
     const state = status(entry)
     const outcome = entry.outcome as { kind?: unknown } | undefined
@@ -342,8 +338,8 @@ export function auditFindings(input: AuditInput): Finding[] {
       add({ severity: 'medium', kind: 'unacknowledged', subject: sessionName(entry), evidence, action: 'report its result, then acknowledge_workers (keep true when a resume or follow-up needs it)' })
     }
     const sid = str(entry.session_id)
-    const isNamedByTask = sid !== '' && (active.includes(sid) || active.includes(sid.slice(0, 8)))
-    if (state === 'done' && entry.keep !== true && kind === 'clean' && !isNamedByTask) {
+    // A queue that cannot be read names every session as far as retiring goes: none is listed retirable.
+    if (state === 'done' && entry.keep !== true && kind === 'clean' && isNamedByTask !== undefined && !isNamedByTask(entry)) {
       add({ severity: 'medium', kind: 'retirable', ref: sid.slice(0, 8), subject: sessionName(entry), evidence: `finished clean, acknowledged, not kept, no queued or running task names it${ended === undefined ? '' : `; ended ${formatAge(nowSec - ended)} ago`}`, action: 'retire_workers when its goal is met' })
     }
     if (entry.keep === true && state !== 'alive') {
