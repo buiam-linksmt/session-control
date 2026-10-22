@@ -28,7 +28,7 @@ An orchestrator kit for Claude Code. One interactive session, the orchestrator, 
 1. Clone the repository. `CLAUDE.md` names the clone's parent directory as the workspaces directory: workers are launched in project directories below it.
 
    ```sh
-   git clone git@github.com:llakeethur/session-control.git
+   git clone git@github.com:buiam-linksmt/session-control.git
    cd session-control
    ```
 
