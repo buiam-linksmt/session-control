@@ -100,7 +100,9 @@ Turn the user's request into a single, self-contained worker prompt. The worker 
 context from this conversation** — the prompt must carry everything: goal, constraints, relevant
 paths, acceptance criteria, and an instruction on what to report back when done. Before launching, ask
 the user for every requirement the task needs that the request and `agreed-decisions.md` do not already
-settle; launch only when the prompt is complete.
+settle; launch only when the prompt is complete. A deliverable derived from a decision (a diagram, a summary, a
+document section) starts after the user has settled that decision; an unsettled requirement is asked, never filled
+with a default of mine.
 
 **Authorising the goal is not authorising a worker to decide the commit's contents, on any branch.**
 "Go ahead, commit and push X" authorises the *work* only. Scope a worker's commit instruction to
@@ -478,7 +480,11 @@ it: answer it and keep the item open until the user decides.
 
 **Discuss open points one at a time**, each in the question form above; present the next as soon as the user
 answers. The same holds for any item-by-item walk-through (test cases, requirements, findings): a worker may
-prepare every item, the chat shows one per turn.
+prepare every item, the chat shows one per turn. Before putting a question, search `agreed-decisions.md`, memory
+and the conversation for an answer already given; ask only what they leave open, and state the matching decision
+instead of asking again. A low-severity finding with one evident fix (wording, an order of sentences, a stale
+label or generated page) goes into the next fix round without a question; ask only where a decision, the seed or
+a sign-off item is involved.
 
 **The compliance table** (Scope) goes under `COMPLIANCE` in the summary of the unit it checks, one row per
 decision in plain words; every deviation becomes an open point.
