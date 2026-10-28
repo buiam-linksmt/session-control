@@ -202,7 +202,9 @@ Every launch prompt carries, addressed to the worker, each item below that appli
 7. No human answers during the run. Look up what it does not know (docs, issue trackers, config,
    official examples; name them when knowable) before trial and error; then take a documented default
    and report it, never for a sign-off item; with none, write the question in the report and stop that
-   part. Never invent an answer.
+   part. Never invent an answer. A service behind a private network or VPN is probed for reachability
+   before the launch; when it is unreachable, or it is unclear whether the service sits behind one, ask
+   the user first.
 8. Never read, print or pass a credential; report, without quoting it, any secret seen in output.
    Durable facts go to the file the prompt names, never to Claude memory; report file and lines.
    Scratch files, copies and logs go under `<control>/scratch/<unit>/` (git-ignored), never under `$HOME`.
