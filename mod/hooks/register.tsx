@@ -137,6 +137,11 @@ import {
   pageCap,
   PAGE_LIST_CAP,
   PAGE_LOG_CAP,
+  SECTION_ORDER,
+  SECTIONS_LOG_CAP,
+  sectionWindow,
+  sectionsScrollTo,
+  sectionsSplitter,
   sliderMove,
   MIN_BOX,
   MIN_SESSIONS_BOX,
@@ -234,6 +239,7 @@ const tab = atom({ plugin: 'session-control', key: 'tab' } as const, 'sessions')
 const selected = atom({ plugin: 'session-control', key: 'selected' } as const, null)
 const points = atom({ plugin: 'session-control', key: 'points' } as const, null)
 const expanded = atom({ plugin: 'session-control', key: 'expanded' } as const, null)
+const logPage = atom({ plugin: 'session-control', key: 'logPage' } as const, false)
 const now = atom({ plugin: 'session-control', key: 'now' } as const, 0)
 const boardDir = atom({ plugin: 'session-control', key: 'boardDir' } as const, '')
 
@@ -290,6 +296,11 @@ let finishedInput: { entries: readonly SessionEntry[]; facts: ProcFacts; queueTe
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over: the boxes, their windows and, on the
 // desktop, the spare rows drawn above and below the panel (0 elsewhere), or that it drew the page (desktopPaneScroll page).
 let layout: { boxes: SectionBox[]; totals: Partial<Record<SectionId, BoxWindow>>; spare: number; isPage?: true } = { boxes: [], totals: {}, spare: 0 }
+/**
+ * The view the `sections` value drew last (desktopPaneScroll sections): `even`, a section's id, `log:<sid>` or
+ * `log-page:<sid>`; undefined after any other drawing. A change asks the body to its start, or to its end for a log page.
+ */
+let sectionsView: string | undefined
 /** The section the last desktop wheel move without a pointer scrolled (wheelTarget). */
 let wheelLast: SectionId | undefined
 /** Set while the desktop pane's window is being asked back to the middle of the spare rows (parkWindow). */
@@ -1618,6 +1629,7 @@ async function closeLog($: EngineInterface, sid: string): Promise<void> {
   if (!wasOpen) return
   await update($, watch, current => (current?.sid === sid ? null : current))
   await update($, expanded, () => null)
+  await update($, logPage, () => false)
 }
 
 /**
@@ -2941,12 +2953,14 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
     stopDisplayTick()
     await update($, selected, () => null)
     await update($, expanded, () => null)
+    await update($, logPage, () => false)
     trace($, 'panel', { isShown: false })
     return { text: 'Session-control panel hidden, session-control stays on.' }
   }
   await refresh($)
   // Each panel starts with no section expanded, also after the engine's close mark closed the last one.
   await update($, expanded, () => null)
+  await update($, logPage, () => false)
   const opened = await $.ui.open({ id: PANE, title: 'Session control' })
   const shownSec = Math.floor((await $.clock.now()) / 1000)
   await update($, now, () => shownSec)
@@ -3439,7 +3453,7 @@ export const register: Register = (on, options) => {
     const snap = await read($, snapshot)
     const columns = e.props.bodyColumns
     if (snap === null) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
-    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState, nowSec] = await Promise.all([
+    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState, nowSec, isLogPageState] = await Promise.all([
       read($, watch),
       read($, selected),
       read($, queued),
@@ -3450,6 +3464,7 @@ export const register: Register = (on, options) => {
       read($, tab),
       read($, expanded),
       read($, now),
+      read($, logPage),
     ])
     const width = Math.max(20, columns - 4)
     // The desktop draws in a proportional font, collapses blanks and reports a width in cells that is not its own: its rows
@@ -3471,12 +3486,26 @@ export const register: Register = (on, options) => {
     // the desktopPaneScroll option a panel that fits its room stands between spare rows (framed, once the sections are
     // drawn), and a window drawn elsewhere than in their middle is asked back there. The rows stay put whatever the
     // window's offset: content that moved above the window would make the page scroll on its own.
-    const scrollMode = isDesktop ? config.desktopPaneScroll : 'spare'
+    // `sections` seated low (inline) keeps the compact tab panel as `spare` draws it: one box at a time is all that fits.
+    const optionMode = isDesktop ? config.desktopPaneScroll : 'spare'
+    const scrollMode = isCompact && optionMode === 'sections' ? 'spare' : optionMode
     const isFitting = isDesktop && bodyRows <= e.props.scroll.bodyRows
     // `page`: no window at all. Every section is drawn whole at its natural height, one below the other, in a root of no
     // fixed height, and the body scrolls the page by itself: no spare rows, no bars, no icons, nothing counted.
     const isPage = isDesktop && scrollMode === 'page'
-    layout = isPage ? { boxes: [], totals: {}, spare: 0, isPage: true } : { boxes, totals: {}, spare: 0 }
+    // `sections`: three fixed boxes exactly as tall as the room, none scrolling (the even view); a section expanded by its
+    // `[+]`, or the open log, drawn alone as a page between two title strips (the page view). In both the body's own moves
+    // go on as they came, as under `page`: the even view gives it nothing to move.
+    const isSections = isDesktop && scrollMode === 'sections'
+    const sectionsShown: ExpandableId | 'log' | null = !isSections ? null : isLogOpen ? (isLogPageState ? 'log' : null) : expandedId
+    const isSectionsPage = sectionsShown !== null
+    layout = isPage || isSections ? { boxes: [], totals: {}, spare: 0, isPage: true } : { boxes, totals: {}, spare: 0 }
+    // A change of the sections view starts the body at its top; a log page at its end, which the body then follows as the
+    // log grows ($.ui.scroll `end`), until the person scrolls.
+    const viewKey = !isSections ? undefined : isLogOpen ? `${isLogPageState ? 'log-page' : 'log'}:${sel}` : (expandedId ?? 'even')
+    const scrollTo = sectionsScrollTo(sectionsView, viewKey)
+    sectionsView = viewKey
+    if (scrollTo !== undefined) void $.ui.scroll({ in: PANE, to: scrollTo }).catch(() => undefined)
     // `buttons`: an up and a down button for each section with more rows than it shows; `drag`: its bar a slider.
     const hasButtons = isDesktop && scrollMode === 'buttons'
     const hasSlider = isDesktop && (scrollMode === 'drag' || scrollMode === 'buttons') && !isSliderFailed
@@ -3499,6 +3528,7 @@ export const register: Register = (on, options) => {
     const widths = paneWidths(snap.rows, width - 2, clock)
     const toggle = (sid: string) => async () => {
       await update($, expanded, () => null)
+      await update($, logPage, () => false)
       await update($, selected, current => (current === sid ? null : sid))
       await update($, boxBack, () => 0)
       await refreshWatch($)
@@ -3507,6 +3537,22 @@ export const register: Register = (on, options) => {
     const expand = (id: ExpandableId) => async () => {
       await update($, selected, () => null)
       await update($, expanded, current => (current === id ? null : id))
+    }
+    // The sections view's presses: a section drawn alone (its `[+]`, its title in a strip), back to the three boxes
+    // (`[-]`), the open log drawn alone (its `[+]`), the log closed (`[x]` in its strip).
+    const showSection = (id: ExpandableId) => async () => {
+      await update($, selected, () => null)
+      await update($, logPage, () => false)
+      await update($, expanded, () => id)
+    }
+    const collapse = async () => {
+      await update($, expanded, () => null)
+      await update($, logPage, () => false)
+    }
+    const showLogPage = () => update($, logPage, () => true)
+    const closeOpenLog = async () => {
+      await update($, selected, () => null)
+      await update($, logPage, () => false)
     }
     const togglePoint = (id: string) => () => update($, selectedPoint, current => (current === id ? null : id))
     // A pressable row's label is padded to `fill`, its column's width: the Button is as wide as its label, so the
@@ -3544,12 +3590,14 @@ export const register: Register = (on, options) => {
     const anyRowEl = (r: PRow, fill = 0, scope?: string) => (isDesktop ? deskRowEl(r, scope) : rowEl(r, fill, scope))
     // The page's lists: at most PAGE_LIST_CAP rows of a list (its first, in the panel's order), PAGE_LOG_CAP of the log
     // (its latest), and a line saying how many are left out; elsewhere every row.
-    const capped = <T,>(items: readonly T[], keep: 'first' | 'latest') => (isPage ? pageCap(items, keep === 'first' ? PAGE_LIST_CAP : PAGE_LOG_CAP, keep) : { shown: [...items], more: 0 })
+    // A page of the sections view caps its lists as `page` does and its log at SECTIONS_LOG_CAP.
+    const logCap = isSections ? SECTIONS_LOG_CAP : PAGE_LOG_CAP
+    const capped = <T,>(items: readonly T[], keep: 'first' | 'latest') => (isPage || isSectionsPage ? pageCap(items, keep === 'first' ? PAGE_LIST_CAP : logCap, keep) : { shown: [...items], more: 0 })
     const moreRow = (more: number, note = 'more'): PRow[] => (more === 0 ? [] : [{ text: `${more} ${note}`, dim: true }])
     // A section of the page: its title, then its rows, each Text wrapped by the surface; a pressable row's lines are
     // Buttons (desktopLines), as a desktop Button draws its label on one line.
     const pageBlock = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[]) => {
-      const chars = desktopLineChars(columns)
+      const chars = isSections ? sectionsSplitter(columns) : desktopLineChars(columns)
       const rows = [...fixedIn, ...bodyIn].flatMap(r => (r.press === undefined ? [r] : desktopLines(r, chars, id)))
       if (id === 'sessions') drawnSessions = { rows: [...new Set(rows.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       return (
@@ -3568,6 +3616,63 @@ export const register: Register = (on, options) => {
       )
     }
     const pagePanel = (sections: ReturnType<typeof pageBlock>[]) => <Box flexDirection="column">{sections}</Box>
+    // A fixed box of the sections view: its rows as the lines they take (sectionsSplitter), as many as its rows hold; a box
+    // with more ends on a `+N more` line (the log, which shows its newest lines, starts on `+N more above`) and only then
+    // has `[+]` in its title row. No scroll bar: the rows take the box's whole width.
+    const sectionBox = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[], onExpand: () => unknown, isTail = false) => {
+      const box = boxes.find(one => one.id === id) as SectionBox
+      const split = sectionsSplitter(columns)
+      const fixed = fixedIn.flatMap(r => desktopLines(r, split, id))
+      const body = bodyIn.flatMap(r => desktopLines(r, split, id))
+      const visible = Math.max(1, box.height - 3 - fixed.length)
+      const win = sectionWindow(body.length, visible)
+      const from = isTail ? body.length - win.shown : 0
+      layout.totals[id] = { total: body.length, visible, from }
+      const more: PRow[] = win.more === 0 ? [] : [{ text: `+${win.more} more${isTail ? ' above' : ''}`, dim: true, wrap: 'truncate-end' }]
+      const lines = body.slice(from, from + win.shown)
+      const shown = isTail ? [...more, ...lines] : [...lines, ...more]
+      if (id === 'sessions') drawnSessions = { rows: [...new Set(lines.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
+      return (
+        <Box key={`sec:${id}`} flexDirection="column" height={box.height} overflow="hidden" borderStyle="round" borderDimColor>
+          <Box flexDirection="row">
+            <Box flexGrow={1}>
+              <Text bold wrap="truncate-end">
+                {title}
+              </Text>
+            </Box>
+            {win.more > 0 && <Button key={`x:${id}`} label="[+]" plain dimColor onPress={onExpand} />}
+          </Box>
+          {fixed.map(r => deskRowEl(r))}
+          {shown.map((r, i) => deskRowEl(r, r.press === undefined ? undefined : (r.group ?? `${id}:${from + i}`)))}
+        </Box>
+      )
+    }
+    // The strip over and under a page of the sections view: the three section titles on the left (the one shown marked,
+    // the others Buttons that show theirs), on the right `[x]` closing an open log and `[-]` back to the boxes.
+    const stripTitles: Record<ExpandableId, string> = { sessions: 'SESSIONS', queue: 'QUEUED WORK', points: 'OPEN POINTS' }
+    const strip = (at: 'top' | 'bottom', current: ExpandableId | 'log') => (
+      <Box key={`strip:${at}`} flexDirection="row" paddingX={1}>
+        <Box flexDirection="row" flexGrow={1} flexWrap="wrap" columnGap={1}>
+          {SECTION_ORDER.map(id =>
+            id === current ? (
+              <Text bold>{`[ ${stripTitles[id]} ]`}</Text>
+            ) : (
+              <Button key={`t:${at}:${id}`} label={stripTitles[id]} plain dimColor onPress={showSection(id)} />
+            ),
+          )}
+          {current === 'log' && <Text bold>[ LOG ]</Text>}
+        </Box>
+        {current === 'log' && <Button key={`close:${at}`} label="[x]" plain dimColor onPress={closeOpenLog} />}
+        <Button key={`c:${at}`} label="[-]" plain dimColor onPress={collapse} />
+      </Box>
+    )
+    const sectionsPage = (current: ExpandableId | 'log', inner: ReturnType<typeof pageBlock>) => (
+      <Box flexDirection="column">
+        {strip('top', current)}
+        {inner}
+        {strip('bottom', current)}
+      </Box>
+    )
     const block = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[], offset: number, isTail = false, isPlain = false) => {
       const box = boxes.find(one => one.id === id) as SectionBox
       // The desktop counts, shows and scrolls a section by the lines its rows take.
@@ -3695,6 +3800,15 @@ export const register: Register = (on, options) => {
       })]
       if (logRows.length === 0) logRows.push({ text: 'Waiting for output.', dim: true })
       if (isPage) return pagePanel([sessionsPage(), pageBlock('log', `LOG ${view.title}`, [], logRows)])
+      if (isSections) {
+        if (isSectionsPage) return sectionsPage('log', pageBlock('log', `LOG ${view.title}`, [], logRows))
+        return framed(
+          <Box flexDirection="column" height={bodyRows} overflow="hidden">
+            {sectionBox('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, showSection('sessions'))}
+            {sectionBox('log', `LOG ${view.title}`, [], logRows, showLogPage, true)}
+          </Box>,
+        )
+      }
       if (isCompact) return framed(compactView(block('log', `LOG ${view.title}`, [], logRows, 0, true, true)))
       return framed(
         <Box flexDirection="column" height={bodyRows} overflow="hidden">
@@ -3748,6 +3862,18 @@ export const register: Register = (on, options) => {
               return lines
             }), ...moreRow(pointsShown.more)]
     if (isPage) return pagePanel([sessionsPage(), pageBlock('queue', 'QUEUED WORK', [], queueRows), pageBlock('points', 'OPEN POINTS', [], pointRows)])
+    if (isSections) {
+      if (sectionsShown === 'sessions') return sectionsPage('sessions', sessionsPage())
+      if (sectionsShown === 'queue') return sectionsPage('queue', pageBlock('queue', 'QUEUED WORK', [], queueRows))
+      if (sectionsShown === 'points') return sectionsPage('points', pageBlock('points', 'OPEN POINTS', [], pointRows))
+      return framed(
+        <Box flexDirection="column" height={bodyRows} overflow="hidden">
+          {sectionBox('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, showSection('sessions'))}
+          {sectionBox('queue', 'QUEUED WORK', [], queueRows, showSection('queue'))}
+          {sectionBox('points', 'OPEN POINTS', [], pointRows, showSection('points'))}
+        </Box>,
+      )
+    }
     if (isCompact) {
       return framed(
         compactView(

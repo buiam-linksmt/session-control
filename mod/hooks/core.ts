@@ -522,6 +522,119 @@ export function desktopLineChars(columns: number, isPlain = false): number {
   return Math.max(8, Math.floor((columns - (isPlain ? 2 : DESKTOP_ROW_RESERVE)) / DESKTOP_CELLS_PER_CHAR))
 }
 
+/**
+ * Advance widths of Desktop's pane font, anthropic-sans, in hundredths of its `0` (the `1ch` cell `bodyColumns` counts):
+ * U+0020 to U+007E, then U+00A0 to U+00FF, each the wider of its regular (400) and semibold (600) glyph, rounded up.
+ * Read from the font file Desktop 4.4212.0 serves (cc27851ad-DDVos-BJ.woff2) with fontTools, kerning left out.
+ */
+const GLYPH_CELLS_ASCII = [
+  36, 44, 78, 106, 90, 168, 120, 44, 69, 69, 81, 106, 44, 60, 44, 59, 102, 67, 99, 96, 105, 96, 97, 92, 96, 97, 44, 44, 106, 106, 106, 94, 146, 125, 110, 128, 125, 107, 100, 133, 125, 48, 93, 119,
+  97, 159, 131, 136, 104, 136, 115, 102, 97, 121, 125, 173, 118, 117, 111, 69, 59, 69, 106, 83, 83, 94, 105, 95, 105, 99, 73, 98, 102, 45, 45, 99, 45, 149, 102, 99, 105, 105, 70, 88, 73, 100, 98, 141,
+  103, 99, 86, 69, 52, 69, 106,
+]
+const GLYPH_CELLS_LATIN1 = [
+  36, 44, 99, 106, 106, 106, 52, 106, 83, 106, 86, 78, 106, 60, 106, 83, 80, 106, 62, 60, 83, 103, 106, 44, 83, 54, 90, 78, 148, 146, 153, 94, 125, 125, 125, 125, 125, 125, 184, 128, 107, 107, 107,
+  107, 48, 48, 48, 48, 140, 131, 136, 136, 136, 136, 136, 106, 136, 121, 121, 121, 121, 117, 104, 105, 94, 94, 94, 94, 94, 94, 151, 95, 99, 99, 99, 99, 45, 45, 45, 45, 99, 102, 99, 99, 99, 99, 99, 106,
+  99, 100, 100, 100, 100, 99, 105, 99,
+]
+
+/** The same for the punctuation the panel and its texts use beyond Latin-1 (bullet, dashes, ellipsis, quotes, arrow). */
+const GLYPH_CELLS_EXTRA: Readonly<Record<string, number>> = {
+  '\u2022': 83,
+  '\u2013': 83,
+  '\u2014': 166,
+  '\u2026': 166,
+  '\u2018': 44,
+  '\u2019': 44,
+  '\u201C': 77,
+  '\u201D': 77,
+  '\u2192': 136,
+}
+
+/**
+ * Cells a glyph outside the table is counted for: wider than any glyph in it (Æ, 1.84), and than an emoji or a CJK
+ * character drawn at 1 to 1.25 em by a fallback font (1.66 to 2.07 cells of a `0` of 0.604 em).
+ */
+export const GLYPH_CELLS_DEFAULT = 2.1
+
+/** The cells one character (a code point) takes in Desktop's pane font (the tables above), else GLYPH_CELLS_DEFAULT. */
+export function glyphCells(ch: string): number {
+  const code = ch.codePointAt(0) ?? 0
+  if (code >= 0x20 && code <= 0x7e) return (GLYPH_CELLS_ASCII[code - 0x20] as number) / 100
+  if (code >= 0xa0 && code <= 0xff) return (GLYPH_CELLS_LATIN1[code - 0xa0] as number) / 100
+  const extra = GLYPH_CELLS_EXTRA[ch]
+  return extra === undefined ? GLYPH_CELLS_DEFAULT : extra / 100
+}
+
+/** The cells a text takes in Desktop's pane font: the sum of its glyphs (glyphCells). */
+export function textCells(text: string): number {
+  let sum = 0
+  for (const ch of text) sum += glyphCells(ch)
+  return sum
+}
+
+/**
+ * Wraps text into lines of at most `room` cells by summed glyph widths (glyphCells), greedy at blanks as wrapText does:
+ * each paragraph on its own, runs of blanks as one, the lines after the first `hang` blanks in (their cells counted),
+ * a word wider than a line cut glyph by glyph, every piece at least one glyph.
+ */
+export function wrapCells(text: string, room: number, hang = 0): string[] {
+  const pad = ' '.repeat(Math.max(0, Math.floor(hang)))
+  const padCells = textCells(pad)
+  const space = glyphCells(' ')
+  const out: string[] = []
+  const roomNow = () => Math.max(room - (out.length === 0 ? 0 : padCells), GLYPH_CELLS_DEFAULT)
+  const push = (line: string) => out.push(out.length === 0 || line === '' ? line : pad + line)
+  for (const para of text.split('\n')) {
+    let line = ''
+    let used = 0
+    for (const word of para.split(/\s+/).filter(x => x !== '')) {
+      const cells = textCells(word)
+      if (line !== '' && used + space + cells <= roomNow()) {
+        line += ' ' + word
+        used += space + cells
+        continue
+      }
+      if (line !== '') push(line)
+      line = ''
+      used = 0
+      for (const ch of word) {
+        const w = glyphCells(ch)
+        if (line !== '' && used + w > roomNow()) {
+          push(line)
+          line = ''
+          used = 0
+        }
+        line += ch
+        used += w
+      }
+    }
+    push(line)
+  }
+  return out.length === 0 ? [''] : out
+}
+
+/**
+ * Cells a bordered section of the desktop panel's `sections` view takes from the pane's width before its rows: its 1 px
+ * border and its `pad.lg` padding a side (at most 20 px, 2.8 cells at the smallest body font), 5.8 rounded up; it draws
+ * no scroll bar, so no bar cell.
+ */
+export const SECTIONS_ROW_RESERVE = 6
+
+/** The share of a `sections` line's room its glyphs may fill: 7 % kept free for kerning, hinting and a font fallback. */
+export const SECTIONS_FILL = 0.93
+
+/** The cells a line of the `sections` view may fill in a pane `columns` cells wide (`bodyColumns`). */
+export function sectionsLineRoom(columns: number): number {
+  return Math.max(8, (columns - SECTIONS_ROW_RESERVE) * SECTIONS_FILL)
+}
+
+/** The `sections` view's splitter for desktopLines: a row's text wrapped by glyph widths into lines of sectionsLineRoom. */
+export function sectionsSplitter(columns: number): (text: string, hang: number) => string[] {
+  const room = sectionsLineRoom(columns)
+  return (text, hang) => wrapCells(text, room, hang)
+}
+
 /** A row of the panel as desktopLines splits it; any other field is carried to each line. */
 export type DesktopRow = { text: string; key?: string; group?: string; press?: unknown; wrap?: 'wrap' | 'truncate-end'; hang?: number }
 
@@ -530,11 +643,12 @@ export type DesktopRow = { text: string; key?: string; group?: string; press?: u
  * (`truncate-end`): the line is within the width, so the surface never wraps it again, and one wider than the estimate is
  * ended with an ellipsis. A log or warning line (already `truncate-end`) stays one line. The lines of a pressable row
  * keep its press and share one hover scope (its group, else `<section>:<key>`); they are keyed as the terminal keys a
- * point's title lines: a key ending in `:0` counts on in its place, any other takes `:<line>`.
+ * point's title lines: a key ending in `:0` counts on in its place, any other takes `:<line>`. `chars` is a count of
+ * characters, or a splitter (sectionsSplitter) that wraps the text by the cells its glyphs take.
  */
-export function desktopLines<R extends DesktopRow>(row: R, chars: number, section: string): R[] {
+export function desktopLines<R extends DesktopRow>(row: R, chars: number | ((text: string, hang: number) => string[]), section: string): R[] {
   if (row.wrap === 'truncate-end') return [row]
-  const texts = wrapText(row.text, chars, row.hang ?? 0)
+  const texts = typeof chars === 'number' ? wrapText(row.text, chars, row.hang ?? 0) : chars(row.text, row.hang ?? 0)
   const key = row.key
   if (row.press === undefined || key === undefined || texts.length === 1) return texts.map(text => ({ ...row, text, wrap: 'truncate-end' as const }))
   const group = row.group ?? `${section}:${key}`
@@ -2310,8 +2424,10 @@ export function wheelTarget(order: readonly SectionId[], windows: Partial<Record
  * rows than it shows. `buttons`: no blank rows (the body never moves), each such section an up and a down button.
  * `drag`: no blank rows, each such section's scroll bar a slider to drag (a Client surface module). `page`: no window at
  * all: every section drawn whole at its natural height, one below the other, and the body scrolls the page by itself.
+ * `sections`: three fixed boxes exactly as tall as the room, none scrolling, a box with more lines than it shows ending
+ * on a `+N more` line and offering `[+]`, which draws that section alone as a page the body scrolls by itself.
  */
-export const DESKTOP_PANE_SCROLLS = ['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag', 'page'] as const
+export const DESKTOP_PANE_SCROLLS = ['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag', 'page', 'sections'] as const
 export type DesktopPaneScroll = (typeof DESKTOP_PANE_SCROLLS)[number]
 
 /** The option's value as the mod uses it: an unknown value, or none, counts as `spare`. */
@@ -2351,6 +2467,33 @@ export const PAGE_LIST_CAP = 50
 export function pageCap<T>(items: readonly T[], cap: number, keep: 'first' | 'latest'): { shown: T[]; more: number } {
   const more = Math.max(0, items.length - cap)
   return { shown: keep === 'first' ? items.slice(0, cap) : items.slice(more), more }
+}
+
+/**
+ * The log's latest entries an expanded log of the `sections` view draws: the log view's own limit (summarizeTranscript
+ * keeps 300), so the page shows the whole view; at most 300 Texts, drawn again only when the log or the panel changes.
+ */
+export const SECTIONS_LOG_CAP = 300
+
+/**
+ * A fixed box of the `sections` view: of `total` lines, the ones it shows in `visible` rows. All when they fit; else
+ * `visible - 1` of them and a `+N more` line in the last row (`more`, the lines not shown). A box of one row shows the
+ * `+N more` line alone.
+ */
+export function sectionWindow(total: number, visible: number): { shown: number; more: number } {
+  if (total <= visible) return { shown: total, more: 0 }
+  const shown = Math.max(0, visible - 1)
+  return { shown, more: total - shown }
+}
+
+/**
+ * Where a change of the `sections` view moves the pane's body ($.ui.scroll): from one view (`was`, undefined before the
+ * first drawing) to the next (`now`, undefined when the value no longer draws): a log page (`log-page:<sid>`) to its
+ * end, any other view to its start; nothing on the first drawing, when the value stops drawing, or when nothing changed.
+ */
+export function sectionsScrollTo(was: string | undefined, now: string | undefined): 'start' | 'end' | undefined {
+  if (was === undefined || now === undefined || was === now) return undefined
+  return now.startsWith('log-page:') ? 'end' : 'start'
 }
 
 /** Whether a section as last drawn has more rows than it shows. */

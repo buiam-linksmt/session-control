@@ -102,6 +102,8 @@ declare module 'claude-code' {
       selected: string | null
       /** Section a header icon expanded to the whole docked panel; null shows the three boxes. */
       expanded: 'sessions' | 'queue' | 'points' | null
+      /** The open log drawn alone as a page the body scrolls (desktopPaneScroll sections); false: its box under the sessions. */
+      logPage: boolean
       /** Tasks sent to peers; an entry is acknowledged once a peer reply arrives. */
       ledger: { to: string; at: number; excerpt: string; isAcked: boolean }[]
       /** Open, not held points of open-points.json; null when unreadable. */

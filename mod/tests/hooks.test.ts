@@ -4055,3 +4055,230 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
     }
   })
 })
+
+// ---------------------------------------------------------------- desktopPaneScroll sections (decision smp-14)
+
+describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a page', () => {
+  type Ui = Awaited<ReturnType<typeof mountPane>>
+  type Test$ = Parameters<NonNullable<Parameters<typeof test>[2]>>[0]
+  type Node = { type?: string; text?: string; props?: Record<string, unknown>; children?: (Node | string)[] }
+  const PANE = 'session-control'
+  const ROOM = 36
+  const MODE = { options: { ...OPTIONS, desktopPaneScroll: 'sections' } }
+  const ALIVE_ROW = `s:${SID_ALIVE}`
+  const tasks = (n: number, title = (i: number) => `Task ${i}`) => JSON.stringify({ tasks: Array.from({ length: n }, (_, i) => ({ id: `t${i + 1}`, status: 'queued', title: title(i + 1) })) })
+  const logRows = (n: number) => Array.from({ length: n }, (_, i) => ({ type: 'assistant', message: { content: [{ type: 'text', text: `log line ${i + 1}` }] } }))
+  const props = (bodyRows = ROOM, bodyColumns = 120, placement = 'dock') => ({ ...PANE_PROPS, bodyColumns, placement, scroll: { offset: 0, bodyRows } })
+  const last: { w?: ReturnType<typeof world> } = {}
+  const open = async ($: Test$, on: On, surface: 'terminal' | 'desktop' = 'desktop', p = props()) => {
+    last.w = world(on)
+    stubPanel(on)
+    await boot($)
+    await runCommand($, 'side')
+    return $.ui.mount({ plugin: 'session-control', surface, component: 'Pane', requestId: PANE, props: p as never }) as Promise<Ui>
+  }
+  const nodesOf = (node: Node): Node[] => [node, ...(node.children ?? []).flatMap(one => (typeof one === 'object' ? nodesOf(one) : []))]
+  const textOf = (node: Node): string[] => (node.type === 'Text' ? [String(node.text ?? (node.children ?? []).map(one => (typeof one === 'string' ? one : '')).join(''))] : (node.children ?? []).flatMap(one => (typeof one === 'object' ? textOf(one) : [])))
+  const texts = async (ui: Ui) => (await ui.findAll({ type: 'Text' })).map(one => one.text)
+  const isShown = async (ui: Ui, key: string) => (await ui.find({ key })) !== undefined
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i)
+  /** The bordered box under `title` (its first Text): its height and the texts of its rows after the title. */
+  const boxOf = async (ui: Ui, title: string) => {
+    const box = nodesOf((await ui.drawn()) as Node).find(one => one.type === 'Box' && one.props?.borderStyle !== undefined && textOf(one)[0] === title)
+    return { height: box?.props?.height, rows: box === undefined ? [] : textOf(box).slice(1), keys: box === undefined ? [] : nodesOf(box).flatMap(one => (typeof one.props?.key === 'string' ? [one.props.key] : [])) }
+  }
+  const tasksIn = (rows: string[]) => rows.flatMap(text => /^\u2022 Task (\d+)$/.exec(text)?.slice(1).map(Number) ?? [])
+  const logIn = (rows: string[]) => rows.flatMap(text => /^log line (\d+)$/.exec(text)?.slice(1).map(Number) ?? [])
+  /** The plugin's own moves of the body ($.ui.scroll), as the hook beneath it sees them. */
+  const scrolls = (on: On) => {
+    const seen: { kind: string; offset: number }[] = []
+    on('ui.scroll', ($, e) => {
+      seen.push({ kind: e.origin.kind, offset: e.offset })
+      return {}
+    })
+    return seen
+  }
+
+  test('even view: three boxes exactly as tall as the room, no spare rows, no scroll bar, no step button or slider; a box with more lines than rows ends on +N more and has [+], one that fits has neither; the wheel moves nothing', MODE, async ($, on) => {
+    QUEUE.text = tasks(15)
+    try {
+      const below = scrolls(on)
+      const ui = await open($, on)
+      const tree = (await ui.drawn()) as Node
+      expect(tree.props?.height).toBe(ROOM)
+      expect(tree.props?.overflow).toBe('hidden')
+      const children = (tree.children ?? []) as Node[]
+      expect(children.map(one => [one.props?.borderStyle, one.props?.height, one.props?.overflow])).toEqual([
+        ['round', 12, 'hidden'],
+        ['round', 12, 'hidden'],
+        ['round', 12, 'hidden'],
+      ])
+      // The queue box: 12 rows less its border and title, 9: 8 tasks and a line for the other 7.
+      const queue = await boxOf(ui, 'QUEUED WORK')
+      expect(tasksIn(queue.rows)).toEqual(range(1, 8))
+      expect(queue.rows.at(-1)).toBe('+7 more')
+      expect(queue.keys).toContain('x:queue')
+      // The open points fit: no line, no [+].
+      const pointsBox = await boxOf(ui, 'OPEN POINTS')
+      expect(pointsBox.rows.some(text => /^\+\d+ more$/.test(text))).toBe(false)
+      expect(pointsBox.keys).not.toContain('x:points')
+      // No scroll bar, no step buttons, no slider anywhere.
+      expect((await texts(ui)).some(text => /[\u2502\u2503\u25B2\u25BC]/.test(text))).toBe(false)
+      for (const key of ['up:queue', 'down:queue', 'bar:queue', 'bar:sessions']) expect(await isShown(ui, key)).toBe(false)
+      // Every row one line drawn whole.
+      expect((await ui.findAll({ type: 'Text' })).filter(one => /^\u2022 Task/.test(one.text)).every(one => one.props.wrap === 'truncate-end')).toBe(true)
+      // A move of the body goes on as it came, and no section moves with it.
+      const before = await ui.drawn()
+      const answer = (await $.ui.scroll({ component: 'Pane', requestId: PANE, offset: 0, by: 1, bodyRows: ROOM, contentRows: ROOM, origin: { kind: 'person' }, pointer: { row: 14, column: 4 } } as never)) as { deny?: string } | undefined
+      expect(answer?.deny).toBeUndefined()
+      expect(below.filter(one => one.kind === 'person').map(one => one.offset)).toEqual([0])
+      await ui.redraw(props() as never)
+      expect(await ui.drawn()).toEqual(before)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('even view: a resize draws the boxes again for the new room and width, showing or hiding +N more and [+]', MODE, async ($, on) => {
+    const title = (i: number) => `Task ${i} whose title runs well past one line of a narrow pane`
+    QUEUE.text = tasks(8, title)
+    try {
+      const ui = await open($, on)
+      const queueRows = async () => (await boxOf(ui, 'QUEUED WORK')).rows
+      // 36 rows, 120 cells: 8 one-line tasks in 9 rows.
+      expect((await queueRows()).length).toBe(8)
+      expect(await isShown(ui, 'x:queue')).toBe(false)
+      // 30 rows: boxes of 10, 7 rows for the tasks: 6 and +2 more.
+      await ui.redraw(props(30) as never)
+      expect(((await ui.drawn()) as Node).props?.height).toBe(30)
+      expect(await queueRows()).toEqual([...range(1, 6).map(i => `\u2022 ${title(i)}`), '+2 more'])
+      expect(await isShown(ui, 'x:queue')).toBe(true)
+      // Back to 36 rows: all fit again.
+      await ui.redraw(props() as never)
+      expect(await isShown(ui, 'x:queue')).toBe(false)
+      // 36 rows, 40 cells: each task takes two lines, 16 in 9 rows: 8 lines and +8 more.
+      await ui.redraw(props(ROOM, 40) as never)
+      const narrow = await queueRows()
+      expect(narrow.length).toBe(9)
+      expect(narrow.slice(0, 2)).toEqual(['\u2022 Task 1 whose title runs well past one', '  line of a narrow pane'])
+      expect(narrow.at(-1)).toBe('+8 more')
+      expect(await isShown(ui, 'x:queue')).toBe(true)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  // Where each change moves the body is sectionsScrollTo's (core.test.ts): the kit answers no plugin's $.ui.scroll.
+  test('expand: [+] draws the section alone as a page between a title strip at the top and one at the bottom; another title switches to its section, [-] restores the boxes', MODE, async ($, on) => {
+    QUEUE.text = tasks(15)
+    try {
+      const ui = await open($, on)
+      await ui.press({ key: 'x:queue' })
+      const tree = (await ui.drawn()) as Node
+      // No height and no clipping anywhere: the page is as tall as its rows and the body scrolls it.
+      expect(nodesOf(tree).filter(one => one.type === 'Box').every(one => one.props?.height === undefined && one.props?.overflow === undefined)).toBe(true)
+      const parts = (tree.children ?? []) as Node[]
+      expect(parts.map(one => one.props?.key)).toEqual(['strip:top', 'page:queue', 'strip:bottom'])
+      // Each strip: the titles on the left (the shown one marked, not pressable), [-] on the right.
+      for (const at of ['top', 'bottom']) {
+        const strip = parts.find(one => one.props?.key === `strip:${at}`) as Node
+        expect(strip.props?.flexDirection).toBe('row')
+        const [titles, ...right] = (strip.children ?? []) as Node[]
+        expect(titles?.props?.flexGrow).toBe(1)
+        expect(textOf(titles as Node)).toEqual(['[ QUEUED WORK ]'])
+        expect(nodesOf(titles as Node).flatMap(one => (one.type === 'Button' ? [one.props?.key, one.props?.label] : []))).toEqual([`t:${at}:sessions`, 'SESSIONS', `t:${at}:points`, 'OPEN POINTS'])
+        expect(right.map(one => [one.props?.key, one.props?.label])).toEqual([[`c:${at}`, '[-]']])
+      }
+      // Every task, each a Text the surface wraps; no other section.
+      expect(tasksIn(await texts(ui))).toEqual(range(1, 15))
+      expect((await ui.findAll({ type: 'Text' })).filter(one => /^\u2022 Task/.test(one.text)).every(one => one.props.wrap === 'wrap')).toBe(true)
+      expect((await texts(ui)).includes('SESSIONS')).toBe(false)
+      // A title of the bottom strip switches to its section.
+      await ui.press({ key: 't:bottom:points' })
+      expect((((await ui.drawn()) as Node).children as Node[]).map(one => one.props?.key)).toEqual(['strip:top', 'page:points', 'strip:bottom'])
+      expect(await isShown(ui, 't:top:queue')).toBe(true)
+      expect(await isShown(ui, 't:top:points')).toBe(false)
+      // [-] of the bottom strip: the three boxes again.
+      await ui.press({ key: 'c:bottom' })
+      expect(((await ui.drawn()) as Node).props?.height).toBe(ROOM)
+      expect(await isShown(ui, 'x:queue')).toBe(true)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('logs: an open log is a box of the room less the sessions third, showing its newest lines under +N more above, with [+]; expanded it is a page of the whole log between strips with [x] and [-]; [-] returns to the box, [x] closes the log', MODE, async ($, on) => {
+    TAIL.rows = logRows(30)
+    try {
+      const ui = await open($, on)
+      await ui.press({ key: ALIVE_ROW })
+      const tree = (await ui.drawn()) as Node
+      expect(tree.props?.height).toBe(ROOM)
+      expect(((tree.children ?? []) as Node[]).map(one => one.props?.height)).toEqual([12, 24])
+      // 24 rows less border and title: 21; the newest 20 lines under a line for the 10 before them.
+      const logTitle = textOf(((tree.children ?? []) as Node[])[1] as Node)[0] as string
+      expect(logTitle.startsWith('LOG ')).toBe(true)
+      const box = await boxOf(ui, logTitle)
+      expect(box.rows[0]).toBe('+10 more above')
+      expect(logIn(box.rows)).toEqual(range(11, 30))
+      expect(box.keys).toContain('x:log')
+      // The log grows: the box still shows its newest lines.
+      TAIL.rows = logRows(33)
+      await last.w?.clock.advance(5000)
+      expect(logIn((await boxOf(ui, logTitle)).rows)).toEqual(range(14, 33))
+      // [+]: the log alone as a page, every line, between strips that also close it.
+      await ui.press({ key: 'x:log' })
+      const page = (await ui.drawn()) as Node
+      expect(((page.children ?? []) as Node[]).map(one => one.props?.key)).toEqual(['strip:top', 'page:log', 'strip:bottom'])
+      expect(logIn(await texts(ui))).toEqual(range(1, 33))
+      for (const at of ['top', 'bottom']) {
+        expect(await isShown(ui, `close:${at}`)).toBe(true)
+        expect(await isShown(ui, `c:${at}`)).toBe(true)
+        expect(await isShown(ui, `t:${at}:sessions`)).toBe(true)
+      }
+      expect((await texts(ui)).includes('[ LOG ]')).toBe(true)
+      // [-]: the box again, the log still open.
+      await ui.press({ key: 'c:bottom' })
+      expect(((await ui.drawn()) as Node).props?.height).toBe(ROOM)
+      expect(await isShown(ui, 'x:log')).toBe(true)
+      // [x]: the log closed, the three boxes.
+      await ui.press({ key: 'x:log' })
+      await ui.press({ key: 'close:bottom' })
+      const closed = (await ui.drawn()) as Node
+      expect(closed.props?.height).toBe(ROOM)
+      expect(((closed.children ?? []) as Node[]).length).toBe(3)
+      expect(logIn(await texts(ui))).toEqual([])
+    } finally {
+      TAIL.rows = undefined
+    }
+  })
+
+  test('logs: a log that fits its box has no [+] and no +N more line', MODE, async ($, on) => {
+    TAIL.rows = logRows(5)
+    try {
+      const ui = await open($, on)
+      await ui.press({ key: ALIVE_ROW })
+      expect(await isShown(ui, 'x:log')).toBe(false)
+      const title = textOf((((await ui.drawn()) as Node).children as Node[])[1] as Node)[0] as string
+      const box = await boxOf(ui, title)
+      expect(box.rows.some(text => /^\+\d+ more/.test(text))).toBe(false)
+      expect(logIn(box.rows)).toEqual(range(1, 5))
+    } finally {
+      TAIL.rows = undefined
+    }
+  })
+
+  test('seated low (inline): the compact tab panel as spare draws it; the terminal as before', MODE, async ($, on) => {
+    const ui = await open($, on, 'desktop', props(ROOM, 120, 'inline'))
+    const tree = (await ui.drawn()) as Node
+    // 7 rows between 8 spare rows above and below, as under spare.
+    expect(tree.props?.height).toBe(7 + 2 * 8)
+    expect(await isShown(ui, 'tab:sessions')).toBe(true)
+    await ui.unmount()
+    const term = (await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS as never })) as Ui
+    const termTree = (await term.drawn()) as Node
+    expect(termTree.props?.height).toBe(ROOM)
+    expect(await isShown(term, 'x:queue')).toBe(true)
+    expect(await isShown(term, 'strip:top')).toBe(false)
+  })
+})

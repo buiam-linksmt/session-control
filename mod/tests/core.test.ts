@@ -37,6 +37,17 @@ import {
   pageCap,
   PAGE_LIST_CAP,
   PAGE_LOG_CAP,
+  SECTIONS_LOG_CAP,
+  SECTIONS_ROW_RESERVE,
+  SECTIONS_FILL,
+  GLYPH_CELLS_DEFAULT,
+  glyphCells,
+  textCells,
+  wrapCells,
+  sectionWindow,
+  sectionsScrollTo,
+  sectionsLineRoom,
+  sectionsSplitter,
   sliderMove,
   TOAST_TITLES,
   toastText,
@@ -846,16 +857,86 @@ describe('output box scrolling', () => {
 })
 
 describe('the desktop pane scroll strategy (option desktopPaneScroll, decision smp-4)', () => {
-  test('the option names one of seven strategies; an unknown value, another type or none counts as spare', () => {
-    expect([...DESKTOP_PANE_SCROLLS]).toEqual(['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag', 'page'])
+  test('the option names one of eight strategies; an unknown value, another type or none counts as spare', () => {
+    expect([...DESKTOP_PANE_SCROLLS]).toEqual(['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag', 'page', 'sections'])
+    expect(desktopPaneScroll('sections')).toBe('sections')
+    for (const other of ['Sections', 'section', 'sections ']) expect(desktopPaneScroll(other)).toBe('spare')
     for (const mode of DESKTOP_PANE_SCROLLS) expect(desktopPaneScroll(mode)).toBe(mode)
     for (const other of [undefined, '', 'Spare', 'hidden', 'clipped', 1, true, ['buttons']]) expect(desktopPaneScroll(other)).toBe('spare')
   })
-  test('the spare rows above and below a panel that fits its room: spare 8, overflow 8 only while a section has more rows than it shows, minimal 1, overflow-minimal 1 only then, buttons, drag and page none', () => {
+  test('the spare rows above and below a panel that fits its room: spare 8, overflow 8 only while a section has more rows than it shows, minimal 1, overflow-minimal 1 only then, buttons, drag, page and sections none', () => {
     expect(DESKTOP_SPARE_ROWS).toBe(8)
     const rows = (isOverflowing: boolean) => DESKTOP_PANE_SCROLLS.map(mode => desktopSpareRows(mode, isOverflowing))
-    expect(rows(true)).toEqual([8, 8, 1, 1, 0, 0, 0])
-    expect(rows(false)).toEqual([8, 0, 1, 0, 0, 0, 0])
+    expect(rows(true)).toEqual([8, 8, 1, 1, 0, 0, 0, 0])
+    expect(rows(false)).toEqual([8, 0, 1, 0, 0, 0, 0, 0])
+  })
+  test('sections: a fixed box shows all its lines when they fit; else one line less and a +N more line counting the rest; the expanded log draws up to 300 entries', () => {
+    expect(SECTIONS_LOG_CAP).toBe(300)
+    expect(sectionWindow(0, 9)).toEqual({ shown: 0, more: 0 })
+    expect(sectionWindow(9, 9)).toEqual({ shown: 9, more: 0 })
+    expect(sectionWindow(10, 9)).toEqual({ shown: 8, more: 2 })
+    expect(sectionWindow(18, 9)).toEqual({ shown: 8, more: 10 })
+    expect(sectionWindow(5, 1)).toEqual({ shown: 0, more: 5 })
+  })
+  test('sections: a line may fill 93 % of the row (bodyColumns less 6 cells), counted by anthropic-sans advance widths in cells of its 0', () => {
+    expect(SECTIONS_ROW_RESERVE).toBe(6)
+    expect(SECTIONS_FILL).toBe(0.93)
+    expect(Math.abs(sectionsLineRoom(40) - 31.62)).toBeLessThan(1e-9)
+    expect(Math.abs(sectionsLineRoom(120) - 106.02)).toBeLessThan(1e-9)
+    expect(sectionsLineRoom(5)).toBe(8)
+    // Glyphs of the table, and the fallback for any other.
+    const cells: [string, number][] = [[' ', 0.36], ['0', 1.02], ['i', 0.45], ['l', 0.45], ['e', 0.99], ['m', 1.49], ['W', 1.73], ['\u00C6', 1.84], ['\u00E9', 0.99], ['\u2022', 0.83], ['\u2026', 1.66], ['\u25B8', 2.1], ['\u4E2D', 2.1], ['\u{1F600}', 2.1]]
+    for (const [ch, want] of cells) expect([ch, glyphCells(ch)]).toEqual([ch, want])
+    expect(GLYPH_CELLS_DEFAULT).toBe(2.1)
+    expect(Math.abs(textCells('lie') - 1.89)).toBeLessThan(1e-9)
+    expect(textCells('')).toBe(0)
+  })
+  test('sections: wrapCells breaks at blanks where the next word would pass the room in cells, hangs the lines after the first, and cuts a word wider than a line glyph by glyph', () => {
+    const cases: { text: string; room: number; hang?: number; want: string[] }[] = [
+      // 'iii iii' takes 0.45 * 6 + 0.36 = 3.06 cells; 'mmm mmm' 1.49 * 6 + 0.36 = 9.30.
+      { text: 'iii iii', room: 8, want: ['iii iii'] },
+      { text: 'mmm mmm', room: 8, want: ['mmm', 'mmm'] },
+      { text: 'iii iii iii iii', room: 6, want: ['iii iii iii', 'iii'] },
+      // A room of exactly the line's cells holds it; a hair less does not.
+      { text: 'mm mm', room: 1.49 * 4 + 0.36, want: ['mm mm'] },
+      { text: 'mm mm', room: 1.49 * 4 + 0.35, want: ['mm', 'mm'] },
+      // A word wider than a line is cut where the next glyph would pass the room.
+      { text: 'WWWWWWWWWW', room: 8, want: ['WWWW', 'WWWW', 'WW'] },
+      // The lines after the first start `hang` blanks in, and their room is less those blanks' cells.
+      { text: '- iiii iiii iiii', room: 6.5, hang: 2, want: ['- iiii iiii', '  iiii'] },
+      // Runs of blanks count as one; each paragraph on its own lines; nothing gives one empty line.
+      { text: 'a   b\nc', room: 20, want: ['a b', 'c'] },
+      { text: '', room: 20, want: [''] },
+      // A glyph outside the table counts 2.1 cells.
+      { text: '\u4E2D\u4E2D\u4E2D\u4E2D', room: 8, want: ['\u4E2D\u4E2D\u4E2D', '\u4E2D'] },
+    ]
+    for (const one of cases) expect([one.text, wrapCells(one.text, one.room, one.hang)]).toEqual([one.text, one.want])
+    // Every line of a real title fits the room it was wrapped to, and takes fewer lines than the count of characters gives.
+    const title = 'Optional, lowest priority: prototype of a WYSIWYG markdown editor as a vim plugin (standalone terminal app as the fallback)'
+    for (const columns of [40, 120]) for (const line of wrapCells(title, sectionsLineRoom(columns))) expect(textCells(line)).toBeLessThanOrEqual(sectionsLineRoom(columns))
+    expect(wrapCells(title, sectionsLineRoom(40)).length).toBeLessThan(wrapText(title, desktopLineChars(40)).length)
+  })
+  test('sections: a change of view moves the body to its start, a log page to its end; the first drawing, a drawing under another value and an unchanged view move nothing', () => {
+    expect(sectionsScrollTo(undefined, 'even')).toBeUndefined()
+    expect(sectionsScrollTo('even', undefined)).toBeUndefined()
+    expect(sectionsScrollTo('queue', 'queue')).toBeUndefined()
+    expect(sectionsScrollTo('even', 'queue')).toBe('start')
+    expect(sectionsScrollTo('queue', 'points')).toBe('start')
+    expect(sectionsScrollTo('points', 'even')).toBe('start')
+    expect(sectionsScrollTo('even', 'log:s1')).toBe('start')
+    expect(sectionsScrollTo('log:s1', 'log-page:s1')).toBe('end')
+    expect(sectionsScrollTo('log-page:s1', 'log:s1')).toBe('start')
+    expect(sectionsScrollTo('log-page:s1', 'log-page:s2')).toBe('end')
+  })
+  test('sections: the splitter cuts a pressable row into lines by glyph widths, keyed and grouped as desktopLines keys them', () => {
+    const row: { text: string; key: string; press: () => undefined; wrap?: 'wrap' | 'truncate-end'; group?: string } = { text: '1. First question whose title is far longer than one line of the pane', key: 'p:a:0', press: () => undefined }
+    const lines = desktopLines(row, sectionsSplitter(40), 'points')
+    expect(lines.map(one => one.key)).toEqual(lines.map((_, i) => (i === 0 ? 'p:a:0' : `p:a:${i}`)))
+    expect(lines.every(one => one.wrap === 'truncate-end' && one.group === 'points:p:a:0')).toBe(true)
+    expect(lines.map(one => one.text).join(' ')).toBe(row.text)
+    for (const one of lines) expect(textCells(one.text)).toBeLessThanOrEqual(sectionsLineRoom(40))
+    // Longer lines than the count of characters gives (26 at 40 cells).
+    expect(lines[0]?.text.length ?? 0).toBeGreaterThan(desktopLines(row, desktopLineChars(40), 'points')[0]?.text.length ?? 0)
   })
   test('page: a list draws its first 50 rows, the log its latest 100 lines, and says how many are left out', () => {
     expect(PAGE_LIST_CAP).toBe(50)
