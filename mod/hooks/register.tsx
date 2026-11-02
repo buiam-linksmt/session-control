@@ -134,6 +134,9 @@ import {
   desktopPaneScroll,
   desktopSpareRows,
   isAnyOverflowing,
+  pageCap,
+  PAGE_LIST_CAP,
+  PAGE_LOG_CAP,
   sliderMove,
   MIN_BOX,
   MIN_SESSIONS_BOX,
@@ -285,8 +288,8 @@ let isDirOptionSet = false
  */
 let finishedInput: { entries: readonly SessionEntry[]; facts: ProcFacts; queueText?: string | null } | undefined
 // What the pane drew last, so the scroll hook knows which box a wheel tick is over: the boxes, their windows and, on the
-// desktop, the spare rows drawn above and below the panel (0 elsewhere).
-let layout: { boxes: SectionBox[]; totals: Partial<Record<SectionId, BoxWindow>>; spare: number } = { boxes: [], totals: {}, spare: 0 }
+// desktop, the spare rows drawn above and below the panel (0 elsewhere), or that it drew the page (desktopPaneScroll page).
+let layout: { boxes: SectionBox[]; totals: Partial<Record<SectionId, BoxWindow>>; spare: number; isPage?: true } = { boxes: [], totals: {}, spare: 0 }
 /** The section the last desktop wheel move without a pointer scrolled (wheelTarget). */
 let wheelLast: SectionId | undefined
 /** Set while the desktop pane's window is being asked back to the middle of the spare rows (parkWindow). */
@@ -3363,6 +3366,9 @@ export const register: Register = (on, options) => {
   // the pointer when the surface sends one, else the one wheelTarget names; every move, the plugin's own (parkWindow)
   // too, lands the window in the middle of the spare rows.
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    // The page (desktopPaneScroll page): the body scrolls the whole panel by itself; the move goes on as it came, and
+    // nothing in the panel moves with it.
+    if (layout.isPage) return next(e)
     if (layout.spare > 0) {
       if (e.origin.kind === 'person') {
         const id =
@@ -3467,7 +3473,10 @@ export const register: Register = (on, options) => {
     // window's offset: content that moved above the window would make the page scroll on its own.
     const scrollMode = isDesktop ? config.desktopPaneScroll : 'spare'
     const isFitting = isDesktop && bodyRows <= e.props.scroll.bodyRows
-    layout = { boxes, totals: {}, spare: 0 }
+    // `page`: no window at all. Every section is drawn whole at its natural height, one below the other, in a root of no
+    // fixed height, and the body scrolls the page by itself: no spare rows, no bars, no icons, nothing counted.
+    const isPage = isDesktop && scrollMode === 'page'
+    layout = isPage ? { boxes: [], totals: {}, spare: 0, isPage: true } : { boxes, totals: {}, spare: 0 }
     // `buttons`: an up and a down button for each section with more rows than it shows; `drag`: its bar a slider.
     const hasButtons = isDesktop && scrollMode === 'buttons'
     const hasSlider = isDesktop && (scrollMode === 'drag' || scrollMode === 'buttons') && !isSliderFailed
@@ -3533,6 +3542,32 @@ export const register: Register = (on, options) => {
         <Button key={r.key} label={r.text === '' ? ' ' : r.text} plain dimColor={r.dim} hover={scope === undefined ? undefined : { scope, inverse: true }} onPress={r.press} />
       )
     const anyRowEl = (r: PRow, fill = 0, scope?: string) => (isDesktop ? deskRowEl(r, scope) : rowEl(r, fill, scope))
+    // The page's lists: at most PAGE_LIST_CAP rows of a list (its first, in the panel's order), PAGE_LOG_CAP of the log
+    // (its latest), and a line saying how many are left out; elsewhere every row.
+    const capped = <T,>(items: readonly T[], keep: 'first' | 'latest') => (isPage ? pageCap(items, keep === 'first' ? PAGE_LIST_CAP : PAGE_LOG_CAP, keep) : { shown: [...items], more: 0 })
+    const moreRow = (more: number, note = 'more'): PRow[] => (more === 0 ? [] : [{ text: `${more} ${note}`, dim: true }])
+    // A section of the page: its title, then its rows, each Text wrapped by the surface; a pressable row's lines are
+    // Buttons (desktopLines), as a desktop Button draws its label on one line.
+    const pageBlock = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[]) => {
+      const chars = desktopLineChars(columns)
+      const rows = [...fixedIn, ...bodyIn].flatMap(r => (r.press === undefined ? [r] : desktopLines(r, chars, id)))
+      if (id === 'sessions') drawnSessions = { rows: [...new Set(rows.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
+      return (
+        <Box key={`page:${id}`} flexDirection="column" borderStyle="round" borderDimColor>
+          <Text bold>{title}</Text>
+          {rows.map((r, i) =>
+            r.press === undefined ? (
+              <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap="wrap">
+                {r.text}
+              </Text>
+            ) : (
+              deskRowEl(r, r.group ?? `${id}:${i}`)
+            ),
+          )}
+        </Box>
+      )
+    }
+    const pagePanel = (sections: ReturnType<typeof pageBlock>[]) => <Box flexDirection="column">{sections}</Box>
     const block = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[], offset: number, isTail = false, isPlain = false) => {
       const box = boxes.find(one => one.id === id) as SectionBox
       // The desktop counts, shows and scrolls a section by the lines its rows take.
@@ -3593,7 +3628,8 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    const sessionRows: PRow[] = snap.rows.length === 0 ? [{ text: 'No workers in the registry.', dim: true }] : snap.rows.flatMap((row, rowIndex) => {
+    const sessionsShown = capped(snap.rows, 'first')
+    const sessionRows: PRow[] = snap.rows.length === 0 ? [{ text: 'No workers in the registry.', dim: true }] : [...sessionsShown.shown.flatMap((row, rowIndex) => {
       const sid = row.sid
       const isSelected = sid !== undefined && sid === sel
       const color = row.status === 'dead' || row.status === 'orphan' ? ('warning' as const) : undefined
@@ -3606,7 +3642,7 @@ export const register: Register = (on, options) => {
       const text = (isSelected ? '\u25B8 ' : '  ') + formatRow(row, width - 2, widths, clock)
       if (sid === undefined) return [{ text, dim: row.status === 'done', color, rowIndex }]
       return [{ text, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done', rowIndex }]
-    })
+    }), ...moreRow(sessionsShown.more)]
     const pick = (id: 'sessions' | 'queue' | 'points') => async () => {
       await update($, tab, () => id)
       await update($, selected, () => null)
@@ -3647,15 +3683,18 @@ export const register: Register = (on, options) => {
       snap.error === undefined ? [] : isDesktop ? [{ text: `! session-control: ${snap.error}`, dim: false, wrap: 'truncate-end' }] : [{ text: wrapText(`! session-control: ${snap.error}`, width)[0] ?? '', dim: false }]
     const headerRows: PRow[] = isDesktop ? DESKTOP_HEADER.map(text => ({ text, dim: true })) : [{ text: '  ' + formatHeader(width - 2, widths), dim: true }]
     const sessionsBlock = (isPlain = false) => block('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, offs.sessions, false, isPlain)
+    const sessionsPage = () => pageBlock('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows)
     if (isLogOpen && view !== null) {
       // The desktop ends each log line at its own width: one row per line, so the newest lines stay in the box.
-      const logRows: PRow[] = view.lines.flatMap(line => {
+      const logShown = capped(view.lines, 'latest')
+      const logRows: PRow[] = [...moreRow(logShown.more, 'more above'), ...logShown.shown.flatMap(line => {
         const dim = line.startsWith('  <') || line.startsWith('>')
         if (isDesktop) return [{ text: line, dim, wrap: 'truncate-end' as const }]
         const wrapped = wrapLogLine(line, width).slice(0, 2)
         return wrapped.map(text => ({ text, dim }))
-      })
+      })]
       if (logRows.length === 0) logRows.push({ text: 'Waiting for output.', dim: true })
+      if (isPage) return pagePanel([sessionsPage(), pageBlock('log', `LOG ${view.title}`, [], logRows)])
       if (isCompact) return framed(compactView(block('log', `LOG ${view.title}`, [], logRows, 0, true, true)))
       return framed(
         <Box flexDirection="column" height={bodyRows} overflow="hidden">
@@ -3664,22 +3703,24 @@ export const register: Register = (on, options) => {
         </Box>,
       )
     }
+    const queueShown = capped(queue ?? [], 'first')
     const queueRows: PRow[] =
       queue === null
         ? [{ text: 'task queue unreadable.', dim: true }]
         : queue.length === 0
           ? [{ text: 'none', dim: true }]
           : isDesktop
-            ? queue.map(task => ({ text: '\u2022 ' + task.title, hang: 2 }))
+            ? [...queueShown.shown.map(task => ({ text: '\u2022 ' + task.title, hang: 2 })), ...moreRow(queueShown.more)]
             : queue.flatMap(task =>
                 wrapText(task.title, width - 2).map((text, i) => ({ text: (i === 0 ? '\u2022 ' : '  ') + text })),
               )
+    const pointsShown = capped(list ?? [], 'first')
     const pointRows: PRow[] =
       list === null
         ? [{ text: 'open points unreadable.', dim: true }]
         : list.length === 0
           ? [{ text: 'none', dim: true }]
-          : list.flatMap((point, index) => {
+          : [...pointsShown.shown.flatMap((point, index) => {
               const id = point.id || String(index)
               const press = togglePoint(point.id)
               if (point.id === '' || point.id !== pointSel) {
@@ -3705,7 +3746,8 @@ export const register: Register = (on, options) => {
               ]
               body.forEach(text => lines.push({ text: '    ' + text, dim: true }))
               return lines
-            })
+            }), ...moreRow(pointsShown.more)]
+    if (isPage) return pagePanel([sessionsPage(), pageBlock('queue', 'QUEUED WORK', [], queueRows), pageBlock('points', 'OPEN POINTS', [], pointRows)])
     if (isCompact) {
       return framed(
         compactView(
