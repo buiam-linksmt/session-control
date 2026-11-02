@@ -55,6 +55,8 @@ const OPEN_POINTS_TEXT = JSON.stringify({
     { id: 'd', status: 'open', title: 'Second question', detail: 'Detail two', recommendation: 'Do B' },
   ],
 })
+// The open points the fixture serves; a test that serves others puts OPEN_POINTS_TEXT back.
+const POINTS = { text: OPEN_POINTS_TEXT }
 
 type World = {
   /** Bash calls the plugin's own launch made through $.tool.call. */
@@ -182,7 +184,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === '/work/orch/CLAUDE.md') return '# Role: Session Orchestrator\n'
     if (path === '/work/new/thin.md') return 'Just do the work.'
     if (path === `${ORCH_DIR}/task-queue.json`) return QUEUE.text
-    if (path === `${ORCH_DIR}/open-points.json`) return OPEN_POINTS_TEXT
+    if (path === `${ORCH_DIR}/open-points.json`) return POINTS.text
     if (path === `${ORCH_DIR}/agreed-decisions.md` && DECISIONS.text !== undefined) return DECISIONS.text
     const result = /^\/fixture\/results\/(\w+)\.json$/.exec(path)?.[1]
     if (result !== undefined && result in RESULTS) return RESULTS[result as keyof typeof RESULTS]
@@ -3167,22 +3169,29 @@ describe('the panel on the desktop surface', () => {
   /** Every Text drawn, with its wrap prop. */
   const textsOf = async (ui: Ui | Awaited<ReturnType<typeof open>>) => (await ui.findAll({ type: 'Text' })).map(one => ({ text: one.text, wrap: one.props.wrap }))
 
-  test('desktop: each session row is its whole text, title to elapsed, with no padding and no cut of the mod; the header names the cells', { options: OPTIONS }, async ($, on) => {
+  test('desktop: each session row is its title, then its cells joined by ` · `, with no padding and no cut of the mod, wrapped into lines that fit the pane (decision smp-8); the header names the cells', { options: OPTIONS }, async ($, on) => {
     const ui = await open($, on, 'desktop')
-    // The title is the pressable line (Desktop draws a Button on one line, cut at the box's edge); the cells follow on a
-    // Text the surface wraps, so the status and the elapsed time always show.
+    // The title is the pressable line (Desktop draws a Button on one line, cut at the box's edge); the cells follow, so
+    // the status and the elapsed time always show.
     expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toBe('alive worker')
-    const texts = await textsOf(ui)
-    const cells = texts.find(one => /^aaaaaaaa · running · opus · high · \d+m\d\ds$/.test(one.text))
-    expect(cells?.wrap).toBe('wrap')
-    expect(texts).toContainEqual({ text: 'title', wrap: 'wrap' })
-    expect(texts).toContainEqual({ text: 'sid · status · model · effort · elapsed', wrap: 'wrap' })
-    // No row of any box is cut, padded or wrapped by the mod: the surface does that in its own room.
+    // 30 cells: lines of (30 - 7) / 1.25, 18 characters (desktopLineChars), each drawn whole for the surface to end.
+    const lines = (await textsOf(ui)).filter(one => one.wrap !== undefined)
+    for (const one of lines) {
+      expect(one.wrap).toBe('truncate-end')
+      expect(one.text.length).toBeLessThanOrEqual(18)
+    }
+    const words = lines.map(one => one.text)
+    const at = words.findIndex(text => text.startsWith('aaaaaaaa'))
+    expect(words.slice(at, at + 3).join(' ')).toMatch(/^aaaaaaaa · running · opus · high · \d+m\d\ds$/)
+    expect(words).toContain('title')
+    const head = words.indexOf('sid · status ·')
+    expect(words.slice(head, head + 3)).toEqual(['sid · status ·', 'model · effort ·', 'elapsed'])
+    // No row of any box is cut or padded by the mod: it breaks rows between words only.
     for (const label of (await ui.findAll({ type: 'Button' })).map(one => String(one.props.label))) {
       expect(label).not.toContain('…')
       expect(label).toBe(label.trim())
     }
-    for (const one of texts) expect(one.text).not.toContain('…')
+    for (const one of lines) expect(one.text).not.toContain('…')
     // A press on the row still opens its log, the row then marked.
     await ui.press({ key: `s:${SID}` })
     expect(String((await ui.find({ key: `s:${SID}` }))?.props.label)).toBe('\u25B8 alive worker')
@@ -3196,17 +3205,30 @@ describe('the panel on the desktop surface', () => {
     expect((await textsOf(ui)).every(one => one.wrap === undefined)).toBe(true)
   })
 
-  test('desktop: queued work and open points are whole texts, a selected point with its detail and recommendation; log lines end at the surface\'s width', { options: OPTIONS }, async ($, on) => {
+  test('desktop: queued work and open points wrap into lines that fit the pane, a selected point with its detail and recommendation (decision smp-8); log lines end at the surface\'s width', { options: OPTIONS }, async ($, on) => {
     QUEUE.text = JSON.stringify({ tasks: [{ id: 'q1', status: 'queued', title: LONG_TASK }] })
     try {
       const ui = await open($, on, 'desktop')
-      expect(await textsOf(ui)).toContainEqual({ text: `• ${LONG_TASK}`, wrap: 'wrap' })
+      // Lines of 18 characters: the bullet's line, then lines two blanks in.
+      const lines = (await textsOf(ui)).filter(one => one.wrap !== undefined)
+      const first = lines.findIndex(one => one.text.startsWith('\u2022 '))
+      const task = [lines[first] as (typeof lines)[number]]
+      for (const one of lines.slice(first + 1)) {
+        if (!one.text.startsWith('  ')) break
+        task.push(one)
+      }
+      expect(task.length).toBeGreaterThan(1)
+      expect(task.every(one => one.wrap === 'truncate-end' && one.text.length <= 18)).toBe(true)
+      expect(task.map(one => one.text.trim()).join(' ')).toBe(`\u2022 ${LONG_TASK}`)
       expect(String((await ui.find({ key: 'p:a:0' }))?.props.label)).toBe('1. First question')
       await ui.press({ key: 'p:a:0' })
-      expect(String((await ui.find({ key: 'p:a:t:0' }))?.props.label)).toBe('▸ 1. First question')
+      // The selected title is 19 characters: two Buttons with its press and one hover scope.
+      expect(String((await ui.find({ key: 'p:a:t:0' }))?.props.label)).toBe('▸ 1. First')
+      expect(String((await ui.find({ key: 'p:a:t:1' }))?.props.label)).toBe('  question')
       const texts = await textsOf(ui)
-      expect(texts).toContainEqual({ text: 'Detail one', wrap: 'wrap' })
-      expect(texts).toContainEqual({ text: 'Recommendation: Do A', wrap: 'wrap' })
+      expect(texts).toContainEqual({ text: 'Detail one', wrap: 'truncate-end' })
+      const rec = texts.findIndex(one => one.text === 'Recommendation: Do')
+      expect(texts[rec + 1]).toEqual({ text: 'A', wrap: 'truncate-end' })
       await ui.press({ key: `s:${SID}` })
       const log = (await textsOf(ui)).filter(one => /Reading the suite files|> Bash git status -sb/.test(one.text))
       expect(log.length).toBe(2)
@@ -3248,7 +3270,8 @@ describe('the panel on the desktop surface', () => {
       ])
       await ui.unmount()
       const desk = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, bodyColumns: 60 } as never })
-      const log = (await textsOf(desk)).filter(one => one.wrap === 'truncate-end')
+      // Every desktop line is drawn whole; the log's are its entries as they are, however long.
+      const log = (await textsOf(desk)).filter(one => one.wrap === 'truncate-end' && (one.text === SAID || /^(> Bash |  < )/.test(one.text)))
       expect(log).toEqual([
         { text: SAID, wrap: 'truncate-end' },
         { text: `> Bash ${COMMAND}`, wrap: 'truncate-end' },
@@ -3697,6 +3720,136 @@ describe('the wheel over the panel on the desktop and the terminal', () => {
     } finally {
       QUEUE.text = QUEUE_TEXT
     }
+  })
+})
+
+// ---------------------------------------------------------------- desktop rows as the lines they take (decision smp-8)
+
+describe('the desktop panel counts, shows and scrolls its sections in lines', () => {
+  type Ui = Awaited<ReturnType<typeof mountPane>>
+  type Test$ = Parameters<NonNullable<Parameters<typeof test>[2]>>[0]
+  type Node = { type?: string; text?: string; props?: Record<string, unknown>; children?: Node[] }
+  const PANE = 'session-control'
+  const ROOM = 36
+  const SPARE = 8
+  // 40 cells: lines of (40 - 7) / 1.25, 26 characters (desktopLineChars).
+  const PROPS = { ...PANE_PROPS, bodyColumns: 40, scroll: { offset: 0, bodyRows: ROOM } }
+  // Six tasks of three lines each: 18 lines in a queue box of 12 rows, which shows 9 (its border and title take 3).
+  const LONG = (n: number) => `Task ${n} whose title runs well past the line the desktop pane gives it`
+  const TASKS = JSON.stringify({ tasks: Array.from({ length: 6 }, (_, i) => ({ id: `t${i + 1}`, status: 'queued', title: LONG(i + 1) })) })
+  const taskLines = (n: number) => [`\u2022 Task ${n} whose title runs`, '  well past the line the', '  desktop pane gives it']
+  const ALL_LINES = [1, 2, 3, 4, 5, 6].flatMap(taskLines)
+  const open = async ($: Test$, on: On, surface: 'terminal' | 'desktop' = 'desktop', registry = REGISTRY_TEXT) => {
+    world(on, '/fixture/lic/a\n', true, registry)
+    stubPanel(on)
+    await boot($)
+    await runCommand($, 'side')
+    return $.ui.mount({ plugin: 'session-control', surface, component: 'Pane', requestId: PANE, props: PROPS as never }) as Promise<Ui>
+  }
+  /** The bordered box whose title is `title`, in the drawn tree. */
+  const boxOf = async (ui: Ui, title: string) => {
+    const textOf = (node: Node): string[] => (node.type === 'Text' ? [String(node.text ?? (node.children ?? []).map(one => (typeof one === 'string' ? one : '')).join(''))] : (node.children ?? []).flatMap(textOf))
+    const find = (node: Node): Node | undefined => {
+      if (node.type === 'Box' && node.props?.borderStyle !== undefined && textOf(node).includes(title)) return node
+      for (const one of node.children ?? []) {
+        const hit = typeof one === 'object' ? find(one) : undefined
+        if (hit !== undefined) return hit
+      }
+      return undefined
+    }
+    const box = find((await ui.drawn()) as Node)
+    // Its rows' column and its scroll bar's (one cell wide).
+    const column = (node: Node): Node | undefined => (node.type === 'Box' && node.props?.width === 1 ? node : (node.children ?? []).map(one => (typeof one === 'object' ? column(one) : undefined)).find(one => one !== undefined))
+    return { bar: box === undefined ? undefined : textOf(column(box) ?? {}).join(''), lines: box === undefined ? [] : textOf(box) }
+  }
+  /** The queued task lines shown. */
+  const queueShown = async (ui: Ui) => (await boxOf(ui, 'QUEUED WORK')).lines.filter(text => ALL_LINES.includes(text))
+
+  test('desktop: queue entries longer than a line count as their lines: the box shows 9 of 18, draws its bar, and the wheel over it scrolls it a line at a time', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      // The engine beneath the plugin's scroll hook.
+      on('ui.scroll', () => ({}))
+      const ui = await open($, on)
+      expect(await queueShown(ui)).toEqual(ALL_LINES.slice(0, 9))
+      for (const one of await ui.findAll({ type: 'Text' })) if (ALL_LINES.includes(one.text)) expect(one.props.wrap).toBe('truncate-end')
+      // 9 of 18 lines: a thumb of 5 rows at the top.
+      expect((await boxOf(ui, 'QUEUED WORK')).bar).toBe('\u2503\u2503\u2503\u2503\u2503\u2502\u2502\u2502\u2502')
+      // A wheel move over the queue box (rows 12 to 23 of the panel): one line, the window back between the spare rows.
+      await ui.redraw({ ...PROPS, scroll: { offset: SPARE, bodyRows: ROOM } } as never)
+      await $.ui.scroll({ component: 'Pane', requestId: PANE, offset: SPARE + 1, by: 1, bodyRows: ROOM, contentRows: ROOM + 2 * SPARE, origin: { kind: 'person' }, pointer: { row: 13, column: 4 } } as never)
+      await ui.redraw({ ...PROPS, scroll: { offset: SPARE, bodyRows: ROOM } } as never)
+      expect(await queueShown(ui)).toEqual(ALL_LINES.slice(1, 10))
+      await $.ui.scroll({ component: 'Pane', requestId: PANE, offset: SPARE + 20, by: 20, bodyRows: ROOM, contentRows: ROOM + 2 * SPARE, origin: { kind: 'person' }, pointer: { row: 13, column: 4 } } as never)
+      await ui.redraw({ ...PROPS, scroll: { offset: SPARE, bodyRows: ROOM } } as never)
+      expect(await queueShown(ui)).toEqual(ALL_LINES.slice(9))
+      expect((await boxOf(ui, 'QUEUED WORK')).bar).toBe('\u2502\u2502\u2502\u2502\u2503\u2503\u2503\u2503\u2503')
+      await ui.unmount()
+      // The terminal at the same width: its own rows, unchanged (none drawn whole, the point's title one row cut).
+      const term = (await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: PANE, props: PROPS as never })) as unknown as Ui
+      expect((await term.findAll({ type: 'Text' })).every(one => one.props.wrap === undefined)).toBe(true)
+      expect((await term.findAll({ type: 'Text' })).some(one => /^\u2022 Task \d whose title runs well past$/.test(one.text))).toBe(true)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  for (const mode of ['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag'] as const) {
+    test(`desktopPaneScroll ${mode}: a queue whose entries wrap past its room shows its ${mode === 'drag' ? 'slider' : mode === 'buttons' ? 'buttons and bar' : 'bar'}, counted in lines`, { options: { ...OPTIONS, desktopPaneScroll: mode } }, async ($, on) => {
+      QUEUE.text = TASKS
+      try {
+        const ui = await open($, on)
+        expect(await queueShown(ui)).toEqual(ALL_LINES.slice(0, 9))
+        if (mode === 'drag') {
+          const slider = (await ui.find({ key: 'bar:queue' })) as { type: string; props: Record<string, unknown> } | undefined
+          expect(slider?.type).toBe('Client')
+          expect(slider?.props.props).toEqual({ id: 'queue', total: 18, visible: 9, from: 0 })
+        } else expect((await boxOf(ui, 'QUEUED WORK')).bar).toBe('\u2503\u2503\u2503\u2503\u2503\u2502\u2502\u2502\u2502')
+        if (mode === 'buttons') {
+          // The window less a line: 8 lines down.
+          await ui.press({ key: 'down:queue' })
+          expect(await queueShown(ui)).toEqual(ALL_LINES.slice(8, 17))
+        }
+      } finally {
+        QUEUE.text = QUEUE_TEXT
+      }
+    })
+  }
+
+  // The lines' shared hover scope is desktopLines' (core.test.ts): the mock leaves `hover` out of the tree it draws.
+  test('desktop: an open point\'s title longer than a line wraps into Buttons that each press it, selected or not; the terminal cuts it on one row as before', { options: OPTIONS }, async ($, on) => {
+    POINTS.text = JSON.stringify({ points: [{ id: 'a', status: 'open', title: 'First question whose title is far longer than one line of the pane', detail: 'Detail one', recommendation: 'Do A' }] })
+    try {
+      const ui = await open($, on)
+      const labels = async (keys: string[]) => Promise.all(keys.map(async key => String((await ui.find({ key }))?.props.label)))
+      expect(await labels(['p:a:0', 'p:a:1', 'p:a:2'])).toEqual(['1. First question whose', 'title is far longer than', 'one line of the pane'])
+      // A press on any line selects the point: its title marked, wrapped two blanks in, then its detail.
+      await ui.press({ key: 'p:a:2' })
+      expect(await labels(['p:a:t:0', 'p:a:t:1', 'p:a:t:2'])).toEqual(['\u25B8 1. First question whose', '  title is far longer than', '  one line of the pane'])
+      expect((await ui.findAll({ type: 'Text' })).some(one => one.text === 'Detail one')).toBe(true)
+      await ui.press({ key: 'p:a:t:1' })
+      expect(await ui.find({ key: 'p:a:t:0' })).toBeUndefined()
+      expect(await ui.find({ key: 'p:a:2' })).toBeDefined()
+      expect(await ui.find({ key: 'p:a:3' })).toBeUndefined()
+      await ui.unmount()
+      const term = (await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: PANE, props: PROPS as never })) as unknown as Ui
+      expect(String((await term.find({ key: 'p:a:0' }))?.props.label).trim()).toMatch(/^1\. First question .*…$/)
+      expect(await term.find({ key: 'p:a:1' })).toBeUndefined()
+    } finally {
+      POINTS.text = OPEN_POINTS_TEXT
+    }
+  })
+
+  test('desktop: a session title longer than a line wraps into Buttons; a press on any line opens its log', { options: OPTIONS }, async ($, on) => {
+    const TITLE = 'alive worker on a task whose title is longer than a line'
+    const ui = await open($, on, 'desktop', REGISTRY_TEXT.replace('"alive worker"', JSON.stringify(TITLE)))
+    const keys = [`s:${SID_ALIVE}`, `s:${SID_ALIVE}:1`, `s:${SID_ALIVE}:2`]
+    const labels = await Promise.all(keys.map(async key => String((await ui.find({ key }))?.props.label)))
+    expect(labels).toEqual(['alive worker on a task', 'whose title is longer than', 'a line'])
+    await ui.press({ key: `s:${SID_ALIVE}:2` })
+    expect(String((await ui.find({ key: `s:${SID_ALIVE}` }))?.props.label)).toBe('\u25B8 alive worker on a task')
+    expect(String((await ui.find({ key: `s:${SID_ALIVE}:1` }))?.props.label)).toBe('  whose title is longer')
+    expect((await boxOf(ui, `LOG ${TITLE}`)).bar).toBeDefined()
   })
 })
 

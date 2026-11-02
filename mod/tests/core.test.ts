@@ -104,6 +104,8 @@ import {
   windowsPickerRefusal,
   defaultConfigDir,
   isDefaultConfigDir,
+  desktopLineChars,
+  desktopLines,
 } from '../hooks/core'
 import type { LaunchArgs, LaunchFacts } from '../hooks/core'
 import { PROBE_PS1, START_MATCH_MS } from '../hooks/host-windows'
@@ -1957,5 +1959,56 @@ describe("close_worker's next calls", () => {
     expect(sessionIdsProblem('acknowledge_workers', {})).toBe(
       'acknowledge_workers needs session_ids, a non-empty list of session ids; the call gave no session_ids, so nothing was acknowledged or retired. Call acknowledge_workers with session_ids ["<session id>"]',
     )
+  })
+})
+
+// ---------------------------------------------------------------- desktop rows as lines (decision smp-8)
+
+describe('desktopLineChars and desktopLines', () => {
+  test('a desktop line holds the pane\'s cells less the section\'s border, padding and bar, at 1.25 cells a character; never under 8', () => {
+    expect(desktopLineChars(40)).toBe(26)
+    expect(desktopLineChars(30)).toBe(18)
+    expect(desktopLineChars(120)).toBe(90)
+    // The compact panel's box has no border: only the bar and a cell to spare.
+    expect(desktopLineChars(40, true)).toBe(30)
+    expect(desktopLineChars(5)).toBe(8)
+  })
+
+  test('a text row wraps into lines drawn whole, its continuation lines under its hang; a line already drawn whole stays one', () => {
+    const row = { text: '\u2022 Task 1 whose title runs well past the line the desktop pane gives it', hang: 2, dim: true }
+    expect(desktopLines(row, 26, 'queue')).toEqual([
+      { text: '\u2022 Task 1 whose title runs', hang: 2, dim: true, wrap: 'truncate-end' },
+      { text: '  well past the line the', hang: 2, dim: true, wrap: 'truncate-end' },
+      { text: '  desktop pane gives it', hang: 2, dim: true, wrap: 'truncate-end' },
+    ])
+    expect(desktopLines({ text: 'short' }, 26, 'queue')).toEqual([{ text: 'short', wrap: 'truncate-end' }])
+    const log = { text: '> Bash '.padEnd(200, 'x'), wrap: 'truncate-end' as const }
+    expect(desktopLines(log, 26, 'log')).toEqual([log])
+  })
+
+  test('a pressable row wraps into lines with its press and one hover scope: its group, else its section and key; keys count on as the terminal\'s', () => {
+    const press = () => undefined
+    type Row = { text: string; key?: string; group?: string; press?: () => undefined; hang?: number }
+    const point = desktopLines<Row>({ text: '1. First question whose title is far longer than one line of the pane', key: 'p:a:0', press }, 26, 'points')
+    expect(point.map(one => [one.text, one.key, one.group])).toEqual([
+      ['1. First question whose', 'p:a:0', 'points:p:a:0'],
+      ['title is far longer than', 'p:a:1', 'points:p:a:0'],
+      ['one line of the pane', 'p:a:2', 'points:p:a:0'],
+    ])
+    expect(point.every(one => one.press === press)).toBe(true)
+    const selected = desktopLines<Row>({ text: '\u25B8 1. First question whose title is far longer than one line of the pane', key: 'p:a:t:0', group: 'p:a:t', press, hang: 2 }, 26, 'points')
+    expect(selected.map(one => [one.text, one.key, one.group])).toEqual([
+      ['\u25B8 1. First question whose', 'p:a:t:0', 'p:a:t'],
+      ['  title is far longer than', 'p:a:t:1', 'p:a:t'],
+      ['  one line of the pane', 'p:a:t:2', 'p:a:t'],
+    ])
+    const session = desktopLines<Row>({ text: 'alive worker on a task whose title is longer than a line', key: 's:aaaa', press }, 26, 'sessions')
+    expect(session.map(one => [one.key, one.group])).toEqual([
+      ['s:aaaa', 'sessions:s:aaaa'],
+      ['s:aaaa:1', 'sessions:s:aaaa'],
+      ['s:aaaa:2', 'sessions:s:aaaa'],
+    ])
+    // A pressable row on one line keeps its own scope (none set: the box gives it one per row, as before).
+    expect(desktopLines({ text: 'alive worker', key: 's:aaaa', press }, 26, 'sessions')).toEqual([{ text: 'alive worker', key: 's:aaaa', press, wrap: 'truncate-end' }])
   })
 })

@@ -489,7 +489,7 @@ const DESKTOP_SEP = ' \u00B7 '
  * model, effort, elapsed at the display clock), whole, joined by ` · `, with no padding and no cut. The desktop draws
  * text in a proportional font, collapses runs of blanks and reports a width in cells that is not its own, so fixed cell
  * widths there cut the row; and it draws a Button on one line, cut at the box's edge, so the cells go on a line of their
- * own, which the surface wraps in the room it has.
+ * own. The panel wraps both lines at desktopLineChars.
  */
 export function desktopRowLines(row: SessionRow, clock?: ElapsedClock): [string, string] {
   return [row.title, SESSION_COLUMNS.map(column => column.cell(row, clock)).join(DESKTOP_SEP)]
@@ -497,6 +497,50 @@ export function desktopRowLines(row: SessionRow, clock?: ElapsedClock): [string,
 
 /** The column header of desktopRowLines' rows, its two lines. */
 export const DESKTOP_HEADER: readonly [string, string] = ['title', SESSION_COLUMNS.map(column => column.header).join(DESKTOP_SEP)]
+
+/**
+ * Cells a bordered section of the desktop panel takes from the pane's width before its rows: Desktop draws the border as
+ * 1 px a side and pads the box by its `pad.lg` a side (at most 1.25rem, 20 px, which is 2.8 cells at the smallest body
+ * font, 12 px, whose cell is 0.604 em), and the scroll bar is one cell; 6.8, rounded up.
+ */
+export const DESKTOP_ROW_RESERVE = 7
+
+/**
+ * Cells a character of a desktop line is counted for. Desktop's cell is `1ch`, the width of `0` in the pane's font; in
+ * anthropic-sans, regular and semibold, a line of the panel's own titles and details takes at most 0.95 cells a character
+ * and a line of capitals 1.16, and DejaVu Sans, a Linux system font, no more; at 1.25 the widest of those lines still
+ * fits, with 7 % to spare for capitals and 24 % for mixed text.
+ */
+export const DESKTOP_CELLS_PER_CHAR = 1.25
+
+/**
+ * The characters a line of the desktop panel holds in a pane `columns` cells wide (`bodyColumns`): the row column of a
+ * bordered section (`isPlain` false) or of the compact panel's border-less box, less the reserve, counted at
+ * DESKTOP_CELLS_PER_CHAR. The panel wraps its desktop rows to it with wrapText, so its rows are the lines shown.
+ */
+export function desktopLineChars(columns: number, isPlain = false): number {
+  return Math.max(8, Math.floor((columns - (isPlain ? 2 : DESKTOP_ROW_RESERVE)) / DESKTOP_CELLS_PER_CHAR))
+}
+
+/** A row of the panel as desktopLines splits it; any other field is carried to each line. */
+export type DesktopRow = { text: string; key?: string; group?: string; press?: unknown; wrap?: 'wrap' | 'truncate-end'; hang?: number }
+
+/**
+ * A desktop row as the lines it takes in `chars` characters (wrapText, the row's `hang`), each drawn whole
+ * (`truncate-end`): the line is within the width, so the surface never wraps it again, and one wider than the estimate is
+ * ended with an ellipsis. A log or warning line (already `truncate-end`) stays one line. The lines of a pressable row
+ * keep its press and share one hover scope (its group, else `<section>:<key>`); they are keyed as the terminal keys a
+ * point's title lines: a key ending in `:0` counts on in its place, any other takes `:<line>`.
+ */
+export function desktopLines<R extends DesktopRow>(row: R, chars: number, section: string): R[] {
+  if (row.wrap === 'truncate-end') return [row]
+  const texts = wrapText(row.text, chars, row.hang ?? 0)
+  const key = row.key
+  if (row.press === undefined || key === undefined || texts.length === 1) return texts.map(text => ({ ...row, text, wrap: 'truncate-end' as const }))
+  const group = row.group ?? `${section}:${key}`
+  const lineKey = (i: number) => (i === 0 ? key : key.endsWith(':0') ? `${key.slice(0, -1)}${i}` : `${key}:${i}`)
+  return texts.map((text, i) => ({ ...row, text, wrap: 'truncate-end' as const, key: lineKey(i), group }))
+}
 
 function shortDir(dir: string): string {
   const parts = dir.replace(/\/+$/, '').split('/')

@@ -126,6 +126,8 @@ import {
   formatHeader,
   elapsedText,
   desktopRowLines,
+  desktopLineChars,
+  desktopLines,
   DESKTOP_HEADER,
   boxAt,
   buttonStep,
@@ -3445,7 +3447,8 @@ export const register: Register = (on, options) => {
     ])
     const width = Math.max(20, columns - 4)
     // The desktop draws in a proportional font, collapses blanks and reports a width in cells that is not its own: its rows
-    // carry no padding, no fixed cell widths and no cut of the mod's, and the surface wraps or ends them in its own room.
+    // carry no padding and no fixed cell widths; block() wraps each into the lines it takes (desktopLineChars), each line
+    // drawn whole, so a section's rows are the lines it shows.
     const isDesktop = e.surface === 'desktop'
     const isLogOpen = sel !== null && view !== null
     // Docked, a section expanded by its header icon takes the body, the other two kept as one-line headers; an open log wins over it.
@@ -3479,7 +3482,8 @@ export const register: Register = (on, options) => {
     }
     drawnSessions = undefined
     // `rowIndex`: the session row (snap.rows) a line of the sessions box belongs to.
-    type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end'; rowIndex?: number }
+    // `hang`: the blanks a desktop row's wrapped lines after its first start with (under the text after a bullet).
+    type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end'; rowIndex?: number; hang?: number }
     // The elapsed column at the display clock: the tick's time, never before the probe the rows come from.
     const probedSec = Math.floor(snap.at / 1000)
     const clock = { nowSec: Math.max(nowSec, probedSec), probedSec }
@@ -3518,8 +3522,8 @@ export const register: Register = (on, options) => {
           onPress={r.press}
         />
       )
-    // On the desktop a row is its whole text: a Text the surface wraps (or ends, `truncate-end`, for a log line) and a
-    // pressable row a Button with its label as it is, never padded.
+    // On the desktop a row is one line (desktopLines): a Text the surface ends at its edge (`truncate-end`) and a pressable row
+    // a Button with its label as it is, never padded.
     const deskRowEl = (r: PRow, scope?: string) =>
       r.press === undefined ? (
         <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap={r.wrap ?? 'wrap'}>
@@ -3529,15 +3533,19 @@ export const register: Register = (on, options) => {
         <Button key={r.key} label={r.text === '' ? ' ' : r.text} plain dimColor={r.dim} hover={scope === undefined ? undefined : { scope, inverse: true }} onPress={r.press} />
       )
     const anyRowEl = (r: PRow, fill = 0, scope?: string) => (isDesktop ? deskRowEl(r, scope) : rowEl(r, fill, scope))
-    const block = (id: SectionId, title: string, fixed: PRow[], body: PRow[], offset: number, isTail = false, isPlain = false) => {
+    const block = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[], offset: number, isTail = false, isPlain = false) => {
       const box = boxes.find(one => one.id === id) as SectionBox
+      // The desktop counts, shows and scrolls a section by the lines its rows take.
+      const chars = desktopLineChars(columns, isPlain)
+      const fixed = isDesktop ? fixedIn.flatMap(r => desktopLines(r, chars, id)) : fixedIn
+      const body = isDesktop ? bodyIn.flatMap(r => desktopLines(r, chars, id)) : bodyIn
       const visible = Math.max(1, box.height - (isPlain ? 0 : 3) - fixed.length)
       const total = body.length
       const from = isTail ? Math.max(0, total - visible - back) : clampOffset(offset, total, visible)
       layout.totals[id] = { total, visible, from }
       const bar = scrollbar(total, visible, from)
       const shown = body.slice(from, from + visible)
-      // The session rows in view, for the display tick (one line each on the terminal, two on the desktop).
+      // The session rows in view, for the display tick (one line each on the terminal, two or more on the desktop).
       if (id === 'sessions') drawnSessions = { rows: [...new Set(shown.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       // The rows' column: the box's inner width less the scroll bar (no border in the compact panel).
       const fill = Math.max(1, columns - (isPlain ? 1 : 3))
@@ -3590,9 +3598,9 @@ export const register: Register = (on, options) => {
       const isSelected = sid !== undefined && sid === sel
       const color = row.status === 'dead' || row.status === 'orphan' ? ('warning' as const) : undefined
       if (isDesktop) {
-        // The title is the line pressed (a Button, one line); the cells follow on a line the surface wraps.
+        // The title is the line pressed (Buttons, a line each); the cells follow on lines of their own.
         const [title, cells] = desktopRowLines(row, clock)
-        const head: PRow = sid === undefined ? { text: title, dim: row.status === 'done', color, rowIndex } : { text: (isSelected ? '\u25B8 ' : '') + title, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done', rowIndex }
+        const head: PRow = sid === undefined ? { text: title, dim: row.status === 'done', color, rowIndex } : { text: (isSelected ? '\u25B8 ' : '') + title, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done', rowIndex, hang: isSelected ? 2 : 0 }
         return [head, { text: cells, dim: true, rowIndex }]
       }
       const text = (isSelected ? '\u25B8 ' : '  ') + formatRow(row, width - 2, widths, clock)
@@ -3662,7 +3670,7 @@ export const register: Register = (on, options) => {
         : queue.length === 0
           ? [{ text: 'none', dim: true }]
           : isDesktop
-            ? queue.map(task => ({ text: '\u2022 ' + task.title }))
+            ? queue.map(task => ({ text: '\u2022 ' + task.title, hang: 2 }))
             : queue.flatMap(task =>
                 wrapText(task.title, width - 2).map((text, i) => ({ text: (i === 0 ? '\u2022 ' : '  ') + text })),
               )
@@ -3681,7 +3689,7 @@ export const register: Register = (on, options) => {
               }
               if (isDesktop) {
                 return [
-                  { text: `\u25B8 ${index + 1}. ${point.title}`, key: `p:${id}:t:0`, group: `p:${id}:t`, press, bold: true },
+                  { text: `\u25B8 ${index + 1}. ${point.title}`, key: `p:${id}:t:0`, group: `p:${id}:t`, press, bold: true, hang: 2 },
                   ...(point.detail === '' ? [] : [{ text: point.detail, dim: true }]),
                   ...(point.recommendation === '' ? [] : [{ text: 'Recommendation: ' + point.recommendation, dim: true }]),
                 ]
