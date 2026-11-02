@@ -34,6 +34,9 @@ import {
   desktopPaneScroll,
   desktopSpareRows,
   isAnyOverflowing,
+  pageCap,
+  PAGE_LIST_CAP,
+  PAGE_LOG_CAP,
   sliderMove,
   TOAST_TITLES,
   toastText,
@@ -843,16 +846,25 @@ describe('output box scrolling', () => {
 })
 
 describe('the desktop pane scroll strategy (option desktopPaneScroll, decision smp-4)', () => {
-  test('the option names one of six strategies; an unknown value, another type or none counts as spare', () => {
-    expect([...DESKTOP_PANE_SCROLLS]).toEqual(['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag'])
+  test('the option names one of seven strategies; an unknown value, another type or none counts as spare', () => {
+    expect([...DESKTOP_PANE_SCROLLS]).toEqual(['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag', 'page'])
     for (const mode of DESKTOP_PANE_SCROLLS) expect(desktopPaneScroll(mode)).toBe(mode)
     for (const other of [undefined, '', 'Spare', 'hidden', 'clipped', 1, true, ['buttons']]) expect(desktopPaneScroll(other)).toBe('spare')
   })
-  test('the spare rows above and below a panel that fits its room: spare 8, overflow 8 only while a section has more rows than it shows, minimal 1, overflow-minimal 1 only then, buttons and drag none', () => {
+  test('the spare rows above and below a panel that fits its room: spare 8, overflow 8 only while a section has more rows than it shows, minimal 1, overflow-minimal 1 only then, buttons, drag and page none', () => {
     expect(DESKTOP_SPARE_ROWS).toBe(8)
     const rows = (isOverflowing: boolean) => DESKTOP_PANE_SCROLLS.map(mode => desktopSpareRows(mode, isOverflowing))
-    expect(rows(true)).toEqual([8, 8, 1, 1, 0, 0])
-    expect(rows(false)).toEqual([8, 0, 1, 0, 0, 0])
+    expect(rows(true)).toEqual([8, 8, 1, 1, 0, 0, 0])
+    expect(rows(false)).toEqual([8, 0, 1, 0, 0, 0, 0])
+  })
+  test('page: a list draws its first 50 rows, the log its latest 100 lines, and says how many are left out', () => {
+    expect(PAGE_LIST_CAP).toBe(50)
+    expect(PAGE_LOG_CAP).toBe(100)
+    const items = Array.from({ length: 130 }, (_, i) => i + 1)
+    expect(pageCap(items, PAGE_LIST_CAP, 'first')).toEqual({ shown: items.slice(0, 50), more: 80 })
+    expect(pageCap(items, PAGE_LOG_CAP, 'latest')).toEqual({ shown: items.slice(30), more: 30 })
+    expect(pageCap(items.slice(0, 50), PAGE_LIST_CAP, 'first')).toEqual({ shown: items.slice(0, 50), more: 0 })
+    expect(pageCap([], PAGE_LOG_CAP, 'latest')).toEqual({ shown: [], more: 0 })
   })
   test('a section overflows when it has more rows than it shows; a header-only section (no window) counts as none', () => {
     expect(isAnyOverflowing({})).toBe(false)

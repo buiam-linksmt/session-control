@@ -3721,6 +3721,95 @@ describe('the wheel over the panel on the desktop and the terminal', () => {
       QUEUE.text = QUEUE_TEXT
     }
   })
+
+  // ---------------------------------------------------------------- desktopPaneScroll page (decision smp-10)
+
+  type PNode = { type?: string; text?: string; props?: Record<string, unknown>; children?: (PNode | string)[] }
+  const nodesOf = (node: PNode): PNode[] => [node, ...(node.children ?? []).flatMap(one => (typeof one === 'object' ? nodesOf(one) : []))]
+  const range = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => from + i)
+
+  test('desktopPaneScroll page: the desktop draws the three sections whole, one below the other, in a root of no fixed height: every row, Text the surface wraps, no window, no scroll bar, no spare rows, no expand icon; the terminal as before', withMode('page'), async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const ui = await open($, on, 'desktop')
+      const tree = (await ui.drawn()) as PNode
+      // No Box holds a height or clips: the page is as tall as its rows, whatever the room.
+      const boxes = nodesOf(tree).filter(one => one.type === 'Box')
+      expect(boxes.every(one => one.props?.height === undefined && one.props?.overflow === undefined)).toBe(true)
+      // No spare rows: the root holds the three sections, each a box under its title, in order.
+      const sections = (tree.children ?? []) as PNode[]
+      expect(sections.map(one => one.props?.borderStyle)).toEqual(['round', 'round', 'round'])
+      const shown = await texts(ui)
+      const at = (title: string) => shown.indexOf(title)
+      expect(at('SESSIONS')).toBeGreaterThanOrEqual(0)
+      expect(at('SESSIONS') < at('QUEUED WORK') && at('QUEUED WORK') < at('OPEN POINTS')).toBe(true)
+      // Every row: all 15 tasks, every session row (the last one's cells too), the open points.
+      expect(await tasksShown(ui)).toEqual(range(1, 15))
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+      expect(shown.some(text => text.startsWith('dddddddd \u00B7 finished'))).toBe(true)
+      expect(await isShown(ui, 'p:a:0')).toBe(true)
+      // No scroll bar, no step button, no slider, no expand icon.
+      expect(shown.some(text => /[\u2502\u2503]/.test(text))).toBe(false)
+      for (const key of ['x:sessions', 'x:queue', 'x:points', 'up:queue', 'down:queue', 'bar:queue', 'bar:sessions']) expect(await isShown(ui, key)).toBe(false)
+      // Each row a Text the surface wraps; none drawn whole at a counted width.
+      const rowTexts = (await ui.findAll({ type: 'Text' })).filter(one => /^\u2022 Task \d+$/.test(one.text))
+      expect(rowTexts.length).toBe(15)
+      expect(rowTexts.every(one => one.props.wrap === 'wrap')).toBe(true)
+      expect((await ui.findAll({ type: 'Text' })).some(one => one.props.wrap === 'truncate-end')).toBe(false)
+      // A room of any size draws the same page.
+      await ui.redraw({ ...PANE_PROPS, scroll: { offset: 0, bodyRows: 12 } } as never)
+      expect(await ui.drawn()).toEqual(tree)
+      await terminalUnchanged($)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('desktopPaneScroll page: a move of the body goes on as it came, with or without a pointer: no re-centring, no section moved, the same page drawn at every offset', withMode('page'), async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const at = beneath(on)
+      const ui = await open($, on, 'desktop')
+      const before = await ui.drawn()
+      const moves: [number, number, { row: number; column: number } | undefined][] = [
+        [3, 3, undefined],
+        [10, 7, undefined],
+        [4, -6, { row: 13, column: 4 }],
+        [0, -4, undefined],
+      ]
+      for (const [offset, by, pointer] of moves) {
+        const answer = (await $.ui.scroll({ component: 'Pane', requestId: PANE, offset, by, bodyRows: ROOM, contentRows: 80, origin: { kind: 'person' }, ...(pointer === undefined ? {} : { pointer }) } as never)) as { deny?: string } | undefined
+        expect(answer?.deny).toBeUndefined()
+        await ui.redraw({ ...PANE_PROPS, scroll: { offset, bodyRows: ROOM } } as never)
+        expect(await ui.drawn()).toEqual(before)
+      }
+      // Each offset as the page asked it: nothing pulled back to a middle or a top.
+      expect(at.passed).toEqual([3, 10, 4, 0])
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('desktopPaneScroll page: a list draws its first 50 rows and a line with how many more; an open log, below the sessions, its latest 100 lines under a line with how many more above', withMode('page'), async ($, on) => {
+    QUEUE.text = JSON.stringify({ tasks: Array.from({ length: 120 }, (_, i) => ({ id: `t${i + 1}`, status: 'queued', title: `Task ${i + 1}` })) })
+    TAIL.rows = Array.from({ length: 130 }, (_, i) => ({ type: 'assistant', message: { content: [{ type: 'text', text: `log line ${i + 1}` }] } }))
+    try {
+      const ui = await open($, on, 'desktop')
+      expect(await tasksShown(ui)).toEqual(range(1, 50))
+      const shown = await texts(ui)
+      expect(shown[shown.indexOf('\u2022 Task 50') + 1]).toBe('70 more')
+      await ui.press({ key: ALIVE_ROW })
+      const logShown = async () => (await texts(ui)).flatMap(text => /^log line (\d+)$/.exec(text)?.slice(1).map(Number) ?? [])
+      expect(await logShown()).toEqual(range(31, 130))
+      const withLog = await texts(ui)
+      expect(withLog[withLog.indexOf('log line 31') - 1]).toBe('30 more above')
+      expect(withLog.indexOf('SESSIONS')).toBeLessThan(withLog.indexOf('log line 31'))
+      expect(await tasksShown(ui)).toEqual([])
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+      TAIL.rows = undefined
+    }
+  })
 })
 
 // ---------------------------------------------------------------- desktop rows as the lines they take (decision smp-8)
@@ -3815,6 +3904,26 @@ describe('the desktop panel counts, shows and scrolls its sections in lines', ()
       }
     })
   }
+
+  test('desktopPaneScroll page: a queue entry longer than a line is one Text with its whole title, which the surface wraps; no bar; an open point\'s title is still Buttons a line each', { options: { ...OPTIONS, desktopPaneScroll: 'page' } }, async ($, on) => {
+    QUEUE.text = TASKS
+    POINTS.text = JSON.stringify({ points: [{ id: 'a', status: 'open', title: 'First question whose title is far longer than one line of the pane', detail: 'Detail one', recommendation: 'Do A' }] })
+    try {
+      const ui = await open($, on)
+      const whole = (await ui.findAll({ type: 'Text' })).filter(one => /^\u2022 Task \d /.test(one.text))
+      expect(whole.map(one => one.text)).toEqual([1, 2, 3, 4, 5, 6].map(n => `\u2022 ${LONG(n)}`))
+      expect(whole.every(one => one.props.wrap === 'wrap')).toBe(true)
+      // No one-cell column in the box: no bar.
+      expect((await boxOf(ui, 'QUEUED WORK')).bar).toBe('')
+      const labels = await Promise.all(['p:a:0', 'p:a:1', 'p:a:2'].map(async key => String((await ui.find({ key }))?.props.label)))
+      expect(labels).toEqual(['1. First question whose', 'title is far longer than', 'one line of the pane'])
+      await ui.press({ key: 'p:a:1' })
+      expect((await ui.findAll({ type: 'Text' })).filter(one => one.text === 'Detail one' || one.text === 'Recommendation: Do A').map(one => one.props.wrap)).toEqual(['wrap', 'wrap'])
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+      POINTS.text = OPEN_POINTS_TEXT
+    }
+  })
 
   // The lines' shared hover scope is desktopLines' (core.test.ts): the mock leaves `hover` out of the tree it draws.
   test('desktop: an open point\'s title longer than a line wraps into Buttons that each press it, selected or not; the terminal cuts it on one row as before', { options: OPTIONS }, async ($, on) => {

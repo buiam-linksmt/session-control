@@ -2308,9 +2308,10 @@ export function wheelTarget(order: readonly SectionId[], windows: Partial<Record
  * DESKTOP_SPARE_ROWS blank rows above and below, always. `overflow`: the same rows only while a section has more rows than
  * it shows. `minimal`: one blank row above and below, always. `overflow-minimal`: one row, only while a section has more
  * rows than it shows. `buttons`: no blank rows (the body never moves), each such section an up and a down button.
- * `drag`: no blank rows, each such section's scroll bar a slider to drag (a Client surface module).
+ * `drag`: no blank rows, each such section's scroll bar a slider to drag (a Client surface module). `page`: no window at
+ * all: every section drawn whole at its natural height, one below the other, and the body scrolls the page by itself.
  */
-export const DESKTOP_PANE_SCROLLS = ['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag'] as const
+export const DESKTOP_PANE_SCROLLS = ['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag', 'page'] as const
 export type DesktopPaneScroll = (typeof DESKTOP_PANE_SCROLLS)[number]
 
 /** The option's value as the mod uses it: an unknown value, or none, counts as `spare`. */
@@ -2336,6 +2337,20 @@ export function desktopSpareRows(mode: DesktopPaneScroll, isOverflowing: boolean
     default:
       return 0
   }
+}
+
+/**
+ * The page value's caps (desktopPaneScroll `page`): the log's latest entries drawn (the log view holds up to 300; a
+ * worker's median transcript gives 60, one in ten more than 220), and the rows a list draws (sessions, queued tasks, open
+ * points; the registry, the queue and the open points have held tens at most).
+ */
+export const PAGE_LOG_CAP = 100
+export const PAGE_LIST_CAP = 50
+
+/** A list as the page draws it: at most `cap` items, its first or its latest, and how many are left out. */
+export function pageCap<T>(items: readonly T[], cap: number, keep: 'first' | 'latest'): { shown: T[]; more: number } {
+  const more = Math.max(0, items.length - cap)
+  return { shown: keep === 'first' ? items.slice(0, cap) : items.slice(more), more }
 }
 
 /** Whether a section as last drawn has more rows than it shows. */
