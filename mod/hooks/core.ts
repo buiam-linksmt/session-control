@@ -2256,3 +2256,63 @@ export function wheelTarget(order: readonly SectionId[], windows: Partial<Record
   if (last !== undefined && order.includes(last) && canMove(last)) return last
   return (by > 0 ? order : [...order].reverse()).find(canMove)
 }
+
+/**
+ * How the desktop panel lets the wheel scroll its sections (option desktopPaneScroll). Claude Desktop scrolls a pane's
+ * body by itself, shows the body's own scroll bar whenever the body can move, and tells Claude Code of a move only once
+ * the body has moved; no prop of a plugin's tree reaches that body's style. `spare`: the panel stands between
+ * DESKTOP_SPARE_ROWS blank rows above and below, always. `overflow`: the same rows only while a section has more rows than
+ * it shows. `minimal`: one blank row above and below, always. `overflow-minimal`: one row, only while a section has more
+ * rows than it shows. `buttons`: no blank rows (the body never moves), each such section an up and a down button.
+ * `drag`: no blank rows, each such section's scroll bar a slider to drag (a Client surface module).
+ */
+export const DESKTOP_PANE_SCROLLS = ['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag'] as const
+export type DesktopPaneScroll = (typeof DESKTOP_PANE_SCROLLS)[number]
+
+/** The option's value as the mod uses it: an unknown value, or none, counts as `spare`. */
+export function desktopPaneScroll(value: unknown): DesktopPaneScroll {
+  return (DESKTOP_PANE_SCROLLS as readonly unknown[]).includes(value) ? (value as DesktopPaneScroll) : 'spare'
+}
+
+/**
+ * The blank rows a desktop panel that fits its room is drawn between, above and below, under a strategy; `isOverflowing`:
+ * some section has more rows than it shows. One row is the least that lets the body move both ways: the page reports a
+ * move in whole rows (its first visible row, rounded).
+ */
+export function desktopSpareRows(mode: DesktopPaneScroll, isOverflowing: boolean): number {
+  switch (mode) {
+    case 'spare':
+      return DESKTOP_SPARE_ROWS
+    case 'overflow':
+      return isOverflowing ? DESKTOP_SPARE_ROWS : 0
+    case 'minimal':
+      return 1
+    case 'overflow-minimal':
+      return isOverflowing ? 1 : 0
+    default:
+      return 0
+  }
+}
+
+/** Whether a section as last drawn has more rows than it shows. */
+export function isAnyOverflowing(windows: Partial<Record<SectionId, BoxWindow>>): boolean {
+  return Object.values(windows).some(w => w !== undefined && w.total > w.visible)
+}
+
+/** The rows an up or down button of a section moves it: its window less one row, at least one. */
+export function buttonStep(visible: number): number {
+  return Math.max(1, visible - 1)
+}
+
+/**
+ * A move a section's slider (the drag strategy's surface module) posted, checked: the section, and either the first row
+ * it asks shown (`from`, a drag) or the rows to move by (`by`, a key). Undefined when the data is anything else.
+ */
+export function sliderMove(data: unknown): { id: SectionId; from: number } | { id: SectionId; by: number } | undefined {
+  if (typeof data !== 'object' || data === null) return undefined
+  const { id, from, by } = data as Record<string, unknown>
+  if (id !== 'sessions' && id !== 'queue' && id !== 'points' && id !== 'log') return undefined
+  if (typeof from === 'number' && Number.isInteger(from) && by === undefined) return { id, from }
+  if (typeof by === 'number' && Number.isInteger(by) && from === undefined) return { id, by }
+  return undefined
+}

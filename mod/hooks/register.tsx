@@ -127,8 +127,12 @@ import {
   elapsedText,
   desktopRowLines,
   DESKTOP_HEADER,
-  DESKTOP_SPARE_ROWS,
   boxAt,
+  buttonStep,
+  desktopPaneScroll,
+  desktopSpareRows,
+  isAnyOverflowing,
+  sliderMove,
   MIN_BOX,
   MIN_SESSIONS_BOX,
   clampOffset,
@@ -183,7 +187,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { BoxWindow, ComposedPrompt, ExpandableId, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
+import type { BoxWindow, ComposedPrompt, DesktopPaneScroll, ExpandableId, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -248,6 +252,8 @@ type Config = {
   lockDirs: string
   /** More licence directories for the licence tools (licences.ts), comma separated absolute paths; empty: none. */
   licenceDirs: string
+  /** How the desktop panel lets its sections scroll (core.ts desktopPaneScroll); an unknown value counts as `spare`. */
+  desktopPaneScroll: DesktopPaneScroll
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -265,6 +271,7 @@ let config: Config = {
   modSource: '',
   lockDirs: '',
   licenceDirs: '',
+  desktopPaneScroll: 'spare',
 }
 let isActive = false
 /** Whether the orchestratorDir option is set: the mod then turns on without the CLAUDE.md heading. */
@@ -282,6 +289,8 @@ let layout: { boxes: SectionBox[]; totals: Partial<Record<SectionId, BoxWindow>>
 let wheelLast: SectionId | undefined
 /** Set while the desktop pane's window is being asked back to the middle of the spare rows (parkWindow). */
 let isParking = false
+/** Set once the drag strategy's slider (slider.ts) failed on the surface: the panel then draws its plain scroll bars. */
+let isSliderFailed = false
 let isAfterCompact = false
 let isBusy = false
 let isArmed = false
@@ -1703,6 +1712,18 @@ function parkWindow($: EngineInterface): void {
 }
 
 /**
+ * Moves a section's window as last drawn (layout.totals) by `by` rows, or to show `from` as its first row; the log counts
+ * from its end (boxBack). A section that shows all its rows, or was not drawn, stays.
+ */
+async function scrollSection($: EngineInterface, id: SectionId, move: { by: number } | { from: number }): Promise<void> {
+  const t = layout.totals[id]
+  if (t === undefined || t.total <= t.visible) return
+  const by = 'by' in move ? move.by : clampOffset(move.from, t.total, t.visible) - t.from
+  if (id === 'log') await update($, boxBack, current => nextBack(current, by, t.total, t.visible))
+  else await update($, offsets, current => ({ ...current, [id]: clampOffset('by' in move ? (current[id] ?? 0) + by : move.from, t.total, t.visible) }))
+}
+
+/**
  * One display tick: no process and no file read, only the clock into the `now` atom the pane reads, so the elapsed
  * column redraws with the seconds; and only when the elapsed text of a session row in view changes at this second (a
  * running row under an hour each second, one of an hour or more each minute, a finished row never), so an unchanged
@@ -3042,6 +3063,7 @@ export const register: Register = (on, options) => {
   unattachedToasts = []
   wheelLast = undefined
   isParking = false
+  isSliderFailed = false
   isDirOptionSet = String(options.orchestratorDir ?? '') !== ''
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
@@ -3057,6 +3079,7 @@ export const register: Register = (on, options) => {
     modSource: String(options.modSource ?? ''),
     lockDirs: String(options.lockDirs ?? ''),
     licenceDirs: String(options.licenceDirs ?? ''),
+    desktopPaneScroll: desktopPaneScroll(options.desktopPaneScroll),
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -3367,6 +3390,21 @@ export const register: Register = (on, options) => {
     return fits ? next({ ...e, offset: 0 }) : next(e)
   })
 
+  // The drag strategy's sliders (slider.ts): a drag asks a section's first row shown, a key moves it by rows. Data from a
+  // surface module is checked before it moves anything (sliderMove).
+  on('ui.message', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const move = sliderMove(e.data)
+    if (move !== undefined) await scrollSection($, move.id, move)
+    return next(e)
+  })
+
+  // A slider that fails on the surface (its module not loaded, its drawing or code failed) is left out from then on: the
+  // engine draws the panel again, with its plain scroll bars.
+  on('ui.fault', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (e.module.endsWith('slider.ts')) isSliderFailed = true
+    return next(e)
+  })
+
   // The loaded-mod drift band (decision win-35): one dim line above the prompt while the loaded mod differs from the
   // source mod folder, as the engine's own "Update installed" line; a survey, or nothing to say, leaves the band to the
   // engine. It is no notice: the notices option does not switch it off (modSource off does). The line goes above what
@@ -3386,7 +3424,10 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     if (isTracing) traceRenders++
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Button, Text } = elements
+    // A Client (the drag strategy's slider) is drawn by the terminal and the desktop only.
+    const Client = 'Client' in elements ? elements.Client : undefined
     const snap = await read($, snapshot)
     const columns = e.props.bodyColumns
     if (snap === null) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
@@ -3417,12 +3458,25 @@ export const register: Register = (on, options) => {
     const activeId: SectionId = isLogOpen ? 'log' : (activeTab as SectionId)
     const bodyRows = isCompact ? compactRows : Math.max(MIN_SESSIONS_BOX + 2 * MIN_BOX, e.props.scroll.bodyRows)
     const boxes: SectionBox[] = isCompact ? [{ id: activeId, top: 1, height: compactRows - 1 }] : sectionBoxes(bodyRows, isLogOpen, expandedId)
-    // The desktop scrolls the pane's body by itself and reports a move only once the body has moved: a panel that fits its
-    // room stands between spare rows, and a window drawn elsewhere than in their middle is asked back there. The rows stay
-    // put whatever the window's offset: content that moved above the window would make the page scroll on its own.
-    const spare = isDesktop && bodyRows <= e.props.scroll.bodyRows ? DESKTOP_SPARE_ROWS : 0
-    layout = { boxes, totals: {}, spare }
-    if (spare > 0 && e.props.scroll.offset !== spare) parkWindow($)
+    // The desktop scrolls the pane's body by itself and reports a move only once the body has moved: under the strategy of
+    // the desktopPaneScroll option a panel that fits its room stands between spare rows (framed, once the sections are
+    // drawn), and a window drawn elsewhere than in their middle is asked back there. The rows stay put whatever the
+    // window's offset: content that moved above the window would make the page scroll on its own.
+    const scrollMode = isDesktop ? config.desktopPaneScroll : 'spare'
+    const isFitting = isDesktop && bodyRows <= e.props.scroll.bodyRows
+    layout = { boxes, totals: {}, spare: 0 }
+    // `buttons`: an up and a down button for each section with more rows than it shows; `drag`: its bar a slider.
+    const hasButtons = isDesktop && scrollMode === 'buttons'
+    const hasSlider = isDesktop && scrollMode === 'drag' && !isSliderFailed
+    const stepButtons = (id: SectionId) => {
+      const t = layout.totals[id]
+      if (t === undefined || t.total <= t.visible) return []
+      const step = buttonStep(t.visible)
+      return [
+        <Button key={`up:${id}`} label={'\u25B2'} plain dimColor onPress={() => scrollSection($, id, { by: -step })} />,
+        <Button key={`down:${id}`} label={'\u25BC'} plain dimColor onPress={() => scrollSection($, id, { by: step })} />,
+      ]
+    }
     drawnSessions = undefined
     // `rowIndex`: the session row (snap.rows) a line of the sessions box belongs to.
     type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end'; rowIndex?: number }
@@ -3495,13 +3549,17 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column" flexGrow={1}>
             {shown.map((r, i) => anyRowEl(r, fill, scopes[i]))}
           </Box>
-          <Box flexDirection="column" width={1}>
-            {bar.map((ch, i) => (
-              <Text dimColor hover={scopes[i] === undefined ? undefined : { scope: scopes[i], inverse: true, dimColor: false }}>
-                {ch}
-              </Text>
-            ))}
-          </Box>
+          {hasSlider && Client !== undefined && total > visible ? (
+            <Client key={`bar:${id}`} module="./slider.ts" props={{ id, total, visible, from }} width={1} height={visible} />
+          ) : (
+            <Box flexDirection="column" width={1}>
+              {bar.map((ch, i) => (
+                <Text dimColor hover={scopes[i] === undefined ? undefined : { scope: scopes[i], inverse: true, dimColor: false }}>
+                  {ch}
+                </Text>
+              ))}
+            </Box>
+          )}
         </Box>
       )
       // Compact (inline) panel: no border and no title, the tab strip names the box; every row counts.
@@ -3519,6 +3577,7 @@ export const register: Register = (on, options) => {
             <Box flexGrow={1}>
               <Text bold>{title}</Text>
             </Box>
+            {hasButtons && stepButtons(id)}
             {id !== 'log' && <Button key={`x:${id}`} label={expandedId === id ? '[-]' : '[+]'} plain dimColor onPress={expand(id)} />}
           </Box>
           {fixed.map(r => anyRowEl(r))}
@@ -3555,13 +3614,18 @@ export const register: Register = (on, options) => {
           {tabButton('sessions', `Sessions ${snap.rows.length}`)}
           {tabButton('queue', `Queued ${queueCount}`)}
           {tabButton('points', `Open points ${pointCount}`)}
+          {hasButtons && stepButtons(activeId)}
         </Box>
         {inner}
       </Box>
     )
-    // The panel between its spare rows on the desktop; as it is elsewhere.
-    const framed = (panel: ReturnType<typeof block>) =>
-      spare === 0 ? (
+    // The panel between its spare rows on the desktop (none on the terminal, or in a room too small for the boxes); the
+    // sections are drawn by then, so a strategy that wants the rows only while a section has more rows than it shows knows.
+    const framed = (panel: ReturnType<typeof block>) => {
+      const spare = isFitting ? desktopSpareRows(scrollMode, isAnyOverflowing(layout.totals)) : 0
+      layout.spare = spare
+      if (spare > 0 && e.props.scroll.offset !== spare) parkWindow($)
+      return spare === 0 ? (
         panel
       ) : (
         <Box flexDirection="column" height={bodyRows + 2 * spare}>
@@ -3570,6 +3634,7 @@ export const register: Register = (on, options) => {
           <Box height={spare} />
         </Box>
       )
+    }
     const warningRow: PRow[] =
       snap.error === undefined ? [] : isDesktop ? [{ text: `! session-control: ${snap.error}`, dim: false, wrap: 'truncate-end' }] : [{ text: wrapText(`! session-control: ${snap.error}`, width)[0] ?? '', dim: false }]
     const headerRows: PRow[] = isDesktop ? DESKTOP_HEADER.map(text => ({ text, dim: true })) : [{ text: '  ' + formatHeader(width - 2, widths), dim: true }]

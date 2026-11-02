@@ -84,6 +84,13 @@
       "title": "Licence folders",
       "description": "Comma separated absolute config directories the licence tools (list_licences, probe_licence_usage, launch_worker's config_dir) count as licences besides the ones they find (the default directory, ~/.claude, ~/.claude/<name>, ~/.claude-<name>). A leading ~ is the home directory. Each counts only when it holds both .credentials.json and .claude.json as regular files (an entry that is a symbolic link to such a folder counts), a test of presence and kind only: neither file is opened. Empty: none.",
       "default": ""
+    },
+    "desktopPaneScroll": {
+      "type": "string",
+      "title": "Desktop pane scrolling",
+      "description": "How the panel's sections scroll in Claude Desktop, whose pane shows a scroll bar of its own whenever its body can move (the terminal is not affected). spare: the panel stands between 8 blank rows above and below, so the wheel scrolls the sections; the pane's bar shows with its thumb in the middle. overflow: the same rows only while a section has more rows than it shows; no pane bar otherwise. minimal: 1 blank row above and below; the pane's thumb fills its track but for a row's height at each end. overflow-minimal: 1 row, only while a section has more rows than it shows. buttons: no blank rows and no pane bar; each such section gets an up and a down button, the wheel scrolls nothing. drag: no blank rows and no pane bar; each such section's scroll bar is a slider to drag (and the arrow, page, home and end keys after a click on it), the wheel scrolls nothing. Any other value counts as spare.",
+      "default": "spare",
+      "options": ["spare", "overflow", "minimal", "overflow-minimal", "buttons", "drag"]
     }
   }
 }

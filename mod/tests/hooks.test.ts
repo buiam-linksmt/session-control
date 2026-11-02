@@ -2385,6 +2385,7 @@ describe('debug trace', () => {
         nodePath: '',
         launchRoute: 'bash',
         notices: 'on',
+        desktopPaneScroll: 'spare',
       },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
@@ -3496,6 +3497,203 @@ describe('the wheel over the panel on the desktop and the terminal', () => {
       await tick(3, 3, 19, 12)
       expect(passed).toEqual([0, 0, 3])
       expect(await tasksShown(small as Ui)).toEqual(shownBefore)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  // ---------------------------------------------------------------- the desktopPaneScroll option (decision smp-4)
+
+  /**
+   * A room whose boxes hold all their rows with the default fixture (sessions 15 lines shown of 14, queue 1, points 2):
+   * three boxes of 20 rows. Without spare rows the panel's root holds the boxes, with them the spare rows and the panel.
+   */
+  const WIDE = 60
+  const withMode = (mode: string) => ({ options: { ...OPTIONS, desktopPaneScroll: mode } })
+  type Drawn = { props: { height?: number }; children?: { props: { height?: number } }[] }
+  const heights = async (ui: Ui) => {
+    const tree = (await ui.drawn()) as Drawn
+    return { total: tree.props.height, parts: tree.children?.map(one => one.props.height) }
+  }
+  /** The terminal draws as it did whatever the option says: the room's height, no step button and no slider. */
+  const terminalUnchanged = async ($: Test$) => {
+    const term = (await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS as never })) as Ui
+    expect((await heights(term)).total).toBe(ROOM)
+    expect(await isShown(term, 'down:queue')).toBe(false)
+    expect(await isShown(term, 'bar:queue')).toBe(false)
+    await term.unmount()
+  }
+
+  test('desktopPaneScroll spare, or a value it does not know: the spare rows of before, always', { options: { ...OPTIONS, desktopPaneScroll: 'hidden' } }, async ($, on) => {
+    const desk = await open($, on, 'desktop', WIDE)
+    expect(await heights(desk)).toEqual({ total: WIDE + 2 * SPARE, parts: [SPARE, WIDE, SPARE] })
+  })
+
+  test('desktopPaneScroll overflow: no spare rows while every section shows all its rows (the pane has nothing to scroll and draws no bar); 8 above and below while one has more, scrolled as with spare; back to none when none has', withMode('overflow'), async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const at = beneath(on)
+      const ui = await open($, on, 'desktop', WIDE)
+      // 15 tasks in a queue box of 17 rows: nothing overflows.
+      expect(await heights(ui)).toEqual({ total: WIDE, parts: [20, 20, 20] })
+      // A room of 36: the sessions and the queue have more rows than they show.
+      await ui.redraw({ ...PANE_PROPS, scroll: { offset: 0, bodyRows: ROOM } } as never)
+      expect(await heights(ui)).toEqual({ total: ROOM + 2 * SPARE, parts: [SPARE, ROOM, SPARE] })
+      const desk = await page(ui, at, ROOM, SPARE)
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(await desk.wheel($, 7)).toBe(true)
+      expect(await desk.wheel($, 3)).toBe(true)
+      expect(await tasksShown(ui)).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12])
+      expect(desk.at.passed.every(offset => offset === SPARE)).toBe(true)
+      // The room grows again: the rows go, and the page's move back to the top (its body shrank) moves no section.
+      await ui.redraw({ ...PANE_PROPS, scroll: { offset: SPARE, bodyRows: WIDE } } as never)
+      expect(await heights(ui)).toEqual({ total: WIDE, parts: [20, 20, 20] })
+      const before = await texts(ui)
+      await $.ui.scroll({ component: 'Pane', requestId: PANE, offset: 0, by: -SPARE, bodyRows: WIDE, contentRows: WIDE, origin: { kind: 'person' } } as never)
+      expect(at.passed.at(-1)).toBe(0)
+      expect(await texts(ui)).toEqual(before)
+      await terminalUnchanged($)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('desktopPaneScroll minimal: one spare row above and below, always; each move scrolls a section by its rows and the window goes back to the first row', withMode('minimal'), async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const at = beneath(on)
+      const wide = await open($, on, 'desktop', WIDE)
+      expect(await heights(wide)).toEqual({ total: WIDE + 2, parts: [1, WIDE, 1] })
+      await wide.unmount()
+      const ui = (await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: PANE, props: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: ROOM } } as never })) as unknown as Ui
+      expect(await heights(ui)).toEqual({ total: ROOM + 2, parts: [1, ROOM, 1] })
+      // The body moves one row either way from the middle: a move of 1, then back.
+      const desk = await page(ui, at, ROOM, 1)
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+      expect(await desk.wheel($, 1)).toBe(true)
+      expect(await isShown(ui, ALIVE_ROW)).toBe(false)
+      expect(desk.at.offset).toBe(1)
+      for (let i = 0; i < 6; i++) expect(await desk.wheel($, 1)).toBe(true)
+      expect(await desk.wheel($, 1)).toBe(true)
+      expect(await tasksShown(ui)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10])
+      // A wider move of the page is cut at the edge of the row: one row per report.
+      expect(await desk.wheel($, 3)).toBe(true)
+      expect(await tasksShown(ui)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11])
+      expect(await desk.wheel($, -1)).toBe(true)
+      expect(await tasksShown(ui)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10])
+      expect(desk.at.passed.length).toBeGreaterThan(0)
+      expect(desk.at.passed.every(offset => offset === 1)).toBe(true)
+      await terminalUnchanged($)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('desktopPaneScroll overflow-minimal: no spare rows while every section shows all its rows, one above and below while one has more', withMode('overflow-minimal'), async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const at = beneath(on)
+      const ui = await open($, on, 'desktop', WIDE)
+      expect(await heights(ui)).toEqual({ total: WIDE, parts: [20, 20, 20] })
+      await ui.redraw({ ...PANE_PROPS, scroll: { offset: 0, bodyRows: ROOM } } as never)
+      expect(await heights(ui)).toEqual({ total: ROOM + 2, parts: [1, ROOM, 1] })
+      const desk = await page(ui, at, ROOM, 1)
+      expect(await desk.wheel($, 1)).toBe(true)
+      expect(await isShown(ui, ALIVE_ROW)).toBe(false)
+      expect(desk.at.passed.every(offset => offset === 1)).toBe(true)
+      await terminalUnchanged($)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('desktopPaneScroll buttons: no spare rows (the pane never scrolls); a section with more rows than it shows has an up and a down button that move it by its window less a row; the log too, and the compact panel on its tab strip', withMode('buttons'), async ($, on) => {
+    QUEUE.text = TASKS
+    TAIL.rows = LOG_ROWS
+    try {
+      const ui = await open($, on, 'desktop')
+      expect(await heights(ui)).toEqual({ total: ROOM, parts: [12, 12, 12] })
+      // The sessions and the queue overflow, the open points do not.
+      for (const key of ['up:sessions', 'down:sessions', 'up:queue', 'down:queue']) expect(await isShown(ui, key)).toBe(true)
+      expect(await isShown(ui, 'down:points')).toBe(false)
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      await ui.press({ key: 'down:queue' })
+      expect(await tasksShown(ui)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15])
+      await ui.press({ key: 'down:queue' })
+      expect(await tasksShown(ui)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15])
+      await ui.press({ key: 'up:queue' })
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+      await ui.press({ key: 'down:sessions' })
+      expect(await isShown(ui, ALIVE_ROW)).toBe(false)
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      await ui.press({ key: 'up:sessions' })
+      // A log open: its buttons move it back from its newest line and forth.
+      await ui.press({ key: ALIVE_ROW })
+      const logShown = async () => (await texts(ui)).flatMap(text => /^log line (\d+)$/.exec(text)?.slice(1).map(Number) ?? [])
+      const tail = await logShown()
+      expect(tail.at(-1)).toBe(30)
+      // Back by its window less a row, held at the log's first line.
+      await ui.press({ key: 'up:log' })
+      expect(await logShown()).toEqual(tail.map((_, i) => i + 1))
+      await ui.press({ key: 'down:log' })
+      expect(await logShown()).toEqual(tail)
+      await ui.unmount()
+      // Seated low (inline): the tab strip carries the shown box's buttons.
+      const low = (await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: PANE, props: { ...PANE_PROPS, placement: 'inline', scroll: { offset: 0, bodyRows: 7 } } as never })) as unknown as Ui
+      expect((await heights(low)).total).toBe(7)
+      expect(await isShown(low, 'down:log')).toBe(true)
+      await terminalUnchanged($)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+      TAIL.rows = undefined
+    }
+  })
+
+  test('desktopPaneScroll drag: no spare rows; a section with more rows than it shows draws its bar as a slider (slider.ts) that a drag and the keys move; a post the panel does not know moves nothing', withMode('drag'), async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const ui = await open($, on, 'desktop')
+      expect(await heights(ui)).toEqual({ total: ROOM, parts: [12, 12, 12] })
+      const slider = (await ui.find({ key: 'bar:queue' })) as { type: string; props: Record<string, unknown> } | undefined
+      expect(slider?.type).toBe('Client')
+      // Drawn as `./slider.ts` beside register.tsx; the tree carries the path under the plugin's folder.
+      expect(slider?.props.module).toBe('hooks/slider.ts')
+      expect(slider?.props.props).toEqual({ id: 'queue', total: 15, visible: 9, from: 0 })
+      expect(await isShown(ui, 'bar:points')).toBe(false)
+      // The slider draws the bar: a thumb of 5 rows of 9 at the top.
+      const bar = async () => (await ui.findAll({ type: 'Text', in: 'bar:queue' })).map(one => one.text).join('')
+      expect(await bar()).toBe('\u2503\u2503\u2503\u2503\u2503\u2502\u2502\u2502\u2502')
+      // A press on the track's last row brings the thumb's middle there: the queue at its end.
+      await ui.pointer({ type: 'down', x: 0, y: 8, button: 'left', in: 'bar:queue' })
+      expect(await tasksShown(ui)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15])
+      // Held, the thumb follows the pointer back up (taken at its third row), past the bar's top too.
+      await ui.pointer({ type: 'move', x: 0, y: 4, button: 'left', in: 'bar:queue' })
+      expect(await tasksShown(ui)).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12])
+      await ui.pointer({ type: 'move', x: 0, y: -3, button: 'left', in: 'bar:queue' })
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      await ui.pointer({ type: 'up', x: 0, y: -3, button: 'left', in: 'bar:queue' })
+      // Released, a move with no button moves nothing.
+      await ui.pointer({ type: 'move', x: 0, y: 8, in: 'bar:queue' })
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      // The keys after a click: a row, a window less a row, either end.
+      await ui.key({ key: 'down', in: 'bar:queue' })
+      expect(await tasksShown(ui)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10])
+      await ui.key({ key: 'pagedown', in: 'bar:queue' })
+      expect(await tasksShown(ui)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15])
+      await ui.key({ key: 'home', in: 'bar:queue' })
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      await ui.key({ key: 'end', in: 'bar:queue' })
+      expect(await tasksShown(ui)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15])
+      // The sessions have their own slider.
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+      await ui.key({ key: 'down', in: 'bar:sessions' })
+      expect(await isShown(ui, ALIVE_ROW)).toBe(false)
+      // Data the panel does not know moves nothing.
+      const before = await texts(ui)
+      for (const data of [{ id: 'queue', from: 'x' }, { id: 'nope', by: 1 }, 'down', null]) await ui.post(data as never, { in: 'bar:queue' })
+      expect(await texts(ui)).toEqual(before)
+      await terminalUnchanged($)
     } finally {
       QUEUE.text = QUEUE_TEXT
     }

@@ -29,6 +29,12 @@ import {
   sectionBoxes,
   DESKTOP_SPARE_ROWS,
   wheelTarget,
+  DESKTOP_PANE_SCROLLS,
+  buttonStep,
+  desktopPaneScroll,
+  desktopSpareRows,
+  isAnyOverflowing,
+  sliderMove,
   TOAST_TITLES,
   toastText,
   wrapText,
@@ -831,6 +837,38 @@ describe('output box scrolling', () => {
     expect(nextBack(3, 2, 50, 10)).toBe(1)
     expect(nextBack(1, 5, 50, 10)).toBe(0)
     expect(nextBack(39, -5, 50, 10)).toBe(40)
+  })
+})
+
+describe('the desktop pane scroll strategy (option desktopPaneScroll, decision smp-4)', () => {
+  test('the option names one of six strategies; an unknown value, another type or none counts as spare', () => {
+    expect([...DESKTOP_PANE_SCROLLS]).toEqual(['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag'])
+    for (const mode of DESKTOP_PANE_SCROLLS) expect(desktopPaneScroll(mode)).toBe(mode)
+    for (const other of [undefined, '', 'Spare', 'hidden', 'clipped', 1, true, ['buttons']]) expect(desktopPaneScroll(other)).toBe('spare')
+  })
+  test('the spare rows above and below a panel that fits its room: spare 8, overflow 8 only while a section has more rows than it shows, minimal 1, overflow-minimal 1 only then, buttons and drag none', () => {
+    expect(DESKTOP_SPARE_ROWS).toBe(8)
+    const rows = (isOverflowing: boolean) => DESKTOP_PANE_SCROLLS.map(mode => desktopSpareRows(mode, isOverflowing))
+    expect(rows(true)).toEqual([8, 8, 1, 1, 0, 0])
+    expect(rows(false)).toEqual([8, 0, 1, 0, 0, 0])
+  })
+  test('a section overflows when it has more rows than it shows; a header-only section (no window) counts as none', () => {
+    expect(isAnyOverflowing({})).toBe(false)
+    expect(isAnyOverflowing({ sessions: { total: 7, visible: 7, from: 0 }, points: { total: 2, visible: 9, from: 0 } })).toBe(false)
+    expect(isAnyOverflowing({ sessions: { total: 7, visible: 7, from: 0 }, queue: { total: 10, visible: 9, from: 0 } })).toBe(true)
+  })
+  test('an up or down button moves its section by its window less one row, at least one', () => {
+    expect(buttonStep(9)).toBe(8)
+    expect(buttonStep(2)).toBe(1)
+    expect(buttonStep(1)).toBe(1)
+    expect(buttonStep(0)).toBe(1)
+  })
+  test('a slider post moves a section only as a known section with a whole first row or a whole number of rows', () => {
+    expect(sliderMove({ id: 'queue', from: 4 })).toEqual({ id: 'queue', from: 4 })
+    expect(sliderMove({ id: 'log', by: -8 })).toEqual({ id: 'log', by: -8 })
+    for (const bad of [null, 'queue', 3, [], {}, { id: 'queue' }, { id: 'other', from: 1 }, { id: 'queue', from: 1.5 }, { id: 'queue', by: '2' }, { id: 'queue', from: 1, by: 1 }, { id: 'queue', from: Number.NaN }]) {
+      expect(sliderMove(bad)).toBeUndefined()
+    }
   })
 })
 
