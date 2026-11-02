@@ -27,6 +27,8 @@ import {
   clampOffset,
   scrollbar,
   sectionBoxes,
+  DESKTOP_SPARE_ROWS,
+  wheelTarget,
   TOAST_TITLES,
   toastText,
   wrapText,
@@ -829,6 +831,36 @@ describe('output box scrolling', () => {
     expect(nextBack(3, 2, 50, 10)).toBe(1)
     expect(nextBack(1, 5, 50, 10)).toBe(0)
     expect(nextBack(39, -5, 50, 10)).toBe(40)
+  })
+})
+
+describe('the section a desktop wheel move scrolls (no pointer)', () => {
+  const ORDER = ['sessions', 'queue', 'points'] as const
+  // sessions: one row left below; queue: 6 rows, 3 down; points: all rows shown.
+  const WINDOWS = { sessions: { total: 8, visible: 7, from: 0 }, queue: { total: 15, visible: 9, from: 3 }, points: { total: 2, visible: 9, from: 0 } }
+  test('down: the first section from the top with rows below; up: the first from the bottom with rows above', () => {
+    expect(wheelTarget(ORDER, WINDOWS, 1)).toBe('sessions')
+    expect(wheelTarget(ORDER, WINDOWS, -2)).toBe('queue')
+    expect(wheelTarget(ORDER, { ...WINDOWS, sessions: { total: 8, visible: 7, from: 1 } }, 1)).toBe('queue')
+    expect(wheelTarget(ORDER, { ...WINDOWS, queue: { total: 15, visible: 9, from: 0 } }, -1)).toBeUndefined()
+  })
+  test('the section the last move scrolled keeps the wheel while it has rows that way', () => {
+    expect(wheelTarget(ORDER, WINDOWS, 1, 'queue')).toBe('queue')
+    expect(wheelTarget(ORDER, WINDOWS, -1, 'queue')).toBe('queue')
+    expect(wheelTarget(ORDER, { ...WINDOWS, queue: { total: 15, visible: 9, from: 6 } }, 1, 'queue')).toBe('sessions')
+    // A section the panel no longer draws, or one that holds all its rows, is passed over.
+    expect(wheelTarget(['sessions', 'log'], { sessions: WINDOWS.sessions, log: { total: 30, visible: 21, from: 9 } }, -1, 'queue')).toBe('log')
+    expect(wheelTarget(ORDER, WINDOWS, 1, 'points')).toBe('sessions')
+  })
+  test('a log shown at its end has rows above, none below; a move of no rows, or a box drawn as a header only, picks nothing', () => {
+    const log = { sessions: { total: 8, visible: 7, from: 1 }, log: { total: 30, visible: 21, from: 9 } }
+    expect(wheelTarget(['sessions', 'log'], log, -1)).toBe('log')
+    expect(wheelTarget(['sessions', 'log'], log, 1)).toBeUndefined()
+    expect(wheelTarget(ORDER, WINDOWS, 0)).toBeUndefined()
+    expect(wheelTarget(['sessions', 'queue', 'points'], { queue: { total: 15, visible: 9, from: 3 } }, 1)).toBe('queue')
+  })
+  test('the desktop panel stands between 8 spare rows above and below', () => {
+    expect(DESKTOP_SPARE_ROWS).toBe(8)
   })
 })
 

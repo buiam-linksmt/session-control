@@ -2232,3 +2232,27 @@ export function sectionBoxes(bodyRows: number, isLogOpen: boolean, expanded: Exp
 export function boxAt(boxes: readonly SectionBox[], row: number): SectionBox | undefined {
   return boxes.find(box => row >= box.top && row < box.top + box.height)
 }
+
+/**
+ * Blank rows the desktop panel draws above and below its boxes. Claude Desktop scrolls a pane's body by itself and
+ * reports a move (with no pointer) only once the body has moved, so a panel exactly as tall as the body leaves the wheel
+ * nothing to move; with these rows the body has room both ways, and the scroll hook puts the window back in their middle.
+ */
+export const DESKTOP_SPARE_ROWS = 8
+
+/** A section's window as last drawn: its rows, the rows it shows, the first row shown. */
+export type BoxWindow = { total: number; visible: number; from: number }
+
+/**
+ * The section a wheel move with no pointer scrolls (the desktop sends none): the one the last such move scrolled, while
+ * it still has rows that way; otherwise, moving down, the first section from the top with rows below its window, moving
+ * up, the first from the bottom with rows above it. Undefined when no section has rows that way.
+ */
+export function wheelTarget(order: readonly SectionId[], windows: Partial<Record<SectionId, BoxWindow>>, by: number, last?: SectionId): SectionId | undefined {
+  const canMove = (id: SectionId) => {
+    const w = windows[id]
+    return w !== undefined && (by > 0 ? w.from < w.total - w.visible : by < 0 && w.from > 0)
+  }
+  if (last !== undefined && order.includes(last) && canMove(last)) return last
+  return (by > 0 ? order : [...order].reverse()).find(canMove)
+}

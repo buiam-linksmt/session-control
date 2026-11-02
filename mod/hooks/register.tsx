@@ -127,6 +127,7 @@ import {
   elapsedText,
   desktopRowLines,
   DESKTOP_HEADER,
+  DESKTOP_SPARE_ROWS,
   boxAt,
   MIN_BOX,
   MIN_SESSIONS_BOX,
@@ -135,6 +136,7 @@ import {
   nextBack,
   scrollbar,
   sectionBoxes,
+  wheelTarget,
   TOAST_TITLES,
   toastText,
   wrapText,
@@ -181,7 +183,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { ComposedPrompt, ExpandableId, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
+import type { BoxWindow, ComposedPrompt, ExpandableId, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -273,8 +275,13 @@ let isDirOptionSet = false
  * registry; undefined until one has.
  */
 let finishedInput: { entries: readonly SessionEntry[]; facts: ProcFacts; queueText?: string | null } | undefined
-// What the pane drew last, so the scroll hook knows which box a wheel tick is over.
-let layout: { boxes: SectionBox[]; totals: Partial<Record<SectionId, { total: number; visible: number }>> } = { boxes: [], totals: {} }
+// What the pane drew last, so the scroll hook knows which box a wheel tick is over: the boxes, their windows and, on the
+// desktop, the spare rows drawn above and below the panel (0 elsewhere).
+let layout: { boxes: SectionBox[]; totals: Partial<Record<SectionId, BoxWindow>>; spare: number } = { boxes: [], totals: {}, spare: 0 }
+/** The section the last desktop wheel move without a pointer scrolled (wheelTarget). */
+let wheelLast: SectionId | undefined
+/** Set while the desktop pane's window is being asked back to the middle of the spare rows (parkWindow). */
+let isParking = false
 let isAfterCompact = false
 let isBusy = false
 let isArmed = false
@@ -1681,6 +1688,21 @@ async function isPanelShown($: EngineInterface): Promise<boolean> {
 }
 
 /**
+ * Asks the desktop pane's window back to the middle of the spare rows, so the wheel has room both ways: a move of the
+ * plugin's own, which the scroll hook lands there. One ask at a time; one refused is asked again at a later drawing.
+ */
+function parkWindow($: EngineInterface): void {
+  if (isParking) return
+  isParking = true
+  void $.ui
+    .scroll({ in: PANE, to: 'start' })
+    .catch(() => undefined)
+    .finally(() => {
+      isParking = false
+    })
+}
+
+/**
  * One display tick: no process and no file read, only the clock into the `now` atom the pane reads, so the elapsed
  * column redraws with the seconds; and only when the elapsed text of a session row in view changes at this second (a
  * running row under an hour each second, one of an hour or more each minute, a finished row never), so an unchanged
@@ -3018,6 +3040,8 @@ export const register: Register = (on, options) => {
   isToastHeldHere = false
   isUnattached = false
   unattachedToasts = []
+  wheelLast = undefined
+  isParking = false
   isDirOptionSet = String(options.orchestratorDir ?? '') !== ''
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
@@ -3310,7 +3334,25 @@ export const register: Register = (on, options) => {
 
   // A wheel tick over a box that has more rows scrolls that box. The panel itself scrolls only when the room is
   // too small to hold the three boxes at their minimum height (a pane seated low, inline).
+  // On the desktop the panel stands between spare rows (layout.spare): a person's move scrolls one section, the box under
+  // the pointer when the surface sends one, else the one wheelTarget names; every move, the plugin's own (parkWindow)
+  // too, lands the window in the middle of the spare rows.
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    if (layout.spare > 0) {
+      if (e.origin.kind === 'person') {
+        const id =
+          e.pointer === undefined
+            ? wheelTarget(layout.boxes.map(box => box.id), layout.totals, e.by, wheelLast)
+            : boxAt(layout.boxes, e.pointer.row + e.offset - e.by - layout.spare)?.id
+        const t = id === undefined ? undefined : layout.totals[id]
+        if (id !== undefined && t !== undefined && t.total > t.visible) {
+          wheelLast = id
+          if (id === 'log') await update($, boxBack, current => nextBack(current, e.by, t.total, t.visible))
+          else await update($, offsets, current => ({ ...current, [id]: clampOffset((current[id] ?? 0) + e.by, t.total, t.visible) }))
+        }
+      }
+      return next({ ...e, offset: layout.spare })
+    }
     const fits = e.contentRows <= e.bodyRows
     const box = e.pointer === undefined ? undefined : boxAt(layout.boxes, e.pointer.row + (fits ? 0 : e.offset - e.by))
     const t = box === undefined ? undefined : layout.totals[box.id]
@@ -3375,7 +3417,12 @@ export const register: Register = (on, options) => {
     const activeId: SectionId = isLogOpen ? 'log' : (activeTab as SectionId)
     const bodyRows = isCompact ? compactRows : Math.max(MIN_SESSIONS_BOX + 2 * MIN_BOX, e.props.scroll.bodyRows)
     const boxes: SectionBox[] = isCompact ? [{ id: activeId, top: 1, height: compactRows - 1 }] : sectionBoxes(bodyRows, isLogOpen, expandedId)
-    layout = { boxes, totals: {} }
+    // The desktop scrolls the pane's body by itself and reports a move only once the body has moved: a panel that fits its
+    // room stands between spare rows, and a window drawn elsewhere than in their middle is asked back there. The rows stay
+    // put whatever the window's offset: content that moved above the window would make the page scroll on its own.
+    const spare = isDesktop && bodyRows <= e.props.scroll.bodyRows ? DESKTOP_SPARE_ROWS : 0
+    layout = { boxes, totals: {}, spare }
+    if (spare > 0 && e.props.scroll.offset !== spare) parkWindow($)
     drawnSessions = undefined
     // `rowIndex`: the session row (snap.rows) a line of the sessions box belongs to.
     type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end'; rowIndex?: number }
@@ -3432,8 +3479,8 @@ export const register: Register = (on, options) => {
       const box = boxes.find(one => one.id === id) as SectionBox
       const visible = Math.max(1, box.height - (isPlain ? 0 : 3) - fixed.length)
       const total = body.length
-      layout.totals[id] = { total, visible }
       const from = isTail ? Math.max(0, total - visible - back) : clampOffset(offset, total, visible)
+      layout.totals[id] = { total, visible, from }
       const bar = scrollbar(total, visible, from)
       const shown = body.slice(from, from + visible)
       // The session rows in view, for the display tick (one line each on the terminal, two on the desktop).
@@ -3512,6 +3559,17 @@ export const register: Register = (on, options) => {
         {inner}
       </Box>
     )
+    // The panel between its spare rows on the desktop; as it is elsewhere.
+    const framed = (panel: ReturnType<typeof block>) =>
+      spare === 0 ? (
+        panel
+      ) : (
+        <Box flexDirection="column" height={bodyRows + 2 * spare}>
+          <Box height={spare} />
+          {panel}
+          <Box height={spare} />
+        </Box>
+      )
     const warningRow: PRow[] =
       snap.error === undefined ? [] : isDesktop ? [{ text: `! session-control: ${snap.error}`, dim: false, wrap: 'truncate-end' }] : [{ text: wrapText(`! session-control: ${snap.error}`, width)[0] ?? '', dim: false }]
     const headerRows: PRow[] = isDesktop ? DESKTOP_HEADER.map(text => ({ text, dim: true })) : [{ text: '  ' + formatHeader(width - 2, widths), dim: true }]
@@ -3525,12 +3583,12 @@ export const register: Register = (on, options) => {
         return wrapped.map(text => ({ text, dim }))
       })
       if (logRows.length === 0) logRows.push({ text: 'Waiting for output.', dim: true })
-      if (isCompact) return compactView(block('log', `LOG ${view.title}`, [], logRows, 0, true, true))
-      return (
+      if (isCompact) return framed(compactView(block('log', `LOG ${view.title}`, [], logRows, 0, true, true)))
+      return framed(
         <Box flexDirection="column" height={bodyRows} overflow="hidden">
           {sessionsBlock()}
           {block('log', `LOG ${view.title}`, [], logRows, 0, true)}
-        </Box>
+        </Box>,
       )
     }
     const queueRows: PRow[] =
@@ -3576,12 +3634,14 @@ export const register: Register = (on, options) => {
               return lines
             })
     if (isCompact) {
-      return compactView(
-        activeId === 'queue'
-          ? block('queue', 'QUEUED WORK', [], queueRows, offs.queue, false, true)
-          : activeId === 'points'
-            ? block('points', 'OPEN POINTS', [], pointRows, offs.points, false, true)
-            : sessionsBlock(true),
+      return framed(
+        compactView(
+          activeId === 'queue'
+            ? block('queue', 'QUEUED WORK', [], queueRows, offs.queue, false, true)
+            : activeId === 'points'
+              ? block('points', 'OPEN POINTS', [], pointRows, offs.points, false, true)
+              : sessionsBlock(true),
+        ),
       )
     }
     const sections: Record<ExpandableId, () => ReturnType<typeof block>> = {
@@ -3599,10 +3659,10 @@ export const register: Register = (on, options) => {
         <Button key={`x:${id}`} label="[+]" plain dimColor onPress={expand(id)} />
       </Box>
     )
-    return (
+    return framed(
       <Box flexDirection="column" height={bodyRows} overflow="hidden">
         {boxes.map(one => (one.isHeader === true ? header(one.id as ExpandableId) : sections[one.id as ExpandableId]()))}
-      </Box>
+      </Box>,
     )
   })
 }

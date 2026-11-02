@@ -3260,6 +3260,248 @@ describe('the panel on the desktop surface', () => {
   })
 })
 
+// ---------------------------------------------------------------- the wheel over the panel, desktop and terminal (decision smp-1)
+
+describe('the wheel over the panel on the desktop and the terminal', () => {
+  type Ui = Awaited<ReturnType<typeof mountPane>>
+  type Test$ = Parameters<Parameters<typeof test>[2]>[0]
+  const PANE = 'session-control'
+  const ROOM = 36
+  /** DESKTOP_SPARE_ROWS of core.ts: the blank rows the desktop panel stands between, above and below. */
+  const SPARE = 8
+  const TASKS = JSON.stringify({ tasks: Array.from({ length: 15 }, (_, i) => ({ id: `t${i + 1}`, status: 'queued', title: `Task ${i + 1}` })) })
+  const LOG_ROWS = Array.from({ length: 30 }, (_, i) => ({ type: 'assistant', message: { content: [{ type: 'text', text: `log line ${i + 1}` }] } }))
+  const ALIVE_ROW = `s:${SID_ALIVE}`
+  /**
+   * Claude Desktop as its Code tab draws a pane (page chunk c2719cf1b-EM6oDecL.js of Desktop 4.4212.0): the pane's body is
+   * a box of the room's height that scrolls by itself (CSS overflow-y auto, no wheel handler of the page's own); after the
+   * body moved, the page reports ui_scroll with `offset` its first row now, `by` the rows since its last report, the room
+   * and the tree's rows, and no pointer (neither the page, the app's IPC check nor its relay to Claude Code carries one);
+   * then it shows the offset the engine answers. A body that cannot move (a tree no taller than the room, or the edge
+   * reached) sends nothing. Optional `pointer`: a surface that would send one. Answers whether a report went out.
+   * `start`: where the body stands first; the kit answers no plugin's `$.ui.scroll`, so a test that starts in the middle
+   * of the spare rows plays the engine's push of the mod's park (parkWindow) by drawing there first.
+   */
+  const page = async (ui: Ui, at: { offset: number; passed: number[] }, room = ROOM, start = 0) => {
+    at.offset = start
+    if (start !== 0) await ui.redraw({ ...PANE_PROPS, scroll: { offset: start, bodyRows: room } } as never)
+    const wheel = async ($: Test$, by: number, pointer?: { row: number; column: number }) => {
+      const tree = (await ui.drawn()) as { props?: { height?: unknown } }
+      const contentRows = Number(tree.props?.height ?? room)
+      const offset = Math.max(0, Math.min(Math.max(0, contentRows - room), at.offset + by))
+      if (offset === at.offset) return false
+      const seen = at.passed.length
+      await $.ui.scroll({ component: 'Pane', requestId: PANE, offset, by: offset - at.offset, bodyRows: room, contentRows, origin: { kind: 'person' }, ...(pointer === undefined ? {} : { pointer }) } as never)
+      at.offset = at.passed.length > seen ? (at.passed.at(-1) as number) : at.offset
+      await ui.redraw({ ...PANE_PROPS, scroll: { offset: at.offset, bodyRows: room } } as never)
+      return true
+    }
+    return { at, wheel }
+  }
+  /**
+   * The plugin's scroll hook passes the move on to the hooks beneath it: the offsets it leaves the window at, recorded by
+   * a hook of the test's (registered before the test first calls `$`).
+   */
+  const beneath = (on: On) => {
+    const at = { offset: 0, passed: [] as number[] }
+    on('ui.scroll', ($, e) => {
+      at.passed.push(e.offset)
+      return {}
+    })
+    return at
+  }
+  const open = async ($: Test$, on: On, surface: 'terminal' | 'desktop', room = ROOM) => {
+    world(on)
+    stubPanel(on)
+    await boot($)
+    await runCommand($, 'side')
+    return $.ui.mount({ plugin: 'session-control', surface, component: 'Pane', requestId: PANE, props: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: room } } as never }) as Promise<Ui>
+  }
+  const texts = async (ui: Ui) => (await ui.findAll({ type: 'Text' })).map(one => one.text)
+  /** The queued tasks drawn, by number. */
+  const tasksShown = async (ui: Ui) => (await texts(ui)).flatMap(text => /^• Task (\d+)$/.exec(text)?.slice(1).map(Number) ?? [])
+  const isShown = async (ui: Ui, key: string) => (await ui.find({ key })) !== undefined
+
+  test('desktop: a panel that fits its room stands between spare rows, which stay put wherever the window is, so the wheel can move the body; the terminal draws none', { options: OPTIONS }, async ($, on) => {
+    const desk = await open($, on, 'desktop')
+    const tree = (await desk.drawn()) as { props: { height: number }; children: { props: { height: number } }[] }
+    expect(tree.props.height).toBe(ROOM + 2 * SPARE)
+    expect(tree.children.map(one => one.props.height)).toEqual([SPARE, ROOM, SPARE])
+    // Nothing above the window moves with it: content shifted there would make the page scroll on its own.
+    for (const offset of [SPARE, 2 * SPARE, 3]) {
+      await desk.redraw({ ...PANE_PROPS, scroll: { offset, bodyRows: ROOM } } as never)
+      expect(((await desk.drawn()) as typeof tree).children.map(one => one.props.height)).toEqual([SPARE, ROOM, SPARE])
+    }
+    await desk.unmount()
+    const term = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: PANE, props: PANE_PROPS as never })
+    expect(((await term.drawn()) as typeof tree).props.height).toBe(ROOM)
+  })
+
+  test('desktop: the window drawn at the top is asked back to the middle of the spare rows; that move of the plugin\'s own lands there and scrolls no section; a first move down from the top works all the same', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const at = beneath(on)
+      const ui = await open($, on, 'desktop')
+      const desk = await page(ui, at)
+      const before = await texts(ui)
+      // parkWindow's `$.ui.scroll({ in, to: 'start' })` as the engine raises it: offset 0, by back to the top.
+      await $.ui.scroll({ component: 'Pane', requestId: PANE, offset: 0, by: 0, bodyRows: ROOM, contentRows: ROOM + 2 * SPARE, origin: { kind: 'plugin', name: 'session-control' } } as never)
+      expect(desk.at.passed).toEqual([SPARE])
+      expect(await texts(ui)).toEqual(before)
+      // Unparked, the body can only move down: that move scrolls the sessions and lands the window in the middle.
+      expect(await desk.wheel($, -1)).toBe(false)
+      expect(await desk.wheel($, 1)).toBe(true)
+      expect(desk.at.passed).toEqual([SPARE, SPARE])
+      expect(await isShown(ui, ALIVE_ROW)).toBe(false)
+      expect(await desk.wheel($, -1)).toBe(true)
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('desktop: a wheel move with no pointer scrolls the first section from the top with rows below it, then the next once that one is at its end; up, the section the last move scrolled, then the first from the bottom with rows above it; the window goes back to the middle', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const at = beneath(on)
+      const ui = await open($, on, 'desktop')
+      const desk = await page(ui, at, ROOM, SPARE)
+      // The sessions box shows 7 of its 14 desktop lines (7 rows, two lines each), the queue 9 of its 15 tasks.
+      const doneCells = async () => (await texts(ui)).some(text => text.startsWith('dddddddd · finished'))
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+      expect(await doneCells()).toBe(false)
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(await desk.wheel($, 1)).toBe(true)
+      expect(desk.at.passed).toEqual([SPARE])
+      expect(await isShown(ui, ALIVE_ROW)).toBe(false)
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(await desk.wheel($, 6)).toBe(true)
+      expect(await doneCells()).toBe(true)
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      // The sessions box is at its end: the queue takes the move.
+      expect(await desk.wheel($, 3)).toBe(true)
+      expect(await tasksShown(ui)).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12])
+      expect(await doneCells()).toBe(true)
+      // Up: the queue, the box the last move scrolled, while it has rows above.
+      expect(await desk.wheel($, -1)).toBe(true)
+      expect(await tasksShown(ui)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11])
+      expect(await desk.wheel($, -5)).toBe(true)
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(await doneCells()).toBe(true)
+      // The queue is at its top: the first box from the bottom with rows above takes the move, the sessions.
+      expect(await desk.wheel($, -1)).toBe(true)
+      expect(await doneCells()).toBe(false)
+      expect(await tasksShown(ui)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+      // Down: the sessions (the last box moved) to their end, then the queue to its end; a further move finds no box
+      // with rows below and leaves every box as it is.
+      expect(await desk.wheel($, 1)).toBe(true)
+      expect(await doneCells()).toBe(true)
+      expect(await desk.wheel($, 6)).toBe(true)
+      expect(await tasksShown(ui)).toEqual([7, 8, 9, 10, 11, 12, 13, 14, 15])
+      const before = await texts(ui)
+      expect(await desk.wheel($, 2)).toBe(true)
+      expect(await texts(ui)).toEqual(before)
+      // Every report left the window in the middle of the spare rows.
+      expect(desk.at.passed.every(offset => offset === SPARE)).toBe(true)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('desktop: over the log box (a log open), a wheel move with no pointer scrolls the log back and forth, then the sessions once the log is at its end', { options: OPTIONS }, async ($, on) => {
+    TAIL.rows = LOG_ROWS
+    try {
+      const at = beneath(on)
+      const ui = await open($, on, 'desktop')
+      await ui.press({ key: ALIVE_ROW })
+      const desk = await page(ui, at, ROOM, SPARE)
+      const logShown = async () => (await texts(ui)).flatMap(text => /^log line (\d+)$/.exec(text)?.slice(1).map(Number) ?? [])
+      const tail = await logShown()
+      expect(tail.at(-1)).toBe(30)
+      expect(tail[0]).toBeGreaterThan(1)
+      expect(await desk.wheel($, -2)).toBe(true)
+      expect(await logShown()).toEqual(tail.map(n => n - 2))
+      expect(await desk.wheel($, 2)).toBe(true)
+      expect(await logShown()).toEqual(tail)
+      // The log shows its newest line: the sessions box, with a line below its window, takes the move.
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+      expect(await desk.wheel($, 1)).toBe(true)
+      expect(await logShown()).toEqual(tail)
+      expect(await isShown(ui, ALIVE_ROW)).toBe(false)
+      expect(desk.at.passed.every(offset => offset === SPARE)).toBe(true)
+    } finally {
+      TAIL.rows = undefined
+    }
+  })
+
+  test('desktop with a pointer (a surface that sends one): the box under the pointer takes the move', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const at = beneath(on)
+      const ui = await open($, on, 'desktop')
+      const desk = await page(ui, at, ROOM, SPARE)
+      // Row 13 of the body is in the queue box (rows 12 to 23 of the panel, drawn from the window's first row).
+      expect(await desk.wheel($, 2, { row: 13, column: 4 })).toBe(true)
+      expect(await tasksShown(ui)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11])
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+      expect(desk.at.passed).toEqual([SPARE])
+      // Over the open points, which hold all their rows: nothing moves, the window is held all the same.
+      const before = await texts(ui)
+      expect(await desk.wheel($, 1, { row: 30, column: 4 })).toBe(true)
+      expect(await texts(ui)).toEqual(before)
+      expect(desk.at.passed).toEqual([SPARE, SPARE])
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('desktop, a room too small for the boxes: no spare rows, and a wheel move with no pointer moves the pane as a whole, as before', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const at = beneath(on)
+      const ui = await open($, on, 'desktop', 12)
+      const tree = (await ui.drawn()) as { props: { height: number } }
+      expect(tree.props.height).toBe(19)
+      const desk = await page(ui, at, 12)
+      const before = await tasksShown(ui)
+      expect(await desk.wheel($, 2)).toBe(true)
+      expect(desk.at.passed).toEqual([2])
+      expect(await tasksShown(ui)).toEqual(before)
+      expect(await isShown(ui, ALIVE_ROW)).toBe(true)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('terminal, unchanged: a tick with a pointer over a box with more rows scrolls it and holds the pane; one with no pointer (the scroll keys) moves no box; a room too small lets the pane move', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = TASKS
+    try {
+      const { passed } = beneath(on)
+      const ui = await open($, on, 'terminal')
+      const tick = (by: number, offset: number, contentRows: number, bodyRows: number, pointer?: { row: number; column: number }) =>
+        $.ui.scroll({ component: 'Pane', requestId: PANE, offset, by, bodyRows, contentRows, origin: { kind: 'person' }, ...(pointer === undefined ? {} : { pointer }) } as never)
+      // The panel fits: a tick over the queue box scrolls it, the pane at 0.
+      await tick(2, 0, ROOM, ROOM, { row: 13, column: 4 })
+      expect(await tasksShown(ui)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11])
+      expect(passed).toEqual([0])
+      // No pointer: no box moves, the pane at 0.
+      await tick(1, 0, ROOM, ROOM)
+      expect(await tasksShown(ui)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11])
+      expect(passed).toEqual([0, 0])
+      await ui.unmount()
+      // A room of 12 rows: the panel is 19 rows; a tick with no pointer moves the pane where the engine put it.
+      const small = await $.ui.mount({ plugin: 'session-control', surface: 'terminal', component: 'Pane', requestId: PANE, props: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 12 } } as never })
+      expect(((await small.drawn()) as { props: { height: number } }).props.height).toBe(19)
+      const shownBefore = await tasksShown(small as Ui)
+      await tick(3, 3, 19, 12)
+      expect(passed).toEqual([0, 0, 3])
+      expect(await tasksShown(small as Ui)).toEqual(shownBefore)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+})
+
 // ---------------------------------------------------------------- the probe's limits on a slow machine (decision mod-28)
 
 describe('one probe at a time, the poll\'s rest and the tracking toast per episode', () => {
