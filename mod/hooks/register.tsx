@@ -3470,7 +3470,7 @@ export const register: Register = (on, options) => {
     layout = { boxes, totals: {}, spare: 0 }
     // `buttons`: an up and a down button for each section with more rows than it shows; `drag`: its bar a slider.
     const hasButtons = isDesktop && scrollMode === 'buttons'
-    const hasSlider = isDesktop && scrollMode === 'drag' && !isSliderFailed
+    const hasSlider = isDesktop && (scrollMode === 'drag' || scrollMode === 'buttons') && !isSliderFailed
     const stepButtons = (id: SectionId) => {
       const t = layout.totals[id]
       if (t === undefined || t.total <= t.visible) return []
@@ -3585,8 +3585,8 @@ export const register: Register = (on, options) => {
             <Box flexGrow={1}>
               <Text bold>{title}</Text>
             </Box>
-            {hasButtons && stepButtons(id)}
             {id !== 'log' && <Button key={`x:${id}`} label={expandedId === id ? '[-]' : '[+]'} plain dimColor onPress={expand(id)} />}
+            {hasButtons && stepButtons(id)}
           </Box>
           {fixed.map(r => anyRowEl(r))}
           {rows}

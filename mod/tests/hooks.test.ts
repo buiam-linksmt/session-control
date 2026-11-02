@@ -3795,12 +3795,12 @@ describe('the desktop panel counts, shows and scrolls its sections in lines', ()
   })
 
   for (const mode of ['spare', 'overflow', 'minimal', 'overflow-minimal', 'buttons', 'drag'] as const) {
-    test(`desktopPaneScroll ${mode}: a queue whose entries wrap past its room shows its ${mode === 'drag' ? 'slider' : mode === 'buttons' ? 'buttons and bar' : 'bar'}, counted in lines`, { options: { ...OPTIONS, desktopPaneScroll: mode } }, async ($, on) => {
+    test(`desktopPaneScroll ${mode}: a queue whose entries wrap past its room shows its ${mode === 'drag' ? 'slider' : mode === 'buttons' ? 'buttons and slider' : 'bar'}, counted in lines`, { options: { ...OPTIONS, desktopPaneScroll: mode } }, async ($, on) => {
       QUEUE.text = TASKS
       try {
         const ui = await open($, on)
         expect(await queueShown(ui)).toEqual(ALL_LINES.slice(0, 9))
-        if (mode === 'drag') {
+        if (mode === 'drag' || mode === 'buttons') {
           const slider = (await ui.find({ key: 'bar:queue' })) as { type: string; props: Record<string, unknown> } | undefined
           expect(slider?.type).toBe('Client')
           expect(slider?.props.props).toEqual({ id: 'queue', total: 18, visible: 9, from: 0 })
