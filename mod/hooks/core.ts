@@ -2486,6 +2486,22 @@ export function sectionWindow(total: number, visible: number): { shown: number; 
   return { shown, more: total - shown }
 }
 
+/** The rows a fixed box of the `sections` view takes before its lines: its two borders and its title row. */
+export const SECTION_BOX_CHROME = 3
+
+/**
+ * What a fixed box of the `sections` view `height` rows tall draws of its `fixed` lines (a header, drawn first) and its
+ * `body` lines: every line in a row of its own under the title (sectionWindow over both together), so the header lines
+ * are counted as lines the box may leave out. All when they fit; else the lines its rows hold less one, and a `+N more`
+ * line (`more`, the lines not shown, header lines included) with the `[+]`. A box of fewer than four rows has no row
+ * for the `+N more` line and shows only its title with the `[+]`.
+ */
+export function sectionFit(height: number, fixed: number, body: number): { fixedShown: number; bodyShown: number; more: number } {
+  const win = sectionWindow(fixed + body, Math.max(0, height - SECTION_BOX_CHROME))
+  const fixedShown = Math.min(fixed, win.shown)
+  return { fixedShown, bodyShown: win.shown - fixedShown, more: win.more }
+}
+
 /**
  * Where a change of the `sections` view moves the pane's body ($.ui.scroll): from one view (`was`, undefined before the
  * first drawing) to the next (`now`, undefined when the value no longer draws): a log page (`log-page:<sid>`) to its

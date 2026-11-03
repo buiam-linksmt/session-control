@@ -4169,7 +4169,7 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
   })
 
   // Where each change moves the body is sectionsScrollTo's (core.test.ts): the kit answers no plugin's $.ui.scroll.
-  test('expand: [+] draws the section alone as a page between a title strip at the top and one at the bottom; another title switches to its section, [-] restores the boxes', MODE, async ($, on) => {
+  test('expand: [+] draws the section alone as a page under one title strip at the top, none at the bottom; another title that can expand switches to its section, one that cannot is greyed, [-] restores the boxes', MODE, async ($, on) => {
     QUEUE.text = tasks(15)
     try {
       const ui = await open($, on)
@@ -4178,28 +4178,29 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
       // No height and no clipping anywhere: the page is as tall as its rows and the body scrolls it.
       expect(nodesOf(tree).filter(one => one.type === 'Box').every(one => one.props?.height === undefined && one.props?.overflow === undefined)).toBe(true)
       const parts = (tree.children ?? []) as Node[]
-      expect(parts.map(one => one.props?.key)).toEqual(['strip:top', 'page:queue', 'strip:bottom'])
-      // Each strip: the titles on the left (the shown one marked, not pressable), [-] on the right.
-      for (const at of ['top', 'bottom']) {
-        const strip = parts.find(one => one.props?.key === `strip:${at}`) as Node
-        expect(strip.props?.flexDirection).toBe('row')
-        const [titles, ...right] = (strip.children ?? []) as Node[]
-        expect(titles?.props?.flexGrow).toBe(1)
-        expect(textOf(titles as Node)).toEqual(['[ QUEUED WORK ]'])
-        expect(nodesOf(titles as Node).flatMap(one => (one.type === 'Button' ? [one.props?.key, one.props?.label] : []))).toEqual([`t:${at}:sessions`, 'SESSIONS', `t:${at}:points`, 'OPEN POINTS'])
-        expect(right.map(one => [one.props?.key, one.props?.label])).toEqual([[`c:${at}`, '[-]']])
-      }
+      expect(parts.map(one => one.props?.key)).toEqual(['strip:top', 'page:queue'])
+      // The strip: the titles on the left (the shown one marked, not pressable; the sessions, which exceed their box in
+      // the even view, a Button; the open points, which fit theirs, greyed and not pressable), [-] on the right.
+      const strip = parts.find(one => one.props?.key === 'strip:top') as Node
+      expect(strip.props?.flexDirection).toBe('row')
+      const [titles, ...right] = (strip.children ?? []) as Node[]
+      expect(titles?.props?.flexGrow).toBe(1)
+      expect(textOf(titles as Node)).toEqual(['[ QUEUED WORK ]', 'OPEN POINTS'])
+      expect(nodesOf(titles as Node).find(one => one.type === 'Text' && textOf(one)[0] === 'OPEN POINTS')?.props?.dimColor).toBe(true)
+      expect(nodesOf(titles as Node).flatMap(one => (one.type === 'Button' ? [one.props?.key, one.props?.label] : []))).toEqual(['t:top:sessions', 'SESSIONS'])
+      expect(right.map(one => [one.props?.key, one.props?.label])).toEqual([['c:top', '[-]']])
       // Every task, each a Text the surface wraps; no other section.
       expect(tasksIn(await texts(ui))).toEqual(range(1, 15))
       expect((await ui.findAll({ type: 'Text' })).filter(one => /^\u2022 Task/.test(one.text)).every(one => one.props.wrap === 'wrap')).toBe(true)
       expect((await texts(ui)).includes('SESSIONS')).toBe(false)
-      // A title of the bottom strip switches to its section.
-      await ui.press({ key: 't:bottom:points' })
-      expect((((await ui.drawn()) as Node).children as Node[]).map(one => one.props?.key)).toEqual(['strip:top', 'page:points', 'strip:bottom'])
+      // A pressable title switches to its section; the queue, which exceeds its box, is pressable there.
+      await ui.press({ key: 't:top:sessions' })
+      expect((((await ui.drawn()) as Node).children as Node[]).map(one => one.props?.key)).toEqual(['strip:top', 'page:sessions'])
       expect(await isShown(ui, 't:top:queue')).toBe(true)
+      expect(await isShown(ui, 't:top:sessions')).toBe(false)
       expect(await isShown(ui, 't:top:points')).toBe(false)
-      // [-] of the bottom strip: the three boxes again.
-      await ui.press({ key: 'c:bottom' })
+      // [-]: the three boxes again.
+      await ui.press({ key: 'c:top' })
       expect(((await ui.drawn()) as Node).props?.height).toBe(ROOM)
       expect(await isShown(ui, 'x:queue')).toBe(true)
     } finally {
@@ -4207,7 +4208,7 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
     }
   })
 
-  test('logs: an open log is a box of the room less the sessions third, showing its newest lines under +N more above, with [+]; expanded it is a page of the whole log between strips with [x] and [-]; [-] returns to the box, [x] closes the log', MODE, async ($, on) => {
+  test('logs: an open log is a box of the room less the sessions third, showing its newest lines under +N more above, with [+]; expanded it is a page of the whole log under a strip with [x] and [-] and over a row with [-] alone; [-] returns to the box, [x] closes the log', MODE, async ($, on) => {
     TAIL.rows = logRows(30)
     try {
       const ui = await open($, on)
@@ -4231,19 +4232,21 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
       const page = (await ui.drawn()) as Node
       expect(((page.children ?? []) as Node[]).map(one => one.props?.key)).toEqual(['strip:top', 'page:log', 'strip:bottom'])
       expect(logIn(await texts(ui))).toEqual(range(1, 33))
-      for (const at of ['top', 'bottom']) {
-        expect(await isShown(ui, `close:${at}`)).toBe(true)
-        expect(await isShown(ui, `c:${at}`)).toBe(true)
-        expect(await isShown(ui, `t:${at}:sessions`)).toBe(true)
-      }
+      expect(await isShown(ui, 'close:top')).toBe(true)
+      expect(await isShown(ui, 'c:top')).toBe(true)
+      expect(await isShown(ui, 't:top:sessions')).toBe(true)
       expect((await texts(ui)).includes('[ LOG ]')).toBe(true)
+      // The bottom row: [-] alone.
+      const bottom = ((page.children ?? []) as Node[]).find(one => one.props?.key === 'strip:bottom') as Node
+      expect(nodesOf(bottom).flatMap(one => (one.type === 'Button' ? [[one.props?.key, one.props?.label]] : []))).toEqual([['c:bottom', '[-]']])
+      expect(textOf(bottom)).toEqual([])
       // [-]: the box again, the log still open.
       await ui.press({ key: 'c:bottom' })
       expect(((await ui.drawn()) as Node).props?.height).toBe(ROOM)
       expect(await isShown(ui, 'x:log')).toBe(true)
       // [x]: the log closed, the three boxes.
       await ui.press({ key: 'x:log' })
-      await ui.press({ key: 'close:bottom' })
+      await ui.press({ key: 'close:top' })
       const closed = (await ui.drawn()) as Node
       expect(closed.props?.height).toBe(ROOM)
       expect(((closed.children ?? []) as Node[]).length).toBe(3)
@@ -4280,5 +4283,195 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
     expect(termTree.props?.height).toBe(ROOM)
     expect(await isShown(term, 'x:queue')).toBe(true)
     expect(await isShown(term, 'strip:top')).toBe(false)
+  })
+
+  // ------------------------------------------------ no line hidden without +N more and [+] (decision smp-16)
+
+  type Fit = { height: number; cells: number; lines: number; more: number; hasExpand: boolean }
+  /** What the fixed box whose title matches draws: its rows under the title, each a one-row cell; the +N more line; [+]. */
+  const fitOf = async (ui: Ui, isTitle: (title: string) => boolean, id: string): Promise<Fit> => {
+    const box = nodesOf((await ui.drawn()) as Node).find(one => one.type === 'Box' && one.props?.borderStyle !== undefined && isTitle(textOf(one)[0] ?? '')) as Node
+    expect(box).toBeDefined()
+    const [head, ...cells] = (box.children ?? []) as Node[]
+    for (const cell of cells) {
+      expect([cell.type, cell.props?.height, cell.props?.overflow, cell.props?.flexShrink, (cell.children ?? []).length]).toEqual(['Box', 1, 'hidden', 0, 1])
+    }
+    const lineTexts = cells.map(cell => textOf(cell)[0] ?? String(nodesOf(cell).find(one => one.type === 'Button')?.props?.label))
+    const moreText = lineTexts.find(text => /^\+\d+ more( above)?$/.test(text))
+    expect(lineTexts.filter(text => /^\+\d+ more( above)?$/.test(text)).length).toBeLessThanOrEqual(1)
+    return {
+      height: Number(box.props?.height),
+      cells: cells.length,
+      lines: cells.length - (moreText === undefined ? 0 : 1),
+      more: moreText === undefined ? 0 : Number(/\d+/.exec(moreText)?.[0]),
+      hasExpand: nodesOf(head as Node).some(one => one.props?.key === `x:${id}`),
+    }
+  }
+  const TALL = 400
+  /** In a room of `rows` and `cols`: nothing drawn past the box, and every line not drawn counted by +N more with [+]. */
+  const expectNoHidden = async (ui: Ui, isTitle: (title: string) => boolean, id: string, rows: number, cols: number) => {
+    await ui.redraw(props(TALL, cols) as never)
+    const all = await fitOf(ui, isTitle, id)
+    expect(all.more).toBe(0)
+    await ui.redraw(props(rows, cols) as never)
+    const fit = await fitOf(ui, isTitle, id)
+    const where = `${id} in ${rows} rows of ${cols} cells, ${all.lines} lines`
+    expect([where, fit.cells <= fit.height - 3]).toEqual([where, true])
+    expect([where, fit.lines + fit.more]).toEqual([where, all.lines])
+    expect([where, fit.hasExpand]).toEqual([where, fit.more > 0])
+    expect([where, fit.more > 0]).toEqual([where, all.lines > fit.height - 3])
+    return fit
+  }
+  const words = (word: string, n: number) => Array.from({ length: n }, (_, i) => `${word}${i + 1}`).join(' ')
+  const isTitleOf = (title: string) => (text: string) => text === title
+  const isLogTitle = (text: string) => text.startsWith('LOG ')
+
+  test('no hidden line: a selected open point with a long detail and recommendation in a small box ends on +N more with [+], every line one row', MODE, async ($, on) => {
+    POINTS.text = JSON.stringify({ points: [{ id: 'a', status: 'open', title: 'First question about a topic that takes more than one line', detail: words('detail', 30), recommendation: words('rec', 30) }, { id: 'd', status: 'open', title: 'Second question', detail: '', recommendation: '' }] })
+    try {
+      const ui = await open($, on, 'desktop', props(19, 40))
+      const unselected = await expectNoHidden(ui, isTitleOf('OPEN POINTS'), 'points', 19, 40)
+      expect(unselected.more).toBe(0)
+      await ui.press({ key: 'p:a:0' })
+      const fit = await expectNoHidden(ui, isTitleOf('OPEN POINTS'), 'points', 19, 40)
+      // A box of 6 rows: 3 under the title, 2 lines and a line for the others.
+      expect([fit.height, fit.lines]).toEqual([6, 2])
+      expect(fit.more).toBeGreaterThan(10)
+      for (const rows of [20, 24, 30, 36, 60]) for (const cols of [20, 40, 72, 120]) await expectNoHidden(ui, isTitleOf('OPEN POINTS'), 'points', rows, cols)
+    } finally {
+      POINTS.text = OPEN_POINTS_TEXT
+    }
+  })
+
+  test('no hidden line: a selected session (its log open) with its cells, a long queue entry, and the sessions header at the narrowest width', MODE, async ($, on) => {
+    QUEUE.text = tasks(3, i => (i === 2 ? `Task ${i} ${words('long', 40)}` : `Task ${i}`))
+    TAIL.rows = logRows(12)
+    try {
+      const ui = await open($, on, 'desktop', props(19, 40))
+      for (const rows of [19, 21, 24, 30, 36]) for (const cols of [20, 40, 72, 120]) {
+        await expectNoHidden(ui, isTitleOf('QUEUED WORK'), 'queue', rows, cols)
+        // At 20 cells the sessions header alone takes more lines than the box has rows under its title.
+        await expectNoHidden(ui, isTitleOf('SESSIONS'), 'sessions', rows, cols)
+      }
+      await ui.redraw(props(19, 40) as never)
+      await ui.press({ key: ALIVE_ROW })
+      for (const rows of [19, 21, 24, 30, 36]) for (const cols of [20, 40, 72, 120]) {
+        await expectNoHidden(ui, isTitleOf('SESSIONS'), 'sessions', rows, cols)
+        await expectNoHidden(ui, isLogTitle, 'log', rows, cols)
+      }
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+      TAIL.rows = undefined
+    }
+  })
+
+  // The sweep: content of 0 to 40 lines, rooms of 19 to 90 rows (boxes of 6 to 30 and more), widths of 20 to 120 cells,
+  // one test for each amount of content. Each width's reference is its lines in a room where all fit.
+  const COUNTS = [0, 1, 2, 3, 5, 8, 13, 21, 30, 40]
+  const ROOMS = [19, 20, 22, 25, 28, 31, 36, 45, 90]
+  const WIDTHS = [20, 40, 72, 120]
+  const sweep = async (ui: Ui, isTitle: (title: string) => boolean, id: string) => {
+    for (const cols of WIDTHS) {
+      await ui.redraw(props(TALL, cols) as never)
+      const all = await fitOf(ui, isTitle, id)
+      expect(all.more).toBe(0)
+      for (const rows of ROOMS) {
+        await ui.redraw(props(rows, cols) as never)
+        const fit = await fitOf(ui, isTitle, id)
+        const where = `${id} in ${rows} rows of ${cols} cells, ${all.lines} lines`
+        expect([where, fit.cells <= fit.height - 3, fit.lines + fit.more, fit.hasExpand, fit.more > 0]).toEqual([where, true, all.lines, fit.more > 0, all.lines > fit.height - 3])
+      }
+    }
+  }
+  for (const n of COUNTS) {
+    test(`no hidden line, swept: ${n} queued tasks, some of several lines`, MODE, async ($, on) => {
+      QUEUE.text = tasks(n, i => `Task ${i}${i % 3 === 0 ? ' ' + words('w', 12) : ''}`)
+      try {
+        await sweep(await open($, on), isTitleOf('QUEUED WORK'), 'queue')
+      } finally {
+        QUEUE.text = QUEUE_TEXT
+      }
+    })
+    test(`no hidden line, swept: open points, one selected with a detail and a recommendation of ${n} words each`, MODE, async ($, on) => {
+      POINTS.text = JSON.stringify({ points: Array.from({ length: Math.max(1, Math.ceil(n / 4)) }, (_, i) => ({ id: `p${i}`, status: 'open', title: `Point ${i + 1}`, detail: words('d', n), recommendation: i === 0 ? words('r', n) : '' })) })
+      try {
+        const ui = await open($, on)
+        await ui.press({ key: 'p:p0:0' })
+        await sweep(ui, isTitleOf('OPEN POINTS'), 'points')
+      } finally {
+        POINTS.text = OPEN_POINTS_TEXT
+      }
+    })
+    test(`no hidden line, swept: a log of ${n} lines beside its selected session`, MODE, async ($, on) => {
+      TAIL.rows = logRows(n)
+      try {
+        const ui = await open($, on)
+        await ui.press({ key: ALIVE_ROW })
+        await sweep(ui, isLogTitle, 'log')
+      } finally {
+        TAIL.rows = undefined
+      }
+    })
+  }
+  test('no hidden line, swept: the sessions with their header lines, unselected and selected', MODE, async ($, on) => {
+    const ui = await open($, on)
+    await sweep(ui, isTitleOf('SESSIONS'), 'sessions')
+    await ui.press({ key: ALIVE_ROW })
+    await sweep(ui, isTitleOf('SESSIONS'), 'sessions')
+  })
+
+  // ------------------------------------------------ the strip: a title that cannot expand is greyed (decision smp-16)
+
+  test('strip: a section whose lines exceed its even box is a pressable title, one whose lines fit is greyed Text; the strip follows a change of the content and of the room', MODE, async ($, on) => {
+    QUEUE.text = tasks(15)
+    try {
+      const ui = await open($, on)
+      await ui.press({ key: 'x:queue' })
+      const titleNodes = async () => nodesOf(((await ui.drawn()) as Node).children?.[0] as Node)
+      const greyed = async () => (await titleNodes()).filter(one => one.type === 'Text' && one.props?.dimColor === true).map(one => textOf(one)[0])
+      // 36 rows: the sessions exceed their box, the open points (two) fit theirs.
+      expect(await isShown(ui, 't:top:sessions')).toBe(true)
+      expect(await isShown(ui, 't:top:points')).toBe(false)
+      expect(await greyed()).toEqual(['OPEN POINTS'])
+      // Pressing the greyed title does nothing: there is no Button to press.
+      await expect(ui.press({ key: 't:top:points' })).rejects.toThrow()
+      // The open points grow past their box: their title turns pressable at the next drawing.
+      POINTS.text = JSON.stringify({ points: Array.from({ length: 30 }, (_, i) => ({ id: `n${i}`, status: 'open', title: `Point ${i + 1}`, detail: '', recommendation: '' })) })
+      await last.w?.clock.advance(5000)
+      await ui.redraw(props() as never)
+      expect(await isShown(ui, 't:top:points')).toBe(true)
+      expect(await greyed()).toEqual([])
+      // A room where everything fits: both other titles greyed.
+      await ui.redraw(props(TALL) as never)
+      expect(await isShown(ui, 't:top:sessions')).toBe(false)
+      expect(await isShown(ui, 't:top:points')).toBe(false)
+      expect(await greyed()).toEqual(['SESSIONS', 'OPEN POINTS'])
+      // And the queue, shown, stays marked.
+      expect((await titleNodes()).some(one => one.type === 'Text' && textOf(one)[0] === '[ QUEUED WORK ]')).toBe(true)
+      // Back to 36 rows, then a press on a pressable title switches.
+      await ui.redraw(props() as never)
+      await ui.press({ key: 't:top:points' })
+      expect((((await ui.drawn()) as Node).children as Node[]).map(one => one.props?.key)).toEqual(['strip:top', 'page:points'])
+      expect(await isShown(ui, 't:top:queue')).toBe(true)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+      POINTS.text = OPEN_POINTS_TEXT
+    }
+  })
+
+  test('strip of a log page: the other titles follow the same rule', MODE, async ($, on) => {
+    TAIL.rows = logRows(30)
+    try {
+      const ui = await open($, on)
+      await ui.press({ key: ALIVE_ROW })
+      await ui.press({ key: 'x:log' })
+      expect(await isShown(ui, 't:top:sessions')).toBe(true)
+      expect(await isShown(ui, 't:top:queue')).toBe(false)
+      expect(await isShown(ui, 't:top:points')).toBe(false)
+      const strip = (((await ui.drawn()) as Node).children as Node[])[0] as Node
+      expect(nodesOf(strip).filter(one => one.type === 'Text' && one.props?.dimColor === true).map(one => textOf(one)[0])).toEqual(['QUEUED WORK', 'OPEN POINTS'])
+    } finally {
+      TAIL.rows = undefined
+    }
   })
 })

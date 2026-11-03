@@ -45,6 +45,8 @@ import {
   textCells,
   wrapCells,
   sectionWindow,
+  sectionFit,
+  SECTION_BOX_CHROME,
   sectionsScrollTo,
   sectionsLineRoom,
   sectionsSplitter,
@@ -877,6 +879,30 @@ describe('the desktop pane scroll strategy (option desktopPaneScroll, decision s
     expect(sectionWindow(10, 9)).toEqual({ shown: 8, more: 2 })
     expect(sectionWindow(18, 9)).toEqual({ shown: 8, more: 10 })
     expect(sectionWindow(5, 1)).toEqual({ shown: 0, more: 5 })
+  })
+  test('sections, swept: a fixed box of 4 to 30 rows with 0 to 3 header lines and 0 to 40 lines draws no line past its rows, and a line it leaves out always comes with a +N more line (N exact) and [+]', () => {
+    expect(SECTION_BOX_CHROME).toBe(3)
+    // Header lines that take the whole box are left out and counted like any other line.
+    expect(sectionFit(7, 5, 3)).toEqual({ fixedShown: 3, bodyShown: 0, more: 5 })
+    expect(sectionFit(7, 2, 2)).toEqual({ fixedShown: 2, bodyShown: 2, more: 0 })
+    expect(sectionFit(6, 0, 4)).toEqual({ fixedShown: 0, bodyShown: 2, more: 2 })
+    for (let height = 4; height <= 30; height++) {
+      const rows = height - 3
+      for (let fixed = 0; fixed <= 3; fixed++) {
+        for (let body = 0; body <= 40; body++) {
+          const fit = sectionFit(height, fixed, body)
+          const total = fixed + body
+          const drawn = fit.fixedShown + fit.bodyShown + (fit.more > 0 ? 1 : 0)
+          const where = `${height} rows, ${fixed} + ${body} lines`
+          expect([where, drawn <= rows]).toEqual([where, true])
+          expect([where, fit.fixedShown + fit.bodyShown + fit.more]).toEqual([where, total])
+          expect([where, fit.fixedShown <= fixed && fit.bodyShown <= body && fit.fixedShown >= Math.min(fixed, fit.fixedShown + fit.bodyShown)]).toEqual([where, true])
+          // Everything fits: neither indicator; otherwise the box is full, its last row the +N more line.
+          expect([where, fit.more > 0]).toEqual([where, total > rows])
+          if (fit.more > 0) expect([where, drawn]).toEqual([where, rows])
+        }
+      }
+    }
   })
   test('sections: a line may fill 93 % of the row (bodyColumns less 6 cells), counted by anthropic-sans advance widths in cells of its 0', () => {
     expect(SECTIONS_ROW_RESERVE).toBe(6)

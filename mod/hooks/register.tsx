@@ -139,7 +139,8 @@ import {
   PAGE_LOG_CAP,
   SECTION_ORDER,
   SECTIONS_LOG_CAP,
-  sectionWindow,
+  sectionFit,
+  SECTION_BOX_CHROME,
   sectionsScrollTo,
   sectionsSplitter,
   sliderMove,
@@ -3616,61 +3617,92 @@ export const register: Register = (on, options) => {
       )
     }
     const pagePanel = (sections: ReturnType<typeof pageBlock>[]) => <Box flexDirection="column">{sections}</Box>
-    // A fixed box of the sections view: its rows as the lines they take (sectionsSplitter), as many as its rows hold; a box
-    // with more ends on a `+N more` line (the log, which shows its newest lines, starts on `+N more above`) and only then
-    // has `[+]` in its title row. No scroll bar: the rows take the box's whole width.
+    // A section's rows as the lines a fixed box of the sections view draws them (sectionsSplitter): its header lines
+    // (`fixed`) and its other lines (`body`).
+    const sectionLines = (id: SectionId, fixedIn: PRow[], bodyIn: PRow[]) => {
+      const split = sectionsSplitter(columns)
+      return { fixed: fixedIn.flatMap(r => desktopLines(r, split, id)), body: bodyIn.flatMap(r => desktopLines(r, split, id)) }
+    }
+    // One row of a fixed box: a Box one row tall that clips what it holds, so a line takes exactly the row it is counted
+    // for whatever height Desktop gives its element (a plain Button sets its own font and line height, a Text inherits
+    // the box's).
+    const oneRow = (key: string, el: ReturnType<typeof deskRowEl>) => (
+      <Box key={key} height={1} flexShrink={0} overflow="hidden" alignItems="center">
+        {el}
+      </Box>
+    )
+    // A fixed box of the sections view: its lines (sectionLines), each in a row of its own (oneRow), as many as its rows
+    // hold (sectionFit, header lines first); a box with more ends on a `+N more` line (the log, which shows its newest
+    // lines, starts on `+N more above`) and only then has `[+]` in its title row. No scroll bar: the rows take the box's
+    // whole width.
     const sectionBox = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[], onExpand: () => unknown, isTail = false) => {
       const box = boxes.find(one => one.id === id) as SectionBox
-      const split = sectionsSplitter(columns)
-      const fixed = fixedIn.flatMap(r => desktopLines(r, split, id))
-      const body = bodyIn.flatMap(r => desktopLines(r, split, id))
-      const visible = Math.max(1, box.height - 3 - fixed.length)
-      const win = sectionWindow(body.length, visible)
-      const from = isTail ? body.length - win.shown : 0
-      layout.totals[id] = { total: body.length, visible, from }
-      const more: PRow[] = win.more === 0 ? [] : [{ text: `+${win.more} more${isTail ? ' above' : ''}`, dim: true, wrap: 'truncate-end' }]
-      const lines = body.slice(from, from + win.shown)
+      const { fixed, body } = sectionLines(id, fixedIn, bodyIn)
+      const fit = sectionFit(box.height, fixed.length, body.length)
+      const from = isTail ? body.length - fit.bodyShown : 0
+      layout.totals[id] = { total: fixed.length + body.length, visible: Math.max(0, box.height - SECTION_BOX_CHROME), from }
+      const more: PRow[] = fit.more === 0 ? [] : [{ text: `+${fit.more} more${isTail ? ' above' : ''}`, dim: true, wrap: 'truncate-end' }]
+      const lines = body.slice(from, from + fit.bodyShown)
       const shown = isTail ? [...more, ...lines] : [...lines, ...more]
       if (id === 'sessions') drawnSessions = { rows: [...new Set(lines.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       return (
         <Box key={`sec:${id}`} flexDirection="column" height={box.height} overflow="hidden" borderStyle="round" borderDimColor>
-          <Box flexDirection="row">
+          <Box flexDirection="row" height={1} flexShrink={0} overflow="hidden" alignItems="center">
             <Box flexGrow={1}>
               <Text bold wrap="truncate-end">
                 {title}
               </Text>
             </Box>
-            {win.more > 0 && <Button key={`x:${id}`} label="[+]" plain dimColor onPress={onExpand} />}
+            {fit.more > 0 && <Button key={`x:${id}`} label="[+]" plain dimColor onPress={onExpand} />}
           </Box>
-          {fixed.map(r => deskRowEl(r))}
-          {shown.map((r, i) => deskRowEl(r, r.press === undefined ? undefined : (r.group ?? `${id}:${from + i}`)))}
+          {fixed.slice(0, fit.fixedShown).map((r, i) => oneRow(`row:${id}:h${i}`, deskRowEl(r)))}
+          {shown.map((r, i) => oneRow(`row:${id}:${i}`, deskRowEl(r, r.press === undefined ? undefined : (r.group ?? `${id}:${from + i}`))))}
         </Box>
       )
     }
-    // The strip over and under a page of the sections view: the three section titles on the left (the one shown marked,
-    // the others Buttons that show theirs), on the right `[x]` closing an open log and `[-]` back to the boxes.
+    // Whether a section's lines exceed its box in the even view (the three boxes, whichever section is shown now): the
+    // room and width of this drawing, the section's lines as sectionBox draws them, its list uncapped.
+    const evenBoxes = sectionBoxes(bodyRows, false, null)
+    const overflowsEven = (id: ExpandableId) => {
+      const box = evenBoxes.find(one => one.id === id) as SectionBox
+      const uncapped = <T,>(items: readonly T[]) => ({ shown: [...items], more: 0 })
+      const [fixedIn, bodyIn] =
+        id === 'sessions' ? [[...warningRow, ...headerRows], sessionRowsOf(uncapped(snap.rows))] : id === 'queue' ? [[], queueRowsOf(uncapped(queue ?? []))] : [[], pointRowsOf(uncapped(list ?? []))]
+      const { fixed, body } = sectionLines(id, fixedIn, bodyIn)
+      return sectionFit(box.height, fixed.length, body.length).more > 0
+    }
+    // The strip over a page of the sections view: the three section titles on the left (the one shown marked; another
+    // whose lines exceed its box in the even view a Button that shows it, one whose lines fit greyed and not pressable),
+    // on the right `[x]` closing an open log and `[-]` back to the boxes. A log page also ends on a row with `[-]` alone.
     const stripTitles: Record<ExpandableId, string> = { sessions: 'SESSIONS', queue: 'QUEUED WORK', points: 'OPEN POINTS' }
-    const strip = (at: 'top' | 'bottom', current: ExpandableId | 'log') => (
-      <Box key={`strip:${at}`} flexDirection="row" paddingX={1}>
+    const strip = (current: ExpandableId | 'log') => (
+      <Box key="strip:top" flexDirection="row" paddingX={1}>
         <Box flexDirection="row" flexGrow={1} flexWrap="wrap" columnGap={1}>
           {SECTION_ORDER.map(id =>
             id === current ? (
               <Text bold>{`[ ${stripTitles[id]} ]`}</Text>
+            ) : overflowsEven(id) ? (
+              <Button key={`t:top:${id}`} label={stripTitles[id]} plain onPress={showSection(id)} />
             ) : (
-              <Button key={`t:${at}:${id}`} label={stripTitles[id]} plain dimColor onPress={showSection(id)} />
+              <Text dimColor>{stripTitles[id]}</Text>
             ),
           )}
           {current === 'log' && <Text bold>[ LOG ]</Text>}
         </Box>
-        {current === 'log' && <Button key={`close:${at}`} label="[x]" plain dimColor onPress={closeOpenLog} />}
-        <Button key={`c:${at}`} label="[-]" plain dimColor onPress={collapse} />
+        {current === 'log' && <Button key="close:top" label="[x]" plain dimColor onPress={closeOpenLog} />}
+        <Button key="c:top" label="[-]" plain dimColor onPress={collapse} />
       </Box>
     )
     const sectionsPage = (current: ExpandableId | 'log', inner: ReturnType<typeof pageBlock>) => (
       <Box flexDirection="column">
-        {strip('top', current)}
+        {strip(current)}
         {inner}
-        {strip('bottom', current)}
+        {current === 'log' && (
+          <Box key="strip:bottom" flexDirection="row" paddingX={1}>
+            <Box flexGrow={1} />
+            <Button key="c:bottom" label="[-]" plain dimColor onPress={collapse} />
+          </Box>
+        )}
       </Box>
     )
     const block = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[], offset: number, isTail = false, isPlain = false) => {
@@ -3733,8 +3765,9 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    const sessionsShown = capped(snap.rows, 'first')
-    const sessionRows: PRow[] = snap.rows.length === 0 ? [{ text: 'No workers in the registry.', dim: true }] : [...sessionsShown.shown.flatMap((row, rowIndex) => {
+    // The rows of each list from the part of it a view draws (capped, or every item for the even view's overflow test).
+    type Shown<T> = { shown: T[]; more: number }
+    const sessionRowsOf = (sessionsShown: Shown<(typeof snap.rows)[number]>): PRow[] => snap.rows.length === 0 ? [{ text: 'No workers in the registry.', dim: true }] : [...sessionsShown.shown.flatMap((row, rowIndex) => {
       const sid = row.sid
       const isSelected = sid !== undefined && sid === sel
       const color = row.status === 'dead' || row.status === 'orphan' ? ('warning' as const) : undefined
@@ -3748,6 +3781,7 @@ export const register: Register = (on, options) => {
       if (sid === undefined) return [{ text, dim: row.status === 'done', color, rowIndex }]
       return [{ text, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done', rowIndex }]
     }), ...moreRow(sessionsShown.more)]
+    const sessionRows = sessionRowsOf(capped(snap.rows, 'first'))
     const pick = (id: 'sessions' | 'queue' | 'points') => async () => {
       await update($, tab, () => id)
       await update($, selected, () => null)
@@ -3789,36 +3823,7 @@ export const register: Register = (on, options) => {
     const headerRows: PRow[] = isDesktop ? DESKTOP_HEADER.map(text => ({ text, dim: true })) : [{ text: '  ' + formatHeader(width - 2, widths), dim: true }]
     const sessionsBlock = (isPlain = false) => block('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, offs.sessions, false, isPlain)
     const sessionsPage = () => pageBlock('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows)
-    if (isLogOpen && view !== null) {
-      // The desktop ends each log line at its own width: one row per line, so the newest lines stay in the box.
-      const logShown = capped(view.lines, 'latest')
-      const logRows: PRow[] = [...moreRow(logShown.more, 'more above'), ...logShown.shown.flatMap(line => {
-        const dim = line.startsWith('  <') || line.startsWith('>')
-        if (isDesktop) return [{ text: line, dim, wrap: 'truncate-end' as const }]
-        const wrapped = wrapLogLine(line, width).slice(0, 2)
-        return wrapped.map(text => ({ text, dim }))
-      })]
-      if (logRows.length === 0) logRows.push({ text: 'Waiting for output.', dim: true })
-      if (isPage) return pagePanel([sessionsPage(), pageBlock('log', `LOG ${view.title}`, [], logRows)])
-      if (isSections) {
-        if (isSectionsPage) return sectionsPage('log', pageBlock('log', `LOG ${view.title}`, [], logRows))
-        return framed(
-          <Box flexDirection="column" height={bodyRows} overflow="hidden">
-            {sectionBox('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, showSection('sessions'))}
-            {sectionBox('log', `LOG ${view.title}`, [], logRows, showLogPage, true)}
-          </Box>,
-        )
-      }
-      if (isCompact) return framed(compactView(block('log', `LOG ${view.title}`, [], logRows, 0, true, true)))
-      return framed(
-        <Box flexDirection="column" height={bodyRows} overflow="hidden">
-          {sessionsBlock()}
-          {block('log', `LOG ${view.title}`, [], logRows, 0, true)}
-        </Box>,
-      )
-    }
-    const queueShown = capped(queue ?? [], 'first')
-    const queueRows: PRow[] =
+    const queueRowsOf = (queueShown: Shown<NonNullable<typeof queue>[number]>): PRow[] =>
       queue === null
         ? [{ text: 'task queue unreadable.', dim: true }]
         : queue.length === 0
@@ -3828,8 +3833,7 @@ export const register: Register = (on, options) => {
             : queue.flatMap(task =>
                 wrapText(task.title, width - 2).map((text, i) => ({ text: (i === 0 ? '\u2022 ' : '  ') + text })),
               )
-    const pointsShown = capped(list ?? [], 'first')
-    const pointRows: PRow[] =
+    const pointRowsOf = (pointsShown: Shown<NonNullable<typeof list>[number]>): PRow[] =>
       list === null
         ? [{ text: 'open points unreadable.', dim: true }]
         : list.length === 0
@@ -3861,6 +3865,36 @@ export const register: Register = (on, options) => {
               body.forEach(text => lines.push({ text: '    ' + text, dim: true }))
               return lines
             }), ...moreRow(pointsShown.more)]
+    const queueRows = queueRowsOf(capped(queue ?? [], 'first'))
+    const pointRows = pointRowsOf(capped(list ?? [], 'first'))
+    if (isLogOpen && view !== null) {
+      // The desktop ends each log line at its own width: one row per line, so the newest lines stay in the box.
+      const logShown = capped(view.lines, 'latest')
+      const logRows: PRow[] = [...moreRow(logShown.more, 'more above'), ...logShown.shown.flatMap(line => {
+        const dim = line.startsWith('  <') || line.startsWith('>')
+        if (isDesktop) return [{ text: line, dim, wrap: 'truncate-end' as const }]
+        const wrapped = wrapLogLine(line, width).slice(0, 2)
+        return wrapped.map(text => ({ text, dim }))
+      })]
+      if (logRows.length === 0) logRows.push({ text: 'Waiting for output.', dim: true })
+      if (isPage) return pagePanel([sessionsPage(), pageBlock('log', `LOG ${view.title}`, [], logRows)])
+      if (isSections) {
+        if (isSectionsPage) return sectionsPage('log', pageBlock('log', `LOG ${view.title}`, [], logRows))
+        return framed(
+          <Box flexDirection="column" height={bodyRows} overflow="hidden">
+            {sectionBox('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, showSection('sessions'))}
+            {sectionBox('log', `LOG ${view.title}`, [], logRows, showLogPage, true)}
+          </Box>,
+        )
+      }
+      if (isCompact) return framed(compactView(block('log', `LOG ${view.title}`, [], logRows, 0, true, true)))
+      return framed(
+        <Box flexDirection="column" height={bodyRows} overflow="hidden">
+          {sessionsBlock()}
+          {block('log', `LOG ${view.title}`, [], logRows, 0, true)}
+        </Box>,
+      )
+    }
     if (isPage) return pagePanel([sessionsPage(), pageBlock('queue', 'QUEUED WORK', [], queueRows), pageBlock('points', 'OPEN POINTS', [], pointRows)])
     if (isSections) {
       if (sectionsShown === 'sessions') return sectionsPage('sessions', sessionsPage())
