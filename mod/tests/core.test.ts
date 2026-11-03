@@ -50,6 +50,15 @@ import {
   desktopPreview,
   desktopStyle,
   PANEL_ICON_PX,
+  PANEL_ICON_PRESS_LABEL,
+  PANEL_MARK_PX,
+  PANEL_MARK_ARM_PX,
+  PANEL_MARK_THICK_PX,
+  PANEL_CROSS_REACH_PX,
+  PANEL_CROSS_THICK_PX,
+  PANEL_FRAME_THICK_PX,
+  DESKTOP_STYLE_DEFAULT,
+  DESKTOP_BUTTONS_DEFAULT,
   PANEL_LOOKS,
   panelIconSvg,
   previewState,
@@ -2153,15 +2162,17 @@ describe('desktopLineChars and desktopLines', () => {
   })
 })
 
-describe('the desktop panel look and preview options (decisions smp-18 to smp-21)', () => {
+describe('the desktop panel look and preview options (decisions smp-18 to smp-23)', () => {
   test('desktopStyle, desktopIcons and desktopPreview: their values; an unknown value, another type or none counts as the default', () => {
-    expect([...DESKTOP_STYLES]).toEqual(['plain', 'tint-soft', 'tint-strips', 'tint-mono'])
+    expect([...DESKTOP_STYLES]).toEqual(['tint-soft', 'plain'])
+    expect(DESKTOP_STYLE_DEFAULT).toBe('tint-soft')
     expect([...DESKTOP_ICONS]).toEqual(['text', 'svg'])
     expect([...DESKTOP_PREVIEWS]).toEqual(['off', 'overview', 'queue', 'points', 'log', 'empty'])
     for (const value of DESKTOP_STYLES) expect(desktopStyle(value)).toBe(value)
     for (const value of DESKTOP_ICONS) expect(desktopIcons(value)).toBe(value)
     for (const value of DESKTOP_PREVIEWS) expect(desktopPreview(value)).toBe(value)
-    for (const other of [undefined, '', 'Plain', 'tint', 'tint-soft ', 1, true, ['tint-soft']]) expect(desktopStyle(other)).toBe('plain')
+    // The values the user dropped (decision smp-23) count as the default too.
+    for (const other of [undefined, '', 'Plain', 'tint', 'tint-soft ', 'tint-strips', 'tint-mono', 1, true, ['plain']]) expect(desktopStyle(other)).toBe('tint-soft')
     for (const other of [undefined, '', 'SVG', 'icons', 1, false]) expect(desktopIcons(other)).toBe('text')
     for (const other of [undefined, '', 'on', 'Overview', 'queue ', 0, null]) expect(desktopPreview(other)).toBe('off')
   })
@@ -2190,94 +2201,139 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-21
   const PAGE = '#262624'
   const TEXT = '#FAF9F5'
   const SECONDARY = '#9C9A92'
-  test('every palette keeps Desktop dark text at 4.5:1 or more on each background it draws: the body (secondary text too), the title row, the shown title in the strip; icons at 4.5:1 on their row', () => {
+  test('every palette keeps Desktop dark text at 4.5:1 or more on each background it draws: the body (secondary text too), the shown title in the strip; icons at 4.5:1 on their row', () => {
+    expect(Object.keys(PANEL_LOOKS).sort()).toEqual(['plain', 'tint-soft'])
     for (const [style, look] of Object.entries(PANEL_LOOKS)) {
       for (const [id, section] of Object.entries(look.sections)) {
         const body = section.body ?? PAGE
-        const title = section.title ?? body
         const where = `${style} ${id}`
         expect([where, contrast(TEXT, body) >= 4.5]).toEqual([where, true])
         expect([where, contrast(SECONDARY, body) >= 4.5]).toEqual([where, true])
-        expect([where, contrast(TEXT, title) >= 4.5]).toEqual([where, true])
         if (section.current !== undefined) expect([where, contrast(TEXT, section.current) >= 4.5]).toEqual([where, true])
-        expect([where, contrast(section.icon, title) >= 4.5]).toEqual([where, true])
-        for (const colour of [section.body, section.title, section.accent, section.border, section.current, section.icon, section.iconHover]) if (colour !== undefined) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
+        expect([where, contrast(section.icon, body) >= 4.5]).toEqual([where, true])
+        // The drawn icon under the pointer (desktopButtons plain): its stroke on its hover fill.
+        expect([where, 'icon hover', contrast(section.icon, section.iconHover) >= 4.5]).toEqual([where, 'icon hover', true])
+        for (const colour of [section.body, section.accent, section.border, section.current, section.icon, section.iconHover]) if (colour !== undefined) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
       }
     }
-    // plain adds no colour of its own; each tinted look gives every section a colour of its own.
-    for (const section of Object.values(PANEL_LOOKS.plain.sections)) expect([section.body, section.title, section.accent, section.border, section.current]).toEqual([undefined, undefined, undefined, undefined, undefined])
-    for (const style of ['tint-soft', 'tint-strips', 'tint-mono'] as const) {
-      const sections = Object.values(PANEL_LOOKS[style].sections)
-      expect(new Set(sections.map(one => `${one.body}|${one.title}|${one.accent}`)).size).toBe(4)
-      expect(new Set(sections.map(one => one.current)).size).toBe(4)
-    }
+    // plain adds no colour of its own; tint-soft gives every section a colour of its own.
+    for (const section of Object.values(PANEL_LOOKS.plain.sections)) expect([section.body, section.accent, section.border, section.current]).toEqual([undefined, undefined, undefined, undefined])
+    const sections = Object.values(PANEL_LOOKS['tint-soft'].sections)
+    expect(new Set(sections.map(one => `${one.body}|${one.accent}`)).size).toBe(4)
+    expect(new Set(sections.map(one => one.current)).size).toBe(4)
   })
 
-  test('desktopButtons: its values; an unknown value, another type or none counts as plain', () => {
-    expect([...DESKTOP_BUTTONS]).toEqual(['plain', 'outline', 'filled', 'tabs'])
+  test('desktopButtons: its values; an unknown value, another type or none counts as outline', () => {
+    expect([...DESKTOP_BUTTONS]).toEqual(['outline', 'plain'])
+    expect(DESKTOP_BUTTONS_DEFAULT).toBe('outline')
     for (const value of DESKTOP_BUTTONS) expect(desktopButtons(value)).toBe(value)
-    for (const other of [undefined, '', 'Plain', 'outlined', 'tab', 1, true, ['tabs']]) expect(desktopButtons(other)).toBe('plain')
+    // The values the user dropped (decision smp-23) count as the default too.
+    for (const other of [undefined, '', 'Plain', 'outlined', 'tab', 'filled', 'tabs', 1, true, ['plain']]) expect(desktopButtons(other)).toBe('outline')
   })
 
-  test('the button looks keep Desktop text at 4.5:1 or more on every background a label or a drawn icon sits on, at rest and under the pointer', () => {
-    const LOOKS = ['outline', 'filled', 'tabs'] as const
+  test('the outline look keeps Desktop text at 4.5:1 or more on every background a label or a drawn icon sits on, at rest and under the pointer', () => {
     const SECTIONS = ['sessions', 'queue', 'points', 'log'] as const
     for (const hue of Object.values(BUTTON_HUES)) for (const colour of Object.values(hue)) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
     expect(DESKTOP_TEXT).toBe(TEXT)
-    for (const buttons of LOOKS) {
-      for (const style of DESKTOP_STYLES) {
-        for (const id of SECTIONS) {
-          const where = `${buttons} ${style} ${id}`
-          const look = buttonLook(buttons, style, id)
-          const section = PANEL_LOOKS[style].sections[id]
-          // Where a chip sits: the pane (the strip), or for an icon also its box's title row or body.
-          const rows = [PAGE, section.title ?? section.body ?? PAGE]
-          const ok = (fg: string, bg: string, what: string) => expect([where, what, contrast(fg, bg) >= 4.5]).toEqual([where, what, true])
-          // A pressable title: its label at rest (dim under tabs) and at full strength under the pointer.
-          ok(look.title.isDim === true ? SECONDARY : TEXT, look.title.backgroundColor ?? PAGE, 'title at rest')
-          if (look.title.hover !== undefined) ok(TEXT, look.title.hover.backgroundColor, 'title under the pointer')
-          // The shown title, bold on its colours; a greyed title, dim on the pane.
-          ok(TEXT, look.current.backgroundColor ?? PAGE, 'shown title')
-          expect(look.greyed.backgroundColor).toBeUndefined()
-          expect(look.greyed.hover).toBeUndefined()
-          ok(SECONDARY, PAGE, 'greyed title')
-          // An icon: its glyph (Desktop's text) and its drawn stroke on its box, at rest and under the pointer.
-          for (const bg of look.icon.backgroundColor === undefined ? rows : [look.icon.backgroundColor]) {
-            ok(TEXT, bg, 'icon glyph at rest')
-            ok(look.ink, bg, 'icon stroke at rest')
-          }
-          ok(TEXT, look.icon.hover?.backgroundColor ?? '', 'icon glyph under the pointer')
-          ok(look.ink, look.icon.hover?.backgroundColor ?? '', 'icon stroke under the pointer')
-          for (const one of [look.title, look.current, look.icon]) for (const colour of [one.backgroundColor, one.borderColor, one.hover?.backgroundColor, one.hover?.borderColor]) if (colour !== undefined) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
+    for (const style of DESKTOP_STYLES) {
+      for (const id of SECTIONS) {
+        const where = `outline ${style} ${id}`
+        const look = buttonLook(style, id)
+        const section = PANEL_LOOKS[style].sections[id]
+        // Where a chip sits: the pane (the strip), or for an icon also its box's body.
+        const rows = [PAGE, section.body ?? PAGE]
+        const ok = (fg: string, bg: string, what: string) => expect([where, what, contrast(fg, bg) >= 4.5]).toEqual([where, what, true])
+        // A pressable title: its label at rest and under the pointer.
+        ok(TEXT, look.title.backgroundColor ?? PAGE, 'title at rest')
+        if (look.title.hover !== undefined) ok(TEXT, look.title.hover.backgroundColor, 'title under the pointer')
+        // The shown title, bold on its colours; a greyed title, dim on the pane.
+        ok(TEXT, look.current.backgroundColor ?? PAGE, 'shown title')
+        expect(look.greyed.backgroundColor).toBeUndefined()
+        expect(look.greyed.hover).toBeUndefined()
+        ok(SECONDARY, PAGE, 'greyed title')
+        // An icon: its glyph (Desktop's text) and its drawn stroke on its box, at rest and under the pointer.
+        for (const bg of look.icon.backgroundColor === undefined ? rows : [look.icon.backgroundColor]) {
+          ok(TEXT, bg, 'icon glyph at rest')
+          ok(look.ink, bg, 'icon stroke at rest')
         }
+        ok(TEXT, look.icon.hover?.backgroundColor ?? '', 'icon glyph under the pointer')
+        ok(look.ink, look.icon.hover?.backgroundColor ?? '', 'icon stroke under the pointer')
+        for (const one of [look.title, look.current, look.icon]) for (const colour of [one.backgroundColor, one.borderColor, one.hover?.backgroundColor]) if (colour !== undefined) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
       }
     }
-    // Each section's hue under a tinted look; plain grey, tint-mono blue; the three looks distinct for every section.
+    // Each section's hue under tint-soft; grey under plain; the shown title filled, the others and the icons outlined.
     expect(BUTTON_HUE_OF['tint-soft']).toEqual({ sessions: 'blue', queue: 'violet', points: 'sand', log: 'grey' })
+    expect(BUTTON_HUE_OF.plain).toEqual({ sessions: 'grey', queue: 'grey', points: 'grey', log: 'grey' })
     for (const id of SECTIONS) {
-      expect(new Set(LOOKS.map(buttons => JSON.stringify(buttonLook(buttons, 'tint-soft', id)))).size).toBe(3)
-      expect(buttonLook('tabs', 'tint-soft', id).current.backgroundColor).toBe(PANEL_LOOKS['tint-soft'].sections[id].body)
-      expect(buttonLook('tabs', 'tint-soft', id).current.borderColor).toBe(PANEL_LOOKS['tint-soft'].sections[id].border)
-      expect(buttonLook('filled', 'tint-soft', id).current.underline).toBe(true)
+      const look = buttonLook('tint-soft', id)
+      const hue = BUTTON_HUES[BUTTON_HUE_OF['tint-soft'][id]]
+      expect(look).toEqual({
+        title: { borderColor: hue.edge, hover: { backgroundColor: hue.soft } },
+        current: { backgroundColor: hue.soft, borderColor: hue.edge },
+        greyed: { borderDimColor: true },
+        icon: { borderColor: hue.edge, hover: { backgroundColor: hue.soft } },
+        ink: hue.ink,
+      })
     }
     expect(Object.values(PANEL_ICON_GLYPH)).toEqual(['+', '\u2212', '\u00D7'])
   })
 
-  test('the icons: SVG markup in the colour given, one size, a plus, a minus and a cross', () => {
-    for (const icon of ['plus', 'minus', 'close'] as const) {
-      const svg = panelIconSvg(icon, '#ABCDEF')
-      expect(svg).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 16 16" width="14" height="14">.*<\/svg>$/)
-      expect(svg).toContain('stroke="#ABCDEF"')
-      expect(svg).not.toMatch(/<script|on[a-z]+=/i)
+  /** The rectangles and paths of an icon's markup, with their numeric attributes. */
+  const shapesOf = (svg: string) =>
+    [...svg.matchAll(/<(rect|path) ([^>]*)\/>/g)].map(([, tag, attrs]) => ({ tag, attrs: Object.fromEntries([...(attrs as string).matchAll(/([a-z-]+)="([^"]*)"/g)].map(([, k, v]) => [k, v])) as Record<string, string> }))
+  test('the icons: SVG markup in the colour given, a viewBox of their own pixel size, a plus, a minus and a cross (decision smp-23)', () => {
+    for (const isFramed of [true, false]) {
+      const size = isFramed ? PANEL_ICON_PX : PANEL_MARK_PX
+      for (const icon of ['plus', 'minus', 'close'] as const) {
+        const svg = panelIconSvg(icon, '#ABCDEF', isFramed)
+        expect(svg).toMatch(new RegExp(`^<svg xmlns="http://www\\.w3\\.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">.*</svg>$`))
+        expect(svg).toContain('"#ABCDEF"')
+        expect(svg).not.toMatch(/<script|on[a-z]+=/i)
+      }
+      expect(new Set(['plus', 'minus', 'close'].map(icon => panelIconSvg(icon as 'plus', '#000000', isFramed))).size).toBe(3)
     }
-    expect(PANEL_ICON_PX).toBe(14)
-    expect(new Set(['plus', 'minus', 'close'].map(icon => panelIconSvg(icon as 'plus', '#000000'))).size).toBe(3)
-    // Unframed (a desktopButtons look draws the frame as the icon's box): the mark alone, still one size.
-    for (const icon of ['plus', 'minus', 'close'] as const) {
-      expect(panelIconSvg(icon, '#ABCDEF', false)).not.toContain('<rect')
-      expect(panelIconSvg(icon, '#ABCDEF', false)).toContain('width="14" height="14"')
+    expect([PANEL_ICON_PX, PANEL_MARK_PX]).toEqual([14, 12])
+    // The cross has no frame either way; the outline look's marks have none (the box is their frame).
+    for (const isFramed of [true, false]) expect(panelIconSvg('close', '#ABCDEF', isFramed)).not.toContain('<rect')
+    for (const icon of ['plus', 'minus'] as const) expect(shapesOf(panelIconSvg(icon, '#ABCDEF', false)).filter(one => one.attrs.fill === 'none')).toEqual([])
+  })
+
+  test('the icon marks: bars at least 2 px thick on whole pixels, centred in the icon, crisp; the cross centred and 2 px or more; the frame on the outer pixels', () => {
+    expect(PANEL_MARK_THICK_PX).toBeGreaterThanOrEqual(2)
+    expect(PANEL_CROSS_THICK_PX).toBeGreaterThanOrEqual(2)
+    for (const isFramed of [true, false]) {
+      const size = isFramed ? PANEL_ICON_PX : PANEL_MARK_PX
+      // Whole pixels at the exact centre: the free space on each side of a bar is a whole number.
+      expect([(size - PANEL_MARK_ARM_PX) % 2, (size - PANEL_MARK_THICK_PX) % 2]).toEqual([0, 0])
+      for (const icon of ['plus', 'minus'] as const) {
+        const bars = shapesOf(panelIconSvg(icon, '#ABCDEF', isFramed)).filter(one => one.tag === 'rect' && one.attrs.fill === '#ABCDEF')
+        expect(bars.length).toBe(icon === 'plus' ? 2 : 1)
+        for (const bar of bars) {
+          const [x, y, w, h] = ['x', 'y', 'width', 'height'].map(k => Number(bar.attrs[k]))
+          for (const n of [x, y, w, h] as number[]) expect(Number.isInteger(n)).toBe(true)
+          expect([Math.min(w as number, h as number), Math.max(w as number, h as number)]).toEqual([PANEL_MARK_THICK_PX, PANEL_MARK_ARM_PX])
+          expect([(x as number) + (w as number) / 2, (y as number) + (h as number) / 2]).toEqual([size / 2, size / 2])
+          expect(bar.attrs['shape-rendering']).toBe('crispEdges')
+        }
+        if (icon === 'plus') expect(bars.map(bar => `${bar.attrs.width}x${bar.attrs.height}`).sort()).toEqual([`${PANEL_MARK_ARM_PX}x${PANEL_MARK_THICK_PX}`, `${PANEL_MARK_THICK_PX}x${PANEL_MARK_ARM_PX}`].sort())
+        // The frame, framed only: a 1 px stroke on the icon's outer pixels (its centre half a pixel in).
+        const frames = shapesOf(panelIconSvg(icon, '#ABCDEF', isFramed)).filter(one => one.tag === 'rect' && one.attrs.fill === 'none')
+        if (isFramed) expect(frames.map(one => [one.attrs.x, one.attrs.y, one.attrs.width, one.attrs['stroke-width'], one.attrs.stroke])).toEqual([[`${PANEL_FRAME_THICK_PX / 2}`, `${PANEL_FRAME_THICK_PX / 2}`, `${size - PANEL_FRAME_THICK_PX}`, `${PANEL_FRAME_THICK_PX}`, '#ABCDEF']])
+        else expect(frames).toEqual([])
+      }
+      const [cross] = shapesOf(panelIconSvg('close', '#ABCDEF', isFramed))
+      const [lo, hi] = [size / 2 - PANEL_CROSS_REACH_PX, size / 2 + PANEL_CROSS_REACH_PX]
+      expect(cross?.attrs.d).toBe(`M${lo} ${lo}L${hi} ${hi}M${hi} ${lo}L${lo} ${hi}`)
+      expect([cross?.attrs.stroke, cross?.attrs['stroke-width']]).toEqual(['#ABCDEF', `${PANEL_CROSS_THICK_PX}`])
+      // The cross with its round caps stays inside the icon.
+      expect(hi + PANEL_CROSS_THICK_PX / 2).toBeLessThanOrEqual(size)
     }
-    expect(panelIconSvg('close', '#ABCDEF', false)).toBe(panelIconSvg('close', '#ABCDEF'))
+    // The outline box's inner height is a line less its 2 px of border: 15 px at the smallest density (17 px lines). The
+    // mark fits it; the framed icon fits a row of 17 px with no border.
+    expect(PANEL_MARK_PX).toBeLessThanOrEqual(17 - 2)
+    expect(PANEL_ICON_PX).toBeLessThanOrEqual(17)
+    // The pressing Button's label: one no-break space, so Desktop's padded plain Button never ends it with an ellipsis.
+    expect(PANEL_ICON_PRESS_LABEL).toBe('\u00A0')
   })
 
   test('the preview states: fixed sample data and the panel state each draws, the same at every call; off is the live state', () => {

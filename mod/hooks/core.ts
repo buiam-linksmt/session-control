@@ -2536,20 +2536,21 @@ export function sliderMove(data: unknown): { id: SectionId; from: number } | { i
   return undefined
 }
 
-// ---------------------------------------------------------------- the desktop panel's look and preview (decisions smp-18 to smp-21)
+// ---------------------------------------------------------------- the desktop panel's look and preview (decisions smp-18 to smp-23)
 
 /**
- * The look of the desktop panel's `sections` view (option desktopStyle). `plain`: the panel as it was, no colour of its
- * own. `tint-soft`: each section's box on a low-contrast tint of its hue, its title row starting on a bar of that hue.
- * `tint-strips`: neutral boxes, each title row on a strong band of its hue. `tint-mono`: one hue, a lighter step per
- * section. The other values of desktopPaneScroll, and the terminal, draw as `plain` whatever the option says.
+ * The look of the desktop panel's `sections` view (option desktopStyle). `tint-soft` (the default): each section's box on
+ * a low-contrast tint of its hue, its title row starting on a bar of that hue. `plain`: no colour of its own. The other
+ * values of desktopPaneScroll, and the terminal, draw as `plain` whatever the option says.
  */
-export const DESKTOP_STYLES = ['plain', 'tint-soft', 'tint-strips', 'tint-mono'] as const
+export const DESKTOP_STYLES = ['tint-soft', 'plain'] as const
 export type DesktopStyle = (typeof DESKTOP_STYLES)[number]
+/** The look the sections view takes when the option is left out or unknown. */
+export const DESKTOP_STYLE_DEFAULT: DesktopStyle = 'tint-soft'
 
-/** The option's value as the mod uses it: an unknown value, or none, counts as `plain`. */
+/** The option's value as the mod uses it: an unknown value, or none, counts as DESKTOP_STYLE_DEFAULT. */
 export function desktopStyle(value: unknown): DesktopStyle {
-  return (DESKTOP_STYLES as readonly unknown[]).includes(value) ? (value as DesktopStyle) : 'plain'
+  return (DESKTOP_STYLES as readonly unknown[]).includes(value) ? (value as DesktopStyle) : DESKTOP_STYLE_DEFAULT
 }
 
 /** How the `sections` view draws its `[+]`, `[-]` and `[x]` (option desktopIcons): `text` as before, `svg` drawn icons. */
@@ -2601,15 +2602,15 @@ export function desktopPreview(value: unknown): DesktopPreview {
 
 /**
  * One section's colours under a desktopStyle, raw hex for Desktop's dark mode (a plugin's tree cannot read the theme in
- * use, and no theme key names a tint): `body` the box's background, `title` its title row's, `accent` a bar one cell wide
- * at the title row's start, `border` the box's border (each undefined: none of its own, the border dim); `current` the
+ * use, and no theme key names a tint): `body` the box's background, `accent` a bar one cell wide at the title row's
+ * start, `border` the box's border (each undefined: none of its own, the border dim); `current` the
  * background of the section's title in the page view's strip while it is the one shown; `icon` the stroke of its drawn
  * icons (an Svg takes no text colour) and `iconHover` the background under one while the pointer is on it.
  */
-export type SectionLook = { body?: string; title?: string; accent?: string; border?: string; current?: string; icon: string; iconHover: string }
+export type SectionLook = { body?: string; accent?: string; border?: string; current?: string; icon: string; iconHover: string }
 
 /** A desktopStyle: each section's colours, and the font style of the shown section's title in the strip. */
-export type PanelLook = { sections: Record<SectionId, SectionLook>; current: { underline?: true; italic?: true } }
+export type PanelLook = { sections: Record<SectionId, SectionLook>; current: { underline?: true } }
 
 const plainLook: SectionLook = { icon: '#C2C0B8', iconHover: '#3A3A37' }
 
@@ -2630,24 +2631,6 @@ export const PANEL_LOOKS: Record<DesktopStyle, PanelLook> = {
     },
     current: { underline: true },
   },
-  'tint-strips': {
-    sections: {
-      sessions: { title: '#2C5BB0', border: '#2C5BB0', current: '#2C5BB0', icon: '#FAF9F5', iconHover: '#1F427F' },
-      queue: { title: '#6741B0', border: '#6741B0', current: '#6741B0', icon: '#FAF9F5', iconHover: '#4A2E80' },
-      points: { title: '#7E5F27', border: '#7E5F27', current: '#7E5F27', icon: '#FAF9F5', iconHover: '#5A441C' },
-      log: { title: '#545451', border: '#545451', current: '#545451', icon: '#FAF9F5', iconHover: '#3B3B39' },
-    },
-    current: { underline: true },
-  },
-  'tint-mono': {
-    sections: {
-      sessions: { body: '#1B2330', title: '#273448', border: '#344660', current: '#3F5A82', icon: '#C9D6EA', iconHover: '#3F5A82' },
-      queue: { body: '#212B3A', title: '#2F3E55', border: '#3D516E', current: '#4A6894', icon: '#C9D6EA', iconHover: '#4A6894' },
-      points: { body: '#283345', title: '#374862', border: '#475D7E', current: '#4F6C99', icon: '#C9D6EA', iconHover: '#4F6C99' },
-      log: { body: '#1E232A', title: '#2B323C', border: '#3A434F', current: '#4A5566', icon: '#C9D6EA', iconHover: '#4A5566' },
-    },
-    current: { underline: true, italic: true },
-  },
 }
 
 /** The drawn icons of desktopIcons `svg`: `plus` for `[+]`, `minus` for `[-]`, `close` for `[x]`. */
@@ -2660,109 +2643,129 @@ export const PANEL_ICON_TEXT: Record<PanelIcon, { alt: string; label: string }> 
   close: { alt: 'Close the log', label: '[x]' },
 }
 
-/** CSS pixels an icon is drawn at: less than a line of the pane at its smallest body font (12 px, line height 1.4). */
+/**
+ * The geometry of the drawn icons, in CSS pixels (decision smp-23). Desktop draws an Svg as an `<img>` of the width and
+ * height given, snapped to whole pixels, so every icon's viewBox is its own size in pixels (one unit, one pixel) and each
+ * bar of a mark is a rectangle on whole pixels with `crispEdges`: no stroke is spread over two half-lit pixel rows.
+ *
+ * - PANEL_ICON_PX: the framed icon (desktopButtons `plain`), in a box one row tall with no border of its own: at least
+ *   17 px at Desktop's smallest density, so the frame (1 px, on the icon's outer pixels) and the mark fit with room.
+ * - PANEL_MARK_PX: the mark alone, inside the outline box (desktopButtons `outline`: 3 cells by 1 row, a 1 px border each
+ *   side inside the row): its inner height is a line less 2 px, 15 px at the smallest density (17 px lines), 17 at the
+ *   default (19 px), 18 at 20 px lines; its inner width 3ch less 2 px, about 21 px or more.
+ * - PANEL_MARK_ARM_PX: the length of the bars of `+` and `−`; PANEL_MARK_THICK_PX their thickness. (size - arm) and
+ *   (size - thick) are even, so both bars sit on whole pixels at the exact centre of the icon.
+ * - PANEL_CROSS_REACH_PX: how far each diagonal of `×` reaches from the centre along each axis, and
+ *   PANEL_CROSS_THICK_PX its stroke (a diagonal cannot sit on whole pixels; round caps, antialiased).
+ */
 export const PANEL_ICON_PX = 14
+export const PANEL_MARK_PX = 12
+export const PANEL_MARK_ARM_PX = 8
+export const PANEL_MARK_THICK_PX = 2
+export const PANEL_CROSS_REACH_PX = 3
+export const PANEL_CROSS_THICK_PX = 2.25
+/** The frame of a framed icon: its stroke and the radius of its corners, in pixels. */
+export const PANEL_FRAME_THICK_PX = 1
+export const PANEL_FRAME_RADIUS_PX = 3
 
 /**
- * An icon's SVG markup in `color`: a rounded square holding a plus or a minus, or a cross; with `isFramed` false the mark
- * alone (a desktopButtons look draws the frame as the icon's own bordered box).
+ * The label of the Button laid over a drawn icon to take its press: one no-break space. Desktop pads a plain Button
+ * (`padding: 0 var(--cds-pad-xs)`, 4 to 6 px a side) and ends a label too wide for it with an ellipsis
+ * (`[data-press-label]{overflow:hidden;text-overflow:ellipsis}`); three spaces overflowed the outline box (inner 25 px at
+ * 20 px lines, less 2 x 6 px of padding: 13 px for three spaces of the 14 px body font, about 4.5 px each) and drew a `…`
+ * under the mark. One space leaves 8 px or more to spare at every density.
+ */
+export const PANEL_ICON_PRESS_LABEL = '\u00A0'
+
+/** A bar of a mark: a rectangle on whole pixels, `w` by `h`, centred in a square of `size`. */
+function markBar(size: number, w: number, h: number, color: string): string {
+  return `<rect x="${(size - w) / 2}" y="${(size - h) / 2}" width="${w}" height="${h}" fill="${color}" shape-rendering="crispEdges"/>`
+}
+
+/** An icon's mark in a square of `size` pixels: the bars of `+` or `−`, or the two diagonals of `×`. */
+function panelMark(icon: PanelIcon, size: number, color: string): string {
+  if (icon === 'close') {
+    const [lo, hi] = [size / 2 - PANEL_CROSS_REACH_PX, size / 2 + PANEL_CROSS_REACH_PX]
+    return `<path d="M${lo} ${lo}L${hi} ${hi}M${hi} ${lo}L${lo} ${hi}" fill="none" stroke="${color}" stroke-width="${PANEL_CROSS_THICK_PX}" stroke-linecap="round"/>`
+  }
+  const across = markBar(size, PANEL_MARK_ARM_PX, PANEL_MARK_THICK_PX, color)
+  return icon === 'minus' ? across : `${across}${markBar(size, PANEL_MARK_THICK_PX, PANEL_MARK_ARM_PX, color)}`
+}
+
+/**
+ * An icon's SVG markup in `color`: framed (desktopButtons `plain`) a rounded square of PANEL_ICON_PX holding a plus or a
+ * minus, or a cross with no frame; with `isFramed` false the mark alone in PANEL_MARK_PX (desktopButtons `outline` draws
+ * the frame as the icon's own bordered box). One unit of the viewBox is one pixel.
  */
 export function panelIconSvg(icon: PanelIcon, color: string, isFramed = true): string {
-  const frame = `<rect x="1.5" y="1.5" width="13" height="13" rx="3" fill="none" stroke="${color}" stroke-width="1.25"/>`
-  const mark = icon === 'plus' ? 'M8 4.5v7M4.5 8h7' : icon === 'minus' ? 'M4.5 8h7' : 'M4.5 4.5l7 7M11.5 4.5l-7 7'
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="${PANEL_ICON_PX}" height="${PANEL_ICON_PX}">${icon === 'close' || !isFramed ? '' : frame}<path d="${mark}" fill="none" stroke="${color}" stroke-width="1.75" stroke-linecap="round"/></svg>`
+  const size = isFramed ? PANEL_ICON_PX : PANEL_MARK_PX
+  const half = PANEL_FRAME_THICK_PX / 2
+  const frame = isFramed && icon !== 'close' ? `<rect x="${half}" y="${half}" width="${size - PANEL_FRAME_THICK_PX}" height="${size - PANEL_FRAME_THICK_PX}" rx="${PANEL_FRAME_RADIUS_PX}" fill="none" stroke="${color}" stroke-width="${PANEL_FRAME_THICK_PX}"/>` : ''
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${size} ${size}" width="${size}" height="${size}">${frame}${panelMark(icon, size, color)}</svg>`
 }
 
 /**
  * How the `sections` view draws its pressable elements (option desktopButtons): the titles of the strip over a page, the
- * `[+]`, `[-]` and `[x]` icons. `plain`: bare text as before. `outline`: each title a rounded chip bordered in its
- * section's colour, filled softly under the pointer, the shown one filled. `filled`: each title a solid chip of its
- * section's colour with light text, the shown one a brighter step, underlined. `tabs`: the strip a tab bar, the shown
- * title a tab on the colours of the section's box below it, the others dimmer tabs that brighten under the pointer. The
- * icons follow, each a rounded box with a border and a fill under the pointer. A title that cannot expand stays a greyed
- * Text in every look. The other values of desktopPaneScroll, and the terminal, draw `plain` whatever the option says.
+ * `[+]`, `[-]` and `[x]` icons. `outline` (the default): each title a rounded chip bordered in its section's colour,
+ * filled softly under the pointer, the shown one filled; each icon a rounded box bordered the same way. `plain`: bare
+ * text. A title that cannot expand stays a greyed Text in a dim-bordered chip. The other values of desktopPaneScroll, and
+ * the terminal, draw `plain` whatever the option says.
  */
-export const DESKTOP_BUTTONS = ['plain', 'outline', 'filled', 'tabs'] as const
+export const DESKTOP_BUTTONS = ['outline', 'plain'] as const
 export type DesktopButtons = (typeof DESKTOP_BUTTONS)[number]
+/** The look the pressables take when the option is left out or unknown. */
+export const DESKTOP_BUTTONS_DEFAULT: DesktopButtons = 'outline'
 
-/** The option's value as the mod uses it: an unknown value, or none, counts as `plain`. */
+/** The option's value as the mod uses it: an unknown value, or none, counts as DESKTOP_BUTTONS_DEFAULT. */
 export function desktopButtons(value: unknown): DesktopButtons {
-  return (DESKTOP_BUTTONS as readonly unknown[]).includes(value) ? (value as DesktopButtons) : 'plain'
+  return (DESKTOP_BUTTONS as readonly unknown[]).includes(value) ? (value as DesktopButtons) : DESKTOP_BUTTONS_DEFAULT
 }
 
 /**
- * The steps of one hue the desktopButtons looks draw with, raw hex for Desktop's dark mode: `edge` a chip's border,
- * `soft` the fill of an outlined chip under the pointer and of the shown one, `solid` a filled chip, `bright` a filled
- * chip under the pointer and the shown one, `dim` a tab at rest, `lift` a tab under the pointer, `ink` a drawn icon's
- * stroke. Every fill keeps Desktop's text (`#FAF9F5`) at 4.5:1 or more, and `dim` its secondary text.
+ * The steps of one hue the outline look draws with, raw hex for Desktop's dark mode: `edge` a chip's border, `soft` the
+ * fill of a chip under the pointer and of the shown one, `ink` a drawn icon's mark. Every fill keeps Desktop's text
+ * (`#FAF9F5`) at 4.5:1 or more.
  */
-export type ButtonHue = { edge: string; soft: string; solid: string; bright: string; dim: string; lift: string; ink: string }
+export type ButtonHue = { edge: string; soft: string; ink: string }
 
 export const BUTTON_HUES: Record<'blue' | 'violet' | 'sand' | 'grey', ButtonHue> = {
-  blue: { edge: '#6B9BF2', soft: '#2E4F86', solid: '#2C5BB0', bright: '#3A6CC8', dim: '#1D2633', lift: '#3D5478', ink: '#C9D8F5' },
-  violet: { edge: '#A98BEB', soft: '#4F3C84', solid: '#6741B0', bright: '#7650C2', dim: '#28212F', lift: '#584A7C', ink: '#DCD0F7' },
-  sand: { edge: '#D2B07A', soft: '#66512C', solid: '#7E5F27', bright: '#8C6A2C', dim: '#2D2920', lift: '#6E5E40', ink: '#EEDFC4' },
-  grey: { edge: '#9A9892', soft: '#4A4A46', solid: '#545451', bright: '#62625E', dim: '#2A2A28', lift: '#565653', ink: '#DAD8D2' },
+  blue: { edge: '#6B9BF2', soft: '#2E4F86', ink: '#C9D8F5' },
+  violet: { edge: '#A98BEB', soft: '#4F3C84', ink: '#DCD0F7' },
+  sand: { edge: '#D2B07A', soft: '#66512C', ink: '#EEDFC4' },
+  grey: { edge: '#9A9892', soft: '#4A4A46', ink: '#DAD8D2' },
 }
 
-/** The hue each section's buttons take under a desktopStyle: grey under `plain`, blue under `tint-mono`, else its own. */
+/** The hue each section's buttons take under a desktopStyle: grey under `plain`, else its own. */
 export const BUTTON_HUE_OF: Record<DesktopStyle, Record<SectionId, keyof typeof BUTTON_HUES>> = {
   plain: { sessions: 'grey', queue: 'grey', points: 'grey', log: 'grey' },
   'tint-soft': { sessions: 'blue', queue: 'violet', points: 'sand', log: 'grey' },
-  'tint-strips': { sessions: 'blue', queue: 'violet', points: 'sand', log: 'grey' },
-  'tint-mono': { sessions: 'blue', queue: 'blue', points: 'blue', log: 'blue' },
 }
 
 /**
- * One pressable's box under a desktopButtons look: its background and border at rest (none: no border, so no rounding),
- * what changes under the pointer (`hover`), whether its label is drawn dim at rest (and at full strength under the
- * pointer), and for the shown title an underline.
+ * One pressable's box under the outline look: its background and border at rest (a dim border without a colour), and
+ * what changes under the pointer (`hover`).
  */
-export type ChipLook = { backgroundColor?: string; borderColor?: string; borderDimColor?: true; hover?: { backgroundColor: string; borderColor?: string }; isDim?: true; underline?: true }
+export type ChipLook = { backgroundColor?: string; borderColor?: string; borderDimColor?: true; hover?: { backgroundColor: string } }
 
-/** A section's pressables under a desktopButtons look: a title, the shown title, a greyed title, an icon and its stroke. */
+/** A section's pressables under the outline look: a title, the shown title, a greyed title, an icon and its mark. */
 export type ButtonLook = { title: ChipLook; current: ChipLook; greyed: ChipLook; icon: ChipLook; ink: string }
 
 /** Desktop's text colour in dark mode (`--text-100`): a Button's label, which a plugin cannot colour. */
 export const DESKTOP_TEXT = '#FAF9F5'
 
-/** The pressables of section `id` under the look `buttons` (not `plain`) and the desktopStyle `style`. */
-export function buttonLook(buttons: Exclude<DesktopButtons, 'plain'>, style: DesktopStyle, id: SectionId): ButtonLook {
+/** The pressables of section `id` under the outline look and the desktopStyle `style`. */
+export function buttonLook(style: DesktopStyle, id: SectionId): ButtonLook {
   const hue = BUTTON_HUES[BUTTON_HUE_OF[style][id]]
-  const section = PANEL_LOOKS[style].sections[id]
-  const greyed: ChipLook = buttons === 'tabs' ? {} : { borderDimColor: true }
-  switch (buttons) {
-    case 'outline':
-      return {
-        title: { borderColor: hue.edge, hover: { backgroundColor: hue.soft } },
-        current: { backgroundColor: hue.soft, borderColor: hue.edge },
-        greyed,
-        // On a strong title row (tint-strips) the edge would be faint and the stroke near 4.5:1: the icon sits on its own
-        // soft fill, bordered in its stroke's colour, and lifts under the pointer.
-        icon: section.title === undefined ? { borderColor: hue.edge, hover: { backgroundColor: hue.soft } } : { backgroundColor: hue.soft, borderColor: hue.ink, hover: { backgroundColor: hue.lift } },
-        ink: hue.ink,
-      }
-    case 'filled':
-      return {
-        title: { backgroundColor: hue.solid, borderColor: hue.solid, hover: { backgroundColor: hue.bright, borderColor: hue.bright } },
-        current: { backgroundColor: hue.bright, borderColor: hue.edge, underline: true },
-        greyed,
-        icon: { backgroundColor: hue.solid, borderColor: hue.solid, hover: { backgroundColor: hue.bright, borderColor: hue.bright } },
-        ink: DESKTOP_TEXT,
-      }
-    case 'tabs':
-      return {
-        title: { backgroundColor: hue.dim, borderColor: hue.dim, hover: { backgroundColor: hue.lift, borderColor: hue.lift }, isDim: true },
-        // The shown tab takes the colours of the section's box it sits on: its body and its border (dim without one).
-        current: { ...(section.body === undefined ? {} : { backgroundColor: section.body }), ...(section.border === undefined ? { borderDimColor: true as const } : { borderColor: section.border }) },
-        greyed,
-        icon: { backgroundColor: hue.dim, borderColor: hue.lift, hover: { backgroundColor: hue.lift } },
-        ink: hue.ink,
-      }
+  return {
+    title: { borderColor: hue.edge, hover: { backgroundColor: hue.soft } },
+    current: { backgroundColor: hue.soft, borderColor: hue.edge },
+    greyed: { borderDimColor: true },
+    icon: { borderColor: hue.edge, hover: { backgroundColor: hue.soft } },
+    ink: hue.ink,
   }
 }
 
-/** The text an icon's Button draws under a desktopButtons look: the glyph alone, the box being its frame. */
+/** The text an icon's Button draws under the outline look: the glyph alone, the box being its frame. */
 export const PANEL_ICON_GLYPH: Record<PanelIcon, string> = { plus: '+', minus: '−', close: '×' }
 
 /**

@@ -95,14 +95,14 @@
     "desktopStyle": {
       "type": "string",
       "title": "Desktop panel look",
-      "description": "The colours of the panel's sections view in Claude Desktop (desktopPaneScroll sections; every other value and the terminal draw plain). plain: no colour of its own, as before. tint-soft: each section's box on a low-contrast tint of its hue, its title row starting on a bar of that hue. tint-strips: neutral boxes, each title row on a strong band of its hue. tint-mono: one blue hue, a lighter step per section. Hues: sessions blue, queued work violet, open points sand, the log grey. The section shown alone has its title marked in the strip with its colour and underlined. Dark mode only: a plugin's tree cannot tell which theme Desktop shows. Any other value counts as plain.",
-      "default": "plain",
-      "options": ["plain", "tint-soft", "tint-strips", "tint-mono"]
+      "description": "The colours of the panel's sections view in Claude Desktop (desktopPaneScroll sections; every other value and the terminal draw plain). tint-soft: each section's box on a low-contrast tint of its hue, its title row starting on a bar of that hue. plain: no colour of its own. Hues: sessions blue, queued work violet, open points sand, the log grey. The section shown alone has its title marked in the strip with its colour. Dark mode only: a plugin's tree cannot tell which theme Desktop shows. Any other value counts as tint-soft.",
+      "default": "tint-soft",
+      "options": ["tint-soft", "plain"]
     },
     "desktopIcons": {
       "type": "string",
       "title": "Desktop panel icons",
-      "description": "How the sections view in Claude Desktop draws its [+], [-] and [x]: text as before, or svg, drawn icons in the colours of the desktopStyle look, each one row tall, pressed as the text ones. Any other value counts as text.",
+      "description": "How the sections view in Claude Desktop draws its [+], [-] and [x]: text, or svg, drawn icons in the colours of the desktopStyle look (a plus, a minus or a cross of 2 px bars, inside the outline box or a frame of its own under plain buttons), each one row tall, pressed as the text ones. Any other value counts as text.",
       "default": "text",
       "options": ["text", "svg"]
     },
@@ -122,9 +122,9 @@
     "desktopButtons": {
       "type": "string",
       "title": "Desktop panel buttons",
-      "description": "How the sections view in Claude Desktop draws its pressable titles in the strip and its [+], [-] and [x] icons (desktopPaneScroll sections; every other value and the terminal draw plain). plain: bare text as before. outline: each title a rounded chip bordered in its section's colour, filled softly under the pointer, the shown one filled. filled: each title a solid chip of its section's colour with light text, the shown one brighter and underlined. tabs: the strip a tab bar, the shown title a tab on the colours of the section's box, the others dimmer tabs that brighten under the pointer. The icons follow the look, each a rounded box one row tall with a border and a fill under the pointer. Colours follow desktopStyle (grey under plain, one blue under tint-mono). A title that cannot expand stays greyed and not pressable. Dark mode only. Any other value counts as plain.",
-      "default": "plain",
-      "options": ["plain", "outline", "filled", "tabs"]
+      "description": "How the sections view in Claude Desktop draws its pressable titles in the strip and its [+], [-] and [x] icons (desktopPaneScroll sections; every other value and the terminal draw plain). outline: each title a rounded chip bordered in its section's colour, filled softly under the pointer, the shown one filled; each icon a rounded box one row tall bordered the same way, filled under the pointer. plain: bare text. Colours follow desktopStyle (grey under plain). A title that cannot expand stays greyed, in a dim-bordered chip, and not pressable. Dark mode only. Any other value counts as outline.",
+      "default": "outline",
+      "options": ["outline", "plain"]
     }
   }
 }

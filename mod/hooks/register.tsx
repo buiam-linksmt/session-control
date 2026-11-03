@@ -140,7 +140,11 @@ import {
   desktopRowGap,
   desktopStyle,
   PANEL_ICON_GLYPH,
+  PANEL_ICON_PRESS_LABEL,
   PANEL_ICON_PX,
+  PANEL_MARK_PX,
+  DESKTOP_BUTTONS_DEFAULT,
+  DESKTOP_STYLE_DEFAULT,
   PANEL_ICON_TEXT,
   PANEL_LOOKS,
   panelIconSvg,
@@ -280,7 +284,7 @@ type Config = {
   licenceDirs: string
   /** How the desktop panel lets its sections scroll (core.ts desktopPaneScroll); an unknown value counts as `spare`. */
   desktopPaneScroll: DesktopPaneScroll
-  /** The look of the desktop panel's `sections` view (core.ts desktopStyle); an unknown value counts as `plain`. */
+  /** The look of the desktop panel's `sections` view (core.ts desktopStyle); an unknown value counts as `tint-soft`. */
   desktopStyle: DesktopStyle
   /** How the `sections` view draws its `[+]`, `[-]` and `[x]` (core.ts desktopIcons); an unknown value counts as `text`. */
   desktopIcons: DesktopIcons
@@ -288,7 +292,7 @@ type Config = {
   desktopPreview: DesktopPreview
   /** The pixels between the boxes of the `sections` view's even view (core.ts desktopGap). */
   desktopGap: number
-  /** How the `sections` view draws its titles and icons (core.ts desktopButtons); an unknown value counts as `plain`. */
+  /** How the `sections` view draws its titles and icons (core.ts desktopButtons); an unknown value counts as `outline`. */
   desktopButtons: DesktopButtons
 }
 
@@ -308,11 +312,11 @@ let config: Config = {
   lockDirs: '',
   licenceDirs: '',
   desktopPaneScroll: 'spare',
-  desktopStyle: 'plain',
+  desktopStyle: DESKTOP_STYLE_DEFAULT,
   desktopIcons: 'text',
   desktopPreview: 'off',
   desktopGap: DESKTOP_GAP_PX,
-  desktopButtons: 'plain',
+  desktopButtons: DESKTOP_BUTTONS_DEFAULT,
 }
 let isActive = false
 /** Whether the orchestratorDir option is set: the mod then turns on without the CLAUDE.md heading. */
@@ -3656,9 +3660,7 @@ export const register: Register = (on, options) => {
       const look = lookOf(id)
       return { ...(look.border === undefined ? { borderDimColor: true as const } : { borderColor: look.border }), ...(look.body === undefined ? {} : { backgroundColor: look.body }) }
     }
-    // A section's title row: its own background when it has one, and a bar of its accent at its start (one row tall,
-    // so the row keeps its height).
-    const titleColours = (id: SectionId) => (lookOf(id).title === undefined ? {} : { backgroundColor: lookOf(id).title })
+    // A section's title row starts on a bar of its accent when it has one (one row tall, so the row keeps its height).
     const accentBar = (id: SectionId) => {
       const accent = lookOf(id).accent
       return accent === undefined ? null : <Box key={`accent:${id}`} width={1} height={1} flexShrink={0} marginRight={1} backgroundColor={accent} />
@@ -3672,16 +3674,24 @@ export const register: Register = (on, options) => {
     // draws an Svg) the drawn icon in the section's colour, in a box one row tall: the Svg in the flow and a Button with
     // no visible label laid over it takes the press (Desktop drops a Button's children, so the Svg cannot be its label).
     const hasSvgIcons = isSections && config.desktopIcons === 'svg' && Svg !== undefined
-    // The pressables' look (desktopButtons, sections view only): bare text under `plain`, else each title and icon a
-    // box of its own (buttonLook), in the hue its section takes under the desktopStyle.
+    // The pressables' look (desktopButtons, sections view only): bare text under `plain`, else under `outline` each
+    // title and icon a box of its own (buttonLook), in the hue its section takes under the desktopStyle.
     const buttons: DesktopButtons = isSections ? config.desktopButtons : 'plain'
-    const chipsOf = (id: SectionId) => (buttons === 'plain' ? undefined : buttonLook(buttons, config.desktopStyle, id))
-    // A chip's colours: its background, its rounded border (none without a colour: a greyed tab), its hover.
+    const chipsOf = (id: SectionId) => (buttons === 'plain' ? undefined : buttonLook(config.desktopStyle, id))
+    // A chip's colours: its background, its rounded border (dim without a colour: a greyed title), its hover.
     const chipColours = (look: ChipLook) => ({
-      ...(look.borderColor === undefined && look.borderDimColor === undefined ? {} : { borderStyle: 'round', ...(look.borderColor === undefined ? { borderDimColor: true as const } : { borderColor: look.borderColor }) }),
+      borderStyle: 'round',
+      ...(look.borderColor === undefined ? { borderDimColor: true as const } : { borderColor: look.borderColor }),
       ...(look.backgroundColor === undefined ? {} : { backgroundColor: look.backgroundColor }),
       ...(look.hover === undefined ? {} : { hover: look.hover }),
     })
+    // The Button laid over a drawn icon to take its press, centred on the mark: a label of one no-break space, which
+    // Desktop's padded plain Button never ends with an ellipsis (PANEL_ICON_PRESS_LABEL).
+    const pressOver = (key: string, onPress: () => unknown) => (
+      <Box position="absolute" top={0} left={0} right={0} bottom={0} alignItems="center" justifyContent="center">
+        <Button key={key} label={PANEL_ICON_PRESS_LABEL} plain onPress={onPress} />
+      </Box>
+    )
     const iconButton = (icon: PanelIcon, key: string, onPress: () => unknown, id: SectionId) => {
       const chips = chipsOf(id)
       if (chips !== undefined) {
@@ -3697,10 +3707,8 @@ export const register: Register = (on, options) => {
         }
         return (
           <Box {...frame}>
-            <Svg source={panelIconSvg(icon, chips.ink, false)} alt={PANEL_ICON_TEXT[icon].alt} width={PANEL_ICON_PX} height={PANEL_ICON_PX} />
-            <Box position="absolute" top={0} left={0} right={0} bottom={0}>
-              <Button key={key} label={'\u00A0\u00A0\u00A0'} plain onPress={onPress} />
-            </Box>
+            <Svg source={panelIconSvg(icon, chips.ink, false)} alt={PANEL_ICON_TEXT[icon].alt} width={PANEL_MARK_PX} height={PANEL_MARK_PX} />
+            {pressOver(key, onPress)}
           </Box>
         )
       }
@@ -3709,13 +3717,11 @@ export const register: Register = (on, options) => {
       return (
         <Box key={`icon:${key}`} width={3} height={1} flexShrink={0} overflow="hidden" alignItems="center" justifyContent="center" hover={{ backgroundColor: look.iconHover }}>
           <Svg source={panelIconSvg(icon, look.icon)} alt={PANEL_ICON_TEXT[icon].alt} width={PANEL_ICON_PX} height={PANEL_ICON_PX} />
-          <Box position="absolute" top={0} left={0} right={0} bottom={0}>
-            <Button key={key} label={'\u00A0\u00A0\u00A0'} plain onPress={onPress} />
-          </Box>
+          {pressOver(key, onPress)}
         </Box>
       )
     }
-    // A title of the strip under a desktopButtons look: a rounded box one row tall (its borders inside the row) with a
+    // A title of the strip under the outline look: a rounded box one row tall (its borders inside the row) with a
     // cell of padding a side and none above or below, holding the Button or the Text.
     const chip = (key: string, look: ChipLook, inner: ReturnType<typeof deskRowEl>) => (
       <Box key={key} height={1} flexShrink={0} overflow="hidden" alignItems="center" paddingX={1} paddingY={0} {...chipColours(look)}>
@@ -3730,10 +3736,10 @@ export const register: Register = (on, options) => {
       if (id === 'sessions') drawnSessions = { rows: [...new Set(rows.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       return (
         <Box key={`page:${id}`} flexDirection="column" borderStyle="round" {...boxColours(id)}>
-          {lookOf(id).title === undefined && lookOf(id).accent === undefined ? (
+          {lookOf(id).accent === undefined ? (
             <Text bold>{title}</Text>
           ) : (
-            <Box key={`title:${id}`} flexDirection="row" alignItems="center" {...titleColours(id)}>
+            <Box key={`title:${id}`} flexDirection="row" alignItems="center">
               {accentBar(id)}
               <Text bold>{title}</Text>
             </Box>
@@ -3781,7 +3787,7 @@ export const register: Register = (on, options) => {
       if (id === 'sessions') drawnSessions = { rows: [...new Set(lines.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       return (
         <Box key={`sec:${id}`} flexDirection="column" height={box.height} overflow="hidden" borderStyle="round" {...boxColours(id)}>
-          <Box flexDirection="row" height={1} flexShrink={0} overflow="hidden" alignItems="center" {...titleColours(id)}>
+          <Box flexDirection="row" height={1} flexShrink={0} overflow="hidden" alignItems="center">
             {accentBar(id)}
             <Box flexGrow={1}>
               <Text bold wrap="truncate-end">
@@ -3814,9 +3820,9 @@ export const register: Register = (on, options) => {
     // whose lines exceed its box in the even view a Button that shows it, one whose lines fit greyed and not pressable),
     // on the right `[x]` closing an open log and `[-]` back to the boxes. A log page also ends on a row with `[-]` alone.
     const stripTitles: Record<ExpandableId, string> = { sessions: 'SESSIONS', queue: 'QUEUED WORK', points: 'OPEN POINTS' }
-    // Under a desktopButtons look each title is a chip (chip, buttonLook): the shown one bold on its own colours, with no
-    // brackets; another that can be shown a Button in its chip; a greyed one a dim Text in a dim-bordered chip (a tab
-    // without border or background), never pressable. Wrapped chips stand a 2 px gap apart.
+    // Under the outline look each title is a chip (chip, buttonLook): the shown one bold on its own colours, with no
+    // brackets; another that can be shown a Button in its chip; a greyed one a dim Text in a dim-bordered chip, never
+    // pressable. Wrapped chips stand a 2 px gap apart.
     const stripTitle = (id: SectionId, title: string, current: ExpandableId | 'log') => {
       const chips = chipsOf(id)
       if (chips === undefined) {
@@ -3824,10 +3830,8 @@ export const register: Register = (on, options) => {
         if (id !== 'log' && overflowsEven(id)) return <Button key={`t:top:${id}`} label={title} plain onPress={showSection(id)} />
         return <Text dimColor>{title}</Text>
       }
-      if (id === current) return chip(`chip:${id}`, chips.current, <Text bold underline={chips.current.underline}>{title}</Text>)
-      if (id !== 'log' && overflowsEven(id)) {
-        return chip(`chip:${id}`, chips.title, <Button key={`t:top:${id}`} label={title} plain dimColor={chips.title.isDim} hover={chips.title.isDim === true ? { dimColor: false } : undefined} onPress={showSection(id)} />)
-      }
+      if (id === current) return chip(`chip:${id}`, chips.current, <Text bold>{title}</Text>)
+      if (id !== 'log' && overflowsEven(id)) return chip(`chip:${id}`, chips.title, <Button key={`t:top:${id}`} label={title} plain onPress={showSection(id)} />)
       return chip(`chip:${id}`, chips.greyed, <Text dimColor>{title}</Text>)
     }
     const strip = (current: ExpandableId | 'log') => (
