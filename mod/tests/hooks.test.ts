@@ -4613,14 +4613,19 @@ const GOLDEN: Record<string, string> = {
 
 /** The golden states whose tree holds the even view of the sections value on the desktop: the default desktopGap adds its gap there. */
 const GAPPED = new Set(['desk-even-live', 'desk-even-15', 'desk-points-box-selected', 'desk-log-box'])
+/** The golden states whose tree holds a page of the sections value on the desktop: its column and its strip's titles take the gap. */
+const PAGE_GAPPED = new Set(['desk-queue-page', 'desk-points-page-selected', 'desk-log-page'])
+/** The gap props the default desktopGap adds to a golden state's tree: the even view's column, or a page's column and strip. */
+const gapsOf = (name: string) => (GAPPED.has(name) ? 1 : PAGE_GAPPED.has(name) ? 2 : 0)
 /** The default desktopGap's prop in a tree's JSON: the boxes' column's rowGap of 2 px (0.211 half lines). */
 const GAP_PROP = ',"rowGap":0.211'
 /**
  * A golden tree drawn under the default desktopGap: its gap props counted and taken out, so the rest is compared with the
- * tree of before. The gap is the only change the default makes, and only to the even view's column (one per tree).
+ * tree of before. The gap is the only change the default makes: to the even view's column, or to a page's column (strip,
+ * box and a log's bottom row) and its strip's wrapped titles (decision smp-25).
  */
 const withoutGap = (text: string, name: string) => {
-  expect([name, text.split(GAP_PROP).length - 1]).toEqual([name, GAPPED.has(name) ? 1 : 0])
+  expect([name, text.split(GAP_PROP).length - 1]).toEqual([name, gapsOf(name)])
   return text.split(GAP_PROP).join('')
 }
 
@@ -4649,8 +4654,8 @@ describe('desktopStyle plain, desktopButtons plain, desktopIcons text and deskto
     expect([name, labels.filter(label => /^\[[+x-]\]$/.test(label))]).toEqual([name, []])
     expect([name, nodes.filter(one => one.type === 'Svg').length]).toEqual([name, 0])
     expect([name, nodes.some(one => one.type === 'Text' && (one.children ?? []).some(child => typeof child === 'string' && /^\[ [A-Z ]+ \]$/.test(child)))]).toEqual([name, false])
-    // The even view's column, or on a page the strip's wrapped chips, stand 2 px apart.
-    expect([name, text.split(GAP_PROP).length - 1]).toEqual([name, (GAPPED.has(name) ? 1 : 0) + (/page/.test(name) ? 1 : 0)])
+    // The even view's column, or on a page its column and the strip's wrapped chips, stand 2 px apart.
+    expect([name, text.split(GAP_PROP).length - 1]).toEqual([name, gapsOf(name)])
     // The icons that show: an outline box for each `[+]`, `[-]` and `[x]` Button of the tree, and a chip for each title.
     expect([name, nodes.filter(one => one.type === 'Box' && keyOf(one).startsWith('icon:')).length]).toEqual([name, labels.filter(label => ['+', '\u2212', '\u00D7'].includes(label)).length])
     if (/page/.test(name)) expect([name, nodes.filter(one => keyOf(one).startsWith('chip:')).length > 0]).toEqual([name, true])
@@ -4659,8 +4664,8 @@ describe('desktopStyle plain, desktopButtons plain, desktopIcons text and deskto
   const UNTOUCHED = GOLDEN_STATES.filter(state => state.surface === 'terminal' || state.mode !== 'sections')
   const SECTIONS_STATES = GOLDEN_STATES.filter(state => !UNTOUCHED.includes(state))
   for (const state of GOLDEN_STATES) {
-    // plain and plain buttons given: the default desktopGap (2 px) adds the gap between the even view's boxes and nothing
-    // else (decision smp-22).
+    // plain and plain buttons given: the default desktopGap (2 px) adds the gap between the even view's boxes, or between
+    // a page's strip and box and its strip's rows, and nothing else (decisions smp-22, smp-25).
     test(`${state.name}: plain, text, off and plain buttons given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off', desktopButtons: 'plain' }), async ($, on) => {
       expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
     })
@@ -4832,7 +4837,12 @@ describe('desktopStyle x desktopIcons x desktopButtons x desktopPreview on the d
             const heights = (column.children ?? []).flatMap(one => (typeof one === 'object' && one !== null ? [Number(one.props?.height)] : []))
             expect(heights.length).toBe(3)
             expect(heights.reduce((a, b) => a + b, 0)).toBe(ROOM_PROPS.scroll.bodyRows)
-          } else expect(gapped).toEqual([])
+          } else {
+            expect(gapped).toEqual([])
+            // A page's strip, its box and a log's bottom row stand 2 px apart: the rowGap of their column (decision smp-25).
+            const page = nodes.find(one => one.type === 'Box' && (one.children ?? []).some(child => typeof child === 'object' && child !== null && child.props?.key === 'strip:top'))
+            expect(page?.props?.rowGap).toBe(0.211)
+          }
           // The icons: text Buttons, or drawn icons in the section's colour, each with a pressable Button of the same key.
           const svgs = nodes.filter(one => one.type === 'Svg')
           const iconKeys = nodes.filter(one => one.type === 'Button' && /^(x:\w+|c:top|c:bottom|close:top)$/.test(String(one.props?.key))).map(one => String(one.props?.key))
@@ -4923,6 +4933,49 @@ describe('desktopStyle x desktopIcons x desktopButtons x desktopPreview on the d
       TAIL.rows = undefined
     }
   })
+
+  // Every page of the live state (queued work, open points, the log) puts desktopGap between its strip and its box, and
+  // between the strip's wrapped rows; desktopGap 0 lets them touch (decision smp-25).
+  for (const [page, presses] of <[string, string[]][]>[
+    ['queue', ['x:queue']],
+    ['points', ['x:points']],
+    ['log', [`s:${SID_ALIVE}`, 'x:log']],
+  ]) {
+    for (const [gap, rowGap] of <[number | undefined, number | undefined][]>[
+      [undefined, 0.211],
+      [4, 0.421],
+      [0, undefined],
+    ]) {
+      test(`the ${page} page of the live state under desktopGap ${gap ?? 'left out'}: its strip and its box stand ${rowGap ?? 'no'} half lines apart`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', ...(gap === undefined ? {} : { desktopGap: gap }) } }, async ($, on) => {
+        QUEUE.text = goldenTasks
+        POINTS.text = goldenPoints
+        TAIL.rows = goldenLog
+        try {
+          world(on)
+          stubPanel(on)
+          await boot($)
+          await runCommand($, 'side')
+          const ui = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: PANE_PROPS as never })
+          for (const key of presses) await ui.press({ key })
+          const nodes = nodesOf((await ui.drawn()) as Node)
+          const keysOf = (one: Node | undefined) => (one?.children ?? []).flatMap(child => (typeof child === 'object' && child !== null ? [String(child.props?.key)] : []))
+          const column = nodes.find(one => keysOf(one).includes('strip:top'))
+          expect(keysOf(column)).toEqual(page === 'log' ? ['strip:top', 'page:log', 'strip:bottom'] : ['strip:top', `page:${page}`])
+          expect(column?.props?.rowGap).toBe(rowGap)
+          const wrap = nodes.find(one => keysOf(one).includes(`chip:${page}`))
+          expect(wrap?.props?.flexWrap).toBe('wrap')
+          expect(wrap?.props?.rowGap).toBe(rowGap)
+          // Nothing else of the page takes a gap.
+          expect(nodes.filter(one => one.props?.rowGap !== undefined).length).toBe(rowGap === undefined ? 0 : 2)
+          await ui.unmount()
+        } finally {
+          QUEUE.text = QUEUE_TEXT
+          POINTS.text = OPEN_POINTS_TEXT
+          TAIL.rows = undefined
+        }
+      })
+    }
+  }
 
   test('a tinted look with the live state: the colours apply to the live boxes and the svg icons press as the text ones', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: 'tint-soft', desktopIcons: 'svg', desktopButtons: 'plain' } }, async ($, on) => {
     QUEUE.text = goldenTasks

@@ -116,7 +116,7 @@
     "desktopGap": {
       "type": "number",
       "title": "Desktop panel gap",
-      "description": "The space between the three boxes of the sections view in Claude Desktop (desktopPaneScroll sections, docked), in CSS pixels at Desktop's default density (a 19 px line): 2 by default; 0 lets the boxes touch as before. Desktop sizes the gap in half lines, so it follows the person's density: 2 is 1.8 px with 17 px lines and 2.3 px with 22 px lines. The boxes keep their heights in lines. A number from 0 to 8; anything else counts as 2.",
+      "description": "The space between the three boxes of the sections view in Claude Desktop (desktopPaneScroll sections, docked), and on an expanded page between its title strip, its box and the strip's wrapped rows, in CSS pixels at Desktop's default density (a 19 px line): 2 by default; 0 lets them touch as before. Desktop sizes the gap in half lines, so it follows the person's density: 2 is 1.8 px with 17 px lines and 2.3 px with 22 px lines. The boxes keep their heights in lines. A number from 0 to 8; anything else counts as 2.",
       "default": 2
     },
     "desktopButtons": {

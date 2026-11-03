@@ -290,7 +290,7 @@ type Config = {
   desktopIcons: DesktopIcons
   /** A fixed sample state the desktop panel draws instead of the live one (core.ts desktopPreview); `off`: the live state. */
   desktopPreview: DesktopPreview
-  /** The pixels between the boxes of the `sections` view's even view (core.ts desktopGap). */
+  /** The pixels between the boxes of the `sections` view's even view, and between a page's strip, box and wrapped titles (core.ts desktopGap). */
   desktopGap: number
   /** How the `sections` view draws its titles and icons (core.ts desktopButtons); an unknown value counts as `outline`. */
   desktopButtons: DesktopButtons
@@ -3822,7 +3822,7 @@ export const register: Register = (on, options) => {
     const stripTitles: Record<ExpandableId, string> = { sessions: 'SESSIONS', queue: 'QUEUED WORK', points: 'OPEN POINTS' }
     // Under the outline look each title is a chip (chip, buttonLook): the shown one bold on its own colours, with no
     // brackets; another that can be shown a Button in its chip; a greyed one a dim Text in a dim-bordered chip, never
-    // pressable. Wrapped chips stand a 2 px gap apart.
+    // pressable. Wrapped titles stand desktopGap apart, as the boxes do (evenGap).
     const stripTitle = (id: SectionId, title: string, current: ExpandableId | 'log') => {
       const chips = chipsOf(id)
       if (chips === undefined) {
@@ -3836,7 +3836,7 @@ export const register: Register = (on, options) => {
     }
     const strip = (current: ExpandableId | 'log') => (
       <Box key="strip:top" flexDirection="row" paddingX={1} {...(buttons === 'plain' ? {} : { alignItems: 'flex-end' as const })}>
-        <Box flexDirection="row" flexGrow={1} flexWrap="wrap" columnGap={1} {...(buttons === 'plain' ? {} : { rowGap: desktopRowGap(DESKTOP_GAP_PX) })}>
+        <Box flexDirection="row" flexGrow={1} flexWrap="wrap" columnGap={1} {...evenGap}>
           {SECTION_ORDER.map(id => stripTitle(id, stripTitles[id], current))}
           {current === 'log' && stripTitle('log', 'LOG', current)}
         </Box>
@@ -3844,8 +3844,10 @@ export const register: Register = (on, options) => {
         {iconButton('minus', 'c:top', collapse, current)}
       </Box>
     )
+    // The page's strip, its box and a log's bottom row stand desktopGap apart, as the even view's boxes do (evenGap); the
+    // page has no height of its own and scrolls natively, so the gap only lengthens it by its pixels.
     const sectionsPage = (current: ExpandableId | 'log', inner: ReturnType<typeof pageBlock>) => (
-      <Box flexDirection="column">
+      <Box flexDirection="column" {...evenGap}>
         {strip(current)}
         {inner}
         {current === 'log' && (
