@@ -36,6 +36,13 @@ import {
   DESKTOP_PREVIEWS,
   DESKTOP_STYLES,
   DESKTOP_GAP_PX,
+  DESKTOP_BUTTONS,
+  desktopButtons,
+  buttonLook,
+  BUTTON_HUES,
+  BUTTON_HUE_OF,
+  DESKTOP_TEXT,
+  PANEL_ICON_GLYPH,
   DESKTOP_GAP_MAX_PX,
   desktopGap,
   desktopRowGap,
@@ -2206,6 +2213,56 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-21
     }
   })
 
+  test('desktopButtons: its values; an unknown value, another type or none counts as plain', () => {
+    expect([...DESKTOP_BUTTONS]).toEqual(['plain', 'outline', 'filled', 'tabs'])
+    for (const value of DESKTOP_BUTTONS) expect(desktopButtons(value)).toBe(value)
+    for (const other of [undefined, '', 'Plain', 'outlined', 'tab', 1, true, ['tabs']]) expect(desktopButtons(other)).toBe('plain')
+  })
+
+  test('the button looks keep Desktop text at 4.5:1 or more on every background a label or a drawn icon sits on, at rest and under the pointer', () => {
+    const LOOKS = ['outline', 'filled', 'tabs'] as const
+    const SECTIONS = ['sessions', 'queue', 'points', 'log'] as const
+    for (const hue of Object.values(BUTTON_HUES)) for (const colour of Object.values(hue)) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
+    expect(DESKTOP_TEXT).toBe(TEXT)
+    for (const buttons of LOOKS) {
+      for (const style of DESKTOP_STYLES) {
+        for (const id of SECTIONS) {
+          const where = `${buttons} ${style} ${id}`
+          const look = buttonLook(buttons, style, id)
+          const section = PANEL_LOOKS[style].sections[id]
+          // Where a chip sits: the pane (the strip), or for an icon also its box's title row or body.
+          const rows = [PAGE, section.title ?? section.body ?? PAGE]
+          const ok = (fg: string, bg: string, what: string) => expect([where, what, contrast(fg, bg) >= 4.5]).toEqual([where, what, true])
+          // A pressable title: its label at rest (dim under tabs) and at full strength under the pointer.
+          ok(look.title.isDim === true ? SECONDARY : TEXT, look.title.backgroundColor ?? PAGE, 'title at rest')
+          if (look.title.hover !== undefined) ok(TEXT, look.title.hover.backgroundColor, 'title under the pointer')
+          // The shown title, bold on its colours; a greyed title, dim on the pane.
+          ok(TEXT, look.current.backgroundColor ?? PAGE, 'shown title')
+          expect(look.greyed.backgroundColor).toBeUndefined()
+          expect(look.greyed.hover).toBeUndefined()
+          ok(SECONDARY, PAGE, 'greyed title')
+          // An icon: its glyph (Desktop's text) and its drawn stroke on its box, at rest and under the pointer.
+          for (const bg of look.icon.backgroundColor === undefined ? rows : [look.icon.backgroundColor]) {
+            ok(TEXT, bg, 'icon glyph at rest')
+            ok(look.ink, bg, 'icon stroke at rest')
+          }
+          ok(TEXT, look.icon.hover?.backgroundColor ?? '', 'icon glyph under the pointer')
+          ok(look.ink, look.icon.hover?.backgroundColor ?? '', 'icon stroke under the pointer')
+          for (const one of [look.title, look.current, look.icon]) for (const colour of [one.backgroundColor, one.borderColor, one.hover?.backgroundColor, one.hover?.borderColor]) if (colour !== undefined) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
+        }
+      }
+    }
+    // Each section's hue under a tinted look; plain grey, tint-mono blue; the three looks distinct for every section.
+    expect(BUTTON_HUE_OF['tint-soft']).toEqual({ sessions: 'blue', queue: 'violet', points: 'sand', log: 'grey' })
+    for (const id of SECTIONS) {
+      expect(new Set(LOOKS.map(buttons => JSON.stringify(buttonLook(buttons, 'tint-soft', id)))).size).toBe(3)
+      expect(buttonLook('tabs', 'tint-soft', id).current.backgroundColor).toBe(PANEL_LOOKS['tint-soft'].sections[id].body)
+      expect(buttonLook('tabs', 'tint-soft', id).current.borderColor).toBe(PANEL_LOOKS['tint-soft'].sections[id].border)
+      expect(buttonLook('filled', 'tint-soft', id).current.underline).toBe(true)
+    }
+    expect(Object.values(PANEL_ICON_GLYPH)).toEqual(['+', '\u2212', '\u00D7'])
+  })
+
   test('the icons: SVG markup in the colour given, one size, a plus, a minus and a cross', () => {
     for (const icon of ['plus', 'minus', 'close'] as const) {
       const svg = panelIconSvg(icon, '#ABCDEF')
@@ -2215,6 +2272,12 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-21
     }
     expect(PANEL_ICON_PX).toBe(14)
     expect(new Set(['plus', 'minus', 'close'].map(icon => panelIconSvg(icon as 'plus', '#000000'))).size).toBe(3)
+    // Unframed (a desktopButtons look draws the frame as the icon's box): the mark alone, still one size.
+    for (const icon of ['plus', 'minus', 'close'] as const) {
+      expect(panelIconSvg(icon, '#ABCDEF', false)).not.toContain('<rect')
+      expect(panelIconSvg(icon, '#ABCDEF', false)).toContain('width="14" height="14"')
+    }
+    expect(panelIconSvg('close', '#ABCDEF', false)).toBe(panelIconSvg('close', '#ABCDEF'))
   })
 
   test('the preview states: fixed sample data and the panel state each draws, the same at every call; off is the live state', () => {

@@ -118,6 +118,13 @@
       "title": "Desktop panel gap",
       "description": "The space between the three boxes of the sections view in Claude Desktop (desktopPaneScroll sections, docked), in CSS pixels at Desktop's default density (a 19 px line): 2 by default; 0 lets the boxes touch as before. Desktop sizes the gap in half lines, so it follows the person's density: 2 is 1.8 px with 17 px lines and 2.3 px with 22 px lines. The boxes keep their heights in lines. A number from 0 to 8; anything else counts as 2.",
       "default": 2
+    },
+    "desktopButtons": {
+      "type": "string",
+      "title": "Desktop panel buttons",
+      "description": "How the sections view in Claude Desktop draws its pressable titles in the strip and its [+], [-] and [x] icons (desktopPaneScroll sections; every other value and the terminal draw plain). plain: bare text as before. outline: each title a rounded chip bordered in its section's colour, filled softly under the pointer, the shown one filled. filled: each title a solid chip of its section's colour with light text, the shown one brighter and underlined. tabs: the strip a tab bar, the shown title a tab on the colours of the section's box, the others dimmer tabs that brighten under the pointer. The icons follow the look, each a rounded box one row tall with a border and a fill under the pointer. Colours follow desktopStyle (grey under plain, one blue under tint-mono). A title that cannot expand stays greyed and not pressable. Dark mode only. Any other value counts as plain.",
+      "default": "plain",
+      "options": ["plain", "outline", "filled", "tabs"]
     }
   }
 }

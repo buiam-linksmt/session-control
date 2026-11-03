@@ -6,7 +6,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { PANEL_LOOKS, RULES_BLOCK, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
+import { buttonLook, PANEL_LOOKS, RULES_BLOCK, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
 import { auditFindings } from '../hooks/audit'
 import { isRegistrySound } from '../hooks/notices'
 import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
@@ -2392,6 +2392,7 @@ describe('debug trace', () => {
         desktopIcons: 'text',
         desktopPreview: 'off',
         desktopGap: 2,
+        desktopButtons: 'plain',
       },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
@@ -4576,10 +4577,10 @@ describe('desktopStyle plain, desktopIcons text and desktopPreview off draw the 
     test(`${state.name}: the options left out`, optionsOf(state, {}), async ($, on) => {
       expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
     })
-    test(`${state.name}: plain, text and off given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off' }), async ($, on) => {
+    test(`${state.name}: plain, text, off and plain buttons given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off', desktopButtons: 'plain' }), async ($, on) => {
       expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
     })
-    test(`${state.name}: an unknown value of each counts as the default`, optionsOf(state, { desktopStyle: 'Tint-Soft', desktopIcons: 'SVG', desktopPreview: 'on', desktopGap: 99 }), async ($, on) => {
+    test(`${state.name}: an unknown value of each counts as the default`, optionsOf(state, { desktopStyle: 'Tint-Soft', desktopIcons: 'SVG', desktopPreview: 'on', desktopGap: 99, desktopButtons: 'Tabs' }), async ($, on) => {
       expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
     })
     // desktopGap 0 draws the tree of before exactly, gap prop included.
@@ -4591,7 +4592,7 @@ describe('desktopStyle plain, desktopIcons text and desktopPreview off draw the 
   const UNTOUCHED = GOLDEN_STATES.filter(state => state.surface === 'terminal' || state.mode !== 'sections')
   for (const style of ['tint-soft', 'tint-strips', 'tint-mono']) {
     for (const state of UNTOUCHED) {
-      test(`${state.name}: desktopStyle ${style} with svg icons draws as before`, optionsOf(state, { desktopStyle: style, desktopIcons: 'svg' }), async ($, on) => {
+      test(`${state.name}: desktopStyle ${style} with svg icons and each button look draws as before`, optionsOf(state, { desktopStyle: style, desktopIcons: 'svg', desktopButtons: (['outline', 'filled', 'tabs'] as const)[['tint-soft', 'tint-strips', 'tint-mono'].indexOf(style)] as string }), async ($, on) => {
         expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
       })
     }
@@ -4606,12 +4607,15 @@ describe('desktopStyle plain, desktopIcons text and desktopPreview off draw the 
   }
 })
 
-describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections view (decisions smp-18 to smp-21)', () => {
+describe('desktopStyle x desktopIcons x desktopButtons x desktopPreview on the desktop sections view (decisions smp-18 to smp-22)', () => {
   type Node = { type?: string; text?: string; props?: Record<string, unknown>; children?: (Node | string)[] }
   const nodesOf = (node: Node): Node[] => [node, ...(node.children ?? []).flatMap(one => (typeof one === 'object' && one !== null ? nodesOf(one) : []))]
   const textOf = (node: Node): string => (node.children ?? []).map(one => (typeof one === 'string' ? one : typeof one === 'object' && one !== null ? textOf(one) : '')).join('')
   const STYLES = ['plain', 'tint-soft', 'tint-strips', 'tint-mono'] as const
   const ICONS = ['text', 'svg'] as const
+  const BUTTONS = ['plain', 'outline', 'filled', 'tabs'] as const
+  /** The titles of the strip besides the log's. */
+  const SECTION_IDS = ['sessions', 'queue', 'points'] as const
   const PREVIEWS = ['overview', 'queue', 'points', 'log', 'empty'] as const
   /** The title strip's marked title per preview state, and what else the state must show. */
   const SHOWN: Record<(typeof PREVIEWS)[number], { current?: string; texts: RegExp[] }> = {
@@ -4624,8 +4628,9 @@ describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections v
   const ROOM_PROPS = { ...PANE_PROPS, bodyColumns: 60, scroll: { offset: 0, bodyRows: 36 } }
   for (const style of STYLES) {
     for (const icons of ICONS) {
+      for (const buttons of BUTTONS) {
       for (const preview of PREVIEWS) {
-        test(`${style}, ${icons} icons, preview ${preview}: drawn without error, the state's content and look, nothing written`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: style, desktopIcons: icons, desktopPreview: preview } }, async ($, on) => {
+        test(`${style}, ${icons} icons, ${buttons} buttons, preview ${preview}: drawn without error, the state's content and look, nothing written`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: style, desktopIcons: icons, desktopButtons: buttons, desktopPreview: preview } }, async ($, on) => {
           const w = world(on)
           stubPanel(on)
           await boot($)
@@ -4643,8 +4648,46 @@ describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections v
           // The marked title of the strip: bold; its own background and the look's font style under a tinted look.
           const look = PANEL_LOOKS[style]
           const marked = nodes.find(one => one.type === 'Text' && /^\[ [A-Z ]+ \]$/.test(textOf(one)))
-          if (SHOWN[preview].current === undefined) expect(marked).toBeUndefined()
-          else {
+          if (SHOWN[preview].current === undefined || buttons !== 'plain') expect(marked).toBeUndefined()
+          if (SHOWN[preview].current !== undefined && buttons !== 'plain') {
+            // Under a desktopButtons look the shown title is a chip on the look's colours: a bold Text with no brackets.
+            const id = preview as 'queue' | 'points' | 'log'
+            const chips = buttonLook(buttons, style, id)
+            let pressables = 0
+            let greyed = 0
+            const shown = nodes.find(one => one.props?.key === `chip:${id}`) as Node
+            expect(shown.type).toBe('Box')
+            expect(shown.props?.height).toBe(1)
+            expect(shown.props?.backgroundColor).toBe(chips.current.backgroundColor)
+            expect(shown.props?.borderColor).toBe(chips.current.borderColor)
+            const label = (shown.children ?? [])[0] as Node
+            expect([label.type, textOf(label), label.props?.bold, label.props?.underline]).toEqual(['Text', (SHOWN[preview].current as string).slice(2, -2), true, chips.current.underline])
+            // Every title of the strip is a chip one row tall: a pressable one holds its Button on the look's colours (dim
+            // at rest under tabs), a greyed one a dim Text on no background. (The mock leaves out `hover`: the fills under
+            // the pointer are buttonLook's, checked in core.test.ts.)
+            for (const one of SECTION_IDS.filter(other => other !== id)) {
+              const box = nodes.find(node => node.props?.key === `chip:${one}`) as Node
+              expect(box.props?.height).toBe(1)
+              const inner = (box.children ?? [])[0] as Node
+              if (inner.type === 'Button') {
+                const title = buttonLook(buttons, style, one).title
+                expect([inner.props?.key, inner.props?.dimColor, box.props?.backgroundColor, box.props?.borderColor]).toEqual([`t:top:${one}`, title.isDim, title.backgroundColor, title.borderColor])
+              } else {
+                expect([inner.type, inner.props?.dimColor, box.props?.backgroundColor, inner.props?.backgroundColor]).toEqual(['Text', true, undefined, undefined])
+                expect(box.props?.borderDimColor).toBe(buttons === 'tabs' ? undefined : true)
+              }
+              pressables += inner.type === 'Button' ? 1 : 0
+              greyed += inner.type === 'Text' ? 1 : 0
+            }
+            // Beside the shown title, in a room of 36 rows and 60 columns: the queue's page a greyed title (the sessions and
+            // the open points fit their boxes), the points' and the log's pages a pressable one (the queued work does not
+            // fit), so the captures hold all three kinds.
+            if (preview === 'queue') expect(greyed).toBeGreaterThan(0)
+            else expect(pressables).toBeGreaterThan(0)
+            // A strip wrapped onto two rows puts a 2 px gap between them.
+            const wrap = nodes.find(one => (one.children ?? []).some(child => typeof child === 'object' && child !== null && child.props?.key === `chip:${id}`))
+            expect(wrap?.props?.rowGap).toBe(0.211)
+          } else if (SHOWN[preview].current !== undefined) {
             expect(textOf(marked as Node)).toBe(SHOWN[preview].current as string)
             const id = preview as 'queue' | 'points' | 'log'
             const background = look.sections[id].current
@@ -4658,7 +4701,10 @@ describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections v
             for (const greyed of nodes.filter(one => one.type === 'Text' && /^(SESSIONS|QUEUED WORK|OPEN POINTS)$/.test(textOf(one)) && one.props?.dimColor === true)) expect(greyed.props?.backgroundColor).toBeUndefined()
           }
           // Each bordered box: the dim border under plain, else the section's own border colour, and its body tint.
-          const boxes = nodes.filter(one => one.type === 'Box' && one.props?.borderStyle === 'round')
+          const rounded = nodes.filter(one => one.type === 'Box' && one.props?.borderStyle === 'round')
+          // A rounded Box is a section's box, or under a desktopButtons look a title's chip or an icon's box.
+          for (const box of rounded) expect(String(box.props?.key ?? '')).toMatch(buttons === 'plain' ? /^(sec|page):/ : /^(sec|page|chip|icon):/)
+          const boxes = rounded.filter(one => /^(sec|page):/.test(String(one.props?.key ?? '')))
           expect(boxes.length).toBeGreaterThan(0)
           for (const box of boxes) {
             const id = (String(box.props?.key ?? '').split(':')[1] ?? '') as 'sessions' | 'queue' | 'points' | 'log'
@@ -4670,7 +4716,7 @@ describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections v
           }
           // The even view's boxes stand 2 px apart (the default desktopGap): the rowGap of their column, whose boxes keep
           // their heights in lines and fill the room exactly; a page is one box, with no gap.
-          const gapped = nodes.filter(one => one.type === 'Box' && one.props?.rowGap !== undefined)
+          const gapped = nodes.filter(one => one.type === 'Box' && one.props?.rowGap !== undefined && (one.children ?? []).some(child => typeof child === 'object' && child !== null && String(child.props?.key ?? '').startsWith('sec:')))
           if (preview === 'overview' || preview === 'empty') {
             expect(gapped.length).toBe(1)
             const column = gapped[0] as Node
@@ -4684,6 +4730,20 @@ describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections v
           const svgs = nodes.filter(one => one.type === 'Svg')
           const iconKeys = nodes.filter(one => one.type === 'Button' && /^(x:\w+|c:top|c:bottom|close:top)$/.test(String(one.props?.key))).map(one => String(one.props?.key))
           if (preview !== 'overview' && preview !== 'empty') expect(iconKeys).toContain('c:top')
+          // Under a desktopButtons look every icon is a rounded box three cells wide and one row tall, its padding taken
+          // off, that lights under the pointer: the glyph's Button, or the drawn mark with no frame of its own.
+          if (buttons !== 'plain') {
+            const iconBoxes = nodes.filter(one => one.type === 'Box' && String(one.props?.key ?? '').startsWith('icon:'))
+            expect(iconBoxes.length).toBe(iconKeys.length)
+            for (const box of iconBoxes) {
+              expect([box.props?.width, box.props?.height, box.props?.padding, box.props?.borderStyle]).toEqual([3, 1, 0, 'round'])
+              const owner = (/^icon:(?:x:(\w+)|close:top)$/.exec(String(box.props?.key)) ?? [])
+              const id = (String(box.props?.key) === 'icon:close:top' ? 'log' : owner[1]) as 'sessions' | 'queue' | 'points' | 'log' | undefined
+              if (id !== undefined) expect([box.props?.backgroundColor, box.props?.borderColor]).toEqual([buttonLook(buttons, style, id).icon.backgroundColor, buttonLook(buttons, style, id).icon.borderColor])
+            }
+            for (const svg of svgs) expect(String(svg.props?.source)).not.toContain('<rect')
+            if (icons === 'text') for (const button of nodes.filter(one => one.type === 'Button' && iconKeys.includes(String(one.props?.key)))) expect(['+', '\u2212', '\u00D7']).toContain(button.props?.label)
+          }
           if (icons === 'text') {
             expect(svgs).toEqual([])
           } else {
@@ -4708,6 +4768,7 @@ describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections v
           expect(w.calls.length).toBe(calls)
           await ui.unmount()
         })
+      }
       }
     }
   }

@@ -132,11 +132,14 @@ import {
   boxAt,
   buttonStep,
   desktopPaneScroll,
+  buttonLook,
+  desktopButtons,
   desktopGap,
   desktopIcons,
   desktopPreview,
   desktopRowGap,
   desktopStyle,
+  PANEL_ICON_GLYPH,
   PANEL_ICON_PX,
   PANEL_ICON_TEXT,
   PANEL_LOOKS,
@@ -209,7 +212,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { BoxWindow, ComposedPrompt, DesktopIcons, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
+import type { BoxWindow, ChipLook, ComposedPrompt, DesktopButtons, DesktopIcons, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -285,6 +288,8 @@ type Config = {
   desktopPreview: DesktopPreview
   /** The pixels between the boxes of the `sections` view's even view (core.ts desktopGap). */
   desktopGap: number
+  /** How the `sections` view draws its titles and icons (core.ts desktopButtons); an unknown value counts as `plain`. */
+  desktopButtons: DesktopButtons
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -307,6 +312,7 @@ let config: Config = {
   desktopIcons: 'text',
   desktopPreview: 'off',
   desktopGap: DESKTOP_GAP_PX,
+  desktopButtons: 'plain',
 }
 let isActive = false
 /** Whether the orchestratorDir option is set: the mod then turns on without the CLAUDE.md heading. */
@@ -3127,6 +3133,7 @@ export const register: Register = (on, options) => {
     desktopIcons: desktopIcons(options.desktopIcons),
     desktopPreview: desktopPreview(options.desktopPreview),
     desktopGap: desktopGap(options.desktopGap),
+    desktopButtons: desktopButtons(options.desktopButtons),
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -3665,7 +3672,38 @@ export const register: Register = (on, options) => {
     // draws an Svg) the drawn icon in the section's colour, in a box one row tall: the Svg in the flow and a Button with
     // no visible label laid over it takes the press (Desktop drops a Button's children, so the Svg cannot be its label).
     const hasSvgIcons = isSections && config.desktopIcons === 'svg' && Svg !== undefined
+    // The pressables' look (desktopButtons, sections view only): bare text under `plain`, else each title and icon a
+    // box of its own (buttonLook), in the hue its section takes under the desktopStyle.
+    const buttons: DesktopButtons = isSections ? config.desktopButtons : 'plain'
+    const chipsOf = (id: SectionId) => (buttons === 'plain' ? undefined : buttonLook(buttons, config.desktopStyle, id))
+    // A chip's colours: its background, its rounded border (none without a colour: a greyed tab), its hover.
+    const chipColours = (look: ChipLook) => ({
+      ...(look.borderColor === undefined && look.borderDimColor === undefined ? {} : { borderStyle: 'round', ...(look.borderColor === undefined ? { borderDimColor: true as const } : { borderColor: look.borderColor }) }),
+      ...(look.backgroundColor === undefined ? {} : { backgroundColor: look.backgroundColor }),
+      ...(look.hover === undefined ? {} : { hover: look.hover }),
+    })
     const iconButton = (icon: PanelIcon, key: string, onPress: () => unknown, id: SectionId) => {
+      const chips = chipsOf(id)
+      if (chips !== undefined) {
+        // A rounded box one row tall (its 1 px borders inside the row: the box is border-box) and three cells wide, its
+        // padding taken off (a bordered Box gets Desktop's own), holding the glyph's Button or the drawn mark under one.
+        const frame = { key: `icon:${key}`, width: 3, height: 1, flexShrink: 0, overflow: 'hidden' as const, alignItems: 'center' as const, justifyContent: 'center' as const, padding: 0, ...chipColours(chips.icon) }
+        if (!hasSvgIcons || Svg === undefined) {
+          return (
+            <Box {...frame}>
+              <Button key={key} label={PANEL_ICON_GLYPH[icon]} plain onPress={onPress} />
+            </Box>
+          )
+        }
+        return (
+          <Box {...frame}>
+            <Svg source={panelIconSvg(icon, chips.ink, false)} alt={PANEL_ICON_TEXT[icon].alt} width={PANEL_ICON_PX} height={PANEL_ICON_PX} />
+            <Box position="absolute" top={0} left={0} right={0} bottom={0}>
+              <Button key={key} label={'\u00A0\u00A0\u00A0'} plain onPress={onPress} />
+            </Box>
+          </Box>
+        )
+      }
       if (!hasSvgIcons || Svg === undefined) return <Button key={key} label={PANEL_ICON_TEXT[icon].label} plain dimColor onPress={onPress} />
       const look = lookOf(id)
       return (
@@ -3677,6 +3715,13 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    // A title of the strip under a desktopButtons look: a rounded box one row tall (its borders inside the row) with a
+    // cell of padding a side and none above or below, holding the Button or the Text.
+    const chip = (key: string, look: ChipLook, inner: ReturnType<typeof deskRowEl>) => (
+      <Box key={key} height={1} flexShrink={0} overflow="hidden" alignItems="center" paddingX={1} paddingY={0} {...chipColours(look)}>
+        {inner}
+      </Box>
+    )
     // A section of the page: its title, then its rows, each Text wrapped by the surface; a pressable row's lines are
     // Buttons (desktopLines), as a desktop Button draws its label on one line.
     const pageBlock = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[]) => {
@@ -3769,19 +3814,27 @@ export const register: Register = (on, options) => {
     // whose lines exceed its box in the even view a Button that shows it, one whose lines fit greyed and not pressable),
     // on the right `[x]` closing an open log and `[-]` back to the boxes. A log page also ends on a row with `[-]` alone.
     const stripTitles: Record<ExpandableId, string> = { sessions: 'SESSIONS', queue: 'QUEUED WORK', points: 'OPEN POINTS' }
+    // Under a desktopButtons look each title is a chip (chip, buttonLook): the shown one bold on its own colours, with no
+    // brackets; another that can be shown a Button in its chip; a greyed one a dim Text in a dim-bordered chip (a tab
+    // without border or background), never pressable. Wrapped chips stand a 2 px gap apart.
+    const stripTitle = (id: SectionId, title: string, current: ExpandableId | 'log') => {
+      const chips = chipsOf(id)
+      if (chips === undefined) {
+        if (id === current) return <Text bold {...currentLook(id)}>{`[ ${title} ]`}</Text>
+        if (id !== 'log' && overflowsEven(id)) return <Button key={`t:top:${id}`} label={title} plain onPress={showSection(id)} />
+        return <Text dimColor>{title}</Text>
+      }
+      if (id === current) return chip(`chip:${id}`, chips.current, <Text bold underline={chips.current.underline}>{title}</Text>)
+      if (id !== 'log' && overflowsEven(id)) {
+        return chip(`chip:${id}`, chips.title, <Button key={`t:top:${id}`} label={title} plain dimColor={chips.title.isDim} hover={chips.title.isDim === true ? { dimColor: false } : undefined} onPress={showSection(id)} />)
+      }
+      return chip(`chip:${id}`, chips.greyed, <Text dimColor>{title}</Text>)
+    }
     const strip = (current: ExpandableId | 'log') => (
-      <Box key="strip:top" flexDirection="row" paddingX={1}>
-        <Box flexDirection="row" flexGrow={1} flexWrap="wrap" columnGap={1}>
-          {SECTION_ORDER.map(id =>
-            id === current ? (
-              <Text bold {...currentLook(id)}>{`[ ${stripTitles[id]} ]`}</Text>
-            ) : overflowsEven(id) ? (
-              <Button key={`t:top:${id}`} label={stripTitles[id]} plain onPress={showSection(id)} />
-            ) : (
-              <Text dimColor>{stripTitles[id]}</Text>
-            ),
-          )}
-          {current === 'log' && <Text bold {...currentLook('log')}>[ LOG ]</Text>}
+      <Box key="strip:top" flexDirection="row" paddingX={1} {...(buttons === 'plain' ? {} : { alignItems: 'flex-end' as const })}>
+        <Box flexDirection="row" flexGrow={1} flexWrap="wrap" columnGap={1} {...(buttons === 'plain' ? {} : { rowGap: desktopRowGap(DESKTOP_GAP_PX) })}>
+          {SECTION_ORDER.map(id => stripTitle(id, stripTitles[id], current))}
+          {current === 'log' && stripTitle('log', 'LOG', current)}
         </Box>
         {current === 'log' && iconButton('close', 'close:top', closeOpenLog, 'log')}
         {iconButton('minus', 'c:top', collapse, current)}
