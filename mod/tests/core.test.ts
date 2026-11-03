@@ -35,6 +35,10 @@ import {
   DESKTOP_ICONS,
   DESKTOP_PREVIEWS,
   DESKTOP_STYLES,
+  DESKTOP_GAP_PX,
+  DESKTOP_GAP_MAX_PX,
+  desktopGap,
+  desktopRowGap,
   desktopIcons,
   desktopPreview,
   desktopStyle,
@@ -2153,6 +2157,18 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-21
     for (const other of [undefined, '', 'Plain', 'tint', 'tint-soft ', 1, true, ['tint-soft']]) expect(desktopStyle(other)).toBe('plain')
     for (const other of [undefined, '', 'SVG', 'icons', 1, false]) expect(desktopIcons(other)).toBe('text')
     for (const other of [undefined, '', 'on', 'Overview', 'queue ', 0, null]) expect(desktopPreview(other)).toBe('off')
+  })
+
+  test('desktopGap: pixels from 0 to 8, a numeric string too; anything else counts as 2; drawn as half lines of 9.5 px', () => {
+    expect([DESKTOP_GAP_PX, DESKTOP_GAP_MAX_PX]).toEqual([2, 8])
+    for (const value of [0, 1, 1.5, 2, 8]) expect(desktopGap(value)).toBe(value)
+    expect(desktopGap('3')).toBe(3)
+    for (const other of [undefined, null, '', ' ', 'two', -1, 8.5, Number.NaN, Number.POSITIVE_INFINITY, true, [2]]) expect(desktopGap(other)).toBe(2)
+    expect(desktopRowGap(0)).toBe(0)
+    expect(desktopRowGap(2)).toBe(0.211)
+    expect(desktopRowGap(9.5)).toBe(1)
+    // The pixels Desktop draws for the rowGap at each line height of its densities (17, 19, 20 and 22 px lines).
+    expect([17, 19, 20, 22].map(lh => Math.round(desktopRowGap(2) * (lh / 2) * 10) / 10)).toEqual([1.8, 2, 2.1, 2.3])
   })
 
   /** WCAG 2 contrast ratio of two #RRGGBB colours. */

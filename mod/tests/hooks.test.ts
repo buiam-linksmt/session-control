@@ -2391,6 +2391,7 @@ describe('debug trace', () => {
         desktopStyle: 'plain',
         desktopIcons: 'text',
         desktopPreview: 'off',
+        desktopGap: 2,
       },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
@@ -4555,16 +4556,34 @@ const GOLDEN: Record<string, string> = {
   'term-log': '1b5fa36c8ec490:5877',
 }
 
-describe('desktopStyle plain, desktopIcons text and desktopPreview off draw the trees of before (decisions smp-18 to smp-21)', () => {
-  const optionsOf = (state: (typeof GOLDEN_STATES)[number], extra: Record<string, string>) => ({ options: { ...OPTIONS, ...(state.mode === undefined ? {} : { desktopPaneScroll: state.mode }), ...extra } })
+/** The golden states whose tree holds the even view of the sections value on the desktop: the default desktopGap adds its gap there. */
+const GAPPED = new Set(['desk-even-live', 'desk-even-15', 'desk-points-box-selected', 'desk-log-box'])
+/** The default desktopGap's prop in a tree's JSON: the boxes' column's rowGap of 2 px (0.211 half lines). */
+const GAP_PROP = ',"rowGap":0.211'
+/**
+ * A golden tree drawn under the default desktopGap: its gap props counted and taken out, so the rest is compared with the
+ * tree of before. The gap is the only change the default makes, and only to the even view's column (one per tree).
+ */
+const withoutGap = (text: string, name: string) => {
+  expect([name, text.split(GAP_PROP).length - 1]).toEqual([name, GAPPED.has(name) ? 1 : 0])
+  return text.split(GAP_PROP).join('')
+}
+
+describe('desktopStyle plain, desktopIcons text and desktopPreview off draw the trees of before (decisions smp-18 to smp-22)', () => {
+  const optionsOf = (state: (typeof GOLDEN_STATES)[number], extra: Record<string, string | number>) => ({ options: { ...OPTIONS, ...(state.mode === undefined ? {} : { desktopPaneScroll: state.mode }), ...extra } })
   for (const state of GOLDEN_STATES) {
+    // The default desktopGap (2 px) adds the gap between the even view's boxes and nothing else (decision smp-22).
     test(`${state.name}: the options left out`, optionsOf(state, {}), async ($, on) => {
-      expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
+      expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
     })
     test(`${state.name}: plain, text and off given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off' }), async ($, on) => {
-      expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
+      expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
     })
-    test(`${state.name}: an unknown value of each counts as the default`, optionsOf(state, { desktopStyle: 'Tint-Soft', desktopIcons: 'SVG', desktopPreview: 'on' }), async ($, on) => {
+    test(`${state.name}: an unknown value of each counts as the default`, optionsOf(state, { desktopStyle: 'Tint-Soft', desktopIcons: 'SVG', desktopPreview: 'on', desktopGap: 99 }), async ($, on) => {
+      expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
+    })
+    // desktopGap 0 draws the tree of before exactly, gap prop included.
+    test(`${state.name}: desktopGap 0 draws the tree of before`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off', desktopGap: 0 }), async ($, on) => {
       expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
     })
   }
@@ -4577,9 +4596,10 @@ describe('desktopStyle plain, desktopIcons text and desktopPreview off draw the 
       })
     }
   }
+  // A preview, and any desktopGap, leave the terminal and every desktopPaneScroll value but sections on the live state as before.
   for (const preview of ['overview', 'queue', 'points', 'log', 'empty']) {
-    for (const state of GOLDEN_STATES.filter(one => one.surface === 'terminal')) {
-      test(`${state.name}: desktopPreview ${preview} leaves the terminal's live state`, optionsOf(state, { desktopStyle: 'tint-strips', desktopIcons: 'svg', desktopPreview: preview }), async ($, on) => {
+    for (const state of UNTOUCHED) {
+      test(`${state.name}: desktopPreview ${preview} and desktopGap 8 leave the live state of before`, optionsOf(state, { desktopStyle: 'tint-strips', desktopIcons: 'svg', desktopPreview: preview, desktopGap: 8 }), async ($, on) => {
         expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
       })
     }
@@ -4648,6 +4668,18 @@ describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections v
             expect(box.props?.borderDimColor).toBe(section.border === undefined ? true : undefined)
             expect(box.props?.backgroundColor).toBe(section.body)
           }
+          // The even view's boxes stand 2 px apart (the default desktopGap): the rowGap of their column, whose boxes keep
+          // their heights in lines and fill the room exactly; a page is one box, with no gap.
+          const gapped = nodes.filter(one => one.type === 'Box' && one.props?.rowGap !== undefined)
+          if (preview === 'overview' || preview === 'empty') {
+            expect(gapped.length).toBe(1)
+            const column = gapped[0] as Node
+            expect(column.props?.rowGap).toBe(0.211)
+            expect(column.props?.height).toBe(ROOM_PROPS.scroll.bodyRows)
+            const heights = (column.children ?? []).flatMap(one => (typeof one === 'object' && one !== null ? [Number(one.props?.height)] : []))
+            expect(heights.length).toBe(3)
+            expect(heights.reduce((a, b) => a + b, 0)).toBe(ROOM_PROPS.scroll.bodyRows)
+          } else expect(gapped).toEqual([])
           // The icons: text Buttons, or drawn icons in the section's colour, each with a pressable Button of the same key.
           const svgs = nodes.filter(one => one.type === 'Svg')
           const iconKeys = nodes.filter(one => one.type === 'Button' && /^(x:\w+|c:top|c:bottom|close:top)$/.test(String(one.props?.key))).map(one => String(one.props?.key))
@@ -4679,6 +4711,38 @@ describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections v
       }
     }
   }
+
+  test('seated inline, the sections value draws the compact panel of the live state whatever desktopPreview says', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: 'tint-soft', desktopPreview: 'overview' } }, async ($, on) => {
+    world(on)
+    stubPanel(on)
+    await boot($)
+    await runCommand($, 'side')
+    const ui = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: { ...PANE_PROPS, placement: 'inline', scroll: { offset: 0, bodyRows: 7 } } as never })
+    const nodes = nodesOf((await ui.drawn()) as Node)
+    const texts = nodes.flatMap(one => (one.type === 'Text' ? [textOf(one)] : one.type === 'Button' ? [String(one.props?.label ?? '')] : []))
+    expect(texts.some(text => /alive worker/.test(text))).toBe(true)
+    expect(texts.some(text => /Panel style variants/.test(text))).toBe(false)
+    expect(nodes.some(one => one.props?.rowGap !== undefined)).toBe(false)
+    await ui.unmount()
+  })
+
+  test('the even view of the live state with an open log: the sessions box and the log box stand desktopGap apart, 0 lets them touch', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopGap: 4 } }, async ($, on) => {
+    TAIL.rows = goldenLog
+    try {
+      world(on)
+      stubPanel(on)
+      await boot($)
+      await runCommand($, 'side')
+      const ui = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: PANE_PROPS as never })
+      await ui.press({ key: `s:${SID_ALIVE}` })
+      const column = nodesOf((await ui.drawn()) as Node).find(one => one.props?.rowGap !== undefined)
+      expect(column?.props?.rowGap).toBe(0.421)
+      expect((column?.children ?? []).flatMap(one => (typeof one === 'object' && one !== null ? [String(one.props?.key)] : []))).toEqual(['sec:sessions', 'sec:log'])
+      await ui.unmount()
+    } finally {
+      TAIL.rows = undefined
+    }
+  })
 
   test('a tinted look with the live state: the colours apply to the live boxes and the svg icons press as the text ones', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: 'tint-soft', desktopIcons: 'svg' } }, async ($, on) => {
     QUEUE.text = goldenTasks

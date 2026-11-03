@@ -132,8 +132,10 @@ import {
   boxAt,
   buttonStep,
   desktopPaneScroll,
+  desktopGap,
   desktopIcons,
   desktopPreview,
+  desktopRowGap,
   desktopStyle,
   PANEL_ICON_PX,
   PANEL_ICON_TEXT,
@@ -141,6 +143,7 @@ import {
   panelIconSvg,
   previewState,
   desktopSpareRows,
+  DESKTOP_GAP_PX,
   isAnyOverflowing,
   pageCap,
   PAGE_LIST_CAP,
@@ -280,6 +283,8 @@ type Config = {
   desktopIcons: DesktopIcons
   /** A fixed sample state the desktop panel draws instead of the live one (core.ts desktopPreview); `off`: the live state. */
   desktopPreview: DesktopPreview
+  /** The pixels between the boxes of the `sections` view's even view (core.ts desktopGap). */
+  desktopGap: number
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -301,6 +306,7 @@ let config: Config = {
   desktopStyle: 'plain',
   desktopIcons: 'text',
   desktopPreview: 'off',
+  desktopGap: DESKTOP_GAP_PX,
 }
 let isActive = false
 /** Whether the orchestratorDir option is set: the mod then turns on without the CLAUDE.md heading. */
@@ -3120,6 +3126,7 @@ export const register: Register = (on, options) => {
     desktopStyle: desktopStyle(options.desktopStyle),
     desktopIcons: desktopIcons(options.desktopIcons),
     desktopPreview: desktopPreview(options.desktopPreview),
+    desktopGap: desktopGap(options.desktopGap),
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -3475,8 +3482,10 @@ export const register: Register = (on, options) => {
     const Svg = 'Svg' in elements ? elements.Svg : undefined
     // A desktopPreview state: fixed sample data drawn in place of the live state, the panel's own state (a log open, a
     // section expanded, an open point selected) included; nothing it draws reads, writes or calls anything, and its
-    // presses do nothing. The terminal always draws the live state.
-    const preview = e.surface === 'desktop' ? previewState(config.desktopPreview) : undefined
+    // presses do nothing. Only the `sections` view docked draws it: the terminal, every other desktopPaneScroll value and
+    // the panel seated inline (which draws the compact panel) always draw the live state.
+    const isPreviewDrawn = e.surface === 'desktop' && config.desktopPaneScroll === 'sections' && e.props.placement !== 'inline'
+    const preview = isPreviewDrawn ? previewState(config.desktopPreview) : undefined
     const liveSnap = await read($, snapshot)
     const columns = e.props.bodyColumns
     if (liveSnap === null && preview === undefined) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
@@ -3741,6 +3750,10 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    // The even view's gap between its boxes (desktopGap): a rowGap of half lines, none at 0. The boxes keep their heights
+    // in lines; Desktop takes the gap from the room below each box's last row (a box with overflow hidden shrinks).
+    const gapRows = isSections ? desktopRowGap(config.desktopGap) : 0
+    const evenGap = gapRows === 0 ? {} : { rowGap: gapRows }
     // Whether a section's lines exceed its box in the even view (the three boxes, whichever section is shown now): the
     // room and width of this drawing, the section's lines as sectionBox draws them, its list uncapped.
     const evenBoxes = sectionBoxes(bodyRows, false, null)
@@ -3963,7 +3976,7 @@ export const register: Register = (on, options) => {
       if (isSections) {
         if (isSectionsPage) return sectionsPage('log', pageBlock('log', `LOG ${view.title}`, [], logRows))
         return framed(
-          <Box flexDirection="column" height={bodyRows} overflow="hidden">
+          <Box flexDirection="column" height={bodyRows} overflow="hidden" {...evenGap}>
             {sectionBox('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, showSection('sessions'))}
             {sectionBox('log', `LOG ${view.title}`, [], logRows, showLogPage, true)}
           </Box>,
@@ -3983,7 +3996,7 @@ export const register: Register = (on, options) => {
       if (sectionsShown === 'queue') return sectionsPage('queue', pageBlock('queue', 'QUEUED WORK', [], queueRows))
       if (sectionsShown === 'points') return sectionsPage('points', pageBlock('points', 'OPEN POINTS', [], pointRows))
       return framed(
-        <Box flexDirection="column" height={bodyRows} overflow="hidden">
+        <Box flexDirection="column" height={bodyRows} overflow="hidden" {...evenGap}>
           {sectionBox('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, showSection('sessions'))}
           {sectionBox('queue', 'QUEUED WORK', [], queueRows, showSection('queue'))}
           {sectionBox('points', 'OPEN POINTS', [], pointRows, showSection('points'))}

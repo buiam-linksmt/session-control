@@ -2562,6 +2562,31 @@ export function desktopIcons(value: unknown): DesktopIcons {
 }
 
 /**
+ * The gap between the boxes of the `sections` view's even view (option desktopGap), in CSS pixels at Desktop's default
+ * density, where a pane line is 19 px (`--cds-leading-body` of `.cds-root`, 1.1875rem). Desktop draws a Box's vertical
+ * spacing number N as `calc(N * var(--engine-row-unit, .5lh))`, half a line each (the pane sets no row unit; only a Client
+ * does, to 1lh), and takes any finite number, fractions included, as the engine does. So the mod passes the pixels over
+ * 9.5 (desktopRowGap): 2 px is a rowGap of 0.211, 1.8 px at the smallest density (17 px lines) and 2.3 px at the largest
+ * (22 px). The boxes keep their heights in lines: the gap comes out of each box's spare space below its last row.
+ */
+export const DESKTOP_GAP_PX = 2
+/** The most pixels desktopGap takes: a larger value, a negative one or no number counts as the default. */
+export const DESKTOP_GAP_MAX_PX = 8
+/** CSS pixels of one unit of a Box's vertical spacing on Desktop at its default density: half a 19 px line. */
+export const DESKTOP_ROW_UNIT_PX = 9.5
+
+/** The option's value as the mod uses it: a number of pixels from 0 to DESKTOP_GAP_MAX_PX, else DESKTOP_GAP_PX. */
+export function desktopGap(value: unknown): number {
+  const px = typeof value === 'number' ? value : typeof value === 'string' && value.trim() !== '' ? Number(value) : Number.NaN
+  return Number.isFinite(px) && px >= 0 && px <= DESKTOP_GAP_MAX_PX ? px : DESKTOP_GAP_PX
+}
+
+/** A gap of `px` pixels as the `rowGap` of a desktop Box: half lines, to three decimals; 0 for none. */
+export function desktopRowGap(px: number): number {
+  return Math.round((px / DESKTOP_ROW_UNIT_PX) * 1000) / 1000
+}
+
+/**
  * A fixed sample state the desktop panel draws instead of the live one (option desktopPreview): `off` the live state;
  * `overview` the three sections filled, none expanded; `queue` the queued work expanded; `points` the open points
  * expanded with the first one selected; `log` a running session's log expanded; `empty` nothing at all.

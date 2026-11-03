@@ -109,9 +109,15 @@
     "desktopPreview": {
       "type": "string",
       "title": "Desktop panel preview",
-      "description": "A fixed sample state the panel draws in Claude Desktop instead of the live one, to look at a desktopStyle and desktopIcons combination without any click: overview (three sessions, eight queued tasks, three open points, none expanded), queue (the queued work expanded), points (the open points expanded, the first selected), log (a running session's log of 40 lines expanded), empty (nothing at all). It reads, writes and calls nothing, and its presses do nothing; the terminal keeps the live state. off: the live state. Any other value counts as off.",
+      "description": "A fixed sample state the sections view draws in Claude Desktop (desktopPaneScroll sections, docked) instead of the live one, to look at a desktopStyle and desktopIcons combination without any click: overview (three sessions, eight queued tasks, three open points, none expanded), queue (the queued work expanded), points (the open points expanded, the first selected), log (a running session's log of 40 lines expanded), empty (nothing at all). It reads, writes and calls nothing, and its presses do nothing; every other desktopPaneScroll value, the panel seated inline and the terminal keep the live state. off: the live state. Any other value counts as off.",
       "default": "off",
       "options": ["off", "overview", "queue", "points", "log", "empty"]
+    },
+    "desktopGap": {
+      "type": "number",
+      "title": "Desktop panel gap",
+      "description": "The space between the three boxes of the sections view in Claude Desktop (desktopPaneScroll sections, docked), in CSS pixels at Desktop's default density (a 19 px line): 2 by default; 0 lets the boxes touch as before. Desktop sizes the gap in half lines, so it follows the person's density: 2 is 1.8 px with 17 px lines and 2.3 px with 22 px lines. The boxes keep their heights in lines. A number from 0 to 8; anything else counts as 2.",
+      "default": 2
     }
   }
 }
