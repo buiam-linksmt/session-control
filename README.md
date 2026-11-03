@@ -298,6 +298,9 @@ Defaults are those of `mod/.claude-plugin/plugin.json`.
 | `lockDirs` | empty | Comma separated absolute folders whose direct children are locks (see Lock folders); a dead holder is told by the lock-holder notice. Empty: off. |
 | `licenceDirs` | empty | Comma separated absolute config directories the licence tools count besides the ones they find (see Licence tools); a leading `~` is the home directory, an entry that is not absolute is ignored and counted. Each counts only when it holds both `.credentials.json` and `.claude.json` as regular files (presence and kind only); an entry that is a symbolic link to such a folder counts. Empty: none. |
 | `desktopPaneScroll` | `spare` | How the panel's sections scroll in Claude Desktop, whose pane draws a scroll bar of its own whenever its body can move: `spare`, `overflow`, `minimal`, `overflow-minimal`, `buttons`, `drag`, `page` or `sections` (see Claude Desktop). The terminal is not affected. Any other value counts as `spare`. |
+| `desktopStyle` | `plain` | The colours of the `sections` view in Claude Desktop: `plain`, `tint-soft`, `tint-strips` or `tint-mono` (see Panel look and previews under Claude Desktop). Every other `desktopPaneScroll` value and the terminal draw `plain`. Any other value counts as `plain`. |
+| `desktopIcons` | `text` | How the `sections` view in Claude Desktop draws `[+]`, `[-]` and `[x]`: `text`, or `svg` drawn icons. Any other value counts as `text`. |
+| `desktopPreview` | `off` | A fixed sample state the desktop panel draws instead of the live one: `overview`, `queue`, `points`, `log` or `empty`; `off` the live state. The terminal keeps the live state. Any other value counts as `off`. |
 
 Set them in the settings under `pluginConfigs`. A mod loaded with `--plugin-dir` is keyed `session-control@inline`. A `helper` key among the options is ignored without an error:
 
@@ -511,6 +514,53 @@ Verified on 2026-10-12 in Claude Desktop 2.31226.1.0 (the Microsoft Store packag
 - the prompt hook settled in 145 to 209 ms (the 4 prompts of the engine's debug log); the panel was drawn 37 times, in 6.5 to 66 ms (p50 24 ms, p95 61 ms): twice as it opened, then, with only finished rows in view, not again for 6 min 42 s, then 35 times a second apart, from 34 s after the launch's call to 5 s after its answer; the band was drawn 10 times in the debug log (from 04:33 UTC, five minutes after the session started), none of them between the first and the last of those 35 draws.
 
 Seen in that retest: the toasts the mod raised while a session started, before its Code tab showed it, did not appear (their notes and notice lines reached the model with the next prompt), and of several notice toasts released together the desktop showed the last, each taking the place of the one before. The mod keeps toasts until a surface is attached and gives each toast its 8 s on the desktop (see Worker completion under Using it). Not verified there: a worker that runs, which needs a login in the config folder it is launched under (`config_dir`, or the folder the licence picker names); the toast queue, the toasts kept until a surface attaches and the prompt's 3 s wait for a task notification's harvest (mod commits 5824f81, 9683bc4 and 0b39035, after that retest); the panel's scrolling described above, which came after it too.
+
+### Panel look and previews
+
+Three options change how the `sections` view looks in Claude Desktop, and only there: under every other `desktopPaneScroll` value, and on the terminal, the panel draws exactly as before whatever they say (the tests compare the trees with those of mod commit 2e543d4).
+
+- `desktopStyle` colours the sections, one table per section in `PANEL_LOOKS` (`hooks/core.ts`): `plain` (the default) adds no colour; `tint-soft` puts each section's box on a low-contrast tint of its hue, with a bar of that hue at the start of its title row and a border of a muted step of it; `tint-strips` leaves the boxes neutral and puts each title row on a strong band of its hue, the border in the same hue; `tint-mono` uses one blue hue, a lighter step per section for the body, the title row and the border. Hues: sessions blue, queued work violet, open points sand, the log grey; none is the green, red or amber the statuses use. Under a tinted look the section shown alone (a page) has its marked title in the strip on its own background and underlined (`tint-mono` also in italics); a title that cannot expand stays a greyed text, a selected open point or session keeps its marker and weight, and a row the pointer is on is still inverted.
+- `desktopIcons` `svg` draws `[+]`, `[-]` and `[x]` as icons (a rounded square with a plus or a minus, a cross), 14 CSS pixels, stroked in the look's icon colour of the section (an Svg cannot take the text colour). Each sits in a box one row tall, so a line of the box keeps its count; the press goes to a Button with no visible label laid over the icon (Desktop drops a Button's children, so the Svg cannot be its label), with the Button's key of the text icon; under the pointer the box takes the look's hover background.
+- `desktopPreview` draws fixed sample data instead of the live state, the panel's own state included, so each look can be captured without a click: `overview` (three sessions, running, finished and not acknowledged, done; eight queued tasks, one title of three lines; three open points, one with a long detail; nothing expanded), `queue` (the queued work expanded as its page), `points` (the open points expanded, the first one selected), `log` (the running session's log of 40 lines, three of them long enough to wrap, expanded as its page), `empty` (no session, no task, no open point). It reads, writes and calls nothing (no registry, no helper file, no tool), and a press in it does nothing.
+
+Set them under `pluginConfigs` as any option, for example:
+
+```json
+{
+  "pluginConfigs": {
+    "session-control@inline": {
+      "options": {
+        "desktopPaneScroll": "sections",
+        "desktopStyle": "tint-soft",
+        "desktopIcons": "svg",
+        "desktopPreview": "queue"
+      }
+    }
+  }
+}
+```
+
+Dark mode only. A plugin's tree cannot tell which theme Desktop shows: the Pane's render event carries its title, focus, width, placement and scroll window and no theme; a colour may be a theme key, which follows the person's theme, but the theme keys name meanings (`text`, `subtle`, `success`, `warning`, the diff colours, ...) and none is a neutral tint; `$.config.list()` gives the Claude Code `theme` setting, not Desktop's appearance; and Desktop switches its own colours by a `data-mode` attribute outside the shadow root the tree is drawn in. The palettes are raw hex for Desktop's dark mode (its page `#262624`, text `#FAF9F5`, secondary text `#9C9A92`, the `--bg-100`, `--text-100` and `--text-400` of its dark theme). In light mode the tints stay dark under dark text, which makes them unreadable. A light palette needs the theme in the render event (or a theme key per tint), and then the same table for Desktop's light page, text and secondary text, each ratio checked again.
+
+The palettes, with the contrast of Desktop's dark text on each background (WCAG 2; 4.5:1 is AA for text):
+
+| Look | Section | Body | Title row | Bar | Border | Shown in the strip | Icon, hover | Text on body | Secondary on body | Text on title row | Text on shown |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `plain` | all | — | — | — | dim | — | `#C2C0B8`, `#3A3A37` | 14.4 | 5.4 | 14.4 | — |
+| `tint-soft` | sessions | `#1D2633` | — | `#6B9BF2` | `#3D5478` | `#2E4F86` | `#C9D8F5`, `#2E4F86` | 14.5 | 5.4 | 14.5 | 7.7 |
+| `tint-soft` | queued work | `#28212F` | — | `#A98BEB` | `#584A7C` | `#4F3C84` | `#DCD0F7`, `#4F3C84` | 14.8 | 5.5 | 14.8 | 8.6 |
+| `tint-soft` | open points | `#2D2920` | — | `#D2B07A` | `#6E5E40` | `#66512C` | `#EEDFC4`, `#66512C` | 13.8 | 5.1 | 13.8 | 7.2 |
+| `tint-soft` | log | `#2A2A28` | — | `#9A9892` | `#565653` | `#4A4A46` | `#DAD8D2`, `#4A4A46` | 13.7 | 5.1 | 13.7 | 8.4 |
+| `tint-strips` | sessions | — | `#2C5BB0` | — | `#2C5BB0` | `#2C5BB0` | `#FAF9F5`, `#1F427F` | 14.4 | 5.4 | 6.2 | 6.2 |
+| `tint-strips` | queued work | — | `#6741B0` | — | `#6741B0` | `#6741B0` | `#FAF9F5`, `#4A2E80` | 14.4 | 5.4 | 6.7 | 6.7 |
+| `tint-strips` | open points | — | `#7E5F27` | — | `#7E5F27` | `#7E5F27` | `#FAF9F5`, `#5A441C` | 14.4 | 5.4 | 5.6 | 5.6 |
+| `tint-strips` | log | — | `#545451` | — | `#545451` | `#545451` | `#FAF9F5`, `#3B3B39` | 14.4 | 5.4 | 7.2 | 7.2 |
+| `tint-mono` | sessions | `#1B2330` | `#273448` | — | `#344660` | `#3F5A82` | `#C9D6EA`, `#3F5A82` | 15.0 | 5.6 | 11.9 | 6.7 |
+| `tint-mono` | queued work | `#212B3A` | `#2F3E55` | — | `#3D516E` | `#4A6894` | `#C9D6EA`, `#4A6894` | 13.5 | 5.1 | 10.3 | 5.4 |
+| `tint-mono` | open points | `#283345` | `#374862` | — | `#475D7E` | `#4F6C99` | `#C9D6EA`, `#4F6C99` | 12.1 | 4.5 | 8.8 | 5.1 |
+| `tint-mono` | log | `#1E232A` | `#2B323C` | — | `#3A434F` | `#4A5566` | `#C9D6EA`, `#4A5566` | 15.0 | 5.6 | 12.3 | 7.2 |
+
+"Secondary" assumes Desktop draws a dim text in its `--text-400`. An icon stays at 3.6:1 or more on its hover background. Not seen in Desktop: how it paints a Box's `backgroundColor` and `borderColor`, the one-cell bar, an Svg in a box one row tall, and whether the Button laid over an icon is transparent and takes the press.
 
 ## PowerShell launch route
 

@@ -91,6 +91,27 @@
       "description": "How the panel's sections scroll in Claude Desktop, whose pane shows a scroll bar of its own whenever its body can move (the terminal is not affected). spare: the panel stands between 8 blank rows above and below, so the wheel scrolls the sections; the pane's bar shows with its thumb in the middle. overflow: the same rows only while a section has more rows than it shows; no pane bar otherwise. minimal: 1 blank row above and below; the pane's thumb fills its track but for a row's height at each end. overflow-minimal: 1 row, only while a section has more rows than it shows. buttons: no blank rows and no pane bar; each such section gets an up and a down button, the wheel scrolls nothing. drag: no blank rows and no pane bar; each such section's scroll bar is a slider to drag (and the arrow, page, home and end keys after a click on it), the wheel scrolls nothing. page: no window at all; the three sections are drawn whole one below the other and the pane's own bar and wheel scroll the whole panel; no section scrolls by itself, a list shows at most 50 rows and the log its latest 100 lines. sections: three fixed boxes as tall as the pane, nothing scrolls; a box with more lines than it shows ends on a +N more line and has a [+] that draws that section alone as a page the pane's bar and wheel scroll, between title strips at the top and the bottom (another title switches, [-] returns); an open log is a box of two thirds showing its newest lines, and its [+] draws the whole log as such a page, started at its end. Any other value counts as spare.",
       "default": "spare",
       "options": ["spare", "overflow", "minimal", "overflow-minimal", "buttons", "drag", "page", "sections"]
+    },
+    "desktopStyle": {
+      "type": "string",
+      "title": "Desktop panel look",
+      "description": "The colours of the panel's sections view in Claude Desktop (desktopPaneScroll sections; every other value and the terminal draw plain). plain: no colour of its own, as before. tint-soft: each section's box on a low-contrast tint of its hue, its title row starting on a bar of that hue. tint-strips: neutral boxes, each title row on a strong band of its hue. tint-mono: one blue hue, a lighter step per section. Hues: sessions blue, queued work violet, open points sand, the log grey. The section shown alone has its title marked in the strip with its colour and underlined. Dark mode only: a plugin's tree cannot tell which theme Desktop shows. Any other value counts as plain.",
+      "default": "plain",
+      "options": ["plain", "tint-soft", "tint-strips", "tint-mono"]
+    },
+    "desktopIcons": {
+      "type": "string",
+      "title": "Desktop panel icons",
+      "description": "How the sections view in Claude Desktop draws its [+], [-] and [x]: text as before, or svg, drawn icons in the colours of the desktopStyle look, each one row tall, pressed as the text ones. Any other value counts as text.",
+      "default": "text",
+      "options": ["text", "svg"]
+    },
+    "desktopPreview": {
+      "type": "string",
+      "title": "Desktop panel preview",
+      "description": "A fixed sample state the panel draws in Claude Desktop instead of the live one, to look at a desktopStyle and desktopIcons combination without any click: overview (three sessions, eight queued tasks, three open points, none expanded), queue (the queued work expanded), points (the open points expanded, the first selected), log (a running session's log of 40 lines expanded), empty (nothing at all). It reads, writes and calls nothing, and its presses do nothing; the terminal keeps the live state. off: the live state. Any other value counts as off.",
+      "default": "off",
+      "options": ["off", "overview", "queue", "points", "log", "empty"]
     }
   }
 }

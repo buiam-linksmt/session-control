@@ -32,6 +32,16 @@ import {
   DESKTOP_PANE_SCROLLS,
   buttonStep,
   desktopPaneScroll,
+  DESKTOP_ICONS,
+  DESKTOP_PREVIEWS,
+  DESKTOP_STYLES,
+  desktopIcons,
+  desktopPreview,
+  desktopStyle,
+  PANEL_ICON_PX,
+  PANEL_LOOKS,
+  panelIconSvg,
+  previewState,
   desktopSpareRows,
   isAnyOverflowing,
   pageCap,
@@ -2129,5 +2139,89 @@ describe('desktopLineChars and desktopLines', () => {
     ])
     // A pressable row on one line keeps its own scope (none set: the box gives it one per row, as before).
     expect(desktopLines({ text: 'alive worker', key: 's:aaaa', press }, 26, 'sessions')).toEqual([{ text: 'alive worker', key: 's:aaaa', press, wrap: 'truncate-end' }])
+  })
+})
+
+describe('the desktop panel look and preview options (decisions smp-18 to smp-21)', () => {
+  test('desktopStyle, desktopIcons and desktopPreview: their values; an unknown value, another type or none counts as the default', () => {
+    expect([...DESKTOP_STYLES]).toEqual(['plain', 'tint-soft', 'tint-strips', 'tint-mono'])
+    expect([...DESKTOP_ICONS]).toEqual(['text', 'svg'])
+    expect([...DESKTOP_PREVIEWS]).toEqual(['off', 'overview', 'queue', 'points', 'log', 'empty'])
+    for (const value of DESKTOP_STYLES) expect(desktopStyle(value)).toBe(value)
+    for (const value of DESKTOP_ICONS) expect(desktopIcons(value)).toBe(value)
+    for (const value of DESKTOP_PREVIEWS) expect(desktopPreview(value)).toBe(value)
+    for (const other of [undefined, '', 'Plain', 'tint', 'tint-soft ', 1, true, ['tint-soft']]) expect(desktopStyle(other)).toBe('plain')
+    for (const other of [undefined, '', 'SVG', 'icons', 1, false]) expect(desktopIcons(other)).toBe('text')
+    for (const other of [undefined, '', 'on', 'Overview', 'queue ', 0, null]) expect(desktopPreview(other)).toBe('off')
+  })
+
+  /** WCAG 2 contrast ratio of two #RRGGBB colours. */
+  const contrast = (a: string, b: string) => {
+    const lum = (hex: string) => {
+      const [r, g, b2] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(c => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)) as [number, number, number]
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b2
+    }
+    const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x) as [number, number]
+    return (hi + 0.05) / (lo + 0.05)
+  }
+  const PAGE = '#262624'
+  const TEXT = '#FAF9F5'
+  const SECONDARY = '#9C9A92'
+  test('every palette keeps Desktop dark text at 4.5:1 or more on each background it draws: the body (secondary text too), the title row, the shown title in the strip; icons at 4.5:1 on their row', () => {
+    for (const [style, look] of Object.entries(PANEL_LOOKS)) {
+      for (const [id, section] of Object.entries(look.sections)) {
+        const body = section.body ?? PAGE
+        const title = section.title ?? body
+        const where = `${style} ${id}`
+        expect([where, contrast(TEXT, body) >= 4.5]).toEqual([where, true])
+        expect([where, contrast(SECONDARY, body) >= 4.5]).toEqual([where, true])
+        expect([where, contrast(TEXT, title) >= 4.5]).toEqual([where, true])
+        if (section.current !== undefined) expect([where, contrast(TEXT, section.current) >= 4.5]).toEqual([where, true])
+        expect([where, contrast(section.icon, title) >= 4.5]).toEqual([where, true])
+        for (const colour of [section.body, section.title, section.accent, section.border, section.current, section.icon, section.iconHover]) if (colour !== undefined) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
+      }
+    }
+    // plain adds no colour of its own; each tinted look gives every section a colour of its own.
+    for (const section of Object.values(PANEL_LOOKS.plain.sections)) expect([section.body, section.title, section.accent, section.border, section.current]).toEqual([undefined, undefined, undefined, undefined, undefined])
+    for (const style of ['tint-soft', 'tint-strips', 'tint-mono'] as const) {
+      const sections = Object.values(PANEL_LOOKS[style].sections)
+      expect(new Set(sections.map(one => `${one.body}|${one.title}|${one.accent}`)).size).toBe(4)
+      expect(new Set(sections.map(one => one.current)).size).toBe(4)
+    }
+  })
+
+  test('the icons: SVG markup in the colour given, one size, a plus, a minus and a cross', () => {
+    for (const icon of ['plus', 'minus', 'close'] as const) {
+      const svg = panelIconSvg(icon, '#ABCDEF')
+      expect(svg).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg" viewBox="0 0 16 16" width="14" height="14">.*<\/svg>$/)
+      expect(svg).toContain('stroke="#ABCDEF"')
+      expect(svg).not.toMatch(/<script|on[a-z]+=/i)
+    }
+    expect(PANEL_ICON_PX).toBe(14)
+    expect(new Set(['plus', 'minus', 'close'].map(icon => panelIconSvg(icon as 'plus', '#000000'))).size).toBe(3)
+  })
+
+  test('the preview states: fixed sample data and the panel state each draws, the same at every call; off is the live state', () => {
+    expect(previewState('off')).toBeUndefined()
+    const overview = previewState('overview')
+    expect(overview).toEqual(previewState('overview'))
+    expect(overview?.snap.rows.map(row => row.status)).toEqual(['alive', 'unreported', 'done'])
+    expect(overview?.snap.rows.some(row => row.status === 'orphan')).toBe(false)
+    expect(overview?.queue.length).toBe(8)
+    expect(overview?.queue.some(task => task.title.length > 120)).toBe(true)
+    expect(overview?.points.length).toBe(3)
+    expect(overview?.points.some(point => point.detail.length > 200)).toBe(true)
+    expect([overview?.watch, overview?.selected, overview?.selectedPoint, overview?.expanded, overview?.logPage]).toEqual([null, null, null, null, false])
+    expect(previewState('queue')?.expanded).toBe('queue')
+    const points = previewState('points')
+    expect([points?.expanded, points?.selectedPoint]).toEqual(['points', points?.points[0]?.id])
+    const log = previewState('log')
+    expect([log?.expanded, log?.logPage, log?.selected]).toEqual([null, true, log?.snap.rows[0]?.sid])
+    expect(log?.snap.rows[0]?.status).toBe('alive')
+    expect(log?.watch?.sid).toBe(log?.selected as string)
+    expect(log?.watch?.lines.length).toBe(40)
+    expect(log?.watch?.lines.filter(line => line.length > 200).length).toBeGreaterThan(2)
+    const empty = previewState('empty')
+    expect([empty?.snap.rows, empty?.queue, empty?.points]).toEqual([[], [], []])
   })
 })

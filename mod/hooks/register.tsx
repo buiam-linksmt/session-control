@@ -132,6 +132,14 @@ import {
   boxAt,
   buttonStep,
   desktopPaneScroll,
+  desktopIcons,
+  desktopPreview,
+  desktopStyle,
+  PANEL_ICON_PX,
+  PANEL_ICON_TEXT,
+  PANEL_LOOKS,
+  panelIconSvg,
+  previewState,
   desktopSpareRows,
   isAnyOverflowing,
   pageCap,
@@ -198,7 +206,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { BoxWindow, ComposedPrompt, DesktopPaneScroll, ExpandableId, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
+import type { BoxWindow, ComposedPrompt, DesktopIcons, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -266,6 +274,12 @@ type Config = {
   licenceDirs: string
   /** How the desktop panel lets its sections scroll (core.ts desktopPaneScroll); an unknown value counts as `spare`. */
   desktopPaneScroll: DesktopPaneScroll
+  /** The look of the desktop panel's `sections` view (core.ts desktopStyle); an unknown value counts as `plain`. */
+  desktopStyle: DesktopStyle
+  /** How the `sections` view draws its `[+]`, `[-]` and `[x]` (core.ts desktopIcons); an unknown value counts as `text`. */
+  desktopIcons: DesktopIcons
+  /** A fixed sample state the desktop panel draws instead of the live one (core.ts desktopPreview); `off`: the live state. */
+  desktopPreview: DesktopPreview
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -284,6 +298,9 @@ let config: Config = {
   lockDirs: '',
   licenceDirs: '',
   desktopPaneScroll: 'spare',
+  desktopStyle: 'plain',
+  desktopIcons: 'text',
+  desktopPreview: 'off',
 }
 let isActive = false
 /** Whether the orchestratorDir option is set: the mod then turns on without the CLAUDE.md heading. */
@@ -3100,6 +3117,9 @@ export const register: Register = (on, options) => {
     lockDirs: String(options.lockDirs ?? ''),
     licenceDirs: String(options.licenceDirs ?? ''),
     desktopPaneScroll: desktopPaneScroll(options.desktopPaneScroll),
+    desktopStyle: desktopStyle(options.desktopStyle),
+    desktopIcons: desktopIcons(options.desktopIcons),
+    desktopPreview: desktopPreview(options.desktopPreview),
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -3451,10 +3471,17 @@ export const register: Register = (on, options) => {
     const { Box, Button, Text } = elements
     // A Client (the drag strategy's slider) is drawn by the terminal and the desktop only.
     const Client = 'Client' in elements ? elements.Client : undefined
-    const snap = await read($, snapshot)
+    // An Svg (desktopIcons svg) is drawn by the remote surfaces only.
+    const Svg = 'Svg' in elements ? elements.Svg : undefined
+    // A desktopPreview state: fixed sample data drawn in place of the live state, the panel's own state (a log open, a
+    // section expanded, an open point selected) included; nothing it draws reads, writes or calls anything, and its
+    // presses do nothing. The terminal always draws the live state.
+    const preview = e.surface === 'desktop' ? previewState(config.desktopPreview) : undefined
+    const liveSnap = await read($, snapshot)
     const columns = e.props.bodyColumns
-    if (snap === null) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
-    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState, nowSec, isLogPageState] = await Promise.all([
+    if (liveSnap === null && preview === undefined) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
+    const snap = preview?.snap ?? (liveSnap as NonNullable<typeof liveSnap>)
+    const live = await Promise.all([
       read($, watch),
       read($, selected),
       read($, queued),
@@ -3467,6 +3494,12 @@ export const register: Register = (on, options) => {
       read($, now),
       read($, logPage),
     ])
+    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState, nowSec, isLogPageState] =
+      preview === undefined
+        ? live
+        : ([preview.watch, preview.selected, preview.queue, preview.points, 0, preview.selectedPoint, { sessions: 0, queue: 0, points: 0 }, 'sessions', preview.expanded, preview.nowSec, preview.logPage] as typeof live)
+    // A press of the panel's own state (open a log, expand, select, scroll): nothing in a preview.
+    const inert = <A extends unknown[]>(press: (...args: A) => unknown) => (preview === undefined ? press : () => undefined)
     const width = Math.max(20, columns - 4)
     // The desktop draws in a proportional font, collapses blanks and reports a width in cells that is not its own: its rows
     // carry no padding and no fixed cell widths; block() wraps each into the lines it takes (desktopLineChars), each line
@@ -3515,8 +3548,8 @@ export const register: Register = (on, options) => {
       if (t === undefined || t.total <= t.visible) return []
       const step = buttonStep(t.visible)
       return [
-        <Button key={`up:${id}`} label={'\u25B2'} plain dimColor onPress={() => scrollSection($, id, { by: -step })} />,
-        <Button key={`down:${id}`} label={'\u25BC'} plain dimColor onPress={() => scrollSection($, id, { by: step })} />,
+        <Button key={`up:${id}`} label={'\u25B2'} plain dimColor onPress={inert(() => scrollSection($, id, { by: -step }))} />,
+        <Button key={`down:${id}`} label={'\u25BC'} plain dimColor onPress={inert(() => scrollSection($, id, { by: step }))} />,
       ]
     }
     drawnSessions = undefined
@@ -3527,35 +3560,38 @@ export const register: Register = (on, options) => {
     const probedSec = Math.floor(snap.at / 1000)
     const clock = { nowSec: Math.max(nowSec, probedSec), probedSec }
     const widths = paneWidths(snap.rows, width - 2, clock)
-    const toggle = (sid: string) => async () => {
-      await update($, expanded, () => null)
-      await update($, logPage, () => false)
-      await update($, selected, current => (current === sid ? null : sid))
-      await update($, boxBack, () => 0)
-      await refreshWatch($)
-    }
+    const toggle = (sid: string) =>
+      inert(async () => {
+        await update($, expanded, () => null)
+        await update($, logPage, () => false)
+        await update($, selected, current => (current === sid ? null : sid))
+        await update($, boxBack, () => 0)
+        await refreshWatch($)
+      })
     // The header icon: expands its section, or collapses it back to the three boxes; it closes an open log.
-    const expand = (id: ExpandableId) => async () => {
-      await update($, selected, () => null)
-      await update($, expanded, current => (current === id ? null : id))
-    }
+    const expand = (id: ExpandableId) =>
+      inert(async () => {
+        await update($, selected, () => null)
+        await update($, expanded, current => (current === id ? null : id))
+      })
     // The sections view's presses: a section drawn alone (its `[+]`, its title in a strip), back to the three boxes
     // (`[-]`), the open log drawn alone (its `[+]`), the log closed (`[x]` in its strip).
-    const showSection = (id: ExpandableId) => async () => {
-      await update($, selected, () => null)
-      await update($, logPage, () => false)
-      await update($, expanded, () => id)
-    }
-    const collapse = async () => {
+    const showSection = (id: ExpandableId) =>
+      inert(async () => {
+        await update($, selected, () => null)
+        await update($, logPage, () => false)
+        await update($, expanded, () => id)
+      })
+    const collapse = inert(async () => {
       await update($, expanded, () => null)
       await update($, logPage, () => false)
-    }
-    const showLogPage = () => update($, logPage, () => true)
-    const closeOpenLog = async () => {
+    })
+    const showLogPage = inert(() => update($, logPage, () => true))
+    const closeOpenLog = inert(async () => {
       await update($, selected, () => null)
       await update($, logPage, () => false)
-    }
-    const togglePoint = (id: string) => () => update($, selectedPoint, current => (current === id ? null : id))
+    })
+    const togglePoint = (id: string) => inert(() => update($, selectedPoint, current => (current === id ? null : id)))
     // A pressable row's label is padded to `fill`, its column's width: the Button is as wide as its label, so the
     // pointer's light spans the row and not only its text. A session row is padded in cells (cellWidth), so a title with
     // wide characters does not make its label wider than the box (the Button would wrap it onto a second line).
@@ -3595,6 +3631,43 @@ export const register: Register = (on, options) => {
     const logCap = isSections ? SECTIONS_LOG_CAP : PAGE_LOG_CAP
     const capped = <T,>(items: readonly T[], keep: 'first' | 'latest') => (isPage || isSectionsPage ? pageCap(items, keep === 'first' ? PAGE_LIST_CAP : logCap, keep) : { shown: [...items], more: 0 })
     const moreRow = (more: number, note = 'more'): PRow[] => (more === 0 ? [] : [{ text: `${more} ${note}`, dim: true }])
+    // The look of the sections view (desktopStyle, desktopIcons): one table per section (PANEL_LOOKS), none of its colours
+    // under `plain`, and none under any other desktopPaneScroll value, which draw as before.
+    const panelLook = PANEL_LOOKS[isSections ? config.desktopStyle : 'plain']
+    const lookOf = (id: SectionId) => panelLook.sections[id]
+    // A section's box: the dim border of before, or its own border colour; its own background when it has one.
+    const boxColours = (id: SectionId) => {
+      const look = lookOf(id)
+      return { ...(look.border === undefined ? { borderDimColor: true as const } : { borderColor: look.border }), ...(look.body === undefined ? {} : { backgroundColor: look.body }) }
+    }
+    // A section's title row: its own background when it has one, and a bar of its accent at its start (one row tall,
+    // so the row keeps its height).
+    const titleColours = (id: SectionId) => (lookOf(id).title === undefined ? {} : { backgroundColor: lookOf(id).title })
+    const accentBar = (id: SectionId) => {
+      const accent = lookOf(id).accent
+      return accent === undefined ? null : <Box key={`accent:${id}`} width={1} height={1} flexShrink={0} marginRight={1} backgroundColor={accent} />
+    }
+    // The shown section's title in the strip: its own background and the look's font style under a tinted look.
+    const currentLook = (id: SectionId) => {
+      const background = lookOf(id).current
+      return background === undefined ? {} : { backgroundColor: background, ...panelLook.current }
+    }
+    // `[+]`, `[-]` and `[x]`: the text Buttons of before, or under desktopIcons svg (sections view only, where the surface
+    // draws an Svg) the drawn icon in the section's colour, in a box one row tall: the Svg in the flow and a Button with
+    // no visible label laid over it takes the press (Desktop drops a Button's children, so the Svg cannot be its label).
+    const hasSvgIcons = isSections && config.desktopIcons === 'svg' && Svg !== undefined
+    const iconButton = (icon: PanelIcon, key: string, onPress: () => unknown, id: SectionId) => {
+      if (!hasSvgIcons || Svg === undefined) return <Button key={key} label={PANEL_ICON_TEXT[icon].label} plain dimColor onPress={onPress} />
+      const look = lookOf(id)
+      return (
+        <Box key={`icon:${key}`} width={3} height={1} flexShrink={0} overflow="hidden" alignItems="center" justifyContent="center" hover={{ backgroundColor: look.iconHover }}>
+          <Svg source={panelIconSvg(icon, look.icon)} alt={PANEL_ICON_TEXT[icon].alt} width={PANEL_ICON_PX} height={PANEL_ICON_PX} />
+          <Box position="absolute" top={0} left={0} right={0} bottom={0}>
+            <Button key={key} label={'\u00A0\u00A0\u00A0'} plain onPress={onPress} />
+          </Box>
+        </Box>
+      )
+    }
     // A section of the page: its title, then its rows, each Text wrapped by the surface; a pressable row's lines are
     // Buttons (desktopLines), as a desktop Button draws its label on one line.
     const pageBlock = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[]) => {
@@ -3602,8 +3675,15 @@ export const register: Register = (on, options) => {
       const rows = [...fixedIn, ...bodyIn].flatMap(r => (r.press === undefined ? [r] : desktopLines(r, chars, id)))
       if (id === 'sessions') drawnSessions = { rows: [...new Set(rows.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       return (
-        <Box key={`page:${id}`} flexDirection="column" borderStyle="round" borderDimColor>
-          <Text bold>{title}</Text>
+        <Box key={`page:${id}`} flexDirection="column" borderStyle="round" {...boxColours(id)}>
+          {lookOf(id).title === undefined && lookOf(id).accent === undefined ? (
+            <Text bold>{title}</Text>
+          ) : (
+            <Box key={`title:${id}`} flexDirection="row" alignItems="center" {...titleColours(id)}>
+              {accentBar(id)}
+              <Text bold>{title}</Text>
+            </Box>
+          )}
           {rows.map((r, i) =>
             r.press === undefined ? (
               <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap="wrap">
@@ -3646,14 +3726,15 @@ export const register: Register = (on, options) => {
       const shown = isTail ? [...more, ...lines] : [...lines, ...more]
       if (id === 'sessions') drawnSessions = { rows: [...new Set(lines.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       return (
-        <Box key={`sec:${id}`} flexDirection="column" height={box.height} overflow="hidden" borderStyle="round" borderDimColor>
-          <Box flexDirection="row" height={1} flexShrink={0} overflow="hidden" alignItems="center">
+        <Box key={`sec:${id}`} flexDirection="column" height={box.height} overflow="hidden" borderStyle="round" {...boxColours(id)}>
+          <Box flexDirection="row" height={1} flexShrink={0} overflow="hidden" alignItems="center" {...titleColours(id)}>
+            {accentBar(id)}
             <Box flexGrow={1}>
               <Text bold wrap="truncate-end">
                 {title}
               </Text>
             </Box>
-            {fit.more > 0 && <Button key={`x:${id}`} label="[+]" plain dimColor onPress={onExpand} />}
+            {fit.more > 0 && iconButton('plus', `x:${id}`, onExpand, id)}
           </Box>
           {fixed.slice(0, fit.fixedShown).map((r, i) => oneRow(`row:${id}:h${i}`, deskRowEl(r)))}
           {shown.map((r, i) => oneRow(`row:${id}:${i}`, deskRowEl(r, r.press === undefined ? undefined : (r.group ?? `${id}:${from + i}`))))}
@@ -3680,17 +3761,17 @@ export const register: Register = (on, options) => {
         <Box flexDirection="row" flexGrow={1} flexWrap="wrap" columnGap={1}>
           {SECTION_ORDER.map(id =>
             id === current ? (
-              <Text bold>{`[ ${stripTitles[id]} ]`}</Text>
+              <Text bold {...currentLook(id)}>{`[ ${stripTitles[id]} ]`}</Text>
             ) : overflowsEven(id) ? (
               <Button key={`t:top:${id}`} label={stripTitles[id]} plain onPress={showSection(id)} />
             ) : (
               <Text dimColor>{stripTitles[id]}</Text>
             ),
           )}
-          {current === 'log' && <Text bold>[ LOG ]</Text>}
+          {current === 'log' && <Text bold {...currentLook('log')}>[ LOG ]</Text>}
         </Box>
-        {current === 'log' && <Button key="close:top" label="[x]" plain dimColor onPress={closeOpenLog} />}
-        <Button key="c:top" label="[-]" plain dimColor onPress={collapse} />
+        {current === 'log' && iconButton('close', 'close:top', closeOpenLog, 'log')}
+        {iconButton('minus', 'c:top', collapse, current)}
       </Box>
     )
     const sectionsPage = (current: ExpandableId | 'log', inner: ReturnType<typeof pageBlock>) => (
@@ -3700,7 +3781,7 @@ export const register: Register = (on, options) => {
         {current === 'log' && (
           <Box key="strip:bottom" flexDirection="row" paddingX={1}>
             <Box flexGrow={1} />
-            <Button key="c:bottom" label="[-]" plain dimColor onPress={collapse} />
+            {iconButton('minus', 'c:bottom', collapse, 'log')}
           </Box>
         )}
       </Box>
@@ -3782,10 +3863,11 @@ export const register: Register = (on, options) => {
       return [{ text, key: `s:${sid}`, press: toggle(sid), dim: row.status === 'done', rowIndex }]
     }), ...moreRow(sessionsShown.more)]
     const sessionRows = sessionRowsOf(capped(snap.rows, 'first'))
-    const pick = (id: 'sessions' | 'queue' | 'points') => async () => {
-      await update($, tab, () => id)
-      await update($, selected, () => null)
-    }
+    const pick = (id: 'sessions' | 'queue' | 'points') =>
+      inert(async () => {
+        await update($, tab, () => id)
+        await update($, selected, () => null)
+      })
     const queueCount = queue?.length ?? 0
     const pointCount = list?.length ?? 0
     const tabButton = (id: 'sessions' | 'queue' | 'points', label: string) => (

@@ -6,7 +6,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { RULES_BLOCK, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
+import { PANEL_LOOKS, RULES_BLOCK, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
 import { auditFindings } from '../hooks/audit'
 import { isRegistrySound } from '../hooks/notices'
 import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
@@ -2388,6 +2388,9 @@ describe('debug trace', () => {
         launchRoute: 'bash',
         notices: 'on',
         desktopPaneScroll: 'spare',
+        desktopStyle: 'plain',
+        desktopIcons: 'text',
+        desktopPreview: 'off',
       },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
@@ -4472,6 +4475,232 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
       expect(nodesOf(strip).filter(one => one.type === 'Text' && one.props?.dimColor === true).map(one => textOf(one)[0])).toEqual(['QUEUED WORK', 'OPEN POINTS'])
     } finally {
       TAIL.rows = undefined
+    }
+  })
+})
+
+// ---------------------------------------------------------------- the plain desktop style draws as before (decision smp-18)
+
+/** cyrb53: a 53-bit hash of a string, as 14 hex digits; the golden trees are kept as their hashes and lengths. */
+const treeHash = (text: string) => {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i)
+    h1 = Math.imul(h1 ^ ch, 2654435761)
+    h2 = Math.imul(h2 ^ ch, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return `${(4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, '0')}:${text.length}`
+}
+const goldenTasks = JSON.stringify({ tasks: Array.from({ length: 15 }, (_, i) => ({ id: `t${i + 1}`, status: 'queued', title: `Task ${i + 1}` })) })
+const goldenPoints = JSON.stringify({ points: Array.from({ length: 12 }, (_, i) => ({ id: `g${i + 1}`, status: 'open', title: `Point ${i + 1}`, detail: `Detail of point ${i + 1}`, recommendation: `Do ${i + 1}` })) })
+type GoldenStep = { press?: string }
+/** The states the golden trees are drawn in: the option values, the surface, what the fixture serves and the presses. */
+const goldenLog = Array.from({ length: 40 }, (_, i) => ({ type: 'assistant', message: { content: [{ type: 'text', text: `log line ${i + 1}` }] } }))
+const GOLDEN_STATES: { name: string; mode?: string; surface: 'desktop' | 'terminal'; queue?: string; points?: string; tail?: object[]; steps: GoldenStep[] }[] = [
+  { name: 'desk-even-live', mode: 'sections', surface: 'desktop', steps: [] },
+  { name: 'desk-even-15', mode: 'sections', surface: 'desktop', queue: goldenTasks, steps: [] },
+  { name: 'desk-queue-page', mode: 'sections', surface: 'desktop', queue: goldenTasks, steps: [{ press: 'x:queue' }] },
+  { name: 'desk-points-page-selected', mode: 'sections', surface: 'desktop', points: goldenPoints, steps: [{ press: 'x:points' }, { press: 'p:g1:0' }] },
+  { name: 'desk-points-box-selected', mode: 'sections', surface: 'desktop', points: goldenPoints, steps: [{ press: 'p:g2:0' }] },
+  { name: 'desk-log-box', mode: 'sections', surface: 'desktop', tail: goldenLog, steps: [{ press: `s:${SID_ALIVE}` }] },
+  { name: 'desk-log-page', mode: 'sections', surface: 'desktop', tail: goldenLog, steps: [{ press: `s:${SID_ALIVE}` }, { press: 'x:log' }] },
+  { name: 'desk-page-mode', mode: 'page', surface: 'desktop', queue: goldenTasks, steps: [] },
+  { name: 'desk-spare-mode', surface: 'desktop', queue: goldenTasks, steps: [] },
+  { name: 'desk-buttons-mode', mode: 'buttons', surface: 'desktop', queue: goldenTasks, steps: [] },
+  { name: 'term-even', mode: 'sections', surface: 'terminal', queue: goldenTasks, steps: [] },
+  { name: 'term-queue-expanded', mode: 'sections', surface: 'terminal', queue: goldenTasks, steps: [{ press: 'x:queue' }] },
+  { name: 'term-log', mode: 'sections', surface: 'terminal', steps: [{ press: `s:${SID_ALIVE}` }] },
+]
+type GoldenTest$ = Parameters<NonNullable<Parameters<typeof test>[2]>>[0]
+/** The tree a golden state draws, as JSON, under the options `extra` adds. */
+const goldenTree = async ($: GoldenTest$, on: On, state: (typeof GOLDEN_STATES)[number]) => {
+  QUEUE.text = state.queue ?? QUEUE_TEXT
+  POINTS.text = state.points ?? OPEN_POINTS_TEXT
+  TAIL.rows = state.tail
+  try {
+    world(on)
+    stubPanel(on)
+    await boot($)
+    await runCommand($, 'side')
+    const ui = await $.ui.mount({ plugin: 'session-control', surface: state.surface, component: 'Pane', requestId: 'session-control', props: PANE_PROPS as never })
+    for (const step of state.steps) if (step.press !== undefined) await ui.press({ key: step.press })
+    // A press handle is the engine's own number, new at each drawing: the tree is compared without it.
+    const text = JSON.stringify(await ui.drawn(), (key, value) => (key === 'handle' ? 0 : value))
+    await ui.unmount()
+    return text
+  } finally {
+    QUEUE.text = QUEUE_TEXT
+    POINTS.text = OPEN_POINTS_TEXT
+    TAIL.rows = undefined
+  }
+}
+
+/** The golden trees: each state's tree as the panel drew it before desktopStyle, desktopIcons and desktopPreview (2e543d4). */
+const GOLDEN: Record<string, string> = {
+  'desk-even-live': '09021537c455b1:4906',
+  'desk-even-15': '1dd200cef2028f:6636',
+  'desk-queue-page': '14bfa48cea7deb:1893',
+  'desk-points-page-selected': '1d292fdd828cd1:3152',
+  'desk-points-box-selected': '0cd1c57dd2d5d0:6880',
+  'desk-log-box': '07fb0afa36499a:8342',
+  'desk-log-page': '19954d42e8bc49:4747',
+  'desk-page-mode': '106ecbf6ecd3d7:4319',
+  'desk-spare-mode': '064fb30be5471e:6686',
+  'desk-buttons-mode': '0fee87d2e3c767:6075',
+  'term-even': '04b116c1526e32:7357',
+  'term-queue-expanded': '1f66bb131fa4f3:3943',
+  'term-log': '1b5fa36c8ec490:5877',
+}
+
+describe('desktopStyle plain, desktopIcons text and desktopPreview off draw the trees of before (decisions smp-18 to smp-21)', () => {
+  const optionsOf = (state: (typeof GOLDEN_STATES)[number], extra: Record<string, string>) => ({ options: { ...OPTIONS, ...(state.mode === undefined ? {} : { desktopPaneScroll: state.mode }), ...extra } })
+  for (const state of GOLDEN_STATES) {
+    test(`${state.name}: the options left out`, optionsOf(state, {}), async ($, on) => {
+      expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
+    })
+    test(`${state.name}: plain, text and off given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off' }), async ($, on) => {
+      expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
+    })
+    test(`${state.name}: an unknown value of each counts as the default`, optionsOf(state, { desktopStyle: 'Tint-Soft', desktopIcons: 'SVG', desktopPreview: 'on' }), async ($, on) => {
+      expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
+    })
+  }
+  // The terminal, and every desktopPaneScroll value but sections, draw as before under every look, icon and preview value.
+  const UNTOUCHED = GOLDEN_STATES.filter(state => state.surface === 'terminal' || state.mode !== 'sections')
+  for (const style of ['tint-soft', 'tint-strips', 'tint-mono']) {
+    for (const state of UNTOUCHED) {
+      test(`${state.name}: desktopStyle ${style} with svg icons draws as before`, optionsOf(state, { desktopStyle: style, desktopIcons: 'svg' }), async ($, on) => {
+        expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
+      })
+    }
+  }
+  for (const preview of ['overview', 'queue', 'points', 'log', 'empty']) {
+    for (const state of GOLDEN_STATES.filter(one => one.surface === 'terminal')) {
+      test(`${state.name}: desktopPreview ${preview} leaves the terminal's live state`, optionsOf(state, { desktopStyle: 'tint-strips', desktopIcons: 'svg', desktopPreview: preview }), async ($, on) => {
+        expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
+      })
+    }
+  }
+})
+
+describe('desktopStyle x desktopIcons x desktopPreview on the desktop sections view (decisions smp-18 to smp-21)', () => {
+  type Node = { type?: string; text?: string; props?: Record<string, unknown>; children?: (Node | string)[] }
+  const nodesOf = (node: Node): Node[] => [node, ...(node.children ?? []).flatMap(one => (typeof one === 'object' && one !== null ? nodesOf(one) : []))]
+  const textOf = (node: Node): string => (node.children ?? []).map(one => (typeof one === 'string' ? one : typeof one === 'object' && one !== null ? textOf(one) : '')).join('')
+  const STYLES = ['plain', 'tint-soft', 'tint-strips', 'tint-mono'] as const
+  const ICONS = ['text', 'svg'] as const
+  const PREVIEWS = ['overview', 'queue', 'points', 'log', 'empty'] as const
+  /** The title strip's marked title per preview state, and what else the state must show. */
+  const SHOWN: Record<(typeof PREVIEWS)[number], { current?: string; texts: RegExp[] }> = {
+    overview: { texts: [/^SESSIONS$/, /^QUEUED WORK$/, /^OPEN POINTS$/, /^Panel style variants/, /^\u2022 Font colour variants/, /^1\. Which panel style/] },
+    queue: { current: '[ QUEUED WORK ]', texts: [/^\u2022 Light palette once Desktop exposes its theme/, /^\u2022 Trim the drift band text$/] },
+    points: { current: '[ OPEN POINTS ]', texts: [/^\u25B8 1\. Which panel style/, /^Three tinted variants are built/, /^Recommendation: Pick one/] },
+    log: { current: '[ LOG ]', texts: [/^LOG Panel style variants/, /^Step 40: /, /^Reading the section boxes again: .*\(step 33\)\.$/] },
+    empty: { texts: [/^No workers in the registry\.$/, /^none$/] },
+  }
+  const ROOM_PROPS = { ...PANE_PROPS, bodyColumns: 60, scroll: { offset: 0, bodyRows: 36 } }
+  for (const style of STYLES) {
+    for (const icons of ICONS) {
+      for (const preview of PREVIEWS) {
+        test(`${style}, ${icons} icons, preview ${preview}: drawn without error, the state's content and look, nothing written`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: style, desktopIcons: icons, desktopPreview: preview } }, async ($, on) => {
+          const w = world(on)
+          stubPanel(on)
+          await boot($)
+          await runCommand($, 'side')
+          const writes = w.writes.length
+          const calls = w.calls.length
+          const ui = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: ROOM_PROPS as never })
+          const tree = (await ui.drawn()) as Node
+          const nodes = nodesOf(tree)
+          // What the panel draws as text: its Texts and its Buttons' labels (a pressable title).
+          const texts = nodes.flatMap(one => (one.type === 'Text' ? [textOf(one)] : one.type === 'Button' ? [String(one.props?.label ?? '')] : []))
+          // The fixture's content, not the live registry's.
+          for (const wanted of SHOWN[preview].texts) expect(texts.some(text => wanted.test(text))).toBe(true)
+          expect(texts.some(text => /alive worker/.test(text))).toBe(false)
+          // The marked title of the strip: bold; its own background and the look's font style under a tinted look.
+          const look = PANEL_LOOKS[style]
+          const marked = nodes.find(one => one.type === 'Text' && /^\[ [A-Z ]+ \]$/.test(textOf(one)))
+          if (SHOWN[preview].current === undefined) expect(marked).toBeUndefined()
+          else {
+            expect(textOf(marked as Node)).toBe(SHOWN[preview].current as string)
+            const id = preview as 'queue' | 'points' | 'log'
+            const background = look.sections[id].current
+            expect(marked?.props?.backgroundColor).toBe(background)
+            if (style === 'plain') expect(marked?.props?.underline).toBeUndefined()
+            else {
+              expect(background).toMatch(/^#[0-9A-F]{6}$/)
+              expect(marked?.props?.underline).toBe(true)
+            }
+            // A title that cannot expand stays a greyed Text in every look.
+            for (const greyed of nodes.filter(one => one.type === 'Text' && /^(SESSIONS|QUEUED WORK|OPEN POINTS)$/.test(textOf(one)) && one.props?.dimColor === true)) expect(greyed.props?.backgroundColor).toBeUndefined()
+          }
+          // Each bordered box: the dim border under plain, else the section's own border colour, and its body tint.
+          const boxes = nodes.filter(one => one.type === 'Box' && one.props?.borderStyle === 'round')
+          expect(boxes.length).toBeGreaterThan(0)
+          for (const box of boxes) {
+            const id = (String(box.props?.key ?? '').split(':')[1] ?? '') as 'sessions' | 'queue' | 'points' | 'log'
+            const section = look.sections[id]
+            expect(section).toBeDefined()
+            expect(box.props?.borderColor).toBe(section.border)
+            expect(box.props?.borderDimColor).toBe(section.border === undefined ? true : undefined)
+            expect(box.props?.backgroundColor).toBe(section.body)
+          }
+          // The icons: text Buttons, or drawn icons in the section's colour, each with a pressable Button of the same key.
+          const svgs = nodes.filter(one => one.type === 'Svg')
+          const iconKeys = nodes.filter(one => one.type === 'Button' && /^(x:\w+|c:top|c:bottom|close:top)$/.test(String(one.props?.key))).map(one => String(one.props?.key))
+          if (preview !== 'overview' && preview !== 'empty') expect(iconKeys).toContain('c:top')
+          if (icons === 'text') {
+            expect(svgs).toEqual([])
+          } else {
+            expect(svgs.length).toBe(iconKeys.length)
+            for (const svg of svgs) {
+              expect(String(svg.props?.source)).toMatch(/^<svg [^>]*width="14" height="14">.*<\/svg>$/)
+              expect(svg.props?.height).toBe(14)
+              expect(String(svg.props?.alt).length).toBeGreaterThan(0)
+            }
+            for (const button of nodes.filter(one => one.type === 'Button' && iconKeys.includes(String(one.props?.key)))) expect(button.props?.label).toBe('\u00A0\u00A0\u00A0')
+            // An icon's box is one row tall, so a line keeps its count.
+            for (const box of nodes.filter(one => one.type === 'Box' && String(one.props?.key ?? '').startsWith('icon:'))) expect(box.props?.height).toBe(1)
+          }
+          // A preview presses nothing into the panel's state: every press leaves the tree as it is.
+          const before = JSON.stringify(tree, (key, value) => (key === 'handle' ? 0 : value))
+          for (const key of [...iconKeys, 't:top:sessions', 't:top:queue', 't:top:points', 'p:pv2:0', `s:a3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d`]) {
+            if (nodes.some(one => one.props?.key === key)) await ui.press({ key })
+          }
+          expect(JSON.stringify(await ui.drawn(), (key, value) => (key === 'handle' ? 0 : value))).toBe(before)
+          // The fixture wrote nothing and called the helper for nothing.
+          expect(w.writes.slice(writes).filter(one => !one.path.endsWith('trace.log'))).toEqual([])
+          expect(w.calls.length).toBe(calls)
+          await ui.unmount()
+        })
+      }
+    }
+  }
+
+  test('a tinted look with the live state: the colours apply to the live boxes and the svg icons press as the text ones', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: 'tint-soft', desktopIcons: 'svg' } }, async ($, on) => {
+    QUEUE.text = goldenTasks
+    try {
+      world(on)
+      stubPanel(on)
+      await boot($)
+      await runCommand($, 'side')
+      const ui = await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: PANE_PROPS as never })
+      const nodes = () => ui.drawn().then(tree => nodesOf(tree as Node))
+      const queueBox = (await nodes()).find(one => one.props?.key === 'sec:queue')
+      expect(queueBox?.props?.backgroundColor).toBe(PANEL_LOOKS['tint-soft'].sections.queue.body)
+      expect((await nodes()).find(one => one.props?.key === 'accent:queue')?.props?.backgroundColor).toBe(PANEL_LOOKS['tint-soft'].sections.queue.accent)
+      expect((await nodes()).some(one => one.type === 'Svg' && String(one.props?.source).includes(PANEL_LOOKS['tint-soft'].sections.queue.icon))).toBe(true)
+      await ui.press({ key: 'x:queue' })
+      expect((await nodes()).some(one => one.type === 'Text' && textOf(one) === '[ QUEUED WORK ]')).toBe(true)
+      expect((await nodes()).find(one => one.props?.key === 'page:queue')?.props?.backgroundColor).toBe(PANEL_LOOKS['tint-soft'].sections.queue.body)
+      await ui.press({ key: 'c:top' })
+      expect((await nodes()).some(one => one.props?.key === 'sec:queue')).toBe(true)
+      expect((await nodes()).some(one => one.props?.key === 'page:queue')).toBe(false)
+    } finally {
+      QUEUE.text = QUEUE_TEXT
     }
   })
 })

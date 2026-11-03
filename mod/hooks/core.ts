@@ -8,6 +8,7 @@ import type {
   SessionOutcomeKind,
   SessionRow,
   SessionRowStatus,
+  SessionSnapshot,
 } from '../types'
 import { readPointRecords, readTaskRecords, selectPoints } from './bookkeeping'
 
@@ -2533,4 +2534,201 @@ export function sliderMove(data: unknown): { id: SectionId; from: number } | { i
   if (typeof from === 'number' && Number.isInteger(from) && by === undefined) return { id, from }
   if (typeof by === 'number' && Number.isInteger(by) && from === undefined) return { id, by }
   return undefined
+}
+
+// ---------------------------------------------------------------- the desktop panel's look and preview (decisions smp-18 to smp-21)
+
+/**
+ * The look of the desktop panel's `sections` view (option desktopStyle). `plain`: the panel as it was, no colour of its
+ * own. `tint-soft`: each section's box on a low-contrast tint of its hue, its title row starting on a bar of that hue.
+ * `tint-strips`: neutral boxes, each title row on a strong band of its hue. `tint-mono`: one hue, a lighter step per
+ * section. The other values of desktopPaneScroll, and the terminal, draw as `plain` whatever the option says.
+ */
+export const DESKTOP_STYLES = ['plain', 'tint-soft', 'tint-strips', 'tint-mono'] as const
+export type DesktopStyle = (typeof DESKTOP_STYLES)[number]
+
+/** The option's value as the mod uses it: an unknown value, or none, counts as `plain`. */
+export function desktopStyle(value: unknown): DesktopStyle {
+  return (DESKTOP_STYLES as readonly unknown[]).includes(value) ? (value as DesktopStyle) : 'plain'
+}
+
+/** How the `sections` view draws its `[+]`, `[-]` and `[x]` (option desktopIcons): `text` as before, `svg` drawn icons. */
+export const DESKTOP_ICONS = ['text', 'svg'] as const
+export type DesktopIcons = (typeof DESKTOP_ICONS)[number]
+
+/** The option's value as the mod uses it: an unknown value, or none, counts as `text`. */
+export function desktopIcons(value: unknown): DesktopIcons {
+  return (DESKTOP_ICONS as readonly unknown[]).includes(value) ? (value as DesktopIcons) : 'text'
+}
+
+/**
+ * A fixed sample state the desktop panel draws instead of the live one (option desktopPreview): `off` the live state;
+ * `overview` the three sections filled, none expanded; `queue` the queued work expanded; `points` the open points
+ * expanded with the first one selected; `log` a running session's log expanded; `empty` nothing at all.
+ */
+export const DESKTOP_PREVIEWS = ['off', 'overview', 'queue', 'points', 'log', 'empty'] as const
+export type DesktopPreview = (typeof DESKTOP_PREVIEWS)[number]
+
+/** The option's value as the mod uses it: an unknown value, or none, counts as `off`. */
+export function desktopPreview(value: unknown): DesktopPreview {
+  return (DESKTOP_PREVIEWS as readonly unknown[]).includes(value) ? (value as DesktopPreview) : 'off'
+}
+
+/**
+ * One section's colours under a desktopStyle, raw hex for Desktop's dark mode (a plugin's tree cannot read the theme in
+ * use, and no theme key names a tint): `body` the box's background, `title` its title row's, `accent` a bar one cell wide
+ * at the title row's start, `border` the box's border (each undefined: none of its own, the border dim); `current` the
+ * background of the section's title in the page view's strip while it is the one shown; `icon` the stroke of its drawn
+ * icons (an Svg takes no text colour) and `iconHover` the background under one while the pointer is on it.
+ */
+export type SectionLook = { body?: string; title?: string; accent?: string; border?: string; current?: string; icon: string; iconHover: string }
+
+/** A desktopStyle: each section's colours, and the font style of the shown section's title in the strip. */
+export type PanelLook = { sections: Record<SectionId, SectionLook>; current: { underline?: true; italic?: true } }
+
+const plainLook: SectionLook = { icon: '#C2C0B8', iconHover: '#3A3A37' }
+
+/**
+ * The palettes, for Desktop's dark mode: its page `#262624`, its text `#FAF9F5` and its secondary text `#9C9A92` (the
+ * `--bg-100`, `--text-100` and `--text-400` of its dark theme). Every background keeps the text at 4.5:1 or more and the
+ * secondary text at 4.5:1 or more where it is drawn on it (the README's Claude Desktop section lists each ratio). Hues:
+ * sessions blue, queued work violet, open points sand, the log grey; never the green, red and amber of the statuses.
+ */
+export const PANEL_LOOKS: Record<DesktopStyle, PanelLook> = {
+  plain: { sections: { sessions: plainLook, queue: plainLook, points: plainLook, log: plainLook }, current: {} },
+  'tint-soft': {
+    sections: {
+      sessions: { body: '#1D2633', accent: '#6B9BF2', border: '#3D5478', current: '#2E4F86', icon: '#C9D8F5', iconHover: '#2E4F86' },
+      queue: { body: '#28212F', accent: '#A98BEB', border: '#584A7C', current: '#4F3C84', icon: '#DCD0F7', iconHover: '#4F3C84' },
+      points: { body: '#2D2920', accent: '#D2B07A', border: '#6E5E40', current: '#66512C', icon: '#EEDFC4', iconHover: '#66512C' },
+      log: { body: '#2A2A28', accent: '#9A9892', border: '#565653', current: '#4A4A46', icon: '#DAD8D2', iconHover: '#4A4A46' },
+    },
+    current: { underline: true },
+  },
+  'tint-strips': {
+    sections: {
+      sessions: { title: '#2C5BB0', border: '#2C5BB0', current: '#2C5BB0', icon: '#FAF9F5', iconHover: '#1F427F' },
+      queue: { title: '#6741B0', border: '#6741B0', current: '#6741B0', icon: '#FAF9F5', iconHover: '#4A2E80' },
+      points: { title: '#7E5F27', border: '#7E5F27', current: '#7E5F27', icon: '#FAF9F5', iconHover: '#5A441C' },
+      log: { title: '#545451', border: '#545451', current: '#545451', icon: '#FAF9F5', iconHover: '#3B3B39' },
+    },
+    current: { underline: true },
+  },
+  'tint-mono': {
+    sections: {
+      sessions: { body: '#1B2330', title: '#273448', border: '#344660', current: '#3F5A82', icon: '#C9D6EA', iconHover: '#3F5A82' },
+      queue: { body: '#212B3A', title: '#2F3E55', border: '#3D516E', current: '#4A6894', icon: '#C9D6EA', iconHover: '#4A6894' },
+      points: { body: '#283345', title: '#374862', border: '#475D7E', current: '#4F6C99', icon: '#C9D6EA', iconHover: '#4F6C99' },
+      log: { body: '#1E232A', title: '#2B323C', border: '#3A434F', current: '#4A5566', icon: '#C9D6EA', iconHover: '#4A5566' },
+    },
+    current: { underline: true, italic: true },
+  },
+}
+
+/** The drawn icons of desktopIcons `svg`: `plus` for `[+]`, `minus` for `[-]`, `close` for `[x]`. */
+export type PanelIcon = 'plus' | 'minus' | 'close'
+
+/** What each icon says to a reader that cannot see it (the Svg's `alt`), and the text the `text` value draws. */
+export const PANEL_ICON_TEXT: Record<PanelIcon, { alt: string; label: string }> = {
+  plus: { alt: 'Expand', label: '[+]' },
+  minus: { alt: 'Back to the sections', label: '[-]' },
+  close: { alt: 'Close the log', label: '[x]' },
+}
+
+/** CSS pixels an icon is drawn at: less than a line of the pane at its smallest body font (12 px, line height 1.4). */
+export const PANEL_ICON_PX = 14
+
+/** An icon's SVG markup in `color`: a rounded square holding a plus or a minus, or a cross. */
+export function panelIconSvg(icon: PanelIcon, color: string): string {
+  const frame = `<rect x="1.5" y="1.5" width="13" height="13" rx="3" fill="none" stroke="${color}" stroke-width="1.25"/>`
+  const mark = icon === 'plus' ? 'M8 4.5v7M4.5 8h7' : icon === 'minus' ? 'M4.5 8h7' : 'M4.5 4.5l7 7M11.5 4.5l-7 7'
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="${PANEL_ICON_PX}" height="${PANEL_ICON_PX}">${icon === 'close' ? '' : frame}<path d="${mark}" fill="none" stroke="${color}" stroke-width="1.75" stroke-linecap="round"/></svg>`
+}
+
+/**
+ * What a desktopPreview state draws in place of the live one: the sessions, the queued tasks and the open points, the
+ * log shown and the panel's own state (a session's log open, drawn as a page or not, the section expanded, the open point
+ * selected), and the display clock. Pure data: it reads, writes and calls nothing.
+ */
+export type PreviewState = {
+  snap: SessionSnapshot
+  nowSec: number
+  queue: { title: string }[]
+  points: PresentedPoint[]
+  watch: { sid: string; title: string; lines: string[] } | null
+  selected: string | null
+  selectedPoint: string | null
+  expanded: ExpandableId | null
+  logPage: boolean
+}
+
+/** The preview's clock: 2026-11-03 09:00 UTC. */
+const PREVIEW_AT_SEC = 1793696400
+const PREVIEW_SID_RUNNING = 'a3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
+
+const previewSessions: SessionRow[] = [
+  { title: 'Panel style variants for the desktop sections view', sid: PREVIEW_SID_RUNNING, sid8: 'a3f1c2d4', model: 'opus', effort: 'high', configDir: '/home/user/.claude', status: 'alive', pid: 41207, elapsedSec: 1520, startedAt: PREVIEW_AT_SEC - 1520, transcriptAgeSec: 4 },
+  { title: 'Review of the desktop scroll fix', sid: 'b7e2d9a1-2c3d-4e5f-9a0b-1c2d3e4f5a6b', sid8: 'b7e2d9a1', model: 'sonnet', effort: 'high', configDir: '/home/user/.claude', status: 'unreported', startedAt: PREVIEW_AT_SEC - 4100, endedAt: PREVIEW_AT_SEC - 1310, costUsd: 1.84 },
+  { title: 'Licence daemon audit', sid: 'c0d4e8f2-6a7b-4c8d-9e0f-2a3b4c5d6e7f', sid8: 'c0d4e8f2', model: 'haiku', effort: 'low', configDir: '/home/user/.claude', status: 'done', startedAt: PREVIEW_AT_SEC - 9000, endedAt: PREVIEW_AT_SEC - 8650, costUsd: 0.12 },
+]
+
+const previewQueue: { title: string }[] = [
+  { title: 'Font colour variants for the section titles' },
+  { title: 'Stepped expand and collapse animation' },
+  { title: 'Light palette once Desktop exposes its theme to a plugin tree, with every tint and strip checked against the light page and text colours at the same contrast as the dark ones' },
+  { title: 'Retire the buttons scroll value' },
+  { title: 'Merge the panel style branch' },
+  { title: 'Session log use case in Desktop' },
+  { title: 'README screenshots of each variant' },
+  { title: 'Trim the drift band text' },
+]
+
+const previewPoints: PresentedPoint[] = [
+  { id: 'pv1', title: 'Which panel style becomes the default', detail: 'Three tinted variants are built behind the desktopStyle option; the captures show each with the four sample states.', recommendation: 'Pick one after the captures.' },
+  {
+    id: 'pv2',
+    title: 'Push policy for the session-control repository',
+    detail: 'No policy is recorded for pushes to main of this repository: the first push to a protected branch asks every time until one is recorded. The branches merged so far went through the orchestrator after the user saw the result, fast-forward only, with the feature branch deleted after the merge as routine cleanup.',
+    recommendation: 'Record "ask every time" until the panel work settles.',
+  },
+  { id: 'pv3', title: 'Light mode of the tinted variants', detail: '', recommendation: '' },
+]
+
+/** The preview log: 40 lines of a worker's transcript as the log view summarizes it, a few long enough to wrap. */
+const previewLog: string[] = Array.from({ length: 40 }, (_, i) => {
+  const n = i + 1
+  if (n % 10 === 3)
+    return `Reading the section boxes again: the title row, the accent bar and the icon share one row of the box, so a line keeps its height whatever the surface does with the icon; the body takes the tint and every row inside it keeps the text colour of the pane (step ${n}).`
+  if (n % 5 === 1) return `> Bash claude plugin test ./mod (run ${n})`
+  if (n % 5 === 2) return `  < (pass) desktopStyle ${n}: every variant draws every preview state on the desktop surface`
+  if (n % 7 === 0) return `> Read mod/hooks/register.tsx`
+  return `Step ${n}: checking the palette against the pane's text colour.`
+})
+
+/** The state a desktopPreview value draws; undefined for `off`. */
+export function previewState(preview: DesktopPreview): PreviewState | undefined {
+  if (preview === 'off') return undefined
+  const base: PreviewState = {
+    snap: { at: PREVIEW_AT_SEC * 1000, rows: previewSessions },
+    nowSec: PREVIEW_AT_SEC,
+    queue: previewQueue,
+    points: previewPoints,
+    watch: null,
+    selected: null,
+    selectedPoint: null,
+    expanded: null,
+    logPage: false,
+  }
+  switch (preview) {
+    case 'overview':
+      return base
+    case 'queue':
+      return { ...base, expanded: 'queue' }
+    case 'points':
+      return { ...base, expanded: 'points', selectedPoint: previewPoints[0]?.id ?? null }
+    case 'log':
+      return { ...base, watch: { sid: PREVIEW_SID_RUNNING, title: previewSessions[0]?.title ?? '', lines: previewLog }, selected: PREVIEW_SID_RUNNING, logPage: true }
+    case 'empty':
+      return { ...base, snap: { at: PREVIEW_AT_SEC * 1000, rows: [] }, queue: [], points: [] }
+  }
 }
