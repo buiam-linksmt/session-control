@@ -5001,3 +5001,97 @@ describe('desktopStyle x desktopIcons x desktopButtons x desktopPreview on the d
     }
   })
 })
+
+// ---------------------------------------------------------------- control characters in the drawn text
+
+describe('a log, a title or an entry holding control characters: the panel draws them as plain text', () => {
+  type Ui = { drawn: () => Promise<unknown>; press: (a: { key: string }) => Promise<unknown>; unmount: () => Promise<unknown> }
+  /** What every surface refuses in a Text or a Button label: a control character but tab, line feed and carriage return. */
+  const REFUSED = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/
+  /** A drawn tree as one text: its JSON with the escapes of control characters read back, its blanks collapsed (a row's
+   * words are wrapped, which collapses them). */
+  const drawnText = async (ui: Ui) => JSON.stringify(await ui.drawn()).replace(/\\u00[0-9a-f]{2}/g, code => String.fromCharCode(parseInt(code.slice(2), 16)))
+  const has = (text: string, part: string) => text.replace(/ +/g, ' ').includes(part)
+  // A worker's transcript as the panel met it: tool results holding NUL bytes and a colour escape, a call with a bell, a
+  // DEL and a C1 control, and text the panel draws as it is (CJK, box drawing, bullets, a redaction, a path, brackets).
+  const fillers = Array.from({ length: 40 }, (_, i) => ({ type: 'assistant', message: { content: [{ type: 'text', text: `log line ${i + 1}` }] } }))
+  const CONTROL_LOG = [
+    ...fillers,
+    { type: 'user', message: { content: [{ type: 'tool_result', content: 'head\u0000\u0000\u0000tail' }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', content: '\u001b[31mred\u001b[0m plain' }] } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'printf a\u0007b\u007fc\u009bd' } }] } },
+    { type: 'assistant', message: { content: [{ type: 'text', text: '\u65E5\u672C \u2502 \u251C \u2500 \u253C \u2022 \u25E6 \u2610 \u258E \u25A3 [redacted] C:\\x\\y [a] {b}' }] } },
+  ]
+  // The same lines as the panel draws them (blanks collapsed): each control character a blank, an escape sequence gone,
+  // the rest as it is.
+  const DRAWN_LOG = ['< head tail', '< red plain', '> Bash printf a b c d', '\u65E5\u672C \u2502 \u251C \u2500 \u253C \u2022 \u25E6 \u2610 \u258E \u25A3 [redacted] C:\\\\x\\\\y [a] {b}']
+  const VIEWS: { name: string; surface: 'desktop' | 'terminal'; mode: string; placement?: string; bodyRows?: number; isLogPage?: boolean }[] = [
+    { name: 'desktop sections, the log box', surface: 'desktop', mode: 'sections' },
+    { name: 'desktop sections, the log page', surface: 'desktop', mode: 'sections', isLogPage: true },
+    { name: 'desktop page', surface: 'desktop', mode: 'page' },
+    { name: 'desktop spare', surface: 'desktop', mode: 'spare' },
+    { name: 'desktop buttons', surface: 'desktop', mode: 'buttons' },
+    { name: 'desktop seated inline', surface: 'desktop', mode: 'sections', placement: 'inline', bodyRows: 7 },
+    { name: 'terminal', surface: 'terminal', mode: 'sections' },
+  ]
+  for (const view of VIEWS) {
+    test(`${view.name}: the open log draws every line, none holding a control character`, { options: { ...OPTIONS, desktopPaneScroll: view.mode } }, async ($, on) => {
+      TAIL.rows = CONTROL_LOG
+      try {
+        world(on)
+        stubPanel(on)
+        await boot($)
+        await runCommand($, 'side')
+        const props = { ...PANE_PROPS, placement: view.placement ?? 'dock', scroll: { offset: 0, bodyRows: view.bodyRows ?? 36 } }
+        const ui = (await $.ui.mount({ plugin: 'session-control', surface: view.surface, component: 'Pane', requestId: 'session-control', props: props as never })) as unknown as Ui
+        await ui.press({ key: `s:${SID_ALIVE}` })
+        if (view.isLogPage === true) await ui.press({ key: 'x:log' })
+        const drawn = await drawnText(ui)
+        expect([view.name, DRAWN_LOG.filter(line => !has(drawn, line))]).toEqual([view.name, []])
+        expect([view.name, REFUSED.test(drawn)]).toEqual([view.name, false])
+        await ui.unmount()
+      } finally {
+        TAIL.rows = undefined
+      }
+    })
+  }
+
+  // The alive worker's title with a bold escape and a NUL, as a registry may hold it.
+  const TITLED = REGISTRY_TEXT.replace('"alive worker"', '"alive \\u001b[1mworker\\u0000"')
+  for (const surface of ['desktop', 'terminal'] as const) {
+    test(`${surface}: a session title holding an escape sequence and a NUL draws in its row and over its log`, { options: { ...OPTIONS, desktopPaneScroll: 'sections' } }, async ($, on) => {
+      world(on, '/fixture/lic/a\n', true, TITLED)
+      stubPanel(on)
+      await boot($)
+      await runCommand($, 'side')
+      const ui = (await $.ui.mount({ plugin: 'session-control', surface, component: 'Pane', requestId: 'session-control', props: PANE_PROPS as never })) as unknown as Ui
+      const rows = await drawnText(ui)
+      expect([surface, has(rows, 'alive worker'), REFUSED.test(rows)]).toEqual([surface, true, false])
+      await ui.press({ key: `s:${SID_ALIVE}` })
+      const log = await drawnText(ui)
+      expect([surface, has(log, 'LOG alive worker'), REFUSED.test(log)]).toEqual([surface, true, false])
+      await ui.unmount()
+    })
+  }
+
+  for (const surface of ['desktop', 'terminal'] as const) {
+    test(`${surface}: a queued task and an open point holding control characters draw as plain text`, { options: { ...OPTIONS, desktopPaneScroll: 'sections' } }, async ($, on) => {
+      QUEUE.text = JSON.stringify({ tasks: [{ id: 'q1', status: 'queued', title: 'Queued\u0007 one\u001b[0m' }] })
+      POINTS.text = JSON.stringify({ points: [{ id: 'a', status: 'open', title: 'First\u009b question', detail: 'Detail\u0000 one', recommendation: 'Do\u007f A' }] })
+      try {
+        world(on)
+        stubPanel(on)
+        await boot($)
+        await runCommand($, 'side')
+        const ui = (await $.ui.mount({ plugin: 'session-control', surface, component: 'Pane', requestId: 'session-control', props: PANE_PROPS as never })) as unknown as Ui
+        await ui.press({ key: 'p:a:0' })
+        const drawn = await drawnText(ui)
+        expect([surface, ['Queued one', 'First question', 'Detail one', 'Do A'].filter(part => !has(drawn, part)), REFUSED.test(drawn)]).toEqual([surface, [], false])
+        await ui.unmount()
+      } finally {
+        QUEUE.text = QUEUE_TEXT
+        POINTS.text = OPEN_POINTS_TEXT
+      }
+    })
+  }
+})

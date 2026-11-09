@@ -3500,7 +3500,10 @@ export const register: Register = (on, options) => {
     const liveSnap = await read($, snapshot)
     const columns = e.props.bodyColumns
     if (liveSnap === null && preview === undefined) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
-    const snap = preview?.snap ?? (liveSnap as NonNullable<typeof liveSnap>)
+    const gathered = preview?.snap ?? (liveSnap as NonNullable<typeof liveSnap>)
+    // A row's free text (the registry's title, model, effort, config dir) as drawn, before the terminal lays out its
+    // columns: with no terminal control (drawable says why).
+    const snap = { ...gathered, rows: gathered.rows.map(row => ({ ...row, title: plainText(row.title), model: plainText(row.model), effort: plainText(row.effort), configDir: plainText(row.configDir) })) }
     const live = await Promise.all([
       read($, watch),
       read($, selected),
@@ -3576,6 +3579,10 @@ export const register: Register = (on, options) => {
     // `rowIndex`: the session row (snap.rows) a line of the sessions box belongs to.
     // `hang`: the blanks a desktop row's wrapped lines after its first start with (under the text after a bullet).
     type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end'; rowIndex?: number; hang?: number }
+    // Rows as drawn: free text from files (a transcript's lines, a title, an entry) with no terminal control (plainText),
+    // since a Text or a Button label holding a control character but tab and line feed makes every surface refuse the
+    // whole tree, and the pane then draws nothing. Applied before a row is counted, split or wrapped.
+    const drawable = (rows: readonly PRow[]): PRow[] => rows.map(r => ({ ...r, text: plainText(r.text) }))
     // The elapsed column at the display clock: the tick's time, never before the probe the rows come from.
     const probedSec = Math.floor(snap.at / 1000)
     const clock = { nowSec: Math.max(nowSec, probedSec), probedSec }
@@ -3732,7 +3739,7 @@ export const register: Register = (on, options) => {
     // Buttons (desktopLines), as a desktop Button draws its label on one line.
     const pageBlock = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[]) => {
       const chars = isSections ? sectionsSplitter(columns) : desktopLineChars(columns)
-      const rows = [...fixedIn, ...bodyIn].flatMap(r => (r.press === undefined ? [r] : desktopLines(r, chars, id)))
+      const rows = drawable([...fixedIn, ...bodyIn]).flatMap(r => (r.press === undefined ? [r] : desktopLines(r, chars, id)))
       if (id === 'sessions') drawnSessions = { rows: [...new Set(rows.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
       return (
         <Box key={`page:${id}`} flexDirection="column" borderStyle="round" {...boxColours(id)}>
@@ -3761,7 +3768,7 @@ export const register: Register = (on, options) => {
     // (`fixed`) and its other lines (`body`).
     const sectionLines = (id: SectionId, fixedIn: PRow[], bodyIn: PRow[]) => {
       const split = sectionsSplitter(columns)
-      return { fixed: fixedIn.flatMap(r => desktopLines(r, split, id)), body: bodyIn.flatMap(r => desktopLines(r, split, id)) }
+      return { fixed: drawable(fixedIn).flatMap(r => desktopLines(r, split, id)), body: drawable(bodyIn).flatMap(r => desktopLines(r, split, id)) }
     }
     // One row of a fixed box: a Box one row tall that clips what it holds, so a line takes exactly the row it is counted
     // for whatever height Desktop gives its element (a plain Button sets its own font and line height, a Text inherits
@@ -3862,8 +3869,8 @@ export const register: Register = (on, options) => {
       const box = boxes.find(one => one.id === id) as SectionBox
       // The desktop counts, shows and scrolls a section by the lines its rows take.
       const chars = desktopLineChars(columns, isPlain)
-      const fixed = isDesktop ? fixedIn.flatMap(r => desktopLines(r, chars, id)) : fixedIn
-      const body = isDesktop ? bodyIn.flatMap(r => desktopLines(r, chars, id)) : bodyIn
+      const fixed = isDesktop ? drawable(fixedIn).flatMap(r => desktopLines(r, chars, id)) : drawable(fixedIn)
+      const body = isDesktop ? drawable(bodyIn).flatMap(r => desktopLines(r, chars, id)) : drawable(bodyIn)
       const visible = Math.max(1, box.height - (isPlain ? 0 : 3) - fixed.length)
       const total = body.length
       const from = isTail ? Math.max(0, total - visible - back) : clampOffset(offset, total, visible)
@@ -4024,28 +4031,32 @@ export const register: Register = (on, options) => {
     if (isLogOpen && view !== null) {
       // The desktop ends each log line at its own width: one row per line, so the newest lines stay in the box.
       const logShown = capped(view.lines, 'latest')
-      const logRows: PRow[] = [...moreRow(logShown.more, 'more above'), ...logShown.shown.flatMap(line => {
+      // Each line and the title as drawn (drawable), before the terminal wraps a line: a transcript holds NUL bytes and
+      // escape sequences.
+      const logTitle = `LOG ${plainText(view.title)}`
+      const logRows: PRow[] = [...moreRow(logShown.more, 'more above'), ...logShown.shown.flatMap(raw => {
+        const line = plainText(raw)
         const dim = line.startsWith('  <') || line.startsWith('>')
         if (isDesktop) return [{ text: line, dim, wrap: 'truncate-end' as const }]
         const wrapped = wrapLogLine(line, width).slice(0, 2)
         return wrapped.map(text => ({ text, dim }))
       })]
       if (logRows.length === 0) logRows.push({ text: 'Waiting for output.', dim: true })
-      if (isPage) return pagePanel([sessionsPage(), pageBlock('log', `LOG ${view.title}`, [], logRows)])
+      if (isPage) return pagePanel([sessionsPage(), pageBlock('log', logTitle, [], logRows)])
       if (isSections) {
-        if (isSectionsPage) return sectionsPage('log', pageBlock('log', `LOG ${view.title}`, [], logRows))
+        if (isSectionsPage) return sectionsPage('log', pageBlock('log', logTitle, [], logRows))
         return framed(
           <Box flexDirection="column" height={bodyRows} overflow="hidden" {...evenGap}>
             {sectionBox('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, showSection('sessions'))}
-            {sectionBox('log', `LOG ${view.title}`, [], logRows, showLogPage, true)}
+            {sectionBox('log', logTitle, [], logRows, showLogPage, true)}
           </Box>,
         )
       }
-      if (isCompact) return framed(compactView(block('log', `LOG ${view.title}`, [], logRows, 0, true, true)))
+      if (isCompact) return framed(compactView(block('log', logTitle, [], logRows, 0, true, true)))
       return framed(
         <Box flexDirection="column" height={bodyRows} overflow="hidden">
           {sessionsBlock()}
-          {block('log', `LOG ${view.title}`, [], logRows, 0, true)}
+          {block('log', logTitle, [], logRows, 0, true)}
         </Box>,
       )
     }
