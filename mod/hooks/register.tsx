@@ -216,6 +216,8 @@ import {
   slugify,
   launchName,
   sessionFileFacts,
+  setInbox,
+  resumeGone,
   pidFromFile,
   reportCheck,
   resultReport,
@@ -482,6 +484,13 @@ type LateLaunch = {
   until: number
 }
 let lateLaunches: LateLaunch[] = []
+/**
+ * A worker registered with its pid before its sessions file named its session (a resume whose engine writes the file
+ * once it has loaded the transcript): the poll reads that file until it names the session and its socket, then writes
+ * the socket (and name) into the entry (fillInboxes). In memory for the load, until LATE_LAUNCH_SEC after the launch.
+ */
+type InboxWait = { sessionId: string; pid: number; configDir: string; until: number }
+let inboxWaits: InboxWait[] = []
 /**
  * A task notification: its status and, when its task id names a launch of this load (launchTasks), that launch's result
  * file, which names the worker the status belongs to.
@@ -1020,12 +1029,18 @@ function foldedSummary(): HeldToast | undefined {
   return { text: toastText(TOAST_TITLES.moreNotices, moreToastText(more)), timeoutMs: 10000, isCompletion: false, more }
 }
 
+/**
+ * What a harvest of this load is remembered by: the session, the pid and the run's result file. A resumed session
+ * finishes again under a new pid, or under its earlier run's pid when the system gave that number out again, and each
+ * run writes its own result file.
+ */
+const harvestKey = (entry: SessionEntry) => `${String(entry.session_id)}:${entry.pid ?? ''}:${typeof entry.result_file === 'string' ? entry.result_file : ''}`
+
 /** A worker whose recorded pid is gone: classify, maybe merge into the registry, toast. Answers whether it harvested now. */
 async function complete($: EngineInterface, entry: SessionEntry, taskStatus: string | undefined, toasts: ToastBudget): Promise<boolean> {
   const sid = entry.session_id
   if (typeof sid !== 'string') return false
-  // Keyed by session and pid: a resumed session finishes again under a new pid.
-  const key = `${sid}:${entry.pid}`
+  const key = harvestKey(entry)
   if (harvested.has(key)) return false
   if (typeof entry.result_file !== 'string') return false
   const resultText = await $.fs.read(entry.result_file).catch(() => '')
@@ -1546,6 +1561,7 @@ async function gather($: EngineInterface, notice: TaskNotice | undefined, isTick
   for (const entry of entries) {
     if (!isNew(entry) && rowStatus(entry, facts) === 'dead' && (await complete($, entry, statusOf(entry), toasts))) isHarvesting = true
   }
+  await fillInboxes($, entries, now)
   // The finished-open lines read the registry after this refresh's harvests, so a session just harvested is named by its outcome.
   const settled = isHarvesting && config.completionWrites ? parseRegistry(await readRegistryText($)) : undefined
   const queueText = files.isQueueUnreadable === true ? null : files.queueText
@@ -1690,8 +1706,11 @@ async function registerLate($: EngineInterface, entries: readonly SessionEntry[]
       continue
     }
     const worker = await machine.findNewWorker(port, facts, launch.want, new Set([...launch.known, ...claimed]), launch.launchedAt)
-    const fromFile = worker === undefined ? {} : sessionFileFacts(await $.fs.read(`${launch.verdict.configDir}/sessions/${worker.pid}.json`).catch(() => ''))
-    const sessionId = worker === undefined ? undefined : (fromFile.sessionId ?? launch.verdict.resumeSid)
+    const resumeSid = launch.verdict.resumeSid
+    const read = worker === undefined ? {} : sessionFileFacts(await $.fs.read(`${launch.verdict.configDir}/sessions/${worker.pid}.json`).catch(() => ''))
+    // A resume's session is the one it resumed: its sessions file counts only once it names that session.
+    const fromFile = resumeSid === undefined || read.sessionId === resumeSid ? read : {}
+    const sessionId = worker === undefined ? undefined : (resumeSid ?? fromFile.sessionId)
     if (worker === undefined || sessionId === undefined) {
       const ended = await registerFromResult($, launch, toasts)
       if (ended === undefined || ended.failed !== undefined) continue
@@ -1701,13 +1720,15 @@ async function registerLate($: EngineInterface, entries: readonly SessionEntry[]
     }
     const inbox = { name: fromFile.name ?? launch.name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
     const entry = newRegistryEntry(launch.args, launch.verdict, worker.pid, sessionId, launch.files, inbox, Math.floor(launch.launchedAt / 1000), launch.prompt)
-    const failed = await editRegistry($, async text => registerEntry(text, entry, launch.verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
+    const mode = resumeSid ? 'resume' : 'new'
+    const failed = await editRegistry($, async text => resumeGone(text, sessionId, mode) ?? registerEntry(text, entry, mode), freshText('headless-sessions.json'))
     trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, isLate: true, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
     if (failed !== undefined) continue
     done.add(launch)
     claimed.add(worker.pid)
     pids.add(worker.pid)
     isWritten = true
+    if (fromFile.sessionId === undefined) inboxWaits.push({ sessionId, pid: worker.pid, configDir: launch.verdict.configDir, until: launch.until })
   }
   lateLaunches = lateLaunches.filter(one => !done.has(one))
   return { isWritten, pids }
@@ -1733,15 +1754,39 @@ async function registerFromResult(
   const sessionId = launch.verdict.resumeSid ?? outcome.sessionId
   const entry = newRegistryEntry(launch.args, launch.verdict, undefined, sessionId, launch.files, { name: launch.name }, Math.floor(launch.launchedAt / 1000), launch.prompt)
   const finished = config.completionWrites ? { outcome, endedSec: Math.floor((await $.clock.now()) / 1000) } : undefined
-  const failed = await editRegistry($, async text => registerFinished(text, entry, launch.verdict.resumeSid ? 'resume' : 'new', finished), freshText('headless-sessions.json'))
+  const mode = launch.verdict.resumeSid ? 'resume' : 'new'
+  const failed = await editRegistry($, async text => resumeGone(text, sessionId, mode) ?? registerFinished(text, entry, mode, finished), freshText('headless-sessions.json'))
   trace($, 'worker.registered', { sessionId, isRegistered: failed === undefined, isFinished: true, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
   if (failed !== undefined) return { sessionId, outcome, entry, failed }
-  const key = `${sessionId}:${entry.pid}`
+  const key = harvestKey(entry)
   if (!harvested.has(key)) {
     harvested.add(key)
     await announceCompletion($, entry, outcome, completionTold($, entry, sessionId, outcome, resultText), toasts)
   }
   return { sessionId, outcome, entry }
+}
+
+/**
+ * The inboxes the poll still waits for (inboxWaits): each worker's sessions file is read; once it names the session and
+ * a socket, the socket (and the name it gives) goes into the entry that still records that pid (setInbox). A wait ends
+ * when it is written, when no entry records that pid for the session any more, or LATE_LAUNCH_SEC after its launch.
+ */
+async function fillInboxes($: EngineInterface, entries: readonly SessionEntry[], nowMs: number): Promise<void> {
+  if (inboxWaits.length === 0) return
+  const done = new Set<InboxWait>()
+  for (const wait of [...inboxWaits]) {
+    if (nowMs > wait.until || !entries.some(one => one.session_id === wait.sessionId && one.pid === wait.pid)) {
+      done.add(wait)
+      continue
+    }
+    const read = sessionFileFacts(await $.fs.read(`${wait.configDir}/sessions/${wait.pid}.json`).catch(() => ''))
+    if (read.sessionId !== wait.sessionId || read.socketPath === undefined) continue
+    const inbox = { socketPath: read.socketPath, ...(read.name === undefined ? {} : { name: read.name }) }
+    const failed = await editRegistry($, async text => setInbox(text, wait.sessionId, wait.pid, inbox))
+    trace($, 'worker.inbox', { pid: wait.pid, sessionId: wait.sessionId, isWritten: failed === undefined, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
+    if (failed === undefined) done.add(wait)
+  }
+  inboxWaits = inboxWaits.filter(one => !done.has(one))
 }
 
 /**
@@ -2498,16 +2543,20 @@ async function spawnWorker(
   }
   // The engine writes the session file shortly after the process starts: read it again until it is there. Its name
   // and messaging socket are taken from the same file; an older claude writes no socket, and the entry then has none.
+  // A resume knows its session id and waits as long for the file to name that session: a resumed session's engine
+  // writes the file once it has loaded the transcript, seconds later on a long one. When it is still not there, the
+  // entry is written without the socket and the poll adds it once the file names it (fillInboxes).
   const sessionPath = `${verdict.configDir}/sessions/${worker.pid}.json`
-  let sessionId = verdict.resumeSid ?? ''
+  const resumeSid = verdict.resumeSid
+  let sessionId = resumeSid ?? ''
   let fromFile: ReturnType<typeof sessionFileFacts> = {}
   for (let attempt = 0; attempt < 10; attempt++) {
-    fromFile = sessionFileFacts(await $.fs.read(sessionPath).catch(() => ''))
-    if (fromFile.sessionId !== undefined) {
-      sessionId = fromFile.sessionId
+    const read = sessionFileFacts(await $.fs.read(sessionPath).catch(() => ''))
+    if (read.sessionId !== undefined && (resumeSid === undefined || read.sessionId === resumeSid)) {
+      fromFile = read
+      sessionId = read.sessionId
       break
     }
-    if (sessionId !== '') break
     await machine.pause(port, 1)
   }
   // The socket can follow the session id by a moment: a few more reads, then the entry goes without it.
@@ -2550,7 +2599,9 @@ async function spawnWorker(
   const inbox = { name: fromFile.name ?? name, ...(fromFile.socketPath === undefined ? {} : { socketPath: fromFile.socketPath }) }
   const entry = newRegistryEntry(args, verdict, worker.pid, sessionId, files, inbox, Math.floor(launchedAt / 1000), prompt)
   // A missing registry starts as an empty one, as REGISTER_SCRIPT starts it.
-  const failed = await editRegistry($, async text => registerEntry(text, entry, verdict.resumeSid ? 'resume' : 'new'), freshText('headless-sessions.json'))
+  const mode = resumeSid ? 'resume' : 'new'
+  const failed = await editRegistry($, async text => resumeGone(text, sessionId, mode) ?? registerEntry(text, entry, mode), freshText('headless-sessions.json'))
+  if (failed === undefined && fromFile.sessionId === undefined) inboxWaits.push({ sessionId, pid: worker.pid, configDir: verdict.configDir, until: launchedAt + LATE_LAUNCH_SEC * 1000 })
   const note = failed === undefined ? 'registered' : writeFailed(failed)
   trace($, 'worker.registered', { pid: worker.pid, sessionId, isRegistered: failed === undefined, ...(failed === undefined ? {} : messageFields(failed, 'reason')) })
   await refresh($)
@@ -3297,6 +3348,7 @@ export const register: Register = (on, options) => {
   usageSeen.clear()
   isUsageProbing = false
   lateLaunches = []
+  inboxWaits = []
   launchTasks.clear()
   keptStatuses.clear()
   refreshing = undefined

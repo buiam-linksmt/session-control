@@ -161,6 +161,8 @@ import {
   statusLabel,
   registerEntry,
   registerFinished,
+  resumeGone,
+  setInbox,
   removeEntries,
   ackEntries,
   findNewWindowsWorker,
@@ -1813,6 +1815,32 @@ describe('one registry entry per session', () => {
     expect(registerEntry(text, { title: 'queued' }, 'new').ok).toBe(true)
     const resumed = registerEntry(text, { ...entry, pid: 7003 }, 'resume')
     expect(resumed.ok && (JSON.parse(resumed.text) as unknown[]).length).toBe(1)
+  })
+
+  test('a resume whose entry was retired while the launch ran: the registry write is refused, never said registered', () => {
+    const sid = entry.session_id
+    expect(resumeGone('[]\n', sid, 'resume')).toEqual({ ok: false, error: `the registry holds no entry for session ${sid} any more (retired while the launch ran); the worker runs unregistered` })
+    expect(resumeGone('', sid, 'resume')?.ok).toBe(false)
+    // Without the refusal the edit would write nothing and the launch would say registered.
+    expect(registerEntry('[]\n', entry, 'resume')).toEqual({ ok: true, text: '[]\n' })
+    expect(resumeGone(JSON.stringify([entry]), sid, 'resume')).toBeUndefined()
+    expect(resumeGone('[]\n', sid, 'new')).toBeUndefined()
+    expect(resumeGone('not json', sid, 'resume')).toBeUndefined()
+  })
+
+  test('setInbox writes the socket and name into the entry that still records the pid, and nothing else', () => {
+    const sid = entry.session_id
+    const socket = '/run/user/1000/cc-socks/7001.sock'
+    const text = `${JSON.stringify([{ title: 'other', session_id: 'x' }, { title: 'w', pid: 7001, session_id: sid, name: 'w-a', socket_path: null, keep: true }], null, 2)}\n`
+    const set = setInbox(text, sid, 7001, { socketPath: socket, name: 'w-a' })
+    expect(set.ok).toBe(true)
+    const list = JSON.parse(set.ok ? set.text : '[]') as Record<string, unknown>[]
+    expect(list).toEqual([{ title: 'other', session_id: 'x' }, { title: 'w', pid: 7001, session_id: sid, name: 'w-a', socket_path: socket, keep: true }])
+    // Unchanged: another pid now (harvested or resumed again), or the values there already.
+    expect(setInbox(text, sid, 7002, { socketPath: socket })).toEqual({ ok: true, text })
+    const once = set.ok ? set.text : ''
+    expect(setInbox(once, sid, 7001, { socketPath: socket, name: 'w-a' })).toEqual({ ok: true, text: once })
+    expect(setInbox('not json', sid, 7001, { socketPath: socket }).ok).toBe(false)
   })
 })
 
