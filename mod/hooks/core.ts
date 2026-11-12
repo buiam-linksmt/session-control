@@ -1169,7 +1169,7 @@ export const LAUNCH_SCHEMA = {
     rules: {
       type: 'boolean',
       description:
-        'Append the standard rules block (no AI attribution, no human answers, no credentials, foreground waits, never end the turn on a live run, the report with git status -sb and git log --oneline @{u}..HEAD and their exit codes) when the prompt lacks what the launch guard checks. Default true with prompt or section, false for a prompt_file given alone (that file is launched as it is). A prompt that already carries the items, or a skill test, gets no block.',
+        'Append the standard rules block (no AI attribution, no human answers, no credentials, foreground waits, never end the turn on a live run, the report with git status -sb and git log --oneline @{u}..HEAD and their exit codes) when the prompt lacks what the launch guard checks. Default true with prompt or section, false for a prompt_file given alone (the worker runs on a mod-written copy of that file as read). A prompt that already carries the items, or a skill test, gets no block.',
     },
     config_dir: {
       type: 'string',
