@@ -135,6 +135,7 @@ import {
   desktopPaneScroll,
   buttonLook,
   desktopButtons,
+  desktopFont,
   desktopGap,
   desktopIcons,
   desktopPreview,
@@ -145,7 +146,9 @@ import {
   PANEL_ICON_PX,
   PANEL_MARK_PX,
   DESKTOP_BUTTONS_DEFAULT,
+  DESKTOP_FONT_DEFAULT,
   DESKTOP_STYLE_DEFAULT,
+  fontLook,
   PANEL_ICON_TEXT,
   PANEL_LOOKS,
   panelIconSvg,
@@ -224,7 +227,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { BoxWindow, ChipLook, ComposedPrompt, DesktopButtons, DesktopIcons, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces, Workspace } from './core'
+import type { BoxWindow, ChipLook, ComposedPrompt, DesktopButtons, DesktopFont, DesktopIcons, FontLook, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces, Workspace } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -303,6 +306,8 @@ type Config = {
   desktopGap: number
   /** How the `sections` view draws its titles and icons (core.ts desktopButtons); an unknown value counts as `outline`. */
   desktopButtons: DesktopButtons
+  /** The font colour and style of the `sections` view (core.ts desktopFont); an unknown value counts as `standard`. */
+  desktopFont: DesktopFont
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -326,6 +331,7 @@ let config: Config = {
   desktopPreview: 'off',
   desktopGap: DESKTOP_GAP_PX,
   desktopButtons: DESKTOP_BUTTONS_DEFAULT,
+  desktopFont: DESKTOP_FONT_DEFAULT,
 }
 let isActive = false
 /** Whether the orchestratorDir option is set: the mod then turns on without the CLAUDE.md heading. */
@@ -3194,6 +3200,7 @@ export const register: Register = (on, options) => {
     desktopPreview: desktopPreview(options.desktopPreview),
     desktopGap: desktopGap(options.desktopGap),
     desktopButtons: desktopButtons(options.desktopButtons),
+    desktopFont: desktopFont(options.desktopFont),
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -3701,13 +3708,40 @@ export const register: Register = (on, options) => {
           onPress={r.press}
         />
       )
-    // On the desktop a row is one line (desktopLines): a Text the surface ends at its edge (`truncate-end`) and a pressable row
-    // a Button with its label as it is, never padded.
-    const deskRowEl = (r: PRow, scope?: string) =>
-      r.press === undefined ? (
-        <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap={r.wrap ?? 'wrap'}>
-          {r.text}
+    // The font of the sections view (desktopFont, fontLook): each section's title, its rows and its title shown in the
+    // strip; none (`standard`, the trees of before) under every other desktopPaneScroll value and on the terminal.
+    const fontOf = (id: SectionId): FontLook | undefined => (isSections ? fontLook(config.desktopFont, config.desktopStyle, id) : undefined)
+    // A Text row under a font: a row with a status colour keeps it, a dim row takes the font's detail look, any other its
+    // body look. A pressable row stays a Button (its label cannot be coloured).
+    const fontRow = (r: PRow, font: FontLook) => (r.color !== undefined ? { bold: r.bold, dimColor: r.dim, color: r.color } : r.dim === true ? { bold: r.bold, ...font.detail } : { bold: r.bold, ...font.body })
+    // A section's title under its font: bold as before, or the font's title look (a pill padded by a no-break space a side).
+    const titleEl = (title: string, font: FontLook | undefined, isTruncated = false) =>
+      font === undefined ? (
+        isTruncated ? (
+          <Text bold wrap="truncate-end">
+            {title}
+          </Text>
+        ) : (
+          <Text bold>{title}</Text>
+        )
+      ) : (
+        <Text {...font.title} {...(isTruncated ? { wrap: 'truncate-end' as const } : {})}>
+          {font.pad === true ? `\u00A0${title}\u00A0` : title}
         </Text>
+      )
+    // On the desktop a row is one line (desktopLines): a Text the surface ends at its edge (`truncate-end`) and a pressable row
+    // a Button with its label as it is, never padded. Under a font (sections view) a Text row takes its look (fontRow).
+    const deskRowEl = (r: PRow, scope?: string, font?: FontLook) =>
+      r.press === undefined ? (
+        font === undefined ? (
+          <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap={r.wrap ?? 'wrap'}>
+            {r.text}
+          </Text>
+        ) : (
+          <Text {...fontRow(r, font)} wrap={r.wrap ?? 'wrap'}>
+            {r.text}
+          </Text>
+        )
       ) : (
         <Button key={r.key} label={r.text === '' ? ' ' : r.text} plain dimColor={r.dim} hover={scope === undefined ? undefined : { scope, inverse: true }} onPress={r.press} />
       )
@@ -3801,21 +3835,28 @@ export const register: Register = (on, options) => {
       const chars = isSections ? sectionsSplitter(columns) : desktopLineChars(columns)
       const rows = drawable([...fixedIn, ...bodyIn]).flatMap(r => (r.press === undefined ? [r] : desktopLines(r, chars, id)))
       if (id === 'sessions') drawnSessions = { rows: [...new Set(rows.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
+      const font = fontOf(id)
       return (
         <Box key={`page:${id}`} flexDirection="column" borderStyle="round" {...boxColours(id)}>
           {lookOf(id).accent === undefined ? (
-            <Text bold>{title}</Text>
+            titleEl(title, font)
           ) : (
             <Box key={`title:${id}`} flexDirection="row" alignItems="center">
               {accentBar(id)}
-              <Text bold>{title}</Text>
+              {titleEl(title, font)}
             </Box>
           )}
           {rows.map((r, i) =>
             r.press === undefined ? (
-              <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap="wrap">
-                {indented(r.text, r.indent)}
-              </Text>
+              font === undefined ? (
+                <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap="wrap">
+                  {indented(r.text, r.indent)}
+                </Text>
+              ) : (
+                <Text {...fontRow(r, font)} wrap="wrap">
+                  {indented(r.text, r.indent)}
+                </Text>
+              )
             ) : (
               deskRowEl(r, r.group ?? `${id}:${i}`)
             ),
@@ -3852,19 +3893,16 @@ export const register: Register = (on, options) => {
       const lines = body.slice(from, from + fit.bodyShown)
       const shown = isTail ? [...more, ...lines] : [...lines, ...more]
       if (id === 'sessions') drawnSessions = { rows: [...new Set(lines.flatMap(r => (r.rowIndex === undefined ? [] : [r.rowIndex])))].flatMap(i => snap.rows[i] ?? []), probedSec }
+      const font = fontOf(id)
       return (
         <Box key={`sec:${id}`} flexDirection="column" height={box.height} overflow="hidden" borderStyle="round" {...boxColours(id)}>
           <Box flexDirection="row" height={1} flexShrink={0} overflow="hidden" alignItems="center">
             {accentBar(id)}
-            <Box flexGrow={1}>
-              <Text bold wrap="truncate-end">
-                {title}
-              </Text>
-            </Box>
+            <Box flexGrow={1}>{titleEl(title, font, true)}</Box>
             {fit.more > 0 && iconButton('plus', `x:${id}`, onExpand, id)}
           </Box>
-          {fixed.slice(0, fit.fixedShown).map((r, i) => oneRow(`row:${id}:h${i}`, deskRowEl(r)))}
-          {shown.map((r, i) => oneRow(`row:${id}:${i}`, deskRowEl(r, r.press === undefined ? undefined : (r.group ?? `${id}:${from + i}`))))}
+          {fixed.slice(0, fit.fixedShown).map((r, i) => oneRow(`row:${id}:h${i}`, deskRowEl(r, undefined, font)))}
+          {shown.map((r, i) => oneRow(`row:${id}:${i}`, deskRowEl(r, r.press === undefined ? undefined : (r.group ?? `${id}:${from + i}`), font)))}
         </Box>
       )
     }
@@ -3890,8 +3928,18 @@ export const register: Register = (on, options) => {
     // Under the outline look each title is a chip (chip, buttonLook): the shown one bold on its own colours, with no
     // brackets; another that can be shown a Button in its chip; a greyed one a dim Text in a dim-bordered chip, never
     // pressable. Wrapped titles stand desktopGap apart, as the boxes do (evenGap).
+    // Under a font (desktopFont) the shown title takes the font's look for it: its colour, weight and styles, on the
+    // section's own background, or on the font's fill (a chip's fill under outline buttons).
     const stripTitle = (id: SectionId, title: string, current: ExpandableId | 'log') => {
       const chips = chipsOf(id)
+      const font = id === current ? fontOf(id) : undefined
+      if (font !== undefined) {
+        if (chips === undefined) {
+          const background = lookOf(id).current
+          return <Text {...(background === undefined ? {} : { backgroundColor: background })} {...font.current}>{`[ ${title} ]`}</Text>
+        }
+        return chip(`chip:${id}`, font.currentFill === undefined ? chips.current : { ...chips.current, backgroundColor: font.currentFill }, <Text {...font.current}>{title}</Text>)
+      }
       if (chips === undefined) {
         if (id === current) return <Text bold {...currentLook(id)}>{`[ ${title} ]`}</Text>
         if (id !== 'log' && overflowsEven(id)) return <Button key={`t:top:${id}`} label={title} plain onPress={showSection(id)} />
