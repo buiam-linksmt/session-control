@@ -2487,58 +2487,52 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-23
     expect(Object.values(PANEL_ICON_GLYPH)).toEqual(['+', '\u2212', '\u00D7'])
   })
 
-  test('desktopFont: its values; an unknown value, another type or none counts as standard (decisions pfs-1, pfs-2)', () => {
-    expect(DESKTOP_FONTS).toEqual(['standard', 'subtle', 'accent', 'vivid'])
-    expect(DESKTOP_FONT_DEFAULT).toBe('standard')
+  test('desktopFont: its values; an unknown value, another type or none counts as accent, the default (decisions pfs-1 to pfs-4)', () => {
+    expect(DESKTOP_FONTS).toEqual(['standard', 'accent'])
+    expect(DESKTOP_FONT_DEFAULT).toBe('accent')
     for (const value of DESKTOP_FONTS) expect(desktopFont(value)).toBe(value)
-    for (const other of [undefined, null, '', 'Vivid', 'subtle ', 'bold', 'plain', 1, true, ['accent']]) expect(desktopFont(other)).toBe('standard')
+    for (const other of [undefined, null, '', 'Standard', 'accent ', 'subtle', 'vivid', 'bold', 'plain', 1, true, ['standard']]) expect(desktopFont(other)).toBe('accent')
   })
 
-  test('desktopFont variants: a section\'s title, body, detail and shown title in its hue, at 4.5:1 or more on what it is drawn on; no colour under plain; three distinct variants (decisions pfs-1, pfs-2)', () => {
+  test('desktopFont accent: a section\'s title, body, detail and shown title in its hue, at 4.5:1 or more on what it is drawn on; no colour under plain (decisions pfs-1 to pfs-4)', () => {
     const SECTIONS = ['sessions', 'queue', 'points', 'log'] as const
-    const VARIANTS = ['subtle', 'accent', 'vivid'] as const
     for (const hue of Object.values(FONT_HUES)) for (const colour of Object.values(hue)) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
     // Each font hue's accent is the hue of the tint-soft bars and borders.
     for (const [name, hue] of Object.entries(FONT_HUES)) expect(hue.accent).toBe(BUTTON_HUES[name as keyof typeof BUTTON_HUES].edge)
     for (const style of DESKTOP_STYLES) for (const id of SECTIONS) expect(fontLook('standard', style, id)).toBeUndefined()
-    for (const variant of VARIANTS) {
-      for (const id of SECTIONS) {
-        const where = `${variant} ${id}`
-        const look = fontLook(variant, 'tint-soft', id)
-        if (look === undefined) throw new Error(`${where}: no look`)
-        const body = PANEL_LOOKS['tint-soft'].sections[id].body as string
-        const ok = (fg: string | undefined, bg: string, what: string) => expect([where, what, fg !== undefined && contrast(fg, bg) >= 4.5]).toEqual([where, what, true])
-        // The title on its own fill or on the section's tint; the rows on the tint; nothing dim (a colour instead).
-        ok(look.title.color, look.title.backgroundColor ?? body, 'title')
-        if (look.body.color !== undefined) ok(look.body.color, body, 'body')
-        ok(look.detail.color, body, 'detail')
-        expect([where, look.detail.dimColor]).toEqual([where, undefined])
-        // The shown title in the strip: on the font's fill, else the chip's (outline) or the look's (plain buttons) fill.
-        const fills = look.currentFill !== undefined ? [look.currentFill] : [buttonLook('tint-soft', id).current.backgroundColor as string, PANEL_LOOKS['tint-soft'].sections[id].current as string]
-        for (const fill of fills) ok(look.current.color, look.current.backgroundColor ?? fill, 'shown title')
-        // Every colour is drawn on a fixed background (the tint, a fill), never on Desktop's page: the same in both themes.
-        for (const one of [look.title, look.body, look.detail, look.current]) for (const colour of [one.color, one.backgroundColor]) if (colour !== undefined) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
-        // Under plain (no colour of its own) the variant keeps its weights and styles, no colour: dim rows stay dim.
-        const plain = fontLook(variant, 'plain', id)
-        if (plain === undefined) throw new Error(`${where}: no plain look`)
-        for (const one of [plain.title, plain.body, plain.detail, plain.current]) expect([where, one.color, one.backgroundColor]).toEqual([where, undefined, undefined])
-        expect([where, plain.detail.dimColor, plain.currentFill, plain.pad]).toEqual([where, true, undefined, undefined])
-      }
-      // Under tint-soft each section's title is its own colour.
-      expect([variant, new Set(SECTIONS.map(id => JSON.stringify(fontLook(variant, 'tint-soft', id)?.title))).size]).toEqual([variant, 4])
-    }
-    // From restrained to bold: the three variants differ in every part a capture shows, the title, the rows and the shown title.
+    let lowest = Number.POSITIVE_INFINITY
     for (const id of SECTIONS) {
-      const looks = VARIANTS.map(variant => fontLook(variant, 'tint-soft', id))
-      for (const part of ['title', 'detail', 'current'] as const) expect([id, part, new Set(looks.map(look => JSON.stringify(look?.[part]))).size]).toEqual([id, part, 3])
-      expect([id, new Set(looks.map(look => JSON.stringify(look?.body))).size]).toEqual([id, 3])
-      // subtle leaves the body rows and the weights as they were; vivid sets its title and its shown title on the accent.
-      expect(looks[0]?.body).toEqual({})
-      expect(looks[0]?.title.bold).toBe(true)
-      expect(looks[2]?.title.backgroundColor).toBe(FONT_HUES[BUTTON_HUE_OF['tint-soft'][id]].accent)
-      expect(looks[2]?.currentFill).toBe(FONT_HUES[BUTTON_HUE_OF['tint-soft'][id]].accent)
-      expect([looks[1]?.title.weight, looks[2]?.title.weight, looks[1]?.detail.italic, looks[2]?.detail.italic, looks[2]?.body.weight]).toEqual(['bold', 'bold', true, true, 'medium'])
+      const where = `accent ${id}`
+      const look = fontLook('accent', 'tint-soft', id)
+      if (look === undefined) throw new Error(`${where}: no look`)
+      const hue = FONT_HUES[BUTTON_HUE_OF['tint-soft'][id]]
+      expect([where, look]).toEqual([
+        where,
+        { title: { weight: 'bold', color: hue.accent }, body: { color: hue.ink }, detail: { color: hue.muted, italic: true }, current: { weight: 'bold', underline: true, color: hue.ink } },
+      ])
+      const body = PANEL_LOOKS['tint-soft'].sections[id].body as string
+      const ok = (fg: string | undefined, bg: string, what: string) => {
+        const ratio = fg === undefined ? 0 : contrast(fg, bg)
+        lowest = Math.min(lowest, ratio)
+        expect([where, what, ratio >= 4.5]).toEqual([where, what, true])
+      }
+      // The title and the rows on the section's tint; nothing dim (a colour instead).
+      ok(look.title.color, body, 'title')
+      ok(look.body.color, body, 'body')
+      ok(look.detail.color, body, 'detail')
+      expect([where, look.detail.dimColor]).toEqual([where, undefined])
+      // The shown title in the strip: on the chip's (outline) or the look's (plain buttons) fill.
+      for (const fill of [buttonLook('tint-soft', id).current.backgroundColor as string, PANEL_LOOKS['tint-soft'].sections[id].current as string]) ok(look.current.color, fill, 'shown title')
+      // Under plain (no colour of its own) accent keeps its weights and styles, no colour: dim rows stay dim.
+      const plain = fontLook('accent', 'plain', id)
+      if (plain === undefined) throw new Error(`${where}: no plain look`)
+      expect([where, plain]).toEqual([where, { title: { weight: 'bold' }, body: {}, detail: { dimColor: true, italic: true }, current: { weight: 'bold', underline: true } }])
     }
+    // The lowest contrast, the README's figure: the log's title, #9A9892 on #2A2A28, 4.986:1.
+    expect(Math.round(lowest * 1000) / 1000).toBe(4.986)
+    expect(Math.round(contrast('#9A9892', '#2A2A28') * 1000) / 1000).toBe(4.986)
+    // Under tint-soft each section's title is its own colour.
+    expect(new Set(SECTIONS.map(id => JSON.stringify(fontLook('accent', 'tint-soft', id)?.title))).size).toBe(4)
   })
 
   /** The rectangles and paths of an icon's markup, with their numeric attributes. */

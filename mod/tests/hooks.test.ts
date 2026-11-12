@@ -2407,7 +2407,7 @@ describe('debug trace', () => {
         desktopPreview: 'off',
         desktopGap: 2,
         desktopButtons: 'outline',
-        desktopFont: 'standard',
+        desktopFont: 'accent',
       },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
@@ -4657,10 +4657,10 @@ const withoutGap = (text: string, name: string) => {
   return text.split(GAP_PROP).join('')
 }
 
-describe('desktopStyle plain, desktopButtons plain, desktopIcons text and desktopPreview off draw the trees of before (decisions smp-18 to smp-23)', () => {
+describe('desktopStyle plain, desktopButtons plain, desktopIcons text, desktopFont standard and desktopPreview off draw the trees of before (decisions smp-18 to smp-23, pfs-3)', () => {
   const optionsOf = (state: (typeof GOLDEN_STATES)[number], extra: Record<string, string | number>) => ({ options: { ...OPTIONS, ...(state.mode === undefined ? {} : { desktopPaneScroll: state.mode }), ...extra } })
-  /** The options that select the sections view of before (decision smp-23: tint-soft and outline are the defaults now). */
-  const BEFORE = { desktopStyle: 'plain', desktopButtons: 'plain' }
+  /** The options that select the sections view of before (decisions smp-23, pfs-3: tint-soft, outline and accent are the defaults now). */
+  const BEFORE = { desktopStyle: 'plain', desktopButtons: 'plain', desktopFont: 'standard' }
   type Drawn = { type?: string; props?: Record<string, unknown>; children?: (Drawn | string)[] }
   const drawnNodes = (node: Drawn): Drawn[] => [node, ...(node.children ?? []).flatMap(one => (typeof one === 'object' && one !== null ? drawnNodes(one) : []))]
   /**
@@ -4694,7 +4694,7 @@ describe('desktopStyle plain, desktopButtons plain, desktopIcons text and deskto
   for (const state of GOLDEN_STATES) {
     // plain and plain buttons given: the default desktopGap (2 px) adds the gap between the even view's boxes, or between
     // a page's strip and box and its strip's rows, and nothing else (decisions smp-22, smp-25).
-    test(`${state.name}: plain, text, off and plain buttons given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off', desktopButtons: 'plain' }), async ($, on) => {
+    test(`${state.name}: plain, text, off, standard and plain buttons given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off', desktopButtons: 'plain', desktopFont: 'standard' }), async ($, on) => {
       expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
     })
     // desktopGap 0 with plain and plain buttons draws the tree of before exactly, gap prop included.
@@ -4746,9 +4746,9 @@ describe('desktopStyle plain, desktopButtons plain, desktopIcons text and deskto
   }
 })
 
-// ---------------------------------------------------------------- desktopFont standard draws the defaults' trees (decisions pfs-1, pfs-2)
+// ---------------------------------------------------------------- desktopFont: accent by default, standard the trees of before (decisions pfs-1 to pfs-4)
 
-/** The preview states the font variants are captured in, drawn in a room of 36 rows and 60 columns. */
+/** The preview states the fonts are captured in, drawn in a room of 36 rows and 60 columns. */
 const FONT_PREVIEWS = ['overview', 'queue', 'points', 'log', 'empty'] as const
 const FONT_ROOM_PROPS = { ...PANE_PROPS, bodyColumns: 60, scroll: { offset: 0, bodyRows: 36 } }
 /** The tree a preview state draws on the desktop sections view, as JSON, under the options the test gives. */
@@ -4764,11 +4764,11 @@ const previewTree = async ($: GoldenTest$, on: On) => {
 }
 
 /**
- * The trees the desktop sections view draws under the defaults (tint-soft, outline, text icons, 2 px), as they were before
- * desktopFont (e50061f): each golden state of the sections value, and each preview state. With desktopFont left out,
- * `standard` or an unknown value they stay byte-identical.
+ * The trees the desktop sections view draws under desktopFont `standard` and the other defaults (tint-soft, outline, text
+ * icons, 2 px), as they were before desktopFont (e50061f): each golden state of the sections value, and each preview
+ * state. They stay byte-identical.
  */
-const DEFAULT_GOLDEN: Record<string, string> = {
+const STANDARD_GOLDEN: Record<string, string> = {
   'desk-even-live': '00b60ab0b4620e:5735',
   'desk-even-15': '1656be7e0f63e2:7733',
   'desk-queue-page': '0233f36f3f36da:3312',
@@ -4783,45 +4783,47 @@ const DEFAULT_GOLDEN: Record<string, string> = {
   'preview-empty': '0dccb9cb9a6af7:3068',
 }
 
-describe('desktopFont left out, standard or unknown draws the trees of before (decisions pfs-1, pfs-2)', () => {
+/**
+ * The trees the desktop sections view draws under the defaults (tint-soft, outline, text icons, the accent font, 2 px):
+ * each golden state of the sections value, and each preview state in the room of FONT_ROOM_PROPS (the captures the user
+ * chose accent from). desktopFont left out, `accent` or an unknown value draws them.
+ */
+const ACCENT_GOLDEN: Record<string, string> = {
+  'desk-even-live': '0fae9e3cbd7dbe:5873',
+  'desk-even-15': '1604b2a00cae85:8013',
+  'desk-queue-page': '194a1cc70d4d5d:3627',
+  'desk-points-page-selected': '077142e84f4554:4437',
+  'desk-points-box-selected': '1661eaa7a0d073:8137',
+  'desk-log-box': '1440741af4306e:9313',
+  'desk-log-page': '0b3e1afbb6086a:6712',
+  'preview-overview': '15515645e93063:6317',
+  'preview-queue': '11e6cbbd40be70:3445',
+  'preview-points': '0bed105f1753f8:3121',
+  'preview-log': '16f8978a838871:9785',
+  'preview-empty': '1d8160bf76337c:3190',
+}
+
+describe('desktopFont: left out, accent or unknown draws the accent trees, standard the trees of before (decisions pfs-1 to pfs-4)', () => {
   const SECTIONS_STATES = GOLDEN_STATES.filter(state => state.surface === 'desktop' && state.mode === 'sections')
-  for (const font of [undefined, 'standard', 'Vivid', 1]) {
+  for (const font of [undefined, 'accent', 'standard', '', 'Standard', 'subtle', 'vivid', 1]) {
+    const goldens = font === 'standard' ? STANDARD_GOLDEN : ACCENT_GOLDEN
     for (const state of SECTIONS_STATES) {
-      test(`${state.name}: desktopFont ${String(font)}`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', ...(font === undefined ? {} : { desktopFont: font }) } }, async ($, on) => {
-        expect([state.name, treeHash(await goldenTree($, on, state))]).toEqual([state.name, DEFAULT_GOLDEN[state.name]])
+      test(`${state.name}: desktopFont ${JSON.stringify(font)}`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', ...(font === undefined ? {} : { desktopFont: font }) } }, async ($, on) => {
+        expect([state.name, treeHash(await goldenTree($, on, state))]).toEqual([state.name, goldens[state.name]])
       })
     }
     for (const preview of FONT_PREVIEWS) {
-      test(`preview ${preview}: desktopFont ${String(font)}`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopPreview: preview, ...(font === undefined ? {} : { desktopFont: font }) } }, async ($, on) => {
-        expect([preview, treeHash(await previewTree($, on))]).toEqual([preview, DEFAULT_GOLDEN[`preview-${preview}`]])
+      test(`preview ${preview}: desktopFont ${JSON.stringify(font)}`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopPreview: preview, ...(font === undefined ? {} : { desktopFont: font }) } }, async ($, on) => {
+        expect([preview, treeHash(await previewTree($, on))]).toEqual([preview, goldens[`preview-${preview}`]])
       })
     }
   }
+  test('the accent trees differ from the standard ones in every state', () => {
+    for (const [name, hash] of Object.entries(ACCENT_GOLDEN)) expect([name, hash]).not.toEqual([name, STANDARD_GOLDEN[name]])
+  })
 })
 
-/**
- * The trees each font variant draws in each preview state under the defaults (tint-soft, outline, text icons, 2 px), in
- * the room of FONT_ROOM_PROPS: the captures the user chooses from.
- */
-const FONT_GOLDEN: Record<string, string> = {
-  'subtle-overview': '1123aadbb078a3:6259',
-  'subtle-queue': '12fa799ed8ea5f:3328',
-  'subtle-points': '03642779155549:3084',
-  'subtle-log': '1bc11c98660e03:9132',
-  'subtle-empty': '16ec6df9f9ecce:3132',
-  'accent-overview': '15515645e93063:6317',
-  'accent-queue': '11e6cbbd40be70:3445',
-  'accent-points': '0bed105f1753f8:3121',
-  'accent-log': '16f8978a838871:9785',
-  'accent-empty': '1d8160bf76337c:3190',
-  'vivid-overview': '1fed590f53bfeb:6407',
-  'vivid-queue': '1973b45dbdfb56:3594',
-  'vivid-points': '09f8fe9085a70e:3162',
-  'vivid-log': '0e62ccc3c7dc95:10204',
-  'vivid-empty': '1fffa4718b3556:3280',
-}
-
-describe('desktopFont subtle, accent and vivid on the desktop sections view, in every preview state (decisions pfs-1, pfs-2)', () => {
+describe('desktopFont accent on the desktop sections view, in every preview state (decisions pfs-1 to pfs-4)', () => {
   type Node = { type?: string; props?: Record<string, unknown>; children?: (Node | string)[] }
   const textOf = (node: Node): string => (node.children ?? []).map(one => (typeof one === 'string' ? one : typeof one === 'object' && one !== null ? textOf(one) : '')).join('')
   /** Every node with the section box it sits in (`sec:<id>` or `page:<id>`) and the nearest fixed background over it. */
@@ -4832,7 +4834,6 @@ describe('desktopFont subtle, accent and vivid on the desktop sections view, in 
     const fill = (node.props?.backgroundColor as string | undefined) ?? background
     return [{ node, section: here, background: fill }, ...(node.children ?? []).flatMap(child => (typeof child === 'object' && child !== null ? placed(child, here, fill) : []))]
   }
-  const VARIANTS = ['subtle', 'accent', 'vivid'] as const
   const TITLES: Record<string, RegExp> = { sessions: /^SESSIONS$/, queue: /^QUEUED WORK$/, points: /^OPEN POINTS$/, log: /^LOG Panel style variants/ }
   /**
    * A Text's look as the font sets it: the props a TextLook names, nothing else. The engine draws `bold` as the weight
@@ -4849,23 +4850,22 @@ describe('desktopFont subtle, accent and vivid on the desktop sections view, in 
     empty: { section: 'queue', detail: /^none$/ },
   }
   const CURRENT: Partial<Record<(typeof FONT_PREVIEWS)[number], 'queue' | 'points' | 'log'>> = { queue: 'queue', points: 'points', log: 'log' }
-  for (const variant of VARIANTS) {
+  {
+    const variant = 'accent'
     for (const preview of FONT_PREVIEWS) {
       for (const buttons of ['outline', 'plain'] as const) {
         test(`${variant}, ${buttons} buttons, preview ${preview}: titles, rows and the shown title in the section's font, on fixed backgrounds`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopFont: variant, desktopButtons: buttons, desktopPreview: preview } }, async ($, on) => {
           const tree = JSON.parse(await previewTree($, on)) as Node
           const all = placed(tree)
           const texts = all.filter(one => one.node.type === 'Text')
-          // Each section's title in its box: the font's title look (a vivid title padded by a no-break space a side).
+          // Each section's title in its box: the font's title look.
           let titles = 0
           for (const one of texts.filter(t => t.section !== undefined)) {
             const look = fontLook(variant, 'tint-soft', one.section as 'queue') as NonNullable<ReturnType<typeof fontLook>>
             const text = textOf(one.node)
-            const bare = look.pad === true ? text.replace(/^ /, '').replace(/ $/, '') : text
-            if ((TITLES[one.section as string] as RegExp).test(bare)) {
+            if ((TITLES[one.section as string] as RegExp).test(text)) {
               titles++
               expect([text, lookProps(one.node)]).toEqual([text, expected(look.title)])
-              if (look.pad === true) expect(text).toBe(` ${bare} `)
               continue
             }
             // Every other Text of a box: the font's body or detail look, nothing left dim, a status colour kept.
@@ -4888,14 +4888,14 @@ describe('desktopFont subtle, accent and vivid on the desktop sections view, in 
           for (const one of texts.filter(t => typeof t.node.props?.color === 'string' && String(t.node.props?.color).startsWith('#'))) expect([textOf(one.node), /^#[0-9A-F]{6}$/.test(one.background ?? '')]).toEqual([textOf(one.node), true])
           // A pressable row stays a Button with its label (a plugin cannot colour it), holding nothing.
           for (const one of all.filter(t => t.node.type === 'Button')) expect([one.node.props?.label === undefined, (one.node.children ?? []).length]).toEqual([false, 0])
-          // The shown section's title in the strip: the font's look for it, on the font's fill or the chip's or look's own.
+          // The shown section's title in the strip: the font's look for it, on the chip's or the look's own fill.
           const id = CURRENT[preview]
           if (id !== undefined) {
             const font = fontLook(variant, 'tint-soft', id) as NonNullable<ReturnType<typeof fontLook>>
             const title = { queue: 'QUEUED WORK', points: 'OPEN POINTS', log: 'LOG' }[id]
             if (buttons === 'outline') {
               const chip = all.find(one => one.node.props?.key === `chip:${id}`)?.node as Node
-              expect(chip.props?.backgroundColor).toBe(font.currentFill ?? buttonLook('tint-soft', id).current.backgroundColor)
+              expect(chip.props?.backgroundColor).toBe(buttonLook('tint-soft', id).current.backgroundColor)
               const label = (chip.children ?? [])[0] as Node
               expect([label.type, textOf(label), lookProps(label)]).toEqual(['Text', title, expected(font.current)])
             } else {
@@ -4912,15 +4912,7 @@ describe('desktopFont subtle, accent and vivid on the desktop sections view, in 
           }
         })
       }
-      // The tree each variant draws in each state under the default buttons: kept, and different from the default's and
-      // from the other variants' trees.
-      test(`${variant}, preview ${preview}: the tree of this variant`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopFont: variant, desktopPreview: preview } }, async ($, on) => {
-        const hash = treeHash(await previewTree($, on))
-        expect([variant, preview, hash]).toEqual([variant, preview, FONT_GOLDEN[`${variant}-${preview}`]])
-        expect(hash).not.toBe(DEFAULT_GOLDEN[`preview-${preview}`])
-        for (const other of VARIANTS.filter(one => one !== variant)) expect(hash).not.toBe(FONT_GOLDEN[`${other}-${preview}`])
-      })
-      // Under desktopStyle plain (no colour of its own) a variant writes no colour: its weights and styles alone.
+      // Under desktopStyle plain (no colour of its own) accent writes no colour: its weights and styles alone.
       test(`${variant}, desktopStyle plain, preview ${preview}: no colour of the font's, dim rows dim`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: 'plain', desktopFont: variant, desktopPreview: preview } }, async ($, on) => {
         const all = placed(JSON.parse(await previewTree($, on)) as Node)
         for (const one of all.filter(t => t.node.type === 'Text')) expect([textOf(one.node), typeof one.node.props?.color === 'string' && String(one.node.props?.color).startsWith('#')]).toEqual([textOf(one.node), false])
@@ -4928,7 +4920,9 @@ describe('desktopFont subtle, accent and vivid on the desktop sections view, in 
         if (row !== undefined) expect(all.find(one => one.node.type === 'Text' && row.test(textOf(one.node)))?.node.props?.dimColor).toBe(true)
       })
     }
-    // The terminal, and every desktopPaneScroll value but sections, draw as before under every variant.
+  }
+  // The terminal, and every desktopPaneScroll value but sections, draw as before under either font.
+  for (const variant of ['accent', 'standard']) {
     for (const state of GOLDEN_STATES.filter(one => one.surface === 'terminal' || one.mode !== 'sections')) {
       test(`${state.name}: desktopFont ${variant} draws as before`, { options: { ...OPTIONS, ...(state.mode === undefined ? {} : { desktopPaneScroll: state.mode }), desktopFont: variant } }, async ($, on) => {
         expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
@@ -4937,6 +4931,7 @@ describe('desktopFont subtle, accent and vivid on the desktop sections view, in 
   }
 })
 
+// Under desktopFont standard: the shown title as the looks draw it without a font (accent's own: desktopFont accent above).
 describe('desktopStyle x desktopIcons x desktopButtons x desktopPreview on the desktop sections view (decisions smp-18 to smp-23)', () => {
   type Node = { type?: string; text?: string; props?: Record<string, unknown>; children?: (Node | string)[] }
   const nodesOf = (node: Node): Node[] => [node, ...(node.children ?? []).flatMap(one => (typeof one === 'object' && one !== null ? nodesOf(one) : []))]
@@ -4960,7 +4955,7 @@ describe('desktopStyle x desktopIcons x desktopButtons x desktopPreview on the d
     for (const icons of ICONS) {
       for (const buttons of BUTTONS) {
       for (const preview of PREVIEWS) {
-        test(`${style}, ${icons} icons, ${buttons} buttons, preview ${preview}: drawn without error, the state's content and look, nothing written`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: style, desktopIcons: icons, desktopButtons: buttons, desktopPreview: preview } }, async ($, on) => {
+        test(`${style}, ${icons} icons, ${buttons} buttons, preview ${preview}: drawn without error, the state's content and look, nothing written`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: style, desktopIcons: icons, desktopButtons: buttons, desktopPreview: preview, desktopFont: 'standard' } }, async ($, on) => {
           const w = world(on)
           stubPanel(on)
           await boot($)

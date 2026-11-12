@@ -129,9 +129,9 @@
     "desktopFont": {
       "type": "string",
       "title": "Desktop panel font",
-      "description": "The font colour and style per section of the sections view in Claude Desktop (desktopPaneScroll sections; every other value and the terminal draw standard): each section's title, its rows and its dim rows, and its title in the strip while it is the one shown. standard: as before, the titles bold in the text colour, the rows in the text colour or dim. subtle: the title in its section's hue, the dim rows in a muted step of the hue, the shown title in a light step of it. accent: the title in the hue and heavier, the rows in a light step of the hue, the dim rows muted and italic, the shown title light, bold and underlined. vivid: the title dark on a pill of the hue, the rows in a light step of the hue and medium weight, the dim rows in the hue and italic, the shown title dark on a chip filled with the hue. A pressable row keeps the text colour; under desktopStyle plain a variant adds weights and styles only, no colour. Hues as desktopStyle's: sessions blue, queued work violet, open points sand, the log grey. Any other value counts as standard.",
-      "default": "standard",
-      "options": ["standard", "subtle", "accent", "vivid"]
+      "description": "The font colour and style per section of the sections view in Claude Desktop (desktopPaneScroll sections; every other value and the terminal draw standard): each section's title, its rows and its dim rows, and its title in the strip while it is the one shown. accent: the title in its section's hue and heavier, the rows in a light step of the hue, the dim rows in a muted step of it and italic, the shown title light, bold and underlined. standard: as before, the titles bold in the text colour, the rows in the text colour or dim. A pressable row keeps the text colour; under desktopStyle plain accent adds weights and styles only, no colour. Hues as desktopStyle's: sessions blue, queued work violet, open points sand, the log grey. Any other value counts as accent.",
+      "default": "accent",
+      "options": ["accent", "standard"]
     }
   }
 }

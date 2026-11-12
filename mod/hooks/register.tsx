@@ -306,7 +306,7 @@ type Config = {
   desktopGap: number
   /** How the `sections` view draws its titles and icons (core.ts desktopButtons); an unknown value counts as `outline`. */
   desktopButtons: DesktopButtons
-  /** The font colour and style of the `sections` view (core.ts desktopFont); an unknown value counts as `standard`. */
+  /** The font colour and style of the `sections` view (core.ts desktopFont); an unknown value counts as `accent`. */
   desktopFont: DesktopFont
 }
 
@@ -3714,7 +3714,7 @@ export const register: Register = (on, options) => {
     // A Text row under a font: a row with a status colour keeps it, a dim row takes the font's detail look, any other its
     // body look. A pressable row stays a Button (its label cannot be coloured).
     const fontRow = (r: PRow, font: FontLook) => (r.color !== undefined ? { bold: r.bold, dimColor: r.dim, color: r.color } : r.dim === true ? { bold: r.bold, ...font.detail } : { bold: r.bold, ...font.body })
-    // A section's title under its font: bold as before, or the font's title look (a pill padded by a no-break space a side).
+    // A section's title under its font: bold as before, or the font's title look.
     const titleEl = (title: string, font: FontLook | undefined, isTruncated = false) =>
       font === undefined ? (
         isTruncated ? (
@@ -3726,7 +3726,7 @@ export const register: Register = (on, options) => {
         )
       ) : (
         <Text {...font.title} {...(isTruncated ? { wrap: 'truncate-end' as const } : {})}>
-          {font.pad === true ? `\u00A0${title}\u00A0` : title}
+          {title}
         </Text>
       )
     // On the desktop a row is one line (desktopLines): a Text the surface ends at its edge (`truncate-end`) and a pressable row
@@ -3929,7 +3929,7 @@ export const register: Register = (on, options) => {
     // brackets; another that can be shown a Button in its chip; a greyed one a dim Text in a dim-bordered chip, never
     // pressable. Wrapped titles stand desktopGap apart, as the boxes do (evenGap).
     // Under a font (desktopFont) the shown title takes the font's look for it: its colour, weight and styles, on the
-    // section's own background, or on the font's fill (a chip's fill under outline buttons).
+    // section's own background, or on the chip's fill under outline buttons.
     const stripTitle = (id: SectionId, title: string, current: ExpandableId | 'log') => {
       const chips = chipsOf(id)
       const font = id === current ? fontOf(id) : undefined
@@ -3938,7 +3938,7 @@ export const register: Register = (on, options) => {
           const background = lookOf(id).current
           return <Text {...(background === undefined ? {} : { backgroundColor: background })} {...font.current}>{`[ ${title} ]`}</Text>
         }
-        return chip(`chip:${id}`, font.currentFill === undefined ? chips.current : { ...chips.current, backgroundColor: font.currentFill }, <Text {...font.current}>{title}</Text>)
+        return chip(`chip:${id}`, chips.current, <Text {...font.current}>{title}</Text>)
       }
       if (chips === undefined) {
         if (id === current) return <Text bold {...currentLook(id)}>{`[ ${title} ]`}</Text>
