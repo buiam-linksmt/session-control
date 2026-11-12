@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, ProcessRunInit, ProcessRunResult, Register } from 'claude-code'
 
-import type { SessionEntry, SessionOutcome, SessionRow } from '../types'
+import type { SectionAnimation, SessionEntry, SessionOutcome, SessionRow } from '../types'
 import { ARCHIVE_SCHEMA, ARCHIVED_HEADING, DECISIONS_ARCHIVE, DECISION_SCHEMA, POINT_SCHEMA, QUEUE_SCHEMA, appendDecision, archiveDecisions, editOpenPoints, editQueue, findDecisionSection, listOpenPoints, listQueue } from './bookkeeping'
 import type { Edit, Listing } from './bookkeeping'
 import { backupName, freshText, localDate } from './store'
@@ -139,6 +139,17 @@ import {
   desktopGap,
   desktopIcons,
   desktopPreview,
+  desktopAnimation,
+  animationSchedule,
+  animationNext,
+  animationReversed,
+  animatedBoxes,
+  collapseStart,
+  expandStart,
+  previewLoopAt,
+  previewLoopMs,
+  PREVIEW_HOLD_MS,
+  DESKTOP_ANIMATION_DEFAULT,
   desktopRowGap,
   desktopStyle,
   PANEL_ICON_GLYPH,
@@ -227,7 +238,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { BoxWindow, ChipLook, ComposedPrompt, DesktopButtons, DesktopFont, DesktopIcons, FontLook, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces, Workspace } from './core'
+import type { AnimationSchedule, BoxWindow, ChipLook, ComposedPrompt, DesktopAnimation, DesktopButtons, DesktopFont, DesktopIcons, FontLook, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces, Workspace } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -271,6 +282,8 @@ const selected = atom({ plugin: 'session-control', key: 'selected' } as const, n
 const points = atom({ plugin: 'session-control', key: 'points' } as const, null)
 const expanded = atom({ plugin: 'session-control', key: 'expanded' } as const, null)
 const logPage = atom({ plugin: 'session-control', key: 'logPage' } as const, false)
+const animation = atom({ plugin: 'session-control', key: 'animation' } as const, null)
+const previewLoop = atom({ plugin: 'session-control', key: 'previewLoop' } as const, { expanded: null, animation: null })
 const now = atom({ plugin: 'session-control', key: 'now' } as const, 0)
 const boardDir = atom({ plugin: 'session-control', key: 'boardDir' } as const, '')
 
@@ -308,6 +321,8 @@ type Config = {
   desktopButtons: DesktopButtons
   /** The font colour and style of the `sections` view (core.ts desktopFont); an unknown value counts as `accent`. */
   desktopFont: DesktopFont
+  /** How the `sections` view expands a section to its page and collapses it back (core.ts desktopAnimation); an unknown value counts as `off`. */
+  desktopAnimation: DesktopAnimation
 }
 
 // Per load: a hot reload evaluates the module afresh and session.start re-arms.
@@ -332,6 +347,7 @@ let config: Config = {
   desktopGap: DESKTOP_GAP_PX,
   desktopButtons: DESKTOP_BUTTONS_DEFAULT,
   desktopFont: DESKTOP_FONT_DEFAULT,
+  desktopAnimation: DESKTOP_ANIMATION_DEFAULT,
 }
 let isActive = false
 /** Whether the orchestratorDir option is set: the mod then turns on without the CLAUDE.md heading. */
@@ -370,6 +386,18 @@ let displayTick: { cancel: () => void } | undefined
 let drawnSessions: { rows: SessionRow[]; probedSec: number } | undefined
 /** The display tick's period: it only moves the `now` atom on, so the pane redraws its elapsed column. */
 const DISPLAY_TICK_MS = 1000
+/**
+ * The step of the expand or collapse animation the `sections` view draws now (desktopAnimation), and the timer that moves
+ * it on; null and undefined while none runs. The `animation` atom mirrors it so the pane redraws at each step; the pane
+ * draws from this one, so a step left in the atom by an earlier load draws nothing.
+ */
+let liveAnimation: SectionAnimation | null = null
+let animationTimer: { cancel: () => void } | undefined
+/** The desktopPreview `animate` loop's timer and the milliseconds it has run, while the panel is shown; undefined when none runs. */
+let previewLoopTimer: { cancel: () => void } | undefined
+let previewLoopMsRun = 0
+/** The loop's frame drawn now (previewLoopAt); the `previewLoop` atom mirrors it, written only when it changes. */
+let previewLoopFrame: { expanded: ExpandableId | null; animation: SectionAnimation | null } = { expanded: null, animation: null }
 let lastError: string | undefined
 /**
  * When the board last gathered (epoch ms): every poll sets it, while the snapshot atom's `at` moves only with the rows,
@@ -1801,6 +1829,66 @@ function stopDisplayTick(): void {
   displayTick = undefined
 }
 
+/**
+ * Sets the animation step the `sections` view draws (desktopAnimation) and, for a step, the timer that moves it on one
+ * step every `schedule.ms` until its end state; null: none, the plain state. Synchronous, so a state write that follows
+ * in the same press already finds it; the caller writes the `animation` atom (mirrorAnimation) after its state writes.
+ */
+function setAnimation($: EngineInterface, anim: SectionAnimation | null, schedule: AnimationSchedule | undefined): void {
+  animationTimer?.cancel()
+  animationTimer = undefined
+  liveAnimation = anim
+  if (anim !== null && schedule !== undefined) animationTimer = $.clock.every(schedule.ms, () => void stepAnimation($))
+}
+
+/** Writes the running step to the `animation` atom, so the pane draws it. */
+async function mirrorAnimation($: EngineInterface): Promise<void> {
+  await update($, animation, () => liveAnimation)
+}
+
+/** The timer's step: the animation one step on, or ended (its end state drawn plain) once it gets there. */
+async function stepAnimation($: EngineInterface): Promise<void> {
+  const next = liveAnimation === null ? null : animationNext(liveAnimation)
+  if (next === null) setAnimation($, null, undefined)
+  else liveAnimation = next
+  await mirrorAnimation($)
+}
+
+/** Ends the running animation at once, its end state drawn plain; nothing when none runs. */
+async function finishAnimation($: EngineInterface): Promise<void> {
+  if (liveAnimation === null && animationTimer === undefined) return
+  setAnimation($, null, undefined)
+  await mirrorAnimation($)
+}
+
+/**
+ * Starts the desktopPreview `animate` loop (previewLoopAt) from its start, while the panel is shown: a timer at the
+ * animation's step (at the hold under desktopAnimation `off`) that writes the `previewLoop` atom when the frame changes.
+ * Only the `sections` value draws it.
+ */
+async function armPreviewLoop($: EngineInterface): Promise<void> {
+  stopPreviewLoop()
+  if (config.desktopPreview !== 'animate' || config.desktopPaneScroll !== 'sections') return
+  const schedule = animationSchedule(config.desktopAnimation)
+  const tick = schedule?.ms ?? PREVIEW_HOLD_MS
+  const loopMs = previewLoopMs(schedule)
+  previewLoopTimer = $.clock.every(tick, () => {
+    previewLoopMsRun = (previewLoopMsRun + tick) % loopMs
+    const frame = previewLoopAt(previewLoopMsRun, schedule)
+    if (isSame(frame, previewLoopFrame)) return
+    previewLoopFrame = frame
+    void update($, previewLoop, () => frame)
+  })
+  await update($, previewLoop, () => previewLoopFrame)
+}
+
+function stopPreviewLoop(): void {
+  previewLoopTimer?.cancel()
+  previewLoopTimer = undefined
+  previewLoopMsRun = 0
+  previewLoopFrame = { expanded: null, animation: null }
+}
+
 async function isPanelShown($: EngineInterface): Promise<boolean> {
   const pane = (await $.ui.panes().catch(() => [])).find(one => one.id === PANE)
   return pane !== undefined && pane.isShown !== false
@@ -3049,6 +3137,8 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
   if (isUp) {
     await $.ui.close({ id: PANE })
     stopDisplayTick()
+    stopPreviewLoop()
+    await finishAnimation($)
     await update($, selected, () => null)
     await update($, expanded, () => null)
     await update($, logPage, () => false)
@@ -3065,6 +3155,7 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
   const shownSec = Math.floor((await $.clock.now()) / 1000)
   await update($, now, () => shownSec)
   await armDisplayTick($, true)
+  await armPreviewLoop($)
   trace($, 'panel', { isShown: true, isPlaced: opened.isPlaced })
   return { text: opened.isPlaced ? 'Session-control panel opened.' : `Session-control panel waits: ${opened.reason}` }
 }
@@ -3183,6 +3274,11 @@ export const register: Register = (on, options) => {
   wheelLast = undefined
   isParking = false
   isSliderFailed = false
+  liveAnimation = null
+  animationTimer = undefined
+  previewLoopTimer = undefined
+  previewLoopMsRun = 0
+  previewLoopFrame = { expanded: null, animation: null }
   isDirOptionSet = String(options.orchestratorDir ?? '') !== ''
   config = {
     orchestratorDir: String(options.orchestratorDir ?? ''),
@@ -3205,6 +3301,7 @@ export const register: Register = (on, options) => {
     desktopGap: desktopGap(options.desktopGap),
     desktopButtons: desktopButtons(options.desktopButtons),
     desktopFont: desktopFont(options.desktopFont),
+    desktopAnimation: desktopAnimation(options.desktopAnimation),
   }
   isTraceWanted = config.debug
   isTracing = false
@@ -3563,7 +3660,11 @@ export const register: Register = (on, options) => {
     // presses do nothing. Only the `sections` view docked draws it: the terminal, every other desktopPaneScroll value and
     // the panel seated inline (which draws the compact panel) always draw the live state.
     const isPreviewDrawn = e.surface === 'desktop' && config.desktopPaneScroll === 'sections' && e.props.placement !== 'inline'
-    const preview = isPreviewDrawn ? previewState(config.desktopPreview) : undefined
+    const previewBase = isPreviewDrawn ? previewState(config.desktopPreview) : undefined
+    // The `animate` preview: the section expanded and the animation step drawn come from its loop (armPreviewLoop).
+    const isLoopDrawn = previewBase !== undefined && config.desktopPreview === 'animate'
+    if (isLoopDrawn) await read($, previewLoop)
+    const preview = isLoopDrawn && previewBase !== undefined ? { ...previewBase, expanded: previewLoopFrame.expanded } : previewBase
     const liveSnap = await read($, snapshot)
     const columns = e.props.bodyColumns
     if (liveSnap === null && preview === undefined) return <Text dimColor>session-control is idle here (not the orchestrator dir).</Text>
@@ -3623,6 +3724,15 @@ export const register: Register = (on, options) => {
     // go on as they came, as under `page`: the even view gives it nothing to move.
     const isSections = isDesktop && scrollMode === 'sections'
     const sectionsShown: ExpandableId | 'log' | null = !isSections ? null : isLogOpen ? (isLogPageState ? 'log' : null) : expandedId
+    // The expand or collapse animation (desktopAnimation): the step drawn, between the three even boxes and the page of
+    // its section, in place of either; none on a log, or once the state moved elsewhere (another section's page). The
+    // `animate` preview draws its loop's step; another preview none.
+    if (isSections) await read($, animation)
+    const animationShown = isLoopDrawn ? previewLoopFrame.animation : preview === undefined ? liveAnimation : null
+    const animationDrawn = isSections && !isLogOpen && animationShown !== null && (expandedId === null || expandedId === animationShown.id) ? animationShown : null
+    const animationBoxes = animationDrawn === null ? undefined : animatedBoxes(bodyRows, animationDrawn)
+    // The animation of the presses below: none under `off`, in a preview, or outside the `sections` value.
+    const schedule = isSections && preview === undefined ? animationSchedule(config.desktopAnimation) : undefined
     const isSectionsPage = sectionsShown !== null
     layout = isPage || isSections ? { boxes: [], totals: {}, spare: 0, isPage: true } : { boxes, totals: {}, spare: 0 }
     // A change of the sections view starts the body at its top; a log page at its end, which the body then follows as the
@@ -3658,6 +3768,7 @@ export const register: Register = (on, options) => {
     const widths = paneWidths(snap.rows, width - 2, clock)
     const toggle = (sid: string) =>
       inert(async () => {
+        await finishAnimation($)
         await update($, expanded, () => null)
         await update($, logPage, () => false)
         await update($, selected, current => (current === sid ? null : sid))
@@ -3672,15 +3783,45 @@ export const register: Register = (on, options) => {
       })
     // The sections view's presses: a section drawn alone (its `[+]`, its title in a strip), back to the three boxes
     // (`[-]`), the open log drawn alone (its `[+]`), the log closed (`[x]` in its strip).
+    // Under a desktopAnimation, from the three boxes to a page and back runs in steps (setAnimation); from a page to
+    // another and to or from a log at once. A press during an animation: the one back to where it started (the growing
+    // box's `[-]` while it expands, its `[+]` while it collapses) turns it back from the step it reached; any other ends
+    // it at once (its end state) and then does what it does without one.
+    const isLogOpenNow = async () => (await read($, selected)) !== null && (await read($, watch)) !== null
     const showSection = (id: ExpandableId) =>
       inert(async () => {
+        if (schedule !== undefined && liveAnimation !== null) {
+          if (liveAnimation.id === id && liveAnimation.dir === -1) {
+            setAnimation($, animationReversed(liveAnimation), schedule)
+            await update($, expanded, () => id)
+            await mirrorAnimation($)
+            return
+          }
+          await finishAnimation($)
+        }
+        const isFromEven = schedule !== undefined && (await read($, expanded)) === null && !(await isLogOpenNow())
+        if (isFromEven) setAnimation($, expandStart(id, schedule), schedule)
         await update($, selected, () => null)
         await update($, logPage, () => false)
         await update($, expanded, () => id)
+        if (isFromEven) await mirrorAnimation($)
       })
     const collapse = inert(async () => {
+      if (schedule !== undefined && liveAnimation !== null) {
+        if (liveAnimation.dir === 1) {
+          setAnimation($, animationReversed(liveAnimation), schedule)
+          await update($, expanded, () => null)
+          await update($, logPage, () => false)
+          await mirrorAnimation($)
+          return
+        }
+        await finishAnimation($)
+      }
+      const fromId = schedule === undefined || (await isLogOpenNow()) ? null : await read($, expanded)
+      if (fromId !== null && schedule !== undefined) setAnimation($, collapseStart(fromId, schedule), schedule)
       await update($, expanded, () => null)
       await update($, logPage, () => false)
+      if (fromId !== null) await mirrorAnimation($)
     })
     const showLogPage = inert(() => update($, logPage, () => true))
     const closeOpenLog = inert(async () => {
@@ -3887,8 +4028,8 @@ export const register: Register = (on, options) => {
     // hold (sectionFit, header lines first); a box with more ends on a `+N more` line (the log, which shows its newest
     // lines, starts on `+N more above`) and only then has `[+]` in its title row. No scroll bar: the rows take the box's
     // whole width.
-    const sectionBox = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[], onExpand: () => unknown, isTail = false) => {
-      const box = boxes.find(one => one.id === id) as SectionBox
+    const sectionBox = (id: SectionId, title: string, fixedIn: PRow[], bodyIn: PRow[], onExpand: () => unknown, isTail = false, icon?: PanelIcon) => {
+      const box = (animationBoxes ?? boxes).find(one => one.id === id) as SectionBox
       const { fixed, body } = sectionLines(id, fixedIn, bodyIn)
       const fit = sectionFit(box.height, fixed.length, body.length)
       const from = isTail ? body.length - fit.bodyShown : 0
@@ -3903,7 +4044,7 @@ export const register: Register = (on, options) => {
           <Box flexDirection="row" height={1} flexShrink={0} overflow="hidden" alignItems="center">
             {accentBar(id)}
             <Box flexGrow={1}>{titleEl(title, font, true)}</Box>
-            {fit.more > 0 && iconButton('plus', `x:${id}`, onExpand, id)}
+            {(icon !== undefined || fit.more > 0) && iconButton(icon ?? 'plus', `x:${id}`, onExpand, id)}
           </Box>
           {fixed.slice(0, fit.fixedShown).map((r, i) => oneRow(`row:${id}:h${i}`, deskRowEl(r, undefined, font)))}
           {shown.map((r, i) => oneRow(`row:${id}:${i}`, deskRowEl(r, r.press === undefined ? undefined : (r.group ?? `${id}:${from + i}`), font)))}
@@ -4198,6 +4339,23 @@ export const register: Register = (on, options) => {
     }
     if (isPage) return pagePanel([sessionsPage(), pageBlock('queue', 'QUEUED WORK', [], queueRows), pageBlock('points', 'OPEN POINTS', [], pointRows)])
     if (isSections) {
+      // A step of the animation: the boxes of animatedBoxes, the growing one with `[-]` while it expands (back to the
+      // three boxes) and `[+]` while it collapses (back to its page), the others as the even view draws them.
+      if (animationDrawn !== null && animationBoxes !== undefined) {
+        const isGrowing = (id: ExpandableId) => id === animationDrawn.id
+        const pressOf = (id: ExpandableId) => (isGrowing(id) && animationDrawn.dir === 1 ? collapse : showSection(id))
+        const iconOf = (id: ExpandableId): PanelIcon | undefined => (!isGrowing(id) ? undefined : animationDrawn.dir === 1 ? 'minus' : 'plus')
+        const stepBoxes: Record<ExpandableId, () => ReturnType<typeof sectionBox>> = {
+          sessions: () => sectionBox('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, pressOf('sessions'), false, iconOf('sessions')),
+          queue: () => sectionBox('queue', 'QUEUED WORK', [], queueRows, pressOf('queue'), false, iconOf('queue')),
+          points: () => sectionBox('points', 'OPEN POINTS', [], pointRows, pressOf('points'), false, iconOf('points')),
+        }
+        return framed(
+          <Box flexDirection="column" height={bodyRows} overflow="hidden" {...evenGap}>
+            {animationBoxes.map(one => stepBoxes[one.id as ExpandableId]())}
+          </Box>,
+        )
+      }
       if (sectionsShown === 'sessions') return sectionsPage('sessions', sessionsPage())
       if (sectionsShown === 'queue') return sectionsPage('queue', pageBlock('queue', 'QUEUED WORK', [], queueRows))
       if (sectionsShown === 'points') return sectionsPage('points', pageBlock('points', 'OPEN POINTS', [], pointRows))

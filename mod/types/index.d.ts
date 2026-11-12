@@ -69,6 +69,13 @@ export type SessionSnapshot = {
   error?: string
 }
 
+/**
+ * One step of a section's expand or collapse animation (desktopAnimation): the section, the frame drawn (`step` of
+ * `steps`, 0 the three even boxes and `steps` the page, neither drawn as a step) and the way it runs (1 expanding, -1
+ * collapsing).
+ */
+export type SectionAnimation = { id: 'sessions' | 'queue' | 'points'; step: number; steps: number; dir: 1 | -1 }
+
 declare module 'claude-code' {
   interface PluginState {
     'session-control': {
@@ -106,6 +113,10 @@ declare module 'claude-code' {
       expanded: 'sessions' | 'queue' | 'points' | null
       /** The open log drawn alone as a page the body scrolls (desktopPaneScroll sections); false: its box under the sessions. */
       logPage: boolean
+      /** The step of the expand or collapse animation the `sections` view draws (desktopAnimation); null: none runs. */
+      animation: SectionAnimation | null
+      /** What the desktopPreview `animate` loop draws now: the section expanded and the step of its animation, if any. */
+      previewLoop: { expanded: 'sessions' | 'queue' | 'points' | null; animation: SectionAnimation | null }
       /** Tasks sent to peers; an entry is acknowledged once a peer reply arrives. */
       ledger: { to: string; at: number; excerpt: string; isAcked: boolean }[]
       /** Open, not held points of open-points.json; null when unreadable. */

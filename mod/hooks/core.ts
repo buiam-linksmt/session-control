@@ -9,6 +9,7 @@ import type {
   SessionRow,
   SessionRowStatus,
   SessionSnapshot,
+  SectionAnimation,
 } from '../types'
 import { readPointRecords, readTaskRecords, selectPoints } from './bookkeeping'
 
@@ -2749,14 +2750,132 @@ export function desktopRowGap(px: number): number {
 /**
  * A fixed sample state the desktop panel draws instead of the live one (option desktopPreview): `off` the live state;
  * `overview` the three sections filled, none expanded; `queue` the queued work expanded; `points` the open points
- * expanded with the first one selected; `log` a running session's log expanded; `empty` nothing at all.
+ * expanded with the first one selected; `log` a running session's log expanded; `empty` nothing at all; `animate` the
+ * overview's data expanding and collapsing each section in turn by itself (previewLoopAt), under desktopAnimation.
  */
-export const DESKTOP_PREVIEWS = ['off', 'overview', 'queue', 'points', 'log', 'empty'] as const
+export const DESKTOP_PREVIEWS = ['off', 'overview', 'queue', 'points', 'log', 'empty', 'animate'] as const
 export type DesktopPreview = (typeof DESKTOP_PREVIEWS)[number]
 
 /** The option's value as the mod uses it: an unknown value, or none, counts as `off`. */
 export function desktopPreview(value: unknown): DesktopPreview {
   return (DESKTOP_PREVIEWS as readonly unknown[]).includes(value) ? (value as DesktopPreview) : 'off'
+}
+
+/**
+ * How the `sections` view goes from its three even boxes to a section's page and back (option desktopAnimation): `off`
+ * at once, as before; `snappy`, `medium` and `smooth` in steps (ANIMATION_SCHEDULES).
+ */
+export const DESKTOP_ANIMATIONS = ['off', 'snappy', 'medium', 'smooth'] as const
+export type DesktopAnimation = (typeof DESKTOP_ANIMATIONS)[number]
+export const DESKTOP_ANIMATION_DEFAULT: DesktopAnimation = 'off'
+
+/** The option's value as the mod uses it: an unknown value, or none, counts as `off`. */
+export function desktopAnimation(value: unknown): DesktopAnimation {
+  return (DESKTOP_ANIMATIONS as readonly unknown[]).includes(value) ? (value as DesktopAnimation) : DESKTOP_ANIMATION_DEFAULT
+}
+
+/**
+ * The shortest step of an animation: the engine redraws a pane at most ten times a second ($.ui.invalidate, a state
+ * write's readers), and folds a sooner write into the next redraw.
+ */
+export const ANIMATION_MIN_STEP_MS = 100
+
+/**
+ * A stepped animation: `steps` frames from the press to the end state, one every `ms`; the last frame is the plain end
+ * state (the page, or the three even boxes), so the move takes `(steps - 1) * ms` after the frame the press draws.
+ */
+export type AnimationSchedule = { steps: number; ms: number }
+
+/** Each stepped desktopAnimation: snappy 3 frames in 0.2 s, medium 6 in 0.6 s, smooth 15 in 1.4 s. */
+export const ANIMATION_SCHEDULES: Record<Exclude<DesktopAnimation, 'off'>, AnimationSchedule> = {
+  snappy: { steps: 3, ms: 100 },
+  medium: { steps: 6, ms: 120 },
+  smooth: { steps: 15, ms: 100 },
+}
+
+/** The schedule of a desktopAnimation value; undefined for `off`. */
+export function animationSchedule(value: DesktopAnimation): AnimationSchedule | undefined {
+  return value === 'off' ? undefined : ANIMATION_SCHEDULES[value]
+}
+
+/** The first step an expand of `id` draws at the press; null when the schedule has no step between (instant). */
+export function expandStart(id: ExpandableId, schedule: AnimationSchedule): SectionAnimation | null {
+  return schedule.steps < 2 ? null : { id, step: 1, steps: schedule.steps, dir: 1 }
+}
+
+/** The first step a collapse of `id` draws at the press: the same steps as the expand, backwards. */
+export function collapseStart(id: ExpandableId, schedule: AnimationSchedule): SectionAnimation | null {
+  return schedule.steps < 2 ? null : { id, step: schedule.steps - 1, steps: schedule.steps, dir: -1 }
+}
+
+/** The step after `anim`; null once it reaches its end state (step 0 or `steps`), which is drawn plain. */
+export function animationNext(anim: SectionAnimation): SectionAnimation | null {
+  const step = anim.step + anim.dir
+  return step <= 0 || step >= anim.steps ? null : { ...anim, step }
+}
+
+/** `anim` turned back from the step it reached, one step on at once; null when that is its start state. */
+export function animationReversed(anim: SectionAnimation): SectionAnimation | null {
+  return animationNext({ ...anim, dir: anim.dir === 1 ? -1 : 1 })
+}
+
+/**
+ * The boxes a step of an animation draws in a body of `bodyRows`: the even view's boxes (sectionBoxes) with the section's
+ * box grown by `step / steps` of the way from its even height to the whole body, the other two shrunk by the same share
+ * of their even heights, in their order. A box left below SECTION_BOX_CHROME rows (no room for its borders and title) is
+ * not drawn, its rows going to the growing box; the boxes always fill the body exactly.
+ */
+export function animatedBoxes(bodyRows: number, anim: SectionAnimation): SectionBox[] {
+  const even = sectionBoxes(bodyRows, false, null)
+  const total = even.reduce((sum, box) => sum + box.height, 0)
+  const share = Math.min(1, Math.max(0, anim.step / anim.steps))
+  const others = new Map(even.filter(box => box.id !== anim.id).map(box => [box.id, Math.round(box.height * (1 - share))] as const))
+  for (const [id, height] of others) if (height < SECTION_BOX_CHROME) others.delete(id)
+  const grown = total - [...others.values()].reduce((sum, height) => sum + height, 0)
+  let top = 0
+  return even.flatMap(box => {
+    const height = box.id === anim.id ? grown : others.get(box.id)
+    if (height === undefined) return []
+    const one: SectionBox = { id: box.id, top, height }
+    top += height
+    return [one]
+  })
+}
+
+/** The hold of the desktopPreview `animate` loop on the three boxes and on each page: 2.4 s, a whole number of steps. */
+export const PREVIEW_HOLD_MS = 2400
+
+/** One frame of the desktopPreview `animate` loop: the section expanded, and the animation step drawn over it. */
+export type PreviewLoopFrame = { expanded: ExpandableId | null; animation: SectionAnimation | null }
+
+/** The length of one section's turn in the loop: a hold on the three boxes, the expand, a hold on the page, the collapse. */
+export function previewTurnMs(schedule: AnimationSchedule | undefined): number {
+  return 2 * PREVIEW_HOLD_MS + (schedule === undefined ? 0 : 2 * (schedule.steps - 1) * schedule.ms)
+}
+
+/** The whole loop: one turn for each section, in their order. */
+export function previewLoopMs(schedule: AnimationSchedule | undefined): number {
+  return SECTION_ORDER.length * previewTurnMs(schedule)
+}
+
+/**
+ * The frame the desktopPreview `animate` loop draws `ms` after it started: for each section in turn (sessions, queued
+ * work, open points) the three boxes for PREVIEW_HOLD_MS, the expand's steps one every `schedule.ms`, the page for
+ * PREVIEW_HOLD_MS, the collapse's steps; then the next section, and from the first again. Under `off` (no schedule) the
+ * page follows the boxes and the boxes the page at once.
+ */
+export function previewLoopAt(ms: number, schedule: AnimationSchedule | undefined): PreviewLoopFrame {
+  const turn = previewTurnMs(schedule)
+  const at = ((Math.floor(ms) % previewLoopMs(schedule)) + previewLoopMs(schedule)) % previewLoopMs(schedule)
+  const id = SECTION_ORDER[Math.floor(at / turn)] as ExpandableId
+  const into = at % turn
+  const moving = schedule === undefined ? 0 : (schedule.steps - 1) * schedule.ms
+  const steps = schedule?.steps ?? 1
+  const stepMs = schedule?.ms ?? 1
+  if (into < PREVIEW_HOLD_MS) return { expanded: null, animation: null }
+  if (into < PREVIEW_HOLD_MS + moving) return { expanded: id, animation: { id, step: 1 + Math.floor((into - PREVIEW_HOLD_MS) / stepMs), steps, dir: 1 } }
+  if (into < 2 * PREVIEW_HOLD_MS + moving) return { expanded: id, animation: null }
+  return { expanded: null, animation: { id, step: steps - 1 - Math.floor((into - 2 * PREVIEW_HOLD_MS - moving) / stepMs), steps, dir: -1 } }
 }
 
 /**
@@ -3079,5 +3198,9 @@ export function previewState(preview: DesktopPreview): PreviewState | undefined 
       return { ...base, watch: { sid: PREVIEW_SID_RUNNING, title: previewSessions[0]?.title ?? '', lines: previewLog }, selected: PREVIEW_SID_RUNNING, logPage: true, expandedGroup: previewQueue[0]?.project ?? null }
     case 'empty':
       return { ...base, snap: { at: PREVIEW_AT_SEC * 1000, rows: [] }, queue: [], points: [] }
+    // The loop's data: the overview's, with the first queue group open and the first open point selected, so each page
+    // is longer than its even box; the section expanded and the step drawn come from the loop (previewLoopAt).
+    case 'animate':
+      return { ...base, expandedGroup: previewQueue[0]?.project ?? null, selectedPoint: previewPoints[0]?.id ?? null }
   }
 }

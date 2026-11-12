@@ -300,10 +300,11 @@ Defaults are those of `mod/.claude-plugin/plugin.json`.
 | `desktopPaneScroll` | `spare` | How the panel's sections scroll in Claude Desktop, whose pane draws a scroll bar of its own whenever its body can move: `spare`, `overflow`, `minimal`, `overflow-minimal`, `buttons`, `drag`, `page` or `sections` (see Claude Desktop). The terminal is not affected. Any other value counts as `spare`. |
 | `desktopStyle` | `tint-soft` | The colours of the `sections` view in Claude Desktop: `tint-soft` or `plain` (see Panel look and previews under Claude Desktop). Every other `desktopPaneScroll` value and the terminal draw `plain`. Any other value counts as `tint-soft`. |
 | `desktopIcons` | `text` | How the `sections` view in Claude Desktop draws `[+]`, `[-]` and `[x]`: `text`, or `svg` drawn icons. Any other value counts as `text`. |
-| `desktopPreview` | `off` | A fixed sample state the `sections` view draws in Claude Desktop instead of the live one: `overview`, `queue`, `points`, `log` or `empty`; `off` the live state. Every other `desktopPaneScroll` value, the panel seated inline and the terminal keep the live state. Any other value counts as `off`. |
+| `desktopPreview` | `off` | A fixed sample state the `sections` view draws in Claude Desktop instead of the live one: `overview`, `queue`, `points`, `log`, `empty` or `animate` (a loop expanding and collapsing each section by itself, see Expand and collapse animation under Claude Desktop); `off` the live state. Every other `desktopPaneScroll` value, the panel seated inline and the terminal keep the live state. Any other value counts as `off`. |
 | `desktopGap` | `2` | The pixels between the boxes of the `sections` view's even view in Claude Desktop, and between a page's title strip, its box and the strip's wrapped rows, at Desktop's default density; `0` lets them touch as before (see Panel look and previews under Claude Desktop). A number from 0 to 8; anything else counts as `2`. |
 | `desktopButtons` | `outline` | How the `sections` view in Claude Desktop draws its pressable titles and its `[+]`, `[-]` and `[x]`: `outline` (rounded chips and icon boxes) or `plain` (bare text) (see Panel look and previews under Claude Desktop). Every other `desktopPaneScroll` value and the terminal draw `plain`. Any other value counts as `outline`. |
 | `desktopFont` | `accent` | The font colour and style of the `sections` view in Claude Desktop: `accent` (each section's title, rows and shown title in its hue) or `standard` (as before) (see Panel look and previews under Claude Desktop). Every other `desktopPaneScroll` value and the terminal draw `standard`. Any other value counts as `accent`. |
+| `desktopAnimation` | `off` | How the `sections` view in Claude Desktop goes from its three boxes to a section's page and back: `off` at once, as before; `snappy`, `medium` or `smooth` in steps (see Expand and collapse animation under Claude Desktop). Every other `desktopPaneScroll` value, the panel seated inline and the terminal stay instant. Any other value counts as `off`. |
 
 Set them in the settings under `pluginConfigs`. A mod loaded with `--plugin-dir` is keyed `session-control@inline`. A `helper` key among the options is ignored without an error:
 
@@ -584,6 +585,24 @@ The lowest is the log's title, the accent `#9A9892` on its body `#2A2A28`: 4.986
 Text on the page `#262624` is 14.4 and secondary text 5.4 (the strip's rest under `outline`, a greyed title); an icon in a box sits on the box's body, at least 10.1 under `tint-soft`.
 
 "Secondary" assumes Desktop draws a dim text in its `--text-400`. Not confirmed in Desktop: that a press on a drawn icon reaches the Button laid over it, the redrawn marks of `desktopIcons` `svg` and the hover fills.
+
+### Expand and collapse animation
+
+`desktopAnimation` (decisions ani-1, ani-2) runs the change between the `sections` view's three even boxes and a section's page in steps. It is a set of variants to compare in Desktop, `off` by default: with `off`, an unknown value or none, every tree is the one of before (the tests compare them with the golden trees). The variants (`ANIMATION_SCHEDULES` in `hooks/core.ts`):
+
+| Value | Frames | One every | From the press to the end state |
+| --- | --- | --- | --- |
+| `snappy` | 3 | 100 ms | 0.2 s |
+| `medium` | 6 | 120 ms | 0.6 s |
+| `smooth` | 15 | 100 ms | 1.4 s |
+
+The press draws the first frame at once and each period the next; the last frame is the page, drawn as without an animation. In frame k of n the section's box is k/n of the way from its even height to the whole panel and the other two boxes are (1 − k/n) of their even heights, rounded, in their order; a box left below three rows (its borders and title) is not drawn and its rows go to the growing box, so the boxes always fill the panel (`animatedBoxes`). Each box draws as many of its lines as its rows hold, as in the even view, so a growing box shows more of its section at each step. A collapse runs the same frames backwards and ends on the three boxes. The section's state is the end state from the press on (the section expanded or not, the open queue group, the selected open point, the open log), the body is moved to its start once at the press, and only the drawing steps.
+
+During a step the growing box carries `[-]` while it expands and `[+]` while it collapses: pressing it turns the animation back from the step it reached, one step back at once. Any other press ends the animation at once (its end state) and then does what it does without one: another box's `[+]` during an expand shows that section's page at once (a page to another page is instant); a session's row opens its log. A queue group's row or an open point's row changes that row and leaves the steps running. From one page to another, and to or from a log, stays instant.
+
+Engine limits (the plugin-authoring types of the engine): a plugin redraws a pane only through a state write its drawing read or `$.ui.invalidate`, at most ten times a second in Desktop (thirty for a shown pane in the terminal), a sooner write folding into the next redraw; `$.clock.every(ms, fn)` dispatches once per period (`ms` at least 1) through the host, and a reload cancels it. So a step is at least 100 ms. No Box or Text prop sets an opacity or a CSS transition (only an interactive Svg runs an animation of its own, SMIL, inside its frame), and the boxes of the `sections` view count their lines in whole rows, so the steps are box heights in whole rows.
+
+The `animate` preview loops by itself while the panel is shown, starting when it is opened: for the sessions, then the queued work, then the open points, the three boxes for 2.4 s, the expand in the steps of `desktopAnimation`, the page for 2.4 s, the collapse; then from the sessions again. Its data are the overview's, with the first queue group open and the first open point selected, so each page is longer than its box. One loop takes 15.6 s under `snappy`, 18 s under `medium`, 22.8 s under `smooth` and 14.4 s under `off` (the page and the boxes at once). It reads, writes and calls nothing, and a press in it does nothing. To capture each variant set `desktopPaneScroll` `sections`, `desktopPreview` `animate` and `desktopAnimation` to the variant (the other options at their defaults), open the panel docked, and take frames at least every 100 ms (every 50 ms catches each step of every variant at least once) over one loop. The expand of the sessions starts 2.4 s after the panel opens.
 
 ## PowerShell launch route
 

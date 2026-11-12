@@ -34,6 +34,21 @@ import {
   desktopPaneScroll,
   DESKTOP_ICONS,
   DESKTOP_PREVIEWS,
+  DESKTOP_ANIMATIONS,
+  DESKTOP_ANIMATION_DEFAULT,
+  ANIMATION_MIN_STEP_MS,
+  ANIMATION_SCHEDULES,
+  PREVIEW_HOLD_MS,
+  animatedBoxes,
+  animationNext,
+  animationReversed,
+  animationSchedule,
+  collapseStart,
+  desktopAnimation,
+  expandStart,
+  previewLoopAt,
+  previewLoopMs,
+  previewTurnMs,
   DESKTOP_STYLES,
   DESKTOP_GAP_PX,
   DESKTOP_BUTTONS,
@@ -2376,7 +2391,7 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-23
     expect([...DESKTOP_STYLES]).toEqual(['tint-soft', 'plain'])
     expect(DESKTOP_STYLE_DEFAULT).toBe('tint-soft')
     expect([...DESKTOP_ICONS]).toEqual(['text', 'svg'])
-    expect([...DESKTOP_PREVIEWS]).toEqual(['off', 'overview', 'queue', 'points', 'log', 'empty'])
+    expect([...DESKTOP_PREVIEWS]).toEqual(['off', 'overview', 'queue', 'points', 'log', 'empty', 'animate'])
     for (const value of DESKTOP_STYLES) expect(desktopStyle(value)).toBe(value)
     for (const value of DESKTOP_ICONS) expect(desktopIcons(value)).toBe(value)
     for (const value of DESKTOP_PREVIEWS) expect(desktopPreview(value)).toBe(value)
@@ -2615,5 +2630,105 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-23
     expect(log?.watch?.lines.filter(line => line.length > 200).length).toBeGreaterThan(2)
     const empty = previewState('empty')
     expect([empty?.snap.rows, empty?.queue, empty?.points]).toEqual([[], [], []])
+  })
+})
+
+describe('desktopAnimation: the stepped expand and collapse of the sections view (decisions ani-1, ani-2)', () => {
+  test('its values, off by default; an unknown value, another type or none counts as off; each variant a schedule at the engine\'s redraw rate or slower', () => {
+    expect([...DESKTOP_ANIMATIONS]).toEqual(['off', 'snappy', 'medium', 'smooth'])
+    expect(DESKTOP_ANIMATION_DEFAULT).toBe('off')
+    for (const value of DESKTOP_ANIMATIONS) expect(desktopAnimation(value)).toBe(value)
+    for (const other of [undefined, '', 'on', 'Snappy', 'smooth ', 'fast', 1, true, null]) expect(desktopAnimation(other)).toBe('off')
+    expect(animationSchedule('off')).toBeUndefined()
+    expect(ANIMATION_SCHEDULES).toEqual({ snappy: { steps: 3, ms: 100 }, medium: { steps: 6, ms: 120 }, smooth: { steps: 15, ms: 100 } })
+    // Short and snappy, medium, slow and smooth: more frames and a longer move each.
+    const moves = (['snappy', 'medium', 'smooth'] as const).map(one => ANIMATION_SCHEDULES[one]).map(one => (one.steps - 1) * one.ms)
+    expect(moves).toEqual([200, 600, 1400])
+    for (const one of Object.values(ANIMATION_SCHEDULES)) expect(one.ms).toBeGreaterThanOrEqual(ANIMATION_MIN_STEP_MS)
+  })
+
+  test('the steps: an expand from 1 up, a collapse from steps - 1 down, each ending (null) at its end state; a reverse turns back one step at once', () => {
+    const schedule = ANIMATION_SCHEDULES.medium
+    const run = (first: ReturnType<typeof expandStart>) => {
+      const seen: number[] = []
+      for (let one = first; one !== null; one = animationNext(one)) seen.push(one.step)
+      return seen
+    }
+    expect(run(expandStart('queue', schedule))).toEqual([1, 2, 3, 4, 5])
+    expect(run(collapseStart('queue', schedule))).toEqual([5, 4, 3, 2, 1])
+    expect(expandStart('points', { steps: 1, ms: 100 })).toBeNull()
+    expect(animationReversed({ id: 'queue', step: 3, steps: 6, dir: 1 })).toEqual({ id: 'queue', step: 2, steps: 6, dir: -1 })
+    expect(animationReversed({ id: 'queue', step: 3, steps: 6, dir: -1 })).toEqual({ id: 'queue', step: 4, steps: 6, dir: 1 })
+    expect(animationReversed({ id: 'queue', step: 1, steps: 6, dir: 1 })).toBeNull()
+    expect(animationReversed({ id: 'queue', step: 5, steps: 6, dir: -1 })).toBeNull()
+  })
+
+  test('animatedBoxes: the section grows by equal shares from its even height to the body, the others shrink in order, a box below three rows is left out, the body always filled', () => {
+    for (const bodyRows of [21, 36, 50]) {
+      for (const id of ['sessions', 'queue', 'points'] as const) {
+        for (const steps of [3, 6, 15]) {
+          const even = sectionBoxes(bodyRows, false, null)
+          let last = (even.find(one => one.id === id) as { height: number }).height
+          for (let step = 1; step < steps; step++) {
+            const boxes = animatedBoxes(bodyRows, { id, step, steps, dir: 1 })
+            expect(boxes.reduce((sum, one) => sum + one.height, 0)).toBe(bodyRows)
+            expect(boxes.map(one => one.id)).toEqual(['sessions', 'queue', 'points'].filter(one => boxes.some(box => box.id === one)))
+            expect(boxes.every(one => one.height >= 3)).toBe(true)
+            const grown = boxes.find(one => one.id === id)?.height ?? 0
+            expect(grown).toBeGreaterThanOrEqual(last)
+            last = grown
+            let top = 0
+            for (const one of boxes) {
+              expect(one.top).toBe(top)
+              top += one.height
+            }
+            for (const other of boxes.filter(one => one.id !== id)) expect(other.height).toBe(Math.round((even.find(one => one.id === other.id)?.height ?? 0) * (1 - step / steps)))
+          }
+        }
+      }
+    }
+    // 36 rows, the queue in 6 steps: 12 + 4 a step, the others 12 less 2 a step, left out below 3.
+    expect([1, 2, 3, 4, 5].map(step => animatedBoxes(36, { id: 'queue', step, steps: 6, dir: 1 }).map(one => `${one.id}:${one.height}`))).toEqual([
+      ['sessions:10', 'queue:16', 'points:10'],
+      ['sessions:8', 'queue:20', 'points:8'],
+      ['sessions:6', 'queue:24', 'points:6'],
+      ['sessions:4', 'queue:28', 'points:4'],
+      ['queue:36'],
+    ])
+  })
+
+  test('previewLoopAt: per section the boxes for the hold, the expand one step per period, the page for the hold, the collapse; then the next section, the loop from the start again', () => {
+    expect(PREVIEW_HOLD_MS).toBe(2400)
+    expect([undefined, ...Object.values(ANIMATION_SCHEDULES)].map(previewLoopMs)).toEqual([14400, 15600, 18000, 22800])
+    const schedule = ANIMATION_SCHEDULES.snappy
+    const turn = previewTurnMs(schedule)
+    expect(turn).toBe(5200)
+    const frames = [0, 2399, 2400, 2499, 2500, 2599, 2600, 4999, 5000, 5099, 5100, 5199].map(ms => previewLoopAt(ms, schedule))
+    expect(frames).toEqual([
+      { expanded: null, animation: null },
+      { expanded: null, animation: null },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 1, steps: 3, dir: 1 } },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 1, steps: 3, dir: 1 } },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 2, steps: 3, dir: 1 } },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 2, steps: 3, dir: 1 } },
+      { expanded: 'sessions', animation: null },
+      { expanded: 'sessions', animation: null },
+      { expanded: null, animation: { id: 'sessions', step: 2, steps: 3, dir: -1 } },
+      { expanded: null, animation: { id: 'sessions', step: 2, steps: 3, dir: -1 } },
+      { expanded: null, animation: { id: 'sessions', step: 1, steps: 3, dir: -1 } },
+      { expanded: null, animation: { id: 'sessions', step: 1, steps: 3, dir: -1 } },
+    ])
+    expect(previewLoopAt(turn, schedule)).toEqual({ expanded: null, animation: null })
+    expect(previewLoopAt(turn + 2400, schedule).expanded).toBe('queue')
+    expect(previewLoopAt(2 * turn + 2600, schedule)).toEqual({ expanded: 'points', animation: null })
+    expect(previewLoopAt(3 * turn + 2400, schedule)).toEqual(previewLoopAt(2400, schedule))
+    // Under off: the page at once after the hold, the boxes at once after the next.
+    expect([0, 2400, 4799, 4800, 7200].map(ms => previewLoopAt(ms, undefined))).toEqual([
+      { expanded: null, animation: null },
+      { expanded: 'sessions', animation: null },
+      { expanded: 'sessions', animation: null },
+      { expanded: null, animation: null },
+      { expanded: 'queue', animation: null },
+    ])
   })
 })

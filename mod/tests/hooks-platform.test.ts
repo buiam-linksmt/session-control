@@ -567,6 +567,7 @@ describe('debug trace', () => {
         desktopGap: 2,
         desktopButtons: 'outline',
         desktopFont: 'accent',
+        desktopAnimation: 'off',
       },
     })
     expect(w.writes.filter(one => one.path === TRACE).some(one => one.text.includes('sk-should') || one.text.includes(HOME + '"') || one.text.includes('/fixture/bin/pick'))).toBe(false)
