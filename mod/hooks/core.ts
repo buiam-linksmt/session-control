@@ -179,8 +179,26 @@ export function isPidAlive(entry: SessionEntry, facts: ProcFacts): boolean {
   return typeof entry.session_id !== 'string' || proof.fileSid === entry.session_id
 }
 
+/**
+ * Whether the entry's recorded pid is its worker still starting: the process lives (the probe read its start) and has
+ * written no sessions file with a `procStart` yet (a resumed session's engine writes it only after loading the
+ * transcript, which takes seconds), and the probe lists that pid as a headless claude whose command line carries the
+ * entry's session name (`-n <name>`, which the launch passed) in the entry's cwd (any cwd when the probe read none, as
+ * on Windows without the sessions file). Such a worker runs: it is never harvested as gone. It is no Abort-check proof:
+ * stop_worker still refuses it until its sessions file proves it.
+ */
+export function isPidStarting(entry: SessionEntry, facts: ProcFacts): boolean {
+  if (typeof entry.pid !== 'number' || typeof entry.name !== 'string' || entry.name === '') return false
+  const proof = facts.pidProof.get(entry.pid)
+  if (proof === undefined || proof.startTicks === '' || proof.fileStart !== '') return false
+  const bare = (dir: string) => dir.replace(/[\\/]+$/, '')
+  const cwd = typeof entry.cwd === 'string' ? bare(entry.cwd) : ''
+  const name = entry.name
+  return facts.claude.some(one => one.pid === entry.pid && isHeadless(one.cmdline) && hasSessionName(one.cmdline, name) && (one.cwd === '' || bare(one.cwd) === cwd))
+}
+
 export function rowStatus(entry: SessionEntry, facts: ProcFacts): SessionRowStatus {
-  if (typeof entry.pid === 'number') return isPidAlive(entry, facts) ? 'alive' : 'dead'
+  if (typeof entry.pid === 'number') return isPidAlive(entry, facts) || isPidStarting(entry, facts) ? 'alive' : 'dead'
   if (typeof entry.session_id !== 'string' || entry.session_id === '') return 'queued'
   if (entry.reported === false) return 'unreported'
   return 'done'
@@ -1301,7 +1319,7 @@ export function checkLaunch(args: LaunchArgs, ctx: LaunchFacts): LaunchVerdict {
     if (typeof entry.config_dir !== 'string' || entry.config_dir === '') {
       return { ok: false, reason: 'entry has no config_dir: a resume cannot pick a licence' }
     }
-    if (isPidAlive(entry, ctx.facts)) return { ok: false, reason: `refused: pid ${entry.pid} of that session is alive` }
+    if (isPidAlive(entry, ctx.facts) || isPidStarting(entry, ctx.facts)) return { ok: false, reason: `refused: pid ${entry.pid} of that session is alive` }
     if (ctx.transcriptExists !== true) {
       return { ok: false, reason: `transcript of ${args.resume_sid} not under ${entry.config_dir}` }
     }
@@ -1758,6 +1776,40 @@ export function registerFinished(text: string, entry: SessionEntry, mode: 'new' 
   if (mode === 'new') ended(read.list.at(-1))
   else for (const one of read.list) if (one !== null && jqEqual((one as Rec).session_id, entry.session_id)) ended(one)
   return { ok: true, text: jqText(read.list, 2) + '\n' }
+}
+
+/**
+ * The refusal of a resume's registry write when the registry holds no entry for its session any more (retired while the
+ * launch ran): registerEntry would leave the registry as it is, and the launch would say registered.
+ */
+export function resumeGone(text: string, sessionId: string, mode: 'new' | 'resume'): RegistryEdit | undefined {
+  if (mode !== 'resume') return undefined
+  const parsed = parseRegistry(text)
+  if (!parsed.ok || parsed.entries.some(one => one.session_id === sessionId)) return undefined
+  return { ok: false, error: `the registry holds no entry for session ${sessionId} any more (retired while the launch ran); the worker runs unregistered` }
+}
+
+/**
+ * The inbox a running worker's sessions file named after the launch registered it without one (a resume whose file came
+ * late): `socket_path`, and `name` when given, set on each entry with that session id that still records that pid;
+ * every other entry, and every other field, stays. Unchanged text when no entry matches (it was harvested or resumed
+ * again meanwhile) or the values are there already.
+ */
+export function setInbox(text: string, sessionId: string, pid: number, inbox: { socketPath: string; name?: string }): RegistryEdit {
+  const read = registryList(text)
+  if (!read.ok) return read
+  if (!read.list.every(isEntryOrNull)) return NOT_AN_ENTRY
+  const fields = jqStrings({ socket_path: inbox.socketPath, ...(inbox.name === undefined ? {} : { name: inbox.name }) }) as Rec | undefined
+  if (fields === undefined) return { ok: false, error: 'the inbox holds an unpaired surrogate' }
+  let isChanged = false
+  const list = read.list.map(one => {
+    const rec = one as Rec | null
+    if (rec === null || rec.session_id !== sessionId || rec.pid !== pid) return one
+    if (Object.entries(fields).every(([key, value]) => rec[key] === value)) return one
+    isChanged = true
+    return { ...rec, ...fields }
+  })
+  return { ok: true, text: isChanged ? jqText(list, 2) + '\n' : text }
 }
 
 /** CLEAR_SCRIPT: the registry without the named sessions, and the removed entries as the log lines it appends. */

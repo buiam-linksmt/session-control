@@ -45,9 +45,11 @@ export type World = {
   /**
    * Where the next launch's worker runs: its cwd and the session id its sessions file names. With `isFound` its command
    * line carries the model unquoted, as the shell hands it on, so the launch finds and registers the worker; without, the
-   * quotes stay and the launch answers that no worker appeared (what the older tests rely on).
+   * quotes stay and the launch answers that no worker appeared (what the older tests rely on). `pid` is the worker's pid
+   * (7001 when not set). With `isFileLate` its sessions file is not written at the launch: the test writes it when the
+   * engine would have (a resumed session's engine writes it once it has loaded the transcript).
    */
-  launch: { cwd: string; sid: string; isFound?: boolean }
+  launch: { cwd: string; sid: string; isFound?: boolean; pid?: number; isFileLate?: boolean }
   /**
    * Operations made to fail: `tree` (the helper's listing answers ok:false IO), `stop` (the helper's stop sends nothing
    * and answers ok:false IO), `helper` (node starts but the helper script is not there: exit 1, nothing on stdout).
@@ -271,13 +273,14 @@ export function mockWorld(on: On, opts: { isHelper?: boolean; env?: Record<strin
     world.passed.push({ tool: 'Bash', input: { ...(e as object) } as Record<string, unknown> })
     const model = (world.launch.isFound === true ? /--model '?([^'\s]+)'?/ : /--model (\S+)/).exec(command)?.[1]
     if ((e as { run_in_background?: unknown }).run_in_background === true && model !== undefined && command.includes(' -p ')) {
-      const pid = 7001
+      const pid = world.launch.pid ?? 7001
       // The worker's CLAUDE_CONFIG_DIR: the one on the line, else the orchestrator's own it inherits (none: the default).
       const configDir = /CLAUDE_CONFIG_DIR='([^']*)'/.exec(command)?.[1] ?? opts.env?.CLAUDE_CONFIG_DIR ?? ''
-      // The session name the launch passed with -n, as the process's command line shows it.
+      // The session name the launch passed with -n, as the process's command line shows it; a resume's session id too.
       const name = /\s-n '([^']*)'/.exec(command)?.[1] ?? 'w-x'
-      world.table.procs.set(pid, { ppid: 6999, start: '777', state: 'S', comm: 'claude', claude: { cwd: world.launch.cwd, configDir, cmdline: `claude -p --model ${model} -n ${name} --dangerously-skip-permissions --output-format json` } })
-      files.set(`${configDir === '' ? `${HOME}/.claude` : configDir}/sessions/${pid}.json`, JSON.stringify({ sessionId: world.launch.sid, procStart: '777' }))
+      const resume = /\s--resume '([^']*)'/.exec(command)?.[1]
+      world.table.procs.set(pid, { ppid: 6999, start: '777', state: 'S', comm: 'claude', claude: { cwd: world.launch.cwd, configDir, cmdline: `claude -p --model ${model}${resume === undefined ? '' : ` --resume ${resume}`} -n ${name} --dangerously-skip-permissions --output-format json` } })
+      if (world.launch.isFileLate !== true) files.set(`${configDir === '' ? `${HOME}/.claude` : configDir}/sessions/${pid}.json`, JSON.stringify({ sessionId: world.launch.sid, procStart: '777' }))
     }
     return { result: 'Command running in background with ID: mock' }
   })
