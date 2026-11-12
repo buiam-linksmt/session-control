@@ -2662,21 +2662,21 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-23
 })
 
 describe('desktopAnimation: the stepped expand and collapse of the sections view (decisions ani-1, ani-2)', () => {
-  test('its values, off by default; an unknown value, another type or none counts as off; each variant a schedule at the engine\'s redraw rate or slower', () => {
-    expect([...DESKTOP_ANIMATIONS]).toEqual(['off', 'snappy', 'medium', 'smooth'])
-    expect(DESKTOP_ANIMATION_DEFAULT).toBe('off')
+  test('its values off and smooth, smooth by default; an unknown value, a removed variant, another type or none counts as smooth; its schedule at the engine\'s redraw rate (decision ani-4)', () => {
+    expect([...DESKTOP_ANIMATIONS]).toEqual(['off', 'smooth'])
+    expect(DESKTOP_ANIMATION_DEFAULT).toBe('smooth')
     for (const value of DESKTOP_ANIMATIONS) expect(desktopAnimation(value)).toBe(value)
-    for (const other of [undefined, '', 'on', 'Snappy', 'smooth ', 'fast', 1, true, null]) expect(desktopAnimation(other)).toBe('off')
+    for (const other of [undefined, '', 'on', 'Off', 'smooth ', 'fast', 'snappy', 'medium', 1, true, null]) expect(desktopAnimation(other)).toBe('smooth')
     expect(animationSchedule('off')).toBeUndefined()
-    expect(ANIMATION_SCHEDULES).toEqual({ snappy: { steps: 3, ms: 100 }, medium: { steps: 6, ms: 120 }, smooth: { steps: 15, ms: 100 } })
-    // Short and snappy, medium, slow and smooth: more frames and a longer move each.
-    const moves = (['snappy', 'medium', 'smooth'] as const).map(one => ANIMATION_SCHEDULES[one]).map(one => (one.steps - 1) * one.ms)
-    expect(moves).toEqual([200, 600, 1400])
-    for (const one of Object.values(ANIMATION_SCHEDULES)) expect(one.ms).toBeGreaterThanOrEqual(ANIMATION_MIN_STEP_MS)
+    expect(animationSchedule('smooth')).toEqual({ steps: 15, ms: 100 })
+    expect(ANIMATION_SCHEDULES).toEqual({ smooth: { steps: 15, ms: 100 } })
+    // 15 frames, one every 100 ms: 1.4 s from the press to the end state.
+    expect((ANIMATION_SCHEDULES.smooth.steps - 1) * ANIMATION_SCHEDULES.smooth.ms).toBe(1400)
+    expect(ANIMATION_SCHEDULES.smooth.ms).toBeGreaterThanOrEqual(ANIMATION_MIN_STEP_MS)
   })
 
   test('the steps: an expand from 1 up, a collapse from steps - 1 down, each ending (null) at its end state; a reverse turns back one step at once', () => {
-    const schedule = ANIMATION_SCHEDULES.medium
+    const schedule = { steps: 6, ms: 120 }
     const run = (first: ReturnType<typeof expandStart>) => {
       const seen: number[] = []
       for (let one = first; one !== null; one = animationNext(one)) seen.push(one.step)
@@ -2727,8 +2727,24 @@ describe('desktopAnimation: the stepped expand and collapse of the sections view
 
   test('previewLoopAt: per section the boxes for the hold, the expand one step per period, the page for the hold, the collapse; then the next section, the loop from the start again', () => {
     expect(PREVIEW_HOLD_MS).toBe(2400)
-    expect([undefined, ...Object.values(ANIMATION_SCHEDULES)].map(previewLoopMs)).toEqual([14400, 15600, 18000, 22800])
-    const schedule = ANIMATION_SCHEDULES.snappy
+    expect([undefined, ANIMATION_SCHEDULES.smooth].map(previewLoopMs)).toEqual([14400, 22800])
+    expect(previewTurnMs(ANIMATION_SCHEDULES.smooth)).toBe(7600)
+    expect([2399, 2400, 2499, 2500, 3699, 3700, 3799, 3800, 6199, 6200, 7599, 7600].map(ms => previewLoopAt(ms, ANIMATION_SCHEDULES.smooth))).toEqual([
+      { expanded: null, animation: null },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 1, steps: 15, dir: 1 } },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 1, steps: 15, dir: 1 } },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 2, steps: 15, dir: 1 } },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 13, steps: 15, dir: 1 } },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 14, steps: 15, dir: 1 } },
+      { expanded: 'sessions', animation: { id: 'sessions', step: 14, steps: 15, dir: 1 } },
+      { expanded: 'sessions', animation: null },
+      { expanded: 'sessions', animation: null },
+      { expanded: null, animation: { id: 'sessions', step: 14, steps: 15, dir: -1 } },
+      { expanded: null, animation: { id: 'sessions', step: 1, steps: 15, dir: -1 } },
+      { expanded: null, animation: null },
+    ])
+    // The same steps on a short schedule of three frames, to see each boundary.
+    const schedule = { steps: 3, ms: 100 }
     const turn = previewTurnMs(schedule)
     expect(turn).toBe(5200)
     const frames = [0, 2399, 2400, 2499, 2500, 2599, 2600, 4999, 5000, 5099, 5100, 5199].map(ms => previewLoopAt(ms, schedule))

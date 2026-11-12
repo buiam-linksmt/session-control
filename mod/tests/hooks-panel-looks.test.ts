@@ -250,7 +250,7 @@ describe('desktopStyle x desktopIcons x desktopButtons x desktopPreview on the d
       [4, 0.421],
       [0, undefined],
     ]) {
-      test(`the ${page} page of the live state under desktopGap ${gap ?? 'left out'}: its strip and its box stand ${rowGap ?? 'no'} half lines apart`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', ...(gap === undefined ? {} : { desktopGap: gap }) } }, async ($, on) => {
+      test(`the ${page} page of the live state under desktopGap ${gap ?? 'left out'}: its strip and its box stand ${rowGap ?? 'no'} half lines apart`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopAnimation: 'off', ...(gap === undefined ? {} : { desktopGap: gap }) } }, async ($, on) => {
         QUEUE.text = goldenTasks
         POINTS.text = goldenPoints
         TAIL.rows = goldenLog
@@ -281,7 +281,7 @@ describe('desktopStyle x desktopIcons x desktopButtons x desktopPreview on the d
     }
   }
 
-  test('a tinted look with the live state: the colours apply to the live boxes and the svg icons press as the text ones', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: 'tint-soft', desktopIcons: 'svg', desktopButtons: 'plain' } }, async ($, on) => {
+  test('a tinted look with the live state: the colours apply to the live boxes and the svg icons press as the text ones', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopStyle: 'tint-soft', desktopIcons: 'svg', desktopButtons: 'plain', desktopAnimation: 'off' } }, async ($, on) => {
     QUEUE.text = goldenTasks
     try {
       world(on)

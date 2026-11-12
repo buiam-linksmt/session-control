@@ -1520,7 +1520,7 @@ describe('the queued work grouped by project (decisions qg-1 to qg-3)', () => {
     }
   })
 
-  test('desktop sections: collapsed groups fit the box (no +N more, no [+]); an open group with more tasks than rows ends on +N more with [+], whose page lists every task indented under the group\'s title', { options: { ...OPTIONS, desktopPaneScroll: 'sections' } }, async ($, on) => {
+  test('desktop sections: collapsed groups fit the box (no +N more, no [+]); an open group with more tasks than rows ends on +N more with [+], whose page lists every task indented under the group\'s title', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopAnimation: 'off' } }, async ($, on) => {
     const many = Array.from({ length: 20 }, (_, i) => ({ id: `m${i + 1}`, status: 'queued', title: `Many ${i + 1}`, dir: `${WORKSPACES}/beta/sub` }))
     QUEUE.text = QUEUE_GROUPS(many)
     try {

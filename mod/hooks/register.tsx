@@ -322,7 +322,7 @@ type Config = {
   desktopButtons: DesktopButtons
   /** The font colour and style of the `sections` view (core.ts desktopFont); an unknown value counts as `accent`. */
   desktopFont: DesktopFont
-  /** How the `sections` view expands a section to its page and collapses it back (core.ts desktopAnimation); an unknown value counts as `off`. */
+  /** How the `sections` view expands a section to its page and collapses it back (core.ts desktopAnimation); an unknown value counts as `smooth`. */
   desktopAnimation: DesktopAnimation
 }
 

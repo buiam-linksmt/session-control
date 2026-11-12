@@ -17,7 +17,8 @@ import { boot, OPEN_POINTS_TEXT, OPTIONS, PANE_PROPS, POINTS, QUEUE, QUEUE_TEXT,
 type Node = { type?: string; text?: string; props?: Record<string, unknown>; children?: (Node | string)[] }
 type Ui = { drawn: () => Promise<unknown>; press: (q: { key: string }) => Promise<unknown>; unmount: () => Promise<unknown> }
 
-const VARIANTS = ['snappy', 'medium', 'smooth'] as const
+/** The option values that step: smooth, the only one besides off (decision ani-4). */
+const VARIANTS = ['smooth'] as const
 const ROOM = 36
 const nodesOf = (node: Node): Node[] => [node, ...(node.children ?? []).flatMap(one => (typeof one === 'object' && one !== null ? nodesOf(one) : []))]
 const json = (tree: unknown) => JSON.stringify(tree, (key, value) => (key === 'handle' ? 0 : value))
@@ -79,16 +80,14 @@ const restore = () => {
   TAIL.rows = undefined
 }
 
-// ---------------------------------------------------------------- off: the trees of before (decision ani-2)
+// ---------------------------------------------------------------- off: the trees of before (decisions ani-2, ani-4)
 
-describe('desktopAnimation off, unset or unknown: every golden tree as before (decision ani-2)', () => {
-  for (const value of ['off', 'fast']) {
-    for (const state of GOLDEN_STATES) {
-      const goldens = SECTIONS_STATES.includes(state) ? ACCENT_GOLDEN : GOLDEN
-      test(`${state.name}: desktopAnimation ${value}`, { options: { ...OPTIONS, ...(state.mode === undefined ? {} : { desktopPaneScroll: state.mode }), desktopAnimation: value } }, async ($, on) => {
-        expect([state.name, treeHash(await goldenTree($, on, state))]).toEqual([state.name, goldens[state.name]])
-      })
-    }
+describe('desktopAnimation off: every golden tree as before (decisions ani-2, ani-4)', () => {
+  for (const state of GOLDEN_STATES) {
+    const goldens = SECTIONS_STATES.includes(state) ? ACCENT_GOLDEN : GOLDEN
+    test(`${state.name}: desktopAnimation off`, { options: { ...OPTIONS, ...(state.mode === undefined ? {} : { desktopPaneScroll: state.mode }), desktopAnimation: 'off' } }, async ($, on) => {
+      expect([state.name, treeHash(await goldenTree($, on, state))]).toEqual([state.name, goldens[state.name]])
+    })
   }
   test('off: a press expands and collapses at once, and the clock moving on changes nothing', { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopAnimation: 'off' } }, async ($, on) => {
     try {
@@ -106,9 +105,47 @@ describe('desktopAnimation off, unset or unknown: every golden tree as before (d
   })
 })
 
-// ---------------------------------------------------------------- the stepped variants (decisions ani-1, ani-2)
+// ---------------------------------------------------------------- the default for any other value (decision ani-4)
 
-describe('desktopAnimation snappy, medium, smooth: the stepped expand and collapse of the sections view (decisions ani-1, ani-2)', () => {
+describe('desktopAnimation unset, empty, unknown, not a string or a removed variant: the default, smooth, 15 frames one every 100 ms (decision ani-4)', () => {
+  const STEPS = 15
+  const MS = 100
+  for (const value of [undefined, '', 'fast', 1, 'snappy', 'medium']) {
+    const name = value === undefined ? 'unset' : JSON.stringify(value)
+    test(`${name}: a press of [+] draws the smooth steps, one every 100 ms, then the page; [-] the same steps back`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', ...(value === undefined ? {} : { desktopAnimation: value }) } }, async ($, on) => {
+      try {
+        const { ui, w } = await mounted($, on, { queue: goldenTasks })
+        await ui.press({ key: 'q:General:0' })
+        expect(await hashOf(ui)).toBe(ACCENT_GOLDEN['desk-even-15'])
+        await ui.press({ key: 'x:queue' })
+        const expandFrames: unknown[] = []
+        for (let n = 1; n < STEPS; n++) {
+          expandFrames.push(viewOf((await ui.drawn()) as Node))
+          expect([n, viewOf((await ui.drawn()) as Node)]).toEqual([n, stepView(ROOM, { id: 'queue', step: n, steps: STEPS, dir: 1 })])
+          await w.clock.advance(MS - 1)
+          expect([n, viewOf((await ui.drawn()) as Node)]).toEqual([n, stepView(ROOM, { id: 'queue', step: n, steps: STEPS, dir: 1 })])
+          await w.clock.advance(1)
+        }
+        expect(new Set(expandFrames.map(one => JSON.stringify(one))).size).toBeGreaterThan(1)
+        expect(await hashOf(ui)).toBe(ACCENT_GOLDEN['desk-queue-page'])
+        await ui.press({ key: 'c:top' })
+        const collapseFrames: unknown[] = []
+        for (let n = STEPS - 1; n >= 1; n--) {
+          collapseFrames.push(viewOf((await ui.drawn()) as Node))
+          await w.clock.advance(MS)
+        }
+        expect(collapseFrames).toEqual([...expandFrames].reverse())
+        expect(await hashOf(ui)).toBe(ACCENT_GOLDEN['desk-even-15'])
+      } finally {
+        restore()
+      }
+    })
+  }
+})
+
+// ---------------------------------------------------------------- the stepped animation (decisions ani-1, ani-2, ani-4)
+
+describe('desktopAnimation smooth: the stepped expand and collapse of the sections view (decisions ani-1, ani-2, ani-4)', () => {
   for (const variant of VARIANTS) {
     const schedule: AnimationSchedule = ANIMATION_SCHEDULES[variant]
     const { steps, ms } = schedule
@@ -196,8 +233,6 @@ describe('desktopAnimation snappy, medium, smooth: the stepped expand and collap
         await ui.press({ key: 'c:top' })
         expect(viewOf((await ui.drawn()) as Node)).toEqual(step('queue', steps - 1, -1))
         await ui.press({ key: 'x:queue' })
-        // One step back up at once: the page when the collapse had only one step to go.
-        if (steps === 2) expect(await hashOf(ui)).toBe(ACCENT_GOLDEN['desk-queue-page'])
         await w.clock.advance(steps * ms)
         expect(await hashOf(ui)).toBe(ACCENT_GOLDEN['desk-queue-page'])
         await w.clock.advance(steps * ms)
@@ -269,7 +304,7 @@ describe('desktopPreview animate: the overview data expanding and collapsing eac
         if (frame.expanded === null && frame.animation === null) expect(nodesOf(tree).some(one => one.props?.key === 'q:session_control:t:0')).toBe(true)
         await w.clock.advance(tick)
       }
-      // Each section's page and, under a variant, each of its steps both ways.
+      // Each section's page and, under smooth, each of its steps both ways.
       for (const id of ['sessions', 'queue', 'points'] as const) expect(seen.has(JSON.stringify({ page: id }))).toBe(true)
       if (schedule === undefined) expect(seen.size).toBe(4)
       else for (const id of ['sessions', 'queue', 'points'] as const) for (let n = 1; n < schedule.steps; n++) expect(seen.has(JSON.stringify(stepView(ROOM, { id, step: n, steps: schedule.steps, dir: 1 })))).toBe(true)

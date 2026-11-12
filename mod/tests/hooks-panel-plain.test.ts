@@ -47,11 +47,11 @@ describe('desktopStyle plain, desktopButtons plain, desktopIcons text, desktopFo
   for (const state of GOLDEN_STATES) {
     // plain and plain buttons given: the default desktopGap (2 px) adds the gap between the even view's boxes, or between
     // a page's strip and box and its strip's rows, and nothing else (decisions smp-22, smp-25).
-    test(`${state.name}: plain, text, off, standard and plain buttons given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off', desktopButtons: 'plain', desktopFont: 'standard' }), async ($, on) => {
+    test(`${state.name}: plain, text, off, standard and plain buttons given`, optionsOf(state, { desktopStyle: 'plain', desktopIcons: 'text', desktopPreview: 'off', desktopButtons: 'plain', desktopFont: 'standard', desktopAnimation: 'off' }), async ($, on) => {
       expect(treeHash(withoutGap(await goldenTree($, on, state), state.name))).toBe(GOLDEN[state.name] as string)
     })
     // desktopGap 0 with plain and plain buttons draws the tree of before exactly, gap prop included.
-    test(`${state.name}: desktopGap 0 draws the tree of before`, optionsOf(state, { ...BEFORE, desktopIcons: 'text', desktopPreview: 'off', desktopGap: 0 }), async ($, on) => {
+    test(`${state.name}: desktopGap 0 draws the tree of before`, optionsOf(state, { ...BEFORE, desktopIcons: 'text', desktopPreview: 'off', desktopGap: 0, desktopAnimation: 'off' }), async ($, on) => {
       expect(treeHash(await goldenTree($, on, state))).toBe(GOLDEN[state.name] as string)
     })
   }
@@ -67,7 +67,7 @@ describe('desktopStyle plain, desktopButtons plain, desktopIcons text, desktopFo
   for (const state of SECTIONS_STATES) {
     // On the desktop sections view the options left out, and an unknown value of each (the dropped values among them),
     // draw the defaults' tree: tint-soft, outline, text, the live state, 2 px.
-    test(`${state.name}: the options left out draw the defaults, not the tree of before`, optionsOf(state, {}), async ($, on) => {
+    test(`${state.name}: the options left out draw the defaults, not the tree of before`, optionsOf(state, { desktopAnimation: 'off' }), async ($, on) => {
       const tree = await goldenTree($, on, state)
       expect(treeHash(tree.split(GAP_PROP).join(''))).not.toBe(GOLDEN[state.name] as string)
       expectDefaults(tree, state.name)
@@ -77,7 +77,7 @@ describe('desktopStyle plain, desktopButtons plain, desktopIcons text, desktopFo
       { desktopStyle: 'tint-strips', desktopButtons: 'filled' },
       { desktopStyle: 'tint-mono', desktopButtons: 'tabs' },
     ]) {
-      test(`${state.name}: ${JSON.stringify(unknown)} counts as the defaults`, optionsOf(state, unknown), async ($, on) => {
+      test(`${state.name}: ${JSON.stringify(unknown)} counts as the defaults`, optionsOf(state, { ...unknown, desktopAnimation: 'off' }), async ($, on) => {
         expectDefaults(await goldenTree($, on, state), state.name)
       })
     }

@@ -24,7 +24,7 @@ describe('desktopFont: left out, accent or unknown draws the accent trees, stand
   for (const font of [undefined, 'accent', 'standard', '', 'Standard', 'subtle', 'vivid', 1]) {
     const goldens = font === 'standard' ? STANDARD_GOLDEN : ACCENT_GOLDEN
     for (const state of SECTIONS_STATES) {
-      test(`${state.name}: desktopFont ${JSON.stringify(font)}`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', ...(font === undefined ? {} : { desktopFont: font }) } }, async ($, on) => {
+      test(`${state.name}: desktopFont ${JSON.stringify(font)}`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopAnimation: 'off', ...(font === undefined ? {} : { desktopFont: font }) } }, async ($, on) => {
         expect([state.name, treeHash(await goldenTree($, on, state))]).toEqual([state.name, goldens[state.name]])
       })
     }

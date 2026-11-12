@@ -2814,14 +2814,14 @@ export function desktopPreview(value: unknown): DesktopPreview {
 }
 
 /**
- * How the `sections` view goes from its three even boxes to a section's page and back (option desktopAnimation): `off`
- * at once, as before; `snappy`, `medium` and `smooth` in steps (ANIMATION_SCHEDULES).
+ * How the `sections` view goes from its three even boxes to a section's page and back (option desktopAnimation):
+ * `smooth` (the default) in steps (ANIMATION_SCHEDULES); `off` at once.
  */
-export const DESKTOP_ANIMATIONS = ['off', 'snappy', 'medium', 'smooth'] as const
+export const DESKTOP_ANIMATIONS = ['off', 'smooth'] as const
 export type DesktopAnimation = (typeof DESKTOP_ANIMATIONS)[number]
-export const DESKTOP_ANIMATION_DEFAULT: DesktopAnimation = 'off'
+export const DESKTOP_ANIMATION_DEFAULT: DesktopAnimation = 'smooth'
 
-/** The option's value as the mod uses it: an unknown value, or none, counts as `off`. */
+/** The option's value as the mod uses it: an unknown value, or none, counts as the default (`smooth`). */
 export function desktopAnimation(value: unknown): DesktopAnimation {
   return (DESKTOP_ANIMATIONS as readonly unknown[]).includes(value) ? (value as DesktopAnimation) : DESKTOP_ANIMATION_DEFAULT
 }
@@ -2838,10 +2838,8 @@ export const ANIMATION_MIN_STEP_MS = 100
  */
 export type AnimationSchedule = { steps: number; ms: number }
 
-/** Each stepped desktopAnimation: snappy 3 frames in 0.2 s, medium 6 in 0.6 s, smooth 15 in 1.4 s. */
+/** The stepped desktopAnimation: smooth, 15 frames one every 100 ms, 1.4 s. */
 export const ANIMATION_SCHEDULES: Record<Exclude<DesktopAnimation, 'off'>, AnimationSchedule> = {
-  snappy: { steps: 3, ms: 100 },
-  medium: { steps: 6, ms: 120 },
   smooth: { steps: 15, ms: 100 },
 }
 

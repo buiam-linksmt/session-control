@@ -141,7 +141,7 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
   })
 
   // Where each change moves the body is sectionsScrollTo's (core.test.ts): the kit answers no plugin's $.ui.scroll.
-  test('expand: [+] draws the section alone as a page under one title strip at the top, none at the bottom; another title that can expand switches to its section, one that cannot is greyed, [-] restores the boxes', MODE_BEFORE, async ($, on) => {
+  test('expand: [+] draws the section alone as a page under one title strip at the top, none at the bottom; another title that can expand switches to its section, one that cannot is greyed, [-] restores the boxes', { options: { ...MODE_BEFORE.options, desktopAnimation: 'off' } }, async ($, on) => {
     QUEUE.text = tasks(15)
     try {
       const ui = await open($, on)
@@ -394,7 +394,7 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
 
   // ------------------------------------------------ the strip: a title that cannot expand is greyed (decision smp-16)
 
-  test('strip: a section whose lines exceed its even box is a pressable title, one whose lines fit is greyed Text; the strip follows a change of the content and of the room', MODE_BEFORE, async ($, on) => {
+  test('strip: a section whose lines exceed its even box is a pressable title, one whose lines fit is greyed Text; the strip follows a change of the content and of the room', { options: { ...MODE_BEFORE.options, desktopAnimation: 'off' } }, async ($, on) => {
     QUEUE.text = tasks(15)
     try {
       const ui = await open($, on)
@@ -431,7 +431,7 @@ describe('desktopPaneScroll sections: three fixed boxes, a section expanded as a
     }
   })
 
-  test('the defaults (tint-soft, outline): the strip in chips, the shown title marked, a pressable title switches, a greyed one stays dim and follows the content, the icons in boxes; the log page closes and collapses (decision smp-23)', MODE, async ($, on) => {
+  test('the defaults (tint-soft, outline): the strip in chips, the shown title marked, a pressable title switches, a greyed one stays dim and follows the content, the icons in boxes; the log page closes and collapses (decision smp-23)', { options: { ...MODE.options, desktopAnimation: 'off' } }, async ($, on) => {
     QUEUE.text = tasks(15)
     TAIL.rows = logRows(30)
     try {
