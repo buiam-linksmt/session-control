@@ -39,6 +39,11 @@ import {
   DESKTOP_BUTTONS,
   desktopButtons,
   buttonLook,
+  DESKTOP_FONTS,
+  DESKTOP_FONT_DEFAULT,
+  FONT_HUES,
+  desktopFont,
+  fontLook,
   BUTTON_HUES,
   BUTTON_HUE_OF,
   DESKTOP_TEXT,
@@ -2480,6 +2485,54 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-23
       })
     }
     expect(Object.values(PANEL_ICON_GLYPH)).toEqual(['+', '\u2212', '\u00D7'])
+  })
+
+  test('desktopFont: its values; an unknown value, another type or none counts as accent, the default (decisions pfs-1 to pfs-4)', () => {
+    expect(DESKTOP_FONTS).toEqual(['standard', 'accent'])
+    expect(DESKTOP_FONT_DEFAULT).toBe('accent')
+    for (const value of DESKTOP_FONTS) expect(desktopFont(value)).toBe(value)
+    for (const other of [undefined, null, '', 'Standard', 'accent ', 'subtle', 'vivid', 'bold', 'plain', 1, true, ['standard']]) expect(desktopFont(other)).toBe('accent')
+  })
+
+  test('desktopFont accent: a section\'s title, body, detail and shown title in its hue, at 4.5:1 or more on what it is drawn on; no colour under plain (decisions pfs-1 to pfs-4)', () => {
+    const SECTIONS = ['sessions', 'queue', 'points', 'log'] as const
+    for (const hue of Object.values(FONT_HUES)) for (const colour of Object.values(hue)) expect(colour).toMatch(/^#[0-9A-F]{6}$/)
+    // Each font hue's accent is the hue of the tint-soft bars and borders.
+    for (const [name, hue] of Object.entries(FONT_HUES)) expect(hue.accent).toBe(BUTTON_HUES[name as keyof typeof BUTTON_HUES].edge)
+    for (const style of DESKTOP_STYLES) for (const id of SECTIONS) expect(fontLook('standard', style, id)).toBeUndefined()
+    let lowest = Number.POSITIVE_INFINITY
+    for (const id of SECTIONS) {
+      const where = `accent ${id}`
+      const look = fontLook('accent', 'tint-soft', id)
+      if (look === undefined) throw new Error(`${where}: no look`)
+      const hue = FONT_HUES[BUTTON_HUE_OF['tint-soft'][id]]
+      expect([where, look]).toEqual([
+        where,
+        { title: { weight: 'bold', color: hue.accent }, body: { color: hue.ink }, detail: { color: hue.muted, italic: true }, current: { weight: 'bold', underline: true, color: hue.ink } },
+      ])
+      const body = PANEL_LOOKS['tint-soft'].sections[id].body as string
+      const ok = (fg: string | undefined, bg: string, what: string) => {
+        const ratio = fg === undefined ? 0 : contrast(fg, bg)
+        lowest = Math.min(lowest, ratio)
+        expect([where, what, ratio >= 4.5]).toEqual([where, what, true])
+      }
+      // The title and the rows on the section's tint; nothing dim (a colour instead).
+      ok(look.title.color, body, 'title')
+      ok(look.body.color, body, 'body')
+      ok(look.detail.color, body, 'detail')
+      expect([where, look.detail.dimColor]).toEqual([where, undefined])
+      // The shown title in the strip: on the chip's (outline) or the look's (plain buttons) fill.
+      for (const fill of [buttonLook('tint-soft', id).current.backgroundColor as string, PANEL_LOOKS['tint-soft'].sections[id].current as string]) ok(look.current.color, fill, 'shown title')
+      // Under plain (no colour of its own) accent keeps its weights and styles, no colour: dim rows stay dim.
+      const plain = fontLook('accent', 'plain', id)
+      if (plain === undefined) throw new Error(`${where}: no plain look`)
+      expect([where, plain]).toEqual([where, { title: { weight: 'bold' }, body: {}, detail: { dimColor: true, italic: true }, current: { weight: 'bold', underline: true } }])
+    }
+    // The lowest contrast, the README's figure: the log's title, #9A9892 on #2A2A28, 4.986:1.
+    expect(Math.round(lowest * 1000) / 1000).toBe(4.986)
+    expect(Math.round(contrast('#9A9892', '#2A2A28') * 1000) / 1000).toBe(4.986)
+    // Under tint-soft each section's title is its own colour.
+    expect(new Set(SECTIONS.map(id => JSON.stringify(fontLook('accent', 'tint-soft', id)?.title))).size).toBe(4)
   })
 
   /** The rectangles and paths of an icon's markup, with their numeric attributes. */

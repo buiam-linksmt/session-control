@@ -198,7 +198,9 @@ Every launch prompt carries, addressed to the worker, each item below that appli
    of run wins. Never substitute look-alike host tooling.
 6. Shared live state: the services, containers and data to leave as found, and the teardown it may run.
    Other sessions and the user may use the same stack: take its lock (named in the project's
-   `CLAUDE.md`) around every interaction, a probe included, and release it before ending.
+   `CLAUDE.md`) around every interaction, a probe included, and release it before ending. A full
+   test-suite run is shared load too: take `<control>/scratch/locks/<project>-tests` (`mkdir` is the
+   lock, wait while it exists, `rmdir` when the run ends) around each one.
 7. No human answers during the run. Look up what it does not know (docs, issue trackers, config,
    official examples; name them when knowable) before trial and error; then take a documented default
    and report it, never for a sign-off item; with none, write the question in the report and stop that

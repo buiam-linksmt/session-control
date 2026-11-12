@@ -109,7 +109,7 @@
     "desktopPreview": {
       "type": "string",
       "title": "Desktop panel preview",
-      "description": "A fixed sample state the sections view draws in Claude Desktop (desktopPaneScroll sections, docked) instead of the live one, to look at a desktopStyle and desktopIcons combination without any click: overview (three sessions, ten queued tasks in three project groups, three open points, none expanded), queue (the queued work expanded, its first group open), points (the open points expanded, the first selected), log (a running session's log of 40 lines expanded), empty (nothing at all). It reads, writes and calls nothing, and its presses do nothing; every other desktopPaneScroll value, the panel seated inline and the terminal keep the live state. off: the live state. Any other value counts as off.",
+      "description": "A fixed sample state the sections view draws in Claude Desktop (desktopPaneScroll sections, docked) instead of the live one, to look at a combination of desktopStyle, desktopIcons, desktopButtons and desktopFont without any click: overview (three sessions, ten queued tasks in three project groups, three open points, none expanded), queue (the queued work expanded, its first group open), points (the open points expanded, the first selected), log (a running session's log of 40 lines expanded), empty (nothing at all). It reads, writes and calls nothing, and its presses do nothing; every other desktopPaneScroll value, the panel seated inline and the terminal keep the live state. off: the live state. Any other value counts as off.",
       "default": "off",
       "options": ["off", "overview", "queue", "points", "log", "empty"]
     },
@@ -125,6 +125,13 @@
       "description": "How the sections view in Claude Desktop draws its pressable titles in the strip and its [+], [-] and [x] icons (desktopPaneScroll sections; every other value and the terminal draw plain). outline: each title a rounded chip bordered in its section's colour, filled softly under the pointer, the shown one filled; each icon a rounded box one row tall bordered the same way, filled under the pointer. plain: bare text. Colours follow desktopStyle (grey under plain). A title that cannot expand stays greyed, in a dim-bordered chip, and not pressable. Dark mode only. Any other value counts as outline.",
       "default": "outline",
       "options": ["outline", "plain"]
+    },
+    "desktopFont": {
+      "type": "string",
+      "title": "Desktop panel font",
+      "description": "The font colour and style per section of the sections view in Claude Desktop (desktopPaneScroll sections; every other value and the terminal draw standard): each section's title, its rows and its dim rows, and its title in the strip while it is the one shown. accent: the title in its section's hue and heavier, the rows in a light step of the hue, the dim rows in a muted step of it and italic, the shown title light, bold and underlined. standard: as before, the titles bold in the text colour, the rows in the text colour or dim. A pressable row keeps the text colour; under desktopStyle plain accent adds weights and styles only, no colour. Hues as desktopStyle's: sessions blue, queued work violet, open points sand, the log grey. Any other value counts as accent.",
+      "default": "accent",
+      "options": ["accent", "standard"]
     }
   }
 }

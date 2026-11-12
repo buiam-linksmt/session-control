@@ -2924,6 +2924,66 @@ export function buttonLook(style: DesktopStyle, id: SectionId): ButtonLook {
   }
 }
 
+/**
+ * The font colour and style of the `sections` view (option desktopFont, decisions pfs-1 to pfs-4): how each section's
+ * title, its rows in the text colour (`body`) and its dim rows (`detail`) are drawn, and its title in the strip over a
+ * page while it is the one shown. `accent` (the default) writes them in the section's hue (fontLook); `standard` draws as
+ * before: every title bold in Desktop's text colour, the rows in that colour or dim. The other values of
+ * desktopPaneScroll, and the terminal, draw `standard` whatever the option says.
+ */
+export const DESKTOP_FONTS = ['standard', 'accent'] as const
+export type DesktopFont = (typeof DESKTOP_FONTS)[number]
+/** The font the sections view takes when the option is left out or unknown. */
+export const DESKTOP_FONT_DEFAULT: DesktopFont = 'accent'
+
+/** The option's value as the mod uses it: an unknown value, or none, counts as DESKTOP_FONT_DEFAULT. */
+export function desktopFont(value: unknown): DesktopFont {
+  return (DESKTOP_FONTS as readonly unknown[]).includes(value) ? (value as DesktopFont) : DESKTOP_FONT_DEFAULT
+}
+
+/**
+ * The steps of one hue the accent font writes with, raw hex: `accent` the saturated step (the bar and border hue of
+ * tint-soft), `ink` a light step, `muted` the step of a detail row. Each is drawn only on a background of fixed colour (a
+ * section's tint, a chip's fill), never on Desktop's page, so it reads the same whichever theme Desktop shows; each keeps
+ * 4.5:1 or more on what it is drawn on.
+ */
+export type FontHue = { accent: string; ink: string; muted: string }
+
+export const FONT_HUES: Record<keyof typeof BUTTON_HUES, FontHue> = {
+  blue: { accent: '#6B9BF2', ink: '#C9D8F5', muted: '#8FA9D6' },
+  violet: { accent: '#A98BEB', ink: '#DCD0F7', muted: '#AC9CD0' },
+  sand: { accent: '#D2B07A', ink: '#EEDFC4', muted: '#BCA987' },
+  grey: { accent: '#9A9892', ink: '#DAD8D2', muted: '#A9A69D' },
+}
+
+/** The props of one Text under the accent font (the engine's Text props: colour, weight, styles). */
+export type TextLook = { color?: string; dimColor?: true; weight?: 'bold'; italic?: true; underline?: true }
+
+/**
+ * One section's text under the accent font: `title` its title (in its box, on its page); `body` a row in the text
+ * colour; `detail` a dim row; `current` its title in the strip while it is the one shown, on the chip's or the look's own
+ * fill. A pressable row is a Button, whose label a plugin cannot colour: it keeps Desktop's text colour.
+ */
+export type FontLook = { title: TextLook; body: TextLook; detail: TextLook; current: TextLook }
+
+/**
+ * The text of section `id` under the font `font` and the desktopStyle `style`; undefined for `standard` (the trees of
+ * before). `accent`: the title in the hue's accent at the heavier `bold` weight, the body rows in the hue's ink, the detail
+ * rows in its muted step and italic; the shown title in the ink, `bold` and underlined. The colours are the section's hue
+ * under `tint-soft` (sessions blue, queued work violet, open points sand, the log grey); under `plain`, which has no
+ * colour of its own, the font keeps its weights and styles and adds no colour (dim rows stay dim).
+ */
+export function fontLook(font: DesktopFont, style: DesktopStyle, id: SectionId): FontLook | undefined {
+  if (font === 'standard') return undefined
+  const hue = style === 'plain' ? undefined : FONT_HUES[BUTTON_HUE_OF[style][id]]
+  return {
+    title: { weight: 'bold', ...(hue === undefined ? {} : { color: hue.accent }) },
+    body: hue === undefined ? {} : { color: hue.ink },
+    detail: { ...(hue === undefined ? { dimColor: true as const } : { color: hue.muted }), italic: true },
+    current: { weight: 'bold', underline: true, ...(hue === undefined ? {} : { color: hue.ink }) },
+  }
+}
+
 /** The text an icon's Button draws under the outline look: the glyph alone, the box being its frame. */
 export const PANEL_ICON_GLYPH: Record<PanelIcon, string> = { plus: '+', minus: '−', close: '×' }
 
