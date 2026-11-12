@@ -114,12 +114,14 @@ const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-260921141320
 // there is none).
 // probeMs: how long each Windows probe takes on the fixture's clock (0: no time). probeLateMs: each probe answers only
 // once the test has moved the fixture's clock that far (0: at once). isAliveGone: the alive worker 4101 has exited.
+// probeMs moves the clock from inside the probe's hook while the test's own advance is still running: where the probe
+// ends then depends on how fast the machine runs. A test that checks what follows the end of a probe uses probeLateMs.
 const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false, probeMs: 0, probeLateMs: 0, isAliveGone: false }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
-// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone, probeMs, probeLateMs: as
-// in WINDOWS; isOrphanGone: the unregistered headless claude 4999 has exited too.
-const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeMs: 0, probeLateMs: 0 }
+// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone, probeLateMs: as in
+// WINDOWS; isOrphanGone: the unregistered headless claude 4999 has exited too.
+const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeLateMs: 0 }
 // The registry as a real file (both fixtures): with isCurrent a read answers the text the plugin last wrote there (the
 // seed the test gave until its first write), and the probe asked for the launched worker's pid (7001, while it runs)
 // answers its A line from its sessions file, as the helper's probe and PROBE_PS1 do. Off, every read answers the seed and
@@ -249,7 +251,6 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
       PROBES.max = Math.max(PROBES.max, PROBES.inFlight)
       try {
         if (HELD.probe !== undefined) await HELD.probe
-        if (LINUX_FIXTURE.probeMs > 0) await w.clock.advance(LINUX_FIXTURE.probeMs)
         if (LINUX_FIXTURE.probeLateMs > 0) await w.clock.sleep(LINUX_FIXTURE.probeLateMs)
       } finally {
         PROBES.inFlight--
@@ -4037,21 +4038,29 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
   test('after a probe longer than the poll interval the poll rests as long again from its end; then it probes as before', { options: TRACED }, async ($, on) => {
     const w = world(on)
     await boot($)
-    LINUX_FIXTURE.probeMs = 12_000
+    const rests = () => traceOf(w).filter(line => line.event === 'poll.skip' && Number(line.restMs) > 0).map(line => line.restMs)
+    // The probe the tick at 5 s starts answers when the test's own advance reaches 17 s: it took 12 s, over the 5 s poll.
+    LINUX_FIXTURE.probeLateMs = 12_000
     try {
       const before = probes(w)
       await w.clock.advance(5000)
-      LINUX_FIXTURE.probeMs = 0
+      LINUX_FIXTURE.probeLateMs = 0
       expect(probes(w)).toBe(before + 1)
-      const rested = traceOf(w).filter(line => line.event === 'poll.skip' && Number(line.restMs) > 0)
+      expect(PROBES.inFlight).toBe(1)
+      // The ticks at 10 s and 15 s skip a probe that is running; it ends at 17 s and the poll rests until 29 s.
+      await w.clock.advance(12_000)
+      expect(PROBES.inFlight).toBe(0)
+      expect(rests()).toEqual([])
+      // The ticks at 20 s and 25 s rest: 9 s and 4 s are left.
       for (let step = 0; step < 2; step++) await w.clock.advance(5000)
-      expect(traceOf(w).filter(line => line.event === 'poll.skip' && Number(line.restMs) > 0).length).toBeGreaterThan(rested.length)
-      const atRestEnd = probes(w)
-      expect(atRestEnd).toBe(before + 1)
-      for (let step = 0; step < 4; step++) await w.clock.advance(5000)
-      expect(probes(w)).toBeGreaterThan(atRestEnd)
+      expect(rests()).toEqual([9000, 4000])
+      expect(probes(w)).toBe(before + 1)
+      // The tick at 30 s, past the rest, probes again.
+      await w.clock.advance(5000)
+      expect(probes(w)).toBe(before + 2)
+      expect(rests()).toEqual([9000, 4000])
     } finally {
-      LINUX_FIXTURE.probeMs = 0
+      LINUX_FIXTURE.probeLateMs = 0
     }
   })
 
