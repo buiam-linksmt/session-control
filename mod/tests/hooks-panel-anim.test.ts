@@ -40,13 +40,34 @@ const EVEN = { boxes: ['sessions:12', 'queue:12', 'points:12'] }
 /** The label of the icon keyed `key` (the glyph under the outline buttons). */
 const iconOf = (tree: Node, key: string) => nodesOf(tree).find(one => one.props?.key === key)?.props?.label
 
-/** Mounts the docked desktop panel over the queue, the open points and the log tail given; the world's clock with it. */
-const mounted = async ($: GoldenTest$, on: On, serve: { queue?: string; points?: string; tail?: object[] } = {}, props: object = PANE_PROPS) => {
+/**
+ * The pane as the engine lists it (`ui.panes`), in place of stubPanel's: up once `ui.open` placed it, until the test closes it;
+ * `isShown` false while another pane is in front of it.
+ */
+type PaneState = { isUp: boolean; isShown: boolean }
+const listPane = (on: On, pane: PaneState) => {
+  on('ui.open', () => {
+    pane.isUp = true
+    return { value: { isPlaced: true } } as never
+  })
+  on('ui.panes', () => ({ value: pane.isUp ? [{ id: 'session-control', title: 'Session control', isShown: pane.isShown, isFocused: false, isPlaced: true }] : [] }) as never)
+}
+
+/**
+ * Mounts the docked desktop panel over the queue, the open points and the log tail given; the world's clock with it.
+ * `pane`: the engine lists the pane as that state says (else it lists none); `hooks`: the test's own hooks, registered
+ * above the world's (so above its clock), handed the world once it is made.
+ */
+const mounted = async ($: GoldenTest$, on: On, serve: { queue?: string; points?: string; tail?: object[] } = {}, props: object = PANE_PROPS, pane?: PaneState, hooks?: (w: () => ReturnType<typeof world>) => void) => {
   QUEUE.text = serve.queue ?? QUEUE_TEXT
   POINTS.text = serve.points ?? OPEN_POINTS_TEXT
   TAIL.rows = serve.tail
+  let made: ReturnType<typeof world> | undefined
+  hooks?.(() => made as ReturnType<typeof world>)
   const w = world(on)
-  stubPanel(on)
+  made = w
+  if (pane === undefined) stubPanel(on)
+  else listPane(on, pane)
   await boot($)
   await runCommand($, 'side')
   const ui = (await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: props as never })) as unknown as Ui
@@ -233,7 +254,7 @@ describe('desktopPreview animate: the overview data expanding and collapsing eac
     const schedule = variant === 'off' ? undefined : ANIMATION_SCHEDULES[variant]
     const tick = schedule?.ms ?? PREVIEW_HOLD_MS
     test(`under desktopAnimation ${variant}: every frame of a whole loop and the start of the next, as previewLoopAt says; it writes nothing and its presses do nothing`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopPreview: 'animate', desktopAnimation: variant } }, async ($, on) => {
-      const { ui, w } = await mounted($, on, {}, FONT_ROOM_PROPS)
+      const { ui, w } = await mounted($, on, {}, FONT_ROOM_PROPS, { isUp: false, isShown: true })
       const writes = w.writes.length
       const calls = w.calls.length
       const loop = previewLoopMs(schedule)
@@ -260,6 +281,119 @@ describe('desktopPreview animate: the overview data expanding and collapsing eac
       expect(w.writes.length).toBe(writes)
       const before = new Set(w.calls.slice(0, calls).map(one => one.op))
       expect(w.calls.slice(calls).map(one => one.op).filter(op => !before.has(op))).toEqual([])
+    })
+  }
+})
+
+// ---------------------------------------------------------------- the fix round of the independent check (decision ani-3)
+
+/** The view the preview loop's frame at `ms` draws. */
+const loopView = (ms: number, schedule: AnimationSchedule | undefined) => {
+  const frame = previewLoopAt(ms, schedule)
+  return frame.animation !== null ? stepView(ROOM, frame.animation) : frame.expanded !== null ? { page: frame.expanded } : EVEN
+}
+
+describe('desktopAnimation: a pane closed by the engine during an animation and opened again starts without it (decision ani-3, 1)', () => {
+  for (const variant of VARIANTS) {
+    const { steps, ms } = ANIMATION_SCHEDULES[variant]
+    test(`${variant}: the reopened pane draws the three even boxes at once and at every period after`, { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopAnimation: variant } }, async ($, on) => {
+      try {
+        const pane = { isUp: false, isShown: true }
+        const { ui, w } = await mounted($, on, { queue: goldenTasks }, PANE_PROPS, pane)
+        await ui.press({ key: 'q:General:0' })
+        await ui.press({ key: 'x:queue' })
+        expect(viewOf((await ui.drawn()) as Node)).toEqual(stepView(ROOM, { id: 'queue', step: 1, steps, dir: 1 }))
+        // The engine's close mark closes the pane mid-expand; the command opens it again before the expand is over.
+        await ui.unmount()
+        pane.isUp = false
+        await runCommand($, 'side')
+        const again = (await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: PANE_PROPS as never })) as unknown as Ui
+        for (let n = 0; n <= steps; n++) {
+          const tree = (await again.drawn()) as Node
+          expect([n, viewOf(tree)]).toEqual([n, EVEN])
+          expect([n, iconOf(tree, 'x:queue')]).not.toEqual([n, PANEL_ICON_GLYPH.minus])
+          await w.clock.advance(ms)
+        }
+      } finally {
+        restore()
+      }
+    })
+  }
+})
+
+describe('desktopPreview animate: the loop runs whenever the pane draws it and only while a pane is shown, timed by the clock (decision ani-3, 2 to 4)', () => {
+  for (const variant of ['off', ...VARIANTS] as const) {
+    const schedule = variant === 'off' ? undefined : ANIMATION_SCHEDULES[variant]
+    const tick = schedule?.ms ?? PREVIEW_HOLD_MS
+    const loop = previewLoopMs(schedule)
+    const MODE = { options: { ...OPTIONS, desktopPaneScroll: 'sections', desktopPreview: 'animate', desktopAnimation: variant } }
+    /** The first change of the loop: the sessions' first step, or their page under `off`. */
+    const firstChange = loopView(PREVIEW_HOLD_MS, schedule)
+
+    test(`under desktopAnimation ${variant}: a pane already up at the start, shown without the command, runs the loop from its first drawing`, MODE, async ($, on) => {
+      const w = world(on)
+      // The pane is up before the session starts (a reload, or the engine's own controls): no /session-control.
+      listPane(on, { isUp: true, isShown: true })
+      await boot($)
+      const ui = (await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: FONT_ROOM_PROPS as never })) as unknown as Ui
+      expect(viewOf((await ui.drawn()) as Node)).toEqual(EVEN)
+      await w.clock.advance(PREVIEW_HOLD_MS - 1)
+      expect(viewOf((await ui.drawn()) as Node)).toEqual(EVEN)
+      await w.clock.advance(1)
+      expect(viewOf((await ui.drawn()) as Node)).toEqual(firstChange)
+      await w.clock.advance(loop - PREVIEW_HOLD_MS)
+      expect(viewOf((await ui.drawn()) as Node)).toEqual(EVEN)
+    })
+
+    test(`under desktopAnimation ${variant}: the loop's timer stops while no pane is shown and starts again with the pane`, MODE, async ($, on) => {
+      const pane = { isUp: false, isShown: true }
+      let periods = 0
+      const { ui, w } = await mounted($, on, {}, FONT_ROOM_PROPS, pane, () =>
+        on('clock.every', { ms: tick } as never, (async ($$: unknown, e: unknown, next: (e: unknown) => unknown) => {
+          periods++
+          return next(e)
+        }) as never),
+      )
+      let shown = ui
+      await w.clock.advance(PREVIEW_HOLD_MS)
+      expect(viewOf((await shown.drawn()) as Node)).toEqual(firstChange)
+      expect(periods).toBeGreaterThan(0)
+      // Hidden behind another pane, then closed: at most the period already asked for comes.
+      for (const hide of [() => (pane.isShown = false), () => ((pane.isUp = false), (pane.isShown = true))]) {
+        hide()
+        await w.clock.advance(tick)
+        periods = 0
+        await w.clock.advance(Math.max(3000, 2 * tick))
+        expect(periods).toBe(0)
+        // Shown again: the next drawing starts the loop from its start.
+        pane.isUp = true
+        pane.isShown = true
+        await shown.unmount()
+        const back = (await $.ui.mount({ plugin: 'session-control', surface: 'desktop', component: 'Pane', requestId: 'session-control', props: FONT_ROOM_PROPS as never })) as unknown as Ui
+        expect(viewOf((await back.drawn()) as Node)).toEqual(EVEN)
+        await w.clock.advance(PREVIEW_HOLD_MS)
+        expect(periods).toBeGreaterThan(0)
+        expect(viewOf((await back.drawn()) as Node)).toEqual(firstChange)
+        shown = back
+      }
+    })
+
+    test(`under desktopAnimation ${variant}: each period's dispatch late, the frames still follow the clock and one loop lasts ${loop} ms`, MODE, async ($, on) => {
+      const late = tick / 2
+      const period = tick + late
+      // Each period's dispatch answers `late` milliseconds after it was asked, as on an engine with dispatch latency.
+      const { ui, w } = await mounted($, on, {}, FONT_ROOM_PROPS, { isUp: false, isShown: true }, mocked =>
+        on('clock.every', { ms: tick } as never, (async ($$: unknown, e: unknown, next: (e: unknown) => unknown) => {
+          await mocked().clock.sleep(late)
+          return next(e)
+        }) as never),
+      )
+      let at = 0
+      while (at + period <= 2 * loop + PREVIEW_HOLD_MS) {
+        await w.clock.advance(period)
+        at += period
+        expect([at, viewOf((await ui.drawn()) as Node)]).toEqual([at, loopView(at, schedule)])
+      }
     })
   }
 })

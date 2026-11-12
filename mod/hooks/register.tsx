@@ -147,7 +147,6 @@ import {
   collapseStart,
   expandStart,
   previewLoopAt,
-  previewLoopMs,
   PREVIEW_HOLD_MS,
   DESKTOP_ANIMATION_DEFAULT,
   desktopRowGap,
@@ -393,9 +392,17 @@ const DISPLAY_TICK_MS = 1000
  */
 let liveAnimation: SectionAnimation | null = null
 let animationTimer: { cancel: () => void } | undefined
-/** The desktopPreview `animate` loop's timer and the milliseconds it has run, while the panel is shown; undefined when none runs. */
+/**
+ * The desktopPreview `animate` loop's timer and the clock time its loop started at, while the panel is shown; undefined
+ * when none runs. `isPreviewLoopWanted`: the pane's last drawing drew the loop, so the poll starts it again once the
+ * panel is shown again.
+ */
 let previewLoopTimer: { cancel: () => void } | undefined
-let previewLoopMsRun = 0
+let previewLoopStartMs = 0
+let isPreviewLoopWanted = false
+/** A start of the loop under way (ensurePreviewLoop), and the count of starts and stops, so a start overtaken while it waited for the panes and the clock drops itself. */
+let previewLoopPending: Promise<void> | undefined
+let previewLoopGeneration = 0
 /** The loop's frame drawn now (previewLoopAt); the `previewLoop` atom mirrors it, written only when it changes. */
 let previewLoopFrame: { expanded: ExpandableId | null; animation: SectionAnimation | null } = { expanded: null, animation: null }
 let lastError: string | undefined
@@ -1805,6 +1812,7 @@ function tick($: EngineInterface): void {
   // A panel shown again (after another pane in front of it, or a reload), or one whose session rows are in view again,
   // gets its display tick back here.
   if (displayTick === undefined) void armDisplayTick($)
+  void ensurePreviewLoop($)
   if (!isTracing) {
     void refresh($, undefined, true)
     void refreshWatch($)
@@ -1864,28 +1872,55 @@ async function finishAnimation($: EngineInterface): Promise<void> {
 /**
  * Starts the desktopPreview `animate` loop (previewLoopAt) from its start, while the panel is shown: a timer at the
  * animation's step (at the hold under desktopAnimation `off`) that writes the `previewLoop` atom when the frame changes.
- * Only the `sections` value draws it.
+ * The frame comes from the clock's time since the start, not from the count of periods, so a loop lasts its
+ * previewLoopMs whatever each period's dispatch adds. The timer ends itself once the panel is hidden or closed (the
+ * pane's next drawing or the poll starts it again: ensurePreviewLoop). Only the `sections` value draws it.
  */
 async function armPreviewLoop($: EngineInterface): Promise<void> {
   stopPreviewLoop()
   if (config.desktopPreview !== 'animate' || config.desktopPaneScroll !== 'sections') return
+  const generation = previewLoopGeneration
+  const isShown = await isPanelShown($)
+  const startMs = await $.clock.now()
+  // A later start, or a stop, while this one waited: that one decides.
+  if (generation !== previewLoopGeneration || !isShown) return
   const schedule = animationSchedule(config.desktopAnimation)
   const tick = schedule?.ms ?? PREVIEW_HOLD_MS
-  const loopMs = previewLoopMs(schedule)
-  previewLoopTimer = $.clock.every(tick, () => {
-    previewLoopMsRun = (previewLoopMsRun + tick) % loopMs
-    const frame = previewLoopAt(previewLoopMsRun, schedule)
-    if (isSame(frame, previewLoopFrame)) return
-    previewLoopFrame = frame
-    void update($, previewLoop, () => frame)
-  })
+  previewLoopStartMs = startMs
+  const timer = $.clock.every(tick, () => void previewLoopStep($, timer, schedule))
+  previewLoopTimer = timer
   await update($, previewLoop, () => previewLoopFrame)
 }
 
+/** One period of the preview loop: ended once the panel is not shown, else the frame of the time since its start. */
+async function previewLoopStep($: EngineInterface, timer: { cancel: () => void }, schedule: AnimationSchedule | undefined): Promise<void> {
+  if (!(await isPanelShown($))) {
+    if (previewLoopTimer === timer) stopPreviewLoop()
+    else timer.cancel()
+    return
+  }
+  if (previewLoopTimer !== timer) return
+  const frame = previewLoopAt((await $.clock.now()) - previewLoopStartMs, schedule)
+  if (previewLoopTimer !== timer || isSame(frame, previewLoopFrame)) return
+  previewLoopFrame = frame
+  await update($, previewLoop, () => frame)
+}
+
+/** Starts the preview loop when the pane drew it and none runs or is being started, however the pane came to be shown. */
+async function ensurePreviewLoop($: EngineInterface): Promise<void> {
+  if (!isPreviewLoopWanted || previewLoopTimer !== undefined || previewLoopPending !== undefined) return
+  const pending = armPreviewLoop($).finally(() => {
+    if (previewLoopPending === pending) previewLoopPending = undefined
+  })
+  previewLoopPending = pending
+  await pending
+}
+
 function stopPreviewLoop(): void {
+  previewLoopGeneration++
   previewLoopTimer?.cancel()
   previewLoopTimer = undefined
-  previewLoopMsRun = 0
+  previewLoopStartMs = 0
   previewLoopFrame = { expanded: null, animation: null }
 }
 
@@ -3138,6 +3173,7 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
     await $.ui.close({ id: PANE })
     stopDisplayTick()
     stopPreviewLoop()
+    isPreviewLoopWanted = false
     await finishAnimation($)
     await update($, selected, () => null)
     await update($, expanded, () => null)
@@ -3146,6 +3182,9 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
     trace($, 'panel', { isShown: false })
     return { text: 'Session-control panel hidden, session-control stays on.' }
   }
+  // A pane the engine's close mark closed during an animation or a preview loop: the new one starts on neither.
+  stopPreviewLoop()
+  await finishAnimation($)
   await refresh($)
   // Each panel starts with no section expanded and every queue group collapsed, also after the engine's close mark closed the last one.
   await update($, expanded, () => null)
@@ -3277,7 +3316,9 @@ export const register: Register = (on, options) => {
   liveAnimation = null
   animationTimer = undefined
   previewLoopTimer = undefined
-  previewLoopMsRun = 0
+  previewLoopStartMs = 0
+  isPreviewLoopWanted = false
+  previewLoopPending = undefined
   previewLoopFrame = { expanded: null, animation: null }
   isDirOptionSet = String(options.orchestratorDir ?? '') !== ''
   config = {
@@ -3664,6 +3705,12 @@ export const register: Register = (on, options) => {
     // The `animate` preview: the section expanded and the animation step drawn come from its loop (armPreviewLoop).
     const isLoopDrawn = previewBase !== undefined && config.desktopPreview === 'animate'
     if (isLoopDrawn) await read($, previewLoop)
+    // The loop runs whenever the pane draws it, also a pane shown without the command (one already open after a reload,
+    // or opened from the engine's own controls).
+    if (isLoopDrawn) {
+      isPreviewLoopWanted = true
+      void ensurePreviewLoop($)
+    }
     const preview = isLoopDrawn && previewBase !== undefined ? { ...previewBase, expanded: previewLoopFrame.expanded } : previewBase
     const liveSnap = await read($, snapshot)
     const columns = e.props.bodyColumns
