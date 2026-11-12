@@ -21,6 +21,18 @@ const GUARD_MS = 4000
  * FAMILY_MS (the pattern quotedSpans replaces took 458 s on such a line of curly opening quotes).
  */
 const QUOTE_MS = 2000
+/**
+ * The time of a test that measures against `bound`: three times the bound, so a run over the bound is measured once more
+ * within the test's time (the kit's default of 5000 ms is over before the second run of a 4000 ms bound can end).
+ */
+const retryTime = (bound: number) => ({ timeoutMs: 3 * bound })
+/**
+ * The whole guard's bound on the two 1 MB prompts of stray fence lines and describe blocks, each read three ways and one
+ * building a refusal of 30000 lines: five times the slowest single run measured with the machine's load under 3 at its
+ * start (3.2 s), rounded up to a whole second, the ratio of GUARD_MS to the whole guard's time alone. A guard whose work
+ * grew with the square of the line would take minutes here.
+ */
+const READINGS_MS = 16_000
 
 const repeat = (unit: string, length: number) => unit.repeat(Math.ceil(length / unit.length)).slice(0, length)
 
@@ -138,16 +150,16 @@ describe('the sign-off guard on 1 MB lines: each family of its patterns within t
     // No run of `a.`: the secret scan's url pattern (secrets.ts, outside the guard) reads one in time that grows with its square.
     [`the prompt lint's patterns (promptLint of a skill test): at most ${FAMILY_MS} ms on each shape`, 'prompt', line => promptLint(`skill test\n${line}`)],
   ]
-  for (const [name, family, run] of FAMILIES) test(name, () => expect(slowShapes(shapesOf(family), run)).toEqual({}))
+  for (const [name, family, run] of FAMILIES) test(name, retryTime(FAMILY_MS), () => expect(slowShapes(shapesOf(family), run)).toEqual({}))
 
   for (const [at, start] of ['git push origin --delete refs/heads/', 'git push origin :refs/heads/', 'git branch -d ', 'git push --force-with-lease '].entries()) {
-    test(`the block grammar (BLOCK_FORMS: the names, the remotes) after \`${start}\`: at most ${FAMILY_MS} ms on each shape`, () => {
+    test(`the block grammar (BLOCK_FORMS: the names, the remotes) after \`${start}\`: at most ${FAMILY_MS} ms on each shape`, retryTime(FAMILY_MS), () => {
       expect(slowShapes(shapesOf('forms'), line => BLOCK_FORMS[at]?.form.test(`${start}${line}`))).toEqual({})
     })
   }
 
   for (const start of ['git push --force-with-lease origin feature/', 'git push --force-with-lease origin refs/heads/bugfix/', 'git push --force-with-lease ']) {
-    test(`the leased branch form (BRANCH_LEASE_FORM: the branch, the remote) after \`${start}\`: at most ${FAMILY_MS} ms on each shape`, () => {
+    test(`the leased branch form (BRANCH_LEASE_FORM: the branch, the remote) after \`${start}\`: at most ${FAMILY_MS} ms on each shape`, retryTime(FAMILY_MS), () => {
       expect(slowShapes(shapesOf('forms'), line => BRANCH_LEASE_FORM.test(`${start}${line}`))).toEqual({})
     })
   }
@@ -160,7 +172,7 @@ describe('the sign-off guard on 1 MB lines: each family of its patterns within t
   })
 
   for (const [name, mark] of Object.entries(OPENERS)) {
-    test(`the quoted parts (quotedSpans) and the whole guard on a 1 MB line of ${name} with no closing mark, as a line and as a negating head: at most ${QUOTE_MS} ms each`, () => {
+    test(`the quoted parts (quotedSpans) and the whole guard on a 1 MB line of ${name} with no closing mark, as a line and as a negating head: at most ${QUOTE_MS} ms each`, retryTime(QUOTE_MS), () => {
       const line = mark.repeat(MB)
       const runs: Record<string, (text: string) => unknown> = {
         quotedSpans: text => quotedSpans(text),
@@ -184,7 +196,7 @@ describe('the sign-off guard on 1 MB lines: each family of its patterns within t
   }
 
   for (const name of shapesOf('guard')) {
-    test(`the whole guard (signoffLint) on a 1 MB line of ${name}: at most ${GUARD_MS} ms`, () => {
+    test(`the whole guard (signoffLint) on a 1 MB line of ${name}: at most ${GUARD_MS} ms`, retryTime(GUARD_MS), () => {
       expect(slowShapes([name], line => signoffLint(`Do it.\n${line}\nReport.`, STANDING), GUARD_MS)).toEqual({})
     })
   }
@@ -226,22 +238,22 @@ const DESCRIBE_SHAPES: Readonly<Record<string, (n: number) => string>> = {
   'comment marks on a line': n => `${repeat('<!--', n)}\n${FENCE_MARKS}describe\nx\n${FENCE_MARKS}`,
 }
 
-/** The milliseconds the whole guard takes on a prompt, measured once more when over the bound, the shorter counting. */
-function guardMs(prompt: string): number {
+/** The milliseconds the whole guard takes on a prompt, measured once more when over `bound`, the shorter counting. */
+function guardMs(prompt: string, bound = GUARD_MS): number {
   const measure = () => {
     const start = performance.now()
     signoffLint(`Do it.\n${prompt}\nReport.`, STANDING)
     return Math.round(performance.now() - start)
   }
   const first = measure()
-  return first > GUARD_MS ? Math.min(first, measure()) : first
+  return first > bound ? Math.min(first, measure()) : first
 }
 
 describe('the describe blocks on 1 MB prompts: the whole guard within the bound', () => {
   for (const [name, make] of Object.entries(DESCRIBE_SHAPES)) {
-    test(`the whole guard (signoffLint) on a 1 MB prompt of ${name}: at most ${GUARD_MS} ms`, () => expect(guardMs(make(MB))).toBeLessThanOrEqual(GUARD_MS))
+    test(`the whole guard (signoffLint) on a 1 MB prompt of ${name}: at most ${GUARD_MS} ms`, retryTime(GUARD_MS), () => expect(guardMs(make(MB))).toBeLessThanOrEqual(GUARD_MS))
   }
-  test(`the whole guard on 100000 short describe blocks, 100000 openings no line closes and fences nested 10000 deep: at most ${GUARD_MS} ms each`, () => {
+  test(`the whole guard on 100000 short describe blocks, 100000 openings no line closes and fences nested 10000 deep: at most ${GUARD_MS} ms each`, retryTime(GUARD_MS), () => {
     const counted: Record<string, string> = {
       'short blocks': Array.from({ length: 100_000 }, () => `${FENCE_MARKS}describe\nx\n${FENCE_MARKS}`).join('\n'),
       'openings': Array.from({ length: 100_000 }, () => `${FENCE_MARKS}describe`).join('\n'),
@@ -402,10 +414,10 @@ describe('the launch of a 1 MB prompt of `>`', () => {
 
 describe('the readings of a prompt with describe blocks on 1 MB prompts: the whole guard within the bound', () => {
   // A prompt of 30000 refused lines: building its refusal is main's work too; the time allows two measurements (guardMs).
-  test(`a stray fence line, a describe block and a 1 MB tail of force-pushes: at most ${GUARD_MS} ms`, { timeoutMs: 3 * GUARD_MS }, () => {
-    expect(guardMs(`Example:\n    ${FENCE_MARKS}\n${FENCE_MARKS}describe\nharmless\n${FENCE_MARKS}\n${linesOf('git push --force origin feature/x', MB)}`)).toBeLessThanOrEqual(GUARD_MS)
+  test(`a stray fence line, a describe block and a 1 MB tail of force-pushes: at most ${READINGS_MS} ms`, retryTime(READINGS_MS), () => {
+    expect(guardMs(`Example:\n    ${FENCE_MARKS}\n${FENCE_MARKS}describe\nharmless\n${FENCE_MARKS}\n${linesOf('git push --force origin feature/x', MB)}`, READINGS_MS)).toBeLessThanOrEqual(READINGS_MS)
   })
-  test(`1 MB of stray fence lines and describe blocks in turn: at most ${GUARD_MS} ms`, { timeoutMs: 3 * GUARD_MS }, () => {
-    expect(guardMs(linesOf(`Example:\n    ${FENCE_MARKS}\n${FENCE_MARKS}describe\nthe force-push class\n${FENCE_MARKS}\nForce-push the branch.`, MB))).toBeLessThanOrEqual(GUARD_MS)
+  test(`1 MB of stray fence lines and describe blocks in turn: at most ${READINGS_MS} ms`, retryTime(READINGS_MS), () => {
+    expect(guardMs(linesOf(`Example:\n    ${FENCE_MARKS}\n${FENCE_MARKS}describe\nthe force-push class\n${FENCE_MARKS}\nForce-push the branch.`, MB), READINGS_MS)).toBeLessThanOrEqual(READINGS_MS)
   })
 })
