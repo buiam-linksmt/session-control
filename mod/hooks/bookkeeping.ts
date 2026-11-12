@@ -35,6 +35,11 @@ export const QUEUE_SCHEMA = {
     id: { type: 'string', minLength: 1, description: 'Task id; every action but list needs it.' },
     title: { type: 'string' },
     status: { type: 'string', description: 'Exactly queued, running or done (the panel shows queued tasks only; running work is a session); waiting detail goes in fields.note.' },
+    project: {
+      type: 'string',
+      description:
+        'add/update: the project the task belongs to, shown as its group in the panel\'s queued work. Without it the group is the first folder of the task\'s fields.dir under the workspaces directory (the parent of the orchestrator directory; a worktree folder <project>-<purpose> counts as <project>), else General. update with an empty string removes it.',
+    },
     fields: { type: 'object', description: 'Any other fields (model, effort, dir, prompt_file, session_id, config_dir, waits_for, note).' },
   },
 } as const
@@ -223,12 +228,15 @@ export function editQueue(text: string, input: Obj): Edit {
   if (input.fields !== undefined && (input.fields === null || typeof input.fields !== 'object' || Array.isArray(input.fields))) {
     return { ok: false, error: 'fields must be an object' }
   }
-  // id, title and status have their own inputs: fields never overrides them.
-  const { id: _id, title: _title, status: _status, ...extra } = (input.fields ?? {}) as Obj
+  if (input.project !== undefined && typeof input.project !== 'string') return { ok: false, error: 'project must be a string' }
+  // id, title, status and project have their own inputs: fields never overrides them.
+  const { id: _id, title: _title, status: _status, project: _project, ...extra } = (input.fields ?? {}) as Obj
+  // The project as given (blanks around it taken off); undefined when the call gives none.
+  const project = typeof input.project === 'string' ? input.project.replace(/\s+/g, ' ').trim() : typeof _project === 'string' ? _project.replace(/\s+/g, ' ').trim() : undefined
   if (action === 'add') {
     if (at >= 0) return { ok: false, error: `task ${id} already exists` }
     if (str(input.title) === '') return { ok: false, error: 'add needs title' }
-    list.push({ id, title: str(input.title), status: str(input.status) || 'queued', ...extra })
+    list.push({ id, title: str(input.title), status: str(input.status) || 'queued', ...(project === undefined || project === '' ? {} : { project }), ...extra })
     return { ok: true, text: JSON.stringify(doc, null, 2) + '\n', note: `added ${id}` }
   }
   if (at < 0) return { ok: false, error: `no task ${id}` }
@@ -240,6 +248,8 @@ export function editQueue(text: string, input: Obj): Edit {
   const task = list[at] as Obj
   if (str(input.title) !== '') task.title = str(input.title)
   if (str(input.status) !== '') task.status = str(input.status)
+  if (project === '') delete task.project
+  else if (project !== undefined) task.project = project
   Object.assign(task, extra)
   return { ok: true, text: JSON.stringify(doc, null, 2) + '\n', note: `updated ${id}` }
 }

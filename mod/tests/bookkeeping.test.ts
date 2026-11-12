@@ -284,6 +284,47 @@ describe('list actions', () => {
     expect(listQueue('{"tasks":{}}').ok).toBe(false)
   })
 
+  test('queue_task project: add stores it (trimmed), update sets, replaces or (empty) removes it, list shows it; fields.project counts the same; a non-string is refused', () => {
+    const empty = JSON.stringify({ tasks: [{ id: 'old', title: 'Old', status: 'queued', dir: '/ws/arpa' }] })
+    const added = editQueue(empty, { action: 'add', id: 'n1', title: 'New', project: '  website  ', fields: { dir: '/ws/x' } })
+    if (!added.ok) throw new Error(added.error)
+    const tasks = () => (JSON.parse(text) as { tasks: Record<string, unknown>[] }).tasks
+    let text = added.text
+    expect(tasks()[1]).toEqual({ id: 'n1', title: 'New', status: 'queued', project: 'website', dir: '/ws/x' })
+    // Without a project nothing is stored; an existing task without one keeps working.
+    const plain = editQueue(text, { action: 'add', id: 'n2', title: 'Plain', project: '' })
+    if (!plain.ok) throw new Error(plain.error)
+    text = plain.text
+    expect('project' in (tasks()[2] as object)).toBe(false)
+    const listed = listQueue(text)
+    if (!listed.ok) throw new Error(listed.error)
+    expect(listed.text.split('\n\n')[2]).toBe(['task n1', '  title: New', '  status: queued', '  project: website', '  dir: /ws/x'].join('\n'))
+    const set = editQueue(text, { action: 'update', id: 'old', project: 'arpa' })
+    if (!set.ok) throw new Error(set.error)
+    text = set.text
+    expect(tasks()[0]?.project).toBe('arpa')
+    const viaFields = editQueue(text, { action: 'update', id: 'n2', fields: { project: ' lisa ' } })
+    if (!viaFields.ok) throw new Error(viaFields.error)
+    text = viaFields.text
+    expect(tasks()[2]?.project).toBe('lisa')
+    // The own input wins over fields.project.
+    const both = editQueue(text, { action: 'update', id: 'n2', project: 'own', fields: { project: 'field' } })
+    if (!both.ok) throw new Error(both.error)
+    text = both.text
+    expect(tasks()[2]?.project).toBe('own')
+    // An update without project leaves it; an empty one removes it.
+    const untouched = editQueue(text, { action: 'update', id: 'old', title: 'Old 2' })
+    if (!untouched.ok) throw new Error(untouched.error)
+    text = untouched.text
+    expect(tasks()[0]?.project).toBe('arpa')
+    const cleared = editQueue(text, { action: 'update', id: 'old', project: '' })
+    if (!cleared.ok) throw new Error(cleared.error)
+    text = cleared.text
+    expect('project' in (tasks()[0] as object)).toBe(false)
+    expect(editQueue(text, { action: 'update', id: 'old', project: 5 })).toEqual({ ok: false, error: 'project must be a string' })
+    expect(editQueue(text, { action: 'add', id: 'n3', title: 'T', project: ['x'] })).toEqual({ ok: false, error: 'project must be a string' })
+  })
+
   test('every action but list refuses a missing id', () => {
     for (const action of ['add', 'answer', 'close', 'hold', 'release']) expect(editOpenPoints(LISTED, { action }, '2026-10-09')).toEqual({ ok: false, error: `${action} needs id` })
     for (const action of ['add', 'update', 'remove']) expect(editQueue(TASKS, { action })).toEqual({ ok: false, error: `${action} needs id` })
