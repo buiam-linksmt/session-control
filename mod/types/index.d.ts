@@ -96,8 +96,10 @@ declare module 'claude-code' {
       boxBack: number
       /** Id of the open point whose description is open in the panel; null when none. */
       selectedPoint: string | null
-      /** The tasks of the task queue file whose status is `queued`; null when unreadable. */
-      queued: { title: string }[] | null
+      /** The tasks of the task queue file whose status is `queued`, each with the project it is grouped under; null when unreadable. */
+      queued: { title: string; project: string }[] | null
+      /** The project whose queue group is open in the panel (its tasks listed under it); null when every group is collapsed. */
+      expandedGroup: string | null
       /** Session id whose output box is open in the panel; null when none. */
       selected: string | null
       /** Section a header icon expanded to the whole docked panel; null shows the three boxes. */

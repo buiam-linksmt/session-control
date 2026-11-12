@@ -137,7 +137,7 @@ const PROBE = [
   .join('\n')
 
 /** The machine: its files and their mtimes, the writes through $.fs, every command, each helper call with its request, the files over the read cap. */
-type World = { files: Map<string, string>; mtimes: Map<string, number>; writes: string[]; runs: string[][]; calls: { op: string; request: Record<string, unknown> }[]; unreadable: Set<string> }
+type World = { files: Map<string, string>; mtimes: Map<string, number>; writes: string[]; runs: string[][]; calls: { op: string; request: Record<string, unknown> }[]; unreadable: Set<string>; listed: string[] }
 
 function world(on: On, registry: object[] = REGISTRY): World {
   const files = new Map<string, string>([
@@ -169,7 +169,7 @@ function world(on: On, registry: object[] = REGISTRY): World {
     [`${ORCH}/open-points.json`, (T0 + 10) * 1000],
     [`${ORCH}/task-queue.json.bak`, (T0 + 50) * 1000],
   ])
-  const w: World = { files, mtimes, writes: [], runs: [], calls: [], unreadable: new Set() }
+  const w: World = { files, mtimes, writes: [], runs: [], calls: [], unreadable: new Set(), listed: [] }
   const ok = (stdout = '', exitCode = 0) => ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
   mock.clock(on, { now: NOW_MS })
   machineBase(on, { HOME })
@@ -186,6 +186,13 @@ function world(on: On, registry: object[] = REGISTRY): World {
     return { value: undefined }
   })
   on('fs.exists', ($, e) => ({ value: files.has(worldPath(e.path)) }))
+  // A folder's entries, from the files under it: a name with more below it is a folder.
+  on('fs.list', ($, e) => {
+    const dir = worldPath(e.path).replace(/\/+$/, '')
+    w.listed.push(dir)
+    const names = new Set([...files.keys()].filter(key => key.startsWith(`${dir}/`)).map(key => key.slice(dir.length + 1).split('/')[0] ?? ''))
+    return { value: [...names].map(name => ({ name, kind: files.has(`${dir}/${name}`) ? 'file' : 'dir', size: 0, mtimeMs: NOW_MS, isLink: false })) as never }
+  })
   on('fs.stat', ($, e) => {
     const text = files.get(worldPath(e.path))
     if (text === undefined) throw new Error(`ENOENT ${worldPath(e.path)}`)
@@ -576,7 +583,7 @@ describe('panel_snapshot', () => {
     expect(text).toMatch(/\n {2}alive worker +a11e000c +running +opus +high +2m05s\n/)
     expect(text).toMatch(/\n {2}\(no entry\) \/m\/elsewhere +- +orphan +\? +\? +40m00s\n/)
     // Only the queued task: a running task is a session, and a done one is gone from the queue.
-    expect(text).toContain('\nQUEUED WORK\n\u2022 Queued task\n\nOPEN POINTS\n')
+    expect(text).toContain('\nQUEUED WORK (every group collapsed)\n  General (1)\n\nOPEN POINTS\n')
     expect(text).not.toContain('Running task')
     expect(text).toContain('\nOPEN POINTS\n  1. Rotate the key [redacted]\n  2. Second point')
     expect(text).not.toContain('Done task')
@@ -596,9 +603,10 @@ describe('panel_snapshot', () => {
         { ...TITLES_FIXTURE_ROW, title: '(no entry) /m/elsewhere', status: 'orphan' as const, pid: 4999, elapsedSec: 2400 },
       ],
     },
-    queue: [{ title: 'Queued task' }, { title: 'A long queued task title '.repeat(8) }],
+    queue: [{ title: 'Queued task', project: 'General' }, { title: 'A long queued task title '.repeat(8), project: 'General' }, { title: 'Other task', project: 'arpa' }],
     points: [{ id: 'p1', title: 'Rotate the key', detail: 'Found in a transcript.', recommendation: 'Rotate it.' }, { id: 'p2', title: 'Second point', detail: '', recommendation: '' }],
     selectedPoint: 'p1',
+    expandedGroup: 'General',
     log: null,
     expanded: null,
     nowMs: NOW_MS,
@@ -612,10 +620,12 @@ describe('panel_snapshot', () => {
     '  finished worker           abcdef12   finished               opus        high     5m00s',
     '  (no entry) /m/elsewhere   abcdef12   orphan                 opus        high     40m00s',
     '',
-    'QUEUED WORK',
-    '• Queued task',
-    '• A long queued task title A long queued task title A long queued task title A long queued task title A long queued',
-    '  task title A long queued task title A long queued task title A long queued task title',
+    'QUEUED WORK (the group General is expanded)',
+    '  arpa (1)',
+    '▸ General (2)',
+    '    • Queued task',
+    '    • A long queued task title A long queued task title A long queued task title A long queued task title A long',
+    '      queued task title A long queued task title A long queued task title A long queued task title',
     '',
     'OPEN POINTS',
     '▸ 1. Rotate the key',
@@ -668,11 +678,35 @@ describe('panel_snapshot', () => {
     const queue = (await call($, w, 'queue_task', { action: 'list' })).text
     expect(section(got.text, 'OPEN POINTS', '')).toBe(blocksOf({ ok: true, text: points }).join('\n\n'))
     expect(blocksOf({ ok: true, text: points }).length).toBe(3)
-    expect(section(got.text, 'QUEUED WORK', 'OPEN POINTS')).toBe(blocksOf({ ok: true, text: queue }).filter(block => block.includes('\n  status: queued')).join('\n\n'))
-    expect(section(got.text, 'QUEUED WORK', 'OPEN POINTS')).toBe(['task q1', '  title: First', '  status: queued', '  model: opus', '  effort: high', '  waits_for: licence a', '  note: two', '    lines', '', 'task q2', '  title: (untitled)', '  status: queued', '  nested: {"a":1}'].join('\n'))
+    expect(section(got.text, 'QUEUED WORK', 'OPEN POINTS')).toBe(['General (2)', ...blocksOf({ ok: true, text: queue }).filter(block => block.includes('\n  status: queued'))].join('\n\n'))
+    expect(section(got.text, 'QUEUED WORK', 'OPEN POINTS')).toBe(['General (2)', '', 'task q1', '  title: First', '  status: queued', '  model: opus', '  effort: high', '  waits_for: licence a', '  note: two', '    lines', '', 'task q2', '  title: (untitled)', '  status: queued', '  nested: {"a":1}'].join('\n'))
     expect(got.text).not.toContain('Running')
     expect(got.text).not.toContain('Held one')
     expect(got.text).not.toContain('Answered one')
+  })
+
+  test('the queued work by project group (decisions qg-1 to qg-3): collapsed rows in order of first task, General last; the workspaces directory is listed only when a task needs it; detail full lists every group with its blocks', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    // The workspaces directory is the orchestrator directory's parent: /m/work, holding the folders alpha, alpha-fix and beta.
+    for (const file of ['/m/work/alpha/README.md', '/m/work/alpha-fix/README.md', '/m/work/beta/README.md']) w.files.set(file, '')
+    w.files.set(`${ORCH}/task-queue.json`, JSON.stringify({ tasks: [{ id: 'g1', status: 'queued', title: 'No project' }, { id: 'w1', status: 'queued', title: 'In a worktree', dir: '/m/work/alpha-fix/mod' }, { id: 'b1', status: 'queued', title: 'Beta task', dir: '/m/work/beta' }, { id: 'o1', status: 'queued', title: 'Own project', project: 'gamma', dir: '/m/work/beta' }, { id: 'a1', status: 'queued', title: 'Alpha task', dir: '/m/work/alpha' }, { id: 'x1', status: 'queued', title: 'Outside', dir: '/elsewhere/beta' }, { id: 'd1', status: 'done', title: 'Done', dir: '/m/work/zeta' }] }))
+    const got = await call($, w, 'panel_snapshot')
+    expect(section(got.text, 'QUEUED WORK (every group collapsed)', 'OPEN POINTS')).toBe(['  alpha (2)', '  beta (1)', '  gamma (1)', '  General (2)'].join('\n'))
+    expect(got.text).not.toContain('In a worktree')
+    expect(w.listed).toContain('/m/work')
+    const full = await call($, w, 'panel_snapshot', { detail: 'full' })
+    expect(full.writes).toEqual([])
+    const blocks = section(full.text, 'QUEUED WORK', 'OPEN POINTS')
+    expect(blocks.split('\n').filter(line => /^\S.* \(\d+\)$/.test(line))).toEqual(['alpha (2)', 'beta (1)', 'gamma (1)', 'General (2)'])
+    expect(blocks).toContain('alpha (2)\n\ntask w1\n  title: In a worktree\n  status: queued\n  dir: /m/work/alpha-fix/mod\n\ntask a1\n')
+    expect(blocks).toContain('gamma (1)\n\ntask o1\n  title: Own project\n  status: queued\n  project: gamma\n')
+    expect(blocks).not.toContain('task d1')
+    // A queue whose tasks need no dir lookup lists nothing.
+    const listedBefore = w.listed.length
+    w.files.set(`${ORCH}/task-queue.json`, JSON.stringify({ tasks: [{ id: 'o1', status: 'queued', title: 'Own', project: 'gamma', dir: '/m/work/beta' }, { id: 'g1', status: 'queued', title: 'Bare' }] }))
+    const plain = await call($, w, 'panel_snapshot', { detail: 'full' })
+    expect(section(plain.text, 'QUEUED WORK', 'OPEN POINTS').split('\n').filter(line => /^\S.* \(\d+\)$/.test(line))).toEqual(['gamma (1)', 'General (1)'])
+    expect(w.listed.slice(listedBefore).filter(path => path === '/m/work')).toEqual([])
   })
 
   test('detail full redacts what the titles view redacts; an empty or unreadable file reads as the titles view says; the list action does not redact', { options: OPTIONS }, async ($, on) => {
@@ -746,7 +780,7 @@ describe('panel_snapshot', () => {
         const queued = tasks.filter(task => task.status === 'queued')
         // Written out from the shared readers and formatters, redacted as the panel redacts.
         expect(section(text, 'OPEN POINTS', '')).toBe(chosen.length === 0 ? 'none' : clean(chosen.map(formatPoint).join('\n\n')))
-        expect(section(text, 'QUEUED WORK', 'OPEN POINTS')).toBe(queued.length === 0 ? 'none' : clean(queued.map(formatTask).join('\n\n')))
+        expect(section(text, 'QUEUED WORK', 'OPEN POINTS')).toBe(queued.length === 0 ? 'none' : `General (${queued.length})\n\n${clean(queued.map(formatTask).join('\n\n'))}`)
         // And the list actions' own text is the head, then those blocks.
         const points = listOpenPoints(pointsText, { status: 'open' })
         const queue = listQueue(queueText)

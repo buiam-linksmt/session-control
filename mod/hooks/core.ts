@@ -630,14 +630,28 @@ export function sectionsLineRoom(columns: number): number {
   return Math.max(8, (columns - SECTIONS_ROW_RESERVE) * SECTIONS_FILL)
 }
 
-/** The `sections` view's splitter for desktopLines: a row's text wrapped by glyph widths into lines of sectionsLineRoom. */
-export function sectionsSplitter(columns: number): (text: string, hang: number) => string[] {
+/**
+ * The `sections` view's splitter for desktopLines: a row's text wrapped by glyph widths into lines of sectionsLineRoom,
+ * less the cells of an `indent` of that many blanks the lines are then drawn after.
+ */
+export function sectionsSplitter(columns: number): (text: string, hang: number, indent?: number) => string[] {
   const room = sectionsLineRoom(columns)
-  return (text, hang) => wrapCells(text, room, hang)
+  return (text, hang, indent = 0) => wrapCells(text, room - textCells(' '.repeat(Math.max(0, Math.floor(indent)))), hang)
 }
 
-/** A row of the panel as desktopLines splits it; any other field is carried to each line. */
-export type DesktopRow = { text: string; key?: string; group?: string; press?: unknown; wrap?: 'wrap' | 'truncate-end'; hang?: number }
+/** The blank a desktop row's `indent` is drawn with: a no-break space, which no surface collapses or wraps at. */
+export const DESKTOP_INDENT = '\u00A0'
+
+/** A row's text after its `indent` (DESKTOP_INDENT blanks), as the desktop draws it. */
+export function indented(text: string, indent: number | undefined): string {
+  return DESKTOP_INDENT.repeat(Math.max(0, Math.floor(indent ?? 0))) + text
+}
+
+/**
+ * A row of the panel as desktopLines splits it; any other field is carried to each line. `indent`: blanks every line of
+ * the row starts with (a queued task under its group), its text wrapped in the room left.
+ */
+export type DesktopRow = { text: string; key?: string; group?: string; press?: unknown; wrap?: 'wrap' | 'truncate-end'; hang?: number; indent?: number }
 
 /**
  * A desktop row as the lines it takes in `chars` characters (wrapText, the row's `hang`), each drawn whole
@@ -647,9 +661,10 @@ export type DesktopRow = { text: string; key?: string; group?: string; press?: u
  * point's title lines: a key ending in `:0` counts on in its place, any other takes `:<line>`. `chars` is a count of
  * characters, or a splitter (sectionsSplitter) that wraps the text by the cells its glyphs take.
  */
-export function desktopLines<R extends DesktopRow>(row: R, chars: number | ((text: string, hang: number) => string[]), section: string): R[] {
+export function desktopLines<R extends DesktopRow>(row: R, chars: number | ((text: string, hang: number, indent?: number) => string[]), section: string): R[] {
   if (row.wrap === 'truncate-end') return [row]
-  const texts = typeof chars === 'number' ? wrapText(row.text, chars, row.hang ?? 0) : chars(row.text, row.hang ?? 0)
+  const indent = Math.max(0, Math.floor(row.indent ?? 0))
+  const texts = (typeof chars === 'number' ? wrapText(row.text, chars - indent, row.hang ?? 0) : chars(row.text, row.hang ?? 0, indent)).map(text => indented(text, indent))
   const key = row.key
   if (row.press === undefined || key === undefined || texts.length === 1) return texts.map(text => ({ ...row, text, wrap: 'truncate-end' as const }))
   const group = row.group ?? `${section}:${key}`
@@ -2259,11 +2274,99 @@ export function summarizeTranscript(tail: string, maxLines: number): string[] {
 
 // --- queued work ------------------------------------------------------------
 
-export type QueuedTask = { title: string }
+/** A queued task as the panel draws it: its title and the project whose group it is listed under (projectOf). */
+export type QueuedTask = { title: string; project: string }
+
+/** The group of the queued tasks that name no project and whose dir lies under no project folder: drawn last. */
+export const GENERAL_PROJECT = 'General'
+
+/**
+ * The workspaces directory (the parent of the orchestrator directory) and the names of the folders directly under it, as
+ * a project of a task's dir is derived from them (projectFromDir); `home` expands a dir's leading `~`.
+ */
+export type Workspace = { root: string; folders: readonly string[]; home?: string }
+
+/** The parent of a directory in its own path form (`/` or `\` separators), trailing separators aside; '' at a root. */
+export function parentDir(dir: string): string {
+  const trimmed = dir.replace(/[\\/]+$/, '')
+  const at = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))
+  return at <= 0 ? '' : trimmed.slice(0, at)
+}
+
+/**
+ * The project a dir belongs to: the first folder under the workspaces directory, with a worktree suffix taken off (a
+ * folder `<project>-<purpose>` where `<project>` is another folder under the workspaces directory, the longest such when
+ * several are); undefined for a dir that is not under it, the workspaces directory itself, or no workspace known. Paths
+ * compare with `\` read as `/`, and without case when the root is a drive path (Windows).
+ */
+export function projectFromDir(dir: string, workspace: Workspace | undefined): string | undefined {
+  if (workspace === undefined) return undefined
+  const norm = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '')
+  const root = norm(workspace.root)
+  if (root === '') return undefined
+  const isFolded = /^[A-Za-z]:\//.test(root)
+  const same = (text: string) => (isFolded ? text.toLowerCase() : text)
+  const expanded = workspace.home !== undefined && /^~([\\/]|$)/.test(dir) ? workspace.home + dir.slice(1) : dir
+  const path = norm(expanded.trim())
+  if (!same(path).startsWith(same(root) + '/')) return undefined
+  const first = path.slice(root.length + 1).split('/')[0] ?? ''
+  if (first === '' || first === '.' || first === '..') return undefined
+  const base = workspace.folders.filter(one => one !== '' && same(one) !== same(first) && same(first).startsWith(same(one) + '-')).sort((a, b) => b.length - a.length)[0]
+  return base ?? first
+}
+
+/** A task's project: its own `project` field (trimmed), else the one its `dir` lies in (projectFromDir), else General. */
+export function projectOf(fields: Readonly<Record<string, unknown>>, workspace?: Workspace): string {
+  const own = typeof fields.project === 'string' ? fields.project.trim() : ''
+  if (own !== '') return own
+  const dir = typeof fields.dir === 'string' ? fields.dir : ''
+  return (dir === '' ? undefined : projectFromDir(dir, workspace)) ?? GENERAL_PROJECT
+}
+
+/** Whether a queued task of the queue's text takes its project from its dir: a dir and no project of its own. */
+export function needsWorkspace(text: string): boolean {
+  return (readTaskRecords(text) ?? []).some(task => task.status === 'queued' && typeof task.fields.dir === 'string' && task.fields.dir !== '' && !(typeof task.fields.project === 'string' && task.fields.project.trim() !== ''))
+}
 
 /** Tasks of task-queue.json whose status is exactly queued, in file order: running work is a session, not queued work. Read as the queue_task list action does. */
-export function parseQueuedWork(text: string): QueuedTask[] | null {
-  return readTaskRecords(text)?.filter(task => task.status === 'queued').map(({ title }) => ({ title })) ?? null
+export function parseQueuedWork(text: string, workspace?: Workspace): QueuedTask[] | null {
+  return readTaskRecords(text)?.filter(task => task.status === 'queued').map(({ title, fields }) => ({ title, project: projectOf(fields, workspace) })) ?? null
+}
+
+/** One group of the queued work: a project and its tasks in file order. */
+export type QueueGroup<T extends { project: string } = QueuedTask> = { project: string; tasks: T[] }
+
+/** The queued tasks grouped by project, the groups in order of their first task in the file, General last. */
+export function queueGroups<T extends { project: string }>(tasks: readonly T[]): QueueGroup<T>[] {
+  const groups = new Map<string, T[]>()
+  for (const task of tasks) {
+    const list = groups.get(task.project)
+    if (list === undefined) groups.set(task.project, [task])
+    else list.push(task)
+  }
+  const all = [...groups].map(([project, list]) => ({ project, tasks: list }))
+  return [...all.filter(one => one.project !== GENERAL_PROJECT), ...all.filter(one => one.project === GENERAL_PROJECT)]
+}
+
+/** The longest group id groupKey keeps whole: its row's hover scope `q:<id>:t` stays within the 64 characters a surface takes. */
+export const GROUP_KEY_MAX = 40
+
+/**
+ * The id a queue group's rows are keyed by (`q:<id>:0`, `q:<id>:t:0`) and its hover scope (`q:<id>:t`): the project URI
+ * encoded, or for a longer one its first 30 characters and a hash of the whole name, so a key never grows past what a
+ * surface accepts (a hover scope over 64 characters makes the surface refuse the whole tree).
+ */
+export function groupKey(project: string): string {
+  const encoded = encodeURIComponent(project)
+  if (encoded.length <= GROUP_KEY_MAX) return encoded
+  let hash = 2166136261
+  for (let i = 0; i < project.length; i++) hash = Math.imul(hash ^ project.charCodeAt(i), 16777619) >>> 0
+  return `${encoded.slice(0, 30)}~${hash.toString(16).padStart(8, '0')}`
+}
+
+/** A group's row text: the project and the number of its tasks. */
+export function groupLabel(group: { project: string; tasks: readonly unknown[] }): string {
+  return `${group.project} (${group.tasks.length})`
 }
 
 /** Lines hidden below the window after a wheel move, kept inside the history. */
@@ -2776,11 +2879,13 @@ export const PANEL_ICON_GLYPH: Record<PanelIcon, string> = { plus: '+', minus: '
 export type PreviewState = {
   snap: SessionSnapshot
   nowSec: number
-  queue: { title: string }[]
+  queue: QueuedTask[]
   points: PresentedPoint[]
   watch: { sid: string; title: string; lines: string[] } | null
   selected: string | null
   selectedPoint: string | null
+  /** The queue group shown open (its project); null: every group collapsed. */
+  expandedGroup: string | null
   expanded: ExpandableId | null
   logPage: boolean
 }
@@ -2795,15 +2900,17 @@ const previewSessions: SessionRow[] = [
   { title: 'Licence daemon audit', sid: 'c0d4e8f2-6a7b-4c8d-9e0f-2a3b4c5d6e7f', sid8: 'c0d4e8f2', model: 'haiku', effort: 'low', configDir: '/home/user/.claude', status: 'done', startedAt: PREVIEW_AT_SEC - 9000, endedAt: PREVIEW_AT_SEC - 8650, costUsd: 0.12 },
 ]
 
-const previewQueue: { title: string }[] = [
-  { title: 'Font colour variants for the section titles' },
-  { title: 'Stepped expand and collapse animation' },
-  { title: 'Light palette once Desktop exposes its theme to a plugin tree, with every tint and strip checked against the light page and text colours at the same contrast as the dark ones' },
-  { title: 'Retire the buttons scroll value' },
-  { title: 'Merge the panel style branch' },
-  { title: 'Session log use case in Desktop' },
-  { title: 'README screenshots of each variant' },
-  { title: 'Trim the drift band text' },
+const previewQueue: QueuedTask[] = [
+  { title: 'Font colour variants for the section titles', project: 'session_control' },
+  { title: 'Stepped expand and collapse animation', project: 'session_control' },
+  { title: 'Light palette once Desktop exposes its theme to a plugin tree, with every tint and strip checked against the light page and text colours at the same contrast as the dark ones', project: 'session_control' },
+  { title: 'Retire the buttons scroll value', project: 'session_control' },
+  { title: 'Group the queued work by project', project: 'session_control' },
+  { title: 'Hover light across a group\'s rows', project: 'session_control' },
+  { title: 'Merge the panel style branch', project: 'website' },
+  { title: 'Session log use case in Desktop', project: 'website' },
+  { title: 'README screenshots of each variant', project: 'website' },
+  { title: 'Trim the drift band text', project: GENERAL_PROJECT },
 ]
 
 const previewPoints: PresentedPoint[] = [
@@ -2839,6 +2946,7 @@ export function previewState(preview: DesktopPreview): PreviewState | undefined 
     watch: null,
     selected: null,
     selectedPoint: null,
+    expandedGroup: null,
     expanded: null,
     logPage: false,
   }
@@ -2846,11 +2954,13 @@ export function previewState(preview: DesktopPreview): PreviewState | undefined 
     case 'overview':
       return base
     case 'queue':
-      return { ...base, expanded: 'queue' }
+      return { ...base, expanded: 'queue', expandedGroup: previewQueue[0]?.project ?? null }
+    // The points and the log pages open the first queue group too, so the queued work exceeds its even box and its title
+    // in their strip can be pressed.
     case 'points':
-      return { ...base, expanded: 'points', selectedPoint: previewPoints[0]?.id ?? null }
+      return { ...base, expanded: 'points', selectedPoint: previewPoints[0]?.id ?? null, expandedGroup: previewQueue[0]?.project ?? null }
     case 'log':
-      return { ...base, watch: { sid: PREVIEW_SID_RUNNING, title: previewSessions[0]?.title ?? '', lines: previewLog }, selected: PREVIEW_SID_RUNNING, logPage: true }
+      return { ...base, watch: { sid: PREVIEW_SID_RUNNING, title: previewSessions[0]?.title ?? '', lines: previewLog }, selected: PREVIEW_SID_RUNNING, logPage: true, expandedGroup: previewQueue[0]?.project ?? null }
     case 'empty':
       return { ...base, snap: { at: PREVIEW_AT_SEC * 1000, rows: [] }, queue: [], points: [] }
   }

@@ -93,6 +93,14 @@ import {
   buildRows,
   nextBack,
   parseQueuedWork,
+  projectFromDir,
+  projectOf,
+  queueGroups,
+  groupLabel,
+  parentDir,
+  GENERAL_PROJECT,
+  DESKTOP_INDENT,
+  groupKey,
   pickWatched,
   summarizeTranscript,
   transcriptPath,
@@ -868,14 +876,144 @@ describe('completion summary line', () => {
 describe('panel helpers', () => {
   test('queued work keeps queued tasks in file order', () => {
     const text = JSON.stringify({ tasks: [{ status: 'queued', title: 'A' }, { status: 'done', title: 'B' }, { status: 'queued', title: 'C' }] })
-    expect(parseQueuedWork(text)).toEqual([{ title: 'A' }, { title: 'C' }])
+    expect(parseQueuedWork(text)).toEqual([{ title: 'A', project: 'General' }, { title: 'C', project: 'General' }])
     expect(parseQueuedWork('{')).toBeNull()
   })
 
   test('queued work leaves out a running task: running work is a session, only status queued is listed', () => {
     const running = JSON.stringify({ tasks: [{ status: 'running', title: 'R' }, { status: 'running (worker x)', title: 'S' }, { status: 'queued', title: 'Q' }, { status: 'Queued', title: 'T' }, { status: 'done', title: 'D' }] })
-    expect(parseQueuedWork(running)).toEqual([{ title: 'Q' }])
+    expect(parseQueuedWork(running)).toEqual([{ title: 'Q', project: 'General' }])
     expect(parseQueuedWork(JSON.stringify({ tasks: [{ status: 'running', title: 'R' }] }))).toEqual([])
+  })
+})
+
+describe('queued work grouped by project (decisions qg-1 to qg-3)', () => {
+  const WS = { root: '/ws', folders: ['session_control', 'session_control-panel-refine', 'arpa', 'a', 'a-b', 'notes.txt-x'] }
+
+  test('parentDir: the folder above, in its own separators; none at a root', () => {
+    expect(parentDir('/home/u/workspaces/session_control')).toBe('/home/u/workspaces')
+    expect(parentDir('/home/u/workspaces/session_control/')).toBe('/home/u/workspaces')
+    expect(parentDir('C:\\Users\\u\\ws\\orch')).toBe('C:\\Users\\u\\ws')
+    expect(parentDir('/orch')).toBe('')
+    expect(parentDir('')).toBe('')
+  })
+
+  test('projectFromDir: the first folder under the workspaces directory, at any depth below it', () => {
+    expect(projectFromDir('/ws/arpa', WS)).toBe('arpa')
+    expect(projectFromDir('/ws/arpa/lisa-workspace/sub/', WS)).toBe('arpa')
+    // A folder that does not exist (any more) is still the project its path names.
+    expect(projectFromDir('/ws/gone/x', WS)).toBe('gone')
+  })
+
+  test('projectFromDir: a worktree folder <project>-<purpose> is its project, taken from the folders that exist, the longest one first', () => {
+    expect(projectFromDir('/ws/session_control-panel-refine', WS)).toBe('session_control')
+    expect(projectFromDir('/ws/session_control-queue-groups/mod', WS)).toBe('session_control')
+    expect(projectFromDir('/ws/arpa-fix-login', WS)).toBe('arpa')
+    expect(projectFromDir('/ws/a-b-c', WS)).toBe('a-b')
+    expect(projectFromDir('/ws/a-c', WS)).toBe('a')
+    // No folder is its own base; without its base folder a dashed name stays whole.
+    expect(projectFromDir('/ws/a', WS)).toBe('a')
+    expect(projectFromDir('/ws/other-thing', WS)).toBe('other-thing')
+    expect(projectFromDir('/ws/session_control-panel-refine', { ...WS, folders: ['session_control-panel-refine'] })).toBe('session_control-panel-refine')
+    // Nothing is hard-coded: with no folder listed, the dashed name is the project.
+    expect(projectFromDir('/ws/session_control-panel-refine', { root: '/ws', folders: [] })).toBe('session_control-panel-refine')
+  })
+
+  test('projectFromDir: none outside the workspaces directory, for the directory itself, a lookalike prefix or no workspace', () => {
+    expect(projectFromDir('/elsewhere/arpa', WS)).toBeUndefined()
+    expect(projectFromDir('/ws', WS)).toBeUndefined()
+    expect(projectFromDir('/ws/', WS)).toBeUndefined()
+    expect(projectFromDir('/wsx/arpa', WS)).toBeUndefined()
+    expect(projectFromDir('/ws/../etc', WS)).toBeUndefined()
+    expect(projectFromDir('arpa', WS)).toBeUndefined()
+    expect(projectFromDir('/ws/arpa', undefined)).toBeUndefined()
+    expect(projectFromDir('/ws/arpa', { root: '', folders: [] })).toBeUndefined()
+  })
+
+  test('projectFromDir: a leading ~ is the home directory; a Windows root compares without case and with either separator', () => {
+    expect(projectFromDir('~/ws/arpa/x', { ...WS, root: '/home/u/ws', home: '/home/u' })).toBe('arpa')
+    expect(projectFromDir('~/ws/arpa/x', { ...WS, root: '/home/u/ws' })).toBeUndefined()
+    const win = { root: 'C:\\Users\\u\\ws', folders: ['Session_Control'] }
+    expect(projectFromDir('c:\\users\\u\\WS\\session_control-panel-refine\\mod', win)).toBe('Session_Control')
+    expect(projectFromDir('C:/Users/u/ws/arpa', win)).toBe('arpa')
+  })
+
+  test('projectOf: the own project field first (trimmed), else the dir, else General', () => {
+    expect(projectOf({ project: '  website ', dir: '/ws/arpa' }, WS)).toBe('website')
+    expect(projectOf({ project: '   ', dir: '/ws/arpa' }, WS)).toBe('arpa')
+    expect(projectOf({ project: 7, dir: '/ws/session_control-panel-refine' }, WS)).toBe('session_control')
+    expect(projectOf({ dir: '/elsewhere/x' }, WS)).toBe(GENERAL_PROJECT)
+    expect(projectOf({ dir: 3 }, WS)).toBe('General')
+    expect(projectOf({}, WS)).toBe('General')
+    expect(projectOf({ dir: '/ws/arpa' })).toBe('General')
+  })
+
+  test('parseQueuedWork: each queued task with its project', () => {
+    const text = JSON.stringify({
+      tasks: [
+        { id: 'a', status: 'queued', title: 'A', project: 'lisa-prototype' },
+        { id: 'b', status: 'queued', title: 'B', dir: '/ws/session_control-panel-refine' },
+        { id: 'c', status: 'done', title: 'C', dir: '/ws/arpa' },
+        { id: 'd', status: 'queued', title: 'D' },
+        { id: 'e', status: 'queued', title: 'E', dir: '/ws/arpa/lisa-workspace', project: '' },
+      ],
+    })
+    expect(parseQueuedWork(text, WS)).toEqual([
+      { title: 'A', project: 'lisa-prototype' },
+      { title: 'B', project: 'session_control' },
+      { title: 'D', project: 'General' },
+      { title: 'E', project: 'arpa' },
+    ])
+    expect(parseQueuedWork(text)?.map(task => task.project)).toEqual(['lisa-prototype', 'General', 'General', 'General'])
+  })
+
+  test('queueGroups: one group per project in order of its first task, the tasks in file order, General last', () => {
+    const tasks = [
+      { title: '1', project: 'General' },
+      { title: '2', project: 'beta' },
+      { title: '3', project: 'alpha' },
+      { title: '4', project: 'beta' },
+      { title: '5', project: 'General' },
+    ]
+    const groups = queueGroups(tasks)
+    expect(groups.map(one => one.project)).toEqual(['beta', 'alpha', 'General'])
+    expect(groups.map(one => one.tasks.map(task => task.title))).toEqual([['2', '4'], ['3'], ['1', '5']])
+    expect(groups.map(groupLabel)).toEqual(['beta (2)', 'alpha (1)', 'General (2)'])
+    expect(queueGroups([])).toEqual([])
+  })
+
+  test('groupKey: a project as its URI encoding up to 40 characters; a longer one its first 30 and a hash, distinct and stable', () => {
+    expect(groupKey('session_control')).toBe('session_control')
+    expect(groupKey('my project:x')).toBe('my%20project%3Ax')
+    const long = 'p'.repeat(200)
+    expect(groupKey(long)).toMatch(/^p{30}~[0-9a-f]{8}$/)
+    expect(groupKey(long)).toBe(groupKey('p'.repeat(200)))
+    expect(groupKey(long)).not.toBe(groupKey(`${'p'.repeat(199)}q`))
+    expect(`q:${groupKey(long)}:t`.length).toBeLessThanOrEqual(64)
+  })
+
+  test('desktopLines: an indent starts every line of the row with no-break spaces, the text wrapped in the room left', () => {
+    const row = { text: '\u2022 one two three four five six seven eight nine ten', hang: 2, indent: 2 }
+    const lines = desktopLines(row, 20, 'queue').map(one => one.text)
+    expect(lines.length).toBeGreaterThan(1)
+    for (const line of lines) {
+      expect(line.startsWith(DESKTOP_INDENT.repeat(2))).toBe(true)
+      expect(line.length).toBeLessThanOrEqual(20)
+    }
+    expect(lines[0]).toBe(`${DESKTOP_INDENT.repeat(2)}\u2022 one two three`)
+    expect(lines[1]?.startsWith(`${DESKTOP_INDENT.repeat(2)}  `)).toBe(true)
+    // The sections splitter leaves the indent's room too; no indent draws as before.
+    const split = desktopLines(row, sectionsSplitter(40), 'queue').map(one => one.text)
+    expect(split.every(line => line.startsWith(DESKTOP_INDENT.repeat(2)))).toBe(true)
+    expect(desktopLines({ text: 'plain', hang: 2 }, 20, 'queue').map(one => one.text)).toEqual(['plain'])
+  })
+
+  test('previewState: the sample tasks carry projects; the queue, points and log previews open the first group, overview and empty none', () => {
+    const overview = previewState('overview')
+    expect(new Set(overview?.queue.map(task => task.project))).toEqual(new Set(['session_control', 'website', 'General']))
+    expect(overview?.expandedGroup).toBeNull()
+    expect(previewState('queue')?.expandedGroup).toBe('session_control')
+    expect([previewState('points')?.expandedGroup, previewState('log')?.expandedGroup, previewState('empty')?.expandedGroup]).toEqual(['session_control', 'session_control', null])
   })
 })
 
@@ -2342,7 +2480,7 @@ describe('the desktop panel look and preview options (decisions smp-18 to smp-23
     expect(overview).toEqual(previewState('overview'))
     expect(overview?.snap.rows.map(row => row.status)).toEqual(['alive', 'unreported', 'done'])
     expect(overview?.snap.rows.some(row => row.status === 'orphan')).toBe(false)
-    expect(overview?.queue.length).toBe(8)
+    expect(overview?.queue.length).toBe(10)
     expect(overview?.queue.some(task => task.title.length > 120)).toBe(true)
     expect(overview?.points.length).toBe(3)
     expect(overview?.points.some(point => point.detail.length > 200)).toBe(true)

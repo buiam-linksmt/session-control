@@ -7,8 +7,8 @@
 // Every answer is bounded.
 
 import type { SessionEntry, SessionRow, SessionRowStatus, SessionSnapshot } from '../types'
-import { classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, isGeneratedName, paneWidths, statusLabel, rowStatus, winPath, wrapLogLine, wrapText } from './core'
-import type { PresentedPoint, ProcFacts, QueuedTask } from './core'
+import { classifyResult, elapsedSeconds, formatAge, formatHeader, formatRow, groupLabel, isGeneratedName, paneWidths, projectOf, queueGroups, statusLabel, rowStatus, winPath, wrapLogLine, wrapText } from './core'
+import type { PresentedPoint, ProcFacts, QueuedTask, Workspace } from './core'
 import type { NewerFiles } from './host'
 import { REDACTED, redact } from './trace'
 import { formatPoint, formatTask, readPointRecords, readTaskRecords, selectPoints } from './bookkeeping'
@@ -586,6 +586,8 @@ export function panelSnapshotText(input: {
   queue: readonly QueuedTask[] | null
   points: readonly PresentedPoint[] | null
   selectedPoint: string | null
+  /** The project whose queue group is open in the panel; null or absent: every group collapsed. */
+  expandedGroup?: string | null
   /** The open log: the selected session's title and lines; null when none is open. */
   log: { title: string; lines: readonly string[] } | null
   expanded: string | null
@@ -597,7 +599,7 @@ export function panelSnapshotText(input: {
    * registry cannot be read). The open points and the queued work are then drawn as the list actions draw them, the
    * session rows get a line of their fields.
    */
-  full?: { pointsText: string; queueText: string; entries: readonly SessionEntry[] | null }
+  full?: { pointsText: string; queueText: string; entries: readonly SessionEntry[] | null; workspace?: Workspace }
 }): string {
   const { snap } = input
   if (snap === null) return 'panel_snapshot: the panel has no rows yet (the board has not gathered once).'
@@ -626,15 +628,41 @@ export function panelSnapshotText(input: {
     const lines = input.log.lines.slice(-40).flatMap(line => wrapLogLine(clean(line), width).slice(0, 2))
     out.push(...(lines.length === 0 ? ['Waiting for output.'] : lines))
   }
-  out.push('', 'QUEUED WORK')
+  // The queued work by project group as the panel draws it: one row per group, the open one marked with its tasks under
+  // it; detail full: every group with its tasks as the queue_task list action returns them.
+  const open = input.expandedGroup ?? null
+  const isOpenShown = input.full === undefined && open !== null && input.queue !== null && input.queue.some(task => task.project === open)
+  out.push('', `QUEUED WORK${input.full !== undefined ? '' : isOpenShown ? ` (the group ${clean(open)} is expanded)` : input.queue !== null && input.queue.length > 0 ? ' (every group collapsed)' : ''}`)
   if (input.full !== undefined) {
+    const workspace = input.full.workspace
     const tasks = readTaskRecords(input.full.queueText)?.filter(task => task.status === 'queued')
     if (tasks === undefined) out.push('task queue unreadable.')
     else if (tasks.length === 0) out.push('none')
-    else out.push(...fullBlocks(tasks.slice(0, MAX_ROWS).map(formatTask), tasks.length))
+    else {
+      const kept = tasks.slice(0, MAX_ROWS)
+      const groups = queueGroups(kept.map(task => ({ task, project: projectOf(task.fields, workspace) })))
+      groups.forEach((group, n) => {
+        if (n > 0) out.push('')
+        out.push(clean(groupLabel(group)), '')
+        out.push(clean(group.tasks.map(one => formatTask(one.task)).join('\n\n')))
+      })
+      if (tasks.length > MAX_ROWS) out.push(`(${tasks.length - MAX_ROWS} more not shown)`)
+    }
   } else if (input.queue === null) out.push('task queue unreadable.')
   else if (input.queue.length === 0) out.push('none')
-  else for (const task of input.queue.slice(0, MAX_ROWS)) wrapText(clean(task.title), width - 2).forEach((text, i) => out.push((i === 0 ? '• ' : '  ') + text))
+  else {
+    for (const group of queueGroups(input.queue).slice(0, MAX_ROWS)) {
+      const label = clean(groupLabel(group))
+      if (group.project !== open) {
+        const row = `  ${label}`
+        out.push(row.length > width ? `${row.slice(0, width - 1)}…` : row)
+        continue
+      }
+      wrapText(label, width - 2).forEach((text, i) => out.push((i === 0 ? '▸ ' : '  ') + text))
+      for (const task of group.tasks.slice(0, MAX_ROWS)) wrapText(clean(task.title), width - 6).forEach((text, i) => out.push((i === 0 ? '    • ' : '      ') + text))
+      if (group.tasks.length > MAX_ROWS) out.push(`    (${group.tasks.length - MAX_ROWS} more not shown)`)
+    }
+  }
   out.push('', 'OPEN POINTS')
   if (input.full !== undefined) {
     const parsed = readPointRecords(input.full.pointsText)

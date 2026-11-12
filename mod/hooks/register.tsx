@@ -128,6 +128,7 @@ import {
   desktopRowLines,
   desktopLineChars,
   desktopLines,
+  indented,
   DESKTOP_HEADER,
   boxAt,
   buttonStep,
@@ -182,6 +183,11 @@ import {
   missingPromptItems,
   parseOpenPoints,
   parseQueuedWork,
+  parentDir,
+  needsWorkspace,
+  queueGroups,
+  groupLabel,
+  groupKey,
   newRegistryEntry,
   parseRegistry,
   parseTaskNotification,
@@ -216,7 +222,7 @@ import {
   usageWarning,
 } from './licences'
 import type { Licence, LicenceScan, UsageRow, UsageSeen } from './licences'
-import type { BoxWindow, ChipLook, ComposedPrompt, DesktopButtons, DesktopIcons, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces } from './core'
+import type { BoxWindow, ChipLook, ComposedPrompt, DesktopButtons, DesktopIcons, DesktopPaneScroll, DesktopPreview, DesktopStyle, ExpandableId, PanelIcon, RetireVerdict, LaunchArgs, LaunchInput, PresentedPoint, ProcFact, ProcFacts, RegistryEdit, RunFigures, SectionBox, SectionId, TempPlaces, Workspace } from './core'
 
 const PLUGIN = 'session-control'
 const PANE = 'session-control'
@@ -253,6 +259,7 @@ const watch = atom({ plugin: 'session-control', key: 'watch' } as const, null)
 const queued = atom({ plugin: 'session-control', key: 'queued' } as const, null)
 const boxBack = atom({ plugin: 'session-control', key: 'boxBack' } as const, 0)
 const selectedPoint = atom({ plugin: 'session-control', key: 'selectedPoint' } as const, null)
+const expandedGroup = atom({ plugin: 'session-control', key: 'expandedGroup' } as const, null)
 const offsets = atom({ plugin: 'session-control', key: 'offsets' } as const, { sessions: 0, queue: 0, points: 0 })
 const tab = atom({ plugin: 'session-control', key: 'tab' } as const, 'sessions')
 const selected = atom({ plugin: 'session-control', key: 'selected' } as const, null)
@@ -1387,6 +1394,28 @@ async function readQueue($: EngineInterface): Promise<string | null | undefined>
   return (await $.fs.exists(path).catch(() => true)) ? null : undefined
 }
 
+/** How long a listing of the workspaces directory is kept before it is read again. */
+const WORKSPACE_LIST_MS = 60_000
+
+/**
+ * The workspaces directory (the parent of the orchestrator directory) and its folders, which a queued task's project is
+ * derived from (projectFromDir). The folders are listed only when a queued task needs them (a dir and no project of its
+ * own, needsWorkspace) and kept WORKSPACE_LIST_MS; a folder that cannot be listed has none, so a dir's first folder is
+ * its project as it is. Kept for panel_snapshot's detail full.
+ */
+let lastWorkspace: (Workspace & { at: number }) | undefined
+async function readWorkspace($: EngineInterface, queueText: string): Promise<Workspace | undefined> {
+  const root = parentDir(config.orchestratorDir)
+  if (root === '' || !needsWorkspace(queueText)) return undefined
+  const nowMs = await $.clock.now()
+  if (lastWorkspace !== undefined && lastWorkspace.root === root && nowMs - lastWorkspace.at < WORKSPACE_LIST_MS) return lastWorkspace
+  const entries = await $.fs.list(root).catch(() => undefined)
+  const folders = (entries ?? []).filter(one => one.kind === 'dir' || one.isLink === true).map(one => one.name)
+  const home = await homeDir($).catch(() => undefined)
+  lastWorkspace = { root, folders, at: nowMs, ...(home === undefined || home === '' ? {} : { home }) }
+  return lastWorkspace
+}
+
 /** Reads the points and the queue into the panel's atoms; answers the first problem with those files, and their text for the notices. */
 async function loadPoints($: EngineInterface): Promise<{ problem?: string; queueText?: string; isQueueUnreadable?: boolean; pointsText?: string }> {
   const text = await $.fs.read(orchPath('open-points.json')).catch(() => undefined)
@@ -1394,8 +1423,11 @@ async function loadPoints($: EngineInterface): Promise<{ problem?: string; queue
   const list: PresentedPoint[] | null = parsed.ok ? parsed.points : null
   if (!isSame(await read($, points), list)) await update($, points, () => list)
   const queueRead = await readQueue($)
-  const queue = parseQueuedWork(queueRead ?? '')
+  const queue = parseQueuedWork(queueRead ?? '', await readWorkspace($, queueRead ?? ''))
   if (!isSame(await read($, queued), queue)) await update($, queued, () => queue)
+  // The expanded group closes once no queued task is in it any more.
+  const open = await read($, expandedGroup)
+  if (open !== null && !(queue ?? []).some(task => task.project === open)) await update($, expandedGroup, () => null)
   return {
     ...(parsed.ok ? {} : { problem: parsed.error }),
     ...(typeof queueRead === 'string' ? { queueText: queueRead } : {}),
@@ -2556,9 +2588,10 @@ async function panelSnapshot($: EngineInterface, asked: unknown) {
           entries: registryEntries(await readRegistryText($)),
         }
       : undefined
-  const [snap, queue, list, sel, view, pointSel, exp] = await Promise.all([read($, snapshot), read($, queued), read($, points), read($, selected), read($, watch), read($, selectedPoint), read($, expanded)])
+  const workspace = full === undefined ? undefined : await readWorkspace($, full.queueText)
+  const [snap, queue, list, sel, view, pointSel, exp, group] = await Promise.all([read($, snapshot), read($, queued), read($, points), read($, selected), read($, watch), read($, selectedPoint), read($, expanded), read($, expandedGroup)])
   const log = sel !== null && view !== null ? { title: view.title, lines: view.lines } : null
-  return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, log, expanded: log === null ? exp : null, nowMs: await $.clock.now(), ...(polledAt === undefined ? {} : { polledAt }), ...(full === undefined ? {} : { full }) }) }
+  return { result: panelSnapshotText({ snap, queue, points: list, selectedPoint: pointSel, expandedGroup: group, log, expanded: log === null ? exp : null, nowMs: await $.clock.now(), ...(polledAt === undefined ? {} : { polledAt }), ...(full === undefined ? {} : { full: { ...full, ...(workspace === undefined ? {} : { workspace }) } }) }) }
 }
 
 /**
@@ -2988,13 +3021,15 @@ async function togglePanel($: EngineInterface): Promise<{ text: string }> {
     await update($, selected, () => null)
     await update($, expanded, () => null)
     await update($, logPage, () => false)
+    await update($, expandedGroup, () => null)
     trace($, 'panel', { isShown: false })
     return { text: 'Session-control panel hidden, session-control stays on.' }
   }
   await refresh($)
-  // Each panel starts with no section expanded, also after the engine's close mark closed the last one.
+  // Each panel starts with no section expanded and every queue group collapsed, also after the engine's close mark closed the last one.
   await update($, expanded, () => null)
   await update($, logPage, () => false)
+  await update($, expandedGroup, () => null)
   const opened = await $.ui.open({ id: PANE, title: 'Session control' })
   const shownSec = Math.floor((await $.clock.now()) / 1000)
   await update($, now, () => shownSec)
@@ -3516,11 +3551,12 @@ export const register: Register = (on, options) => {
       read($, expanded),
       read($, now),
       read($, logPage),
+      read($, expandedGroup),
     ])
-    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState, nowSec, isLogPageState] =
+    const [view, sel, queue, list, back, pointSel, offs, activeTab, expandedState, nowSec, isLogPageState, groupOpen] =
       preview === undefined
         ? live
-        : ([preview.watch, preview.selected, preview.queue, preview.points, 0, preview.selectedPoint, { sessions: 0, queue: 0, points: 0 }, 'sessions', preview.expanded, preview.nowSec, preview.logPage] as typeof live)
+        : ([preview.watch, preview.selected, preview.queue, preview.points, 0, preview.selectedPoint, { sessions: 0, queue: 0, points: 0 }, 'sessions', preview.expanded, preview.nowSec, preview.logPage, preview.expandedGroup] as typeof live)
     // A press of the panel's own state (open a log, expand, select, scroll): nothing in a preview.
     const inert = <A extends unknown[]>(press: (...args: A) => unknown) => (preview === undefined ? press : () => undefined)
     const width = Math.max(20, columns - 4)
@@ -3578,7 +3614,8 @@ export const register: Register = (on, options) => {
     drawnSessions = undefined
     // `rowIndex`: the session row (snap.rows) a line of the sessions box belongs to.
     // `hang`: the blanks a desktop row's wrapped lines after its first start with (under the text after a bullet).
-    type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end'; rowIndex?: number; hang?: number }
+    // `indent`: the blanks every desktop line of the row starts with (desktopLines; a task under its queue group).
+    type PRow = { text: string; key?: string; group?: string; press?: () => unknown; dim?: boolean; bold?: boolean; color?: 'warning'; wrap?: 'wrap' | 'truncate-end'; rowIndex?: number; hang?: number; indent?: number }
     // Rows as drawn: free text from files (a transcript's lines, a title, an entry) with no terminal control (plainText),
     // since a Text or a Button label holding a control character but tab and line feed makes every surface refuse the
     // whole tree, and the pane then draws nothing. Applied before a row is counted, split or wrapped.
@@ -3619,6 +3656,8 @@ export const register: Register = (on, options) => {
       await update($, logPage, () => false)
     })
     const togglePoint = (id: string) => inert(() => update($, selectedPoint, current => (current === id ? null : id)))
+    // A queue group's row: expands the group, or closes it when it is the one open; one group is open at a time.
+    const toggleGroup = (project: string) => inert(() => update($, expandedGroup, current => (current === project ? null : project)))
     // A pressable row's label is padded to `fill`, its column's width: the Button is as wide as its label, so the
     // pointer's light spans the row and not only its text. A session row is padded in cells (cellWidth), so a title with
     // wide characters does not make its label wider than the box (the Button would wrap it onto a second line).
@@ -3754,7 +3793,7 @@ export const register: Register = (on, options) => {
           {rows.map((r, i) =>
             r.press === undefined ? (
               <Text bold={r.bold} dimColor={r.dim} color={r.color} wrap="wrap">
-                {r.text}
+                {indented(r.text, r.indent)}
               </Text>
             ) : (
               deskRowEl(r, r.group ?? `${id}:${i}`)
@@ -3819,7 +3858,7 @@ export const register: Register = (on, options) => {
       const box = evenBoxes.find(one => one.id === id) as SectionBox
       const uncapped = <T,>(items: readonly T[]) => ({ shown: [...items], more: 0 })
       const [fixedIn, bodyIn] =
-        id === 'sessions' ? [[...warningRow, ...headerRows], sessionRowsOf(uncapped(snap.rows))] : id === 'queue' ? [[], queueRowsOf(uncapped(queue ?? []))] : [[], pointRowsOf(uncapped(list ?? []))]
+        id === 'sessions' ? [[...warningRow, ...headerRows], sessionRowsOf(uncapped(snap.rows))] : id === 'queue' ? [[], queueRowsOf(uncapped)] : [[], pointRowsOf(uncapped(list ?? []))]
       const { fixed, body } = sectionLines(id, fixedIn, bodyIn)
       return sectionFit(box.height, fixed.length, body.length).more > 0
     }
@@ -3984,16 +4023,40 @@ export const register: Register = (on, options) => {
     const headerRows: PRow[] = isDesktop ? DESKTOP_HEADER.map(text => ({ text, dim: true })) : [{ text: '  ' + formatHeader(width - 2, widths), dim: true }]
     const sessionsBlock = (isPlain = false) => block('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows, offs.sessions, false, isPlain)
     const sessionsPage = () => pageBlock('sessions', 'SESSIONS', [...warningRow, ...headerRows], sessionRows)
-    const queueRowsOf = (queueShown: Shown<NonNullable<typeof queue>[number]>): PRow[] =>
-      queue === null
-        ? [{ text: 'task queue unreadable.', dim: true }]
-        : queue.length === 0
-          ? [{ text: 'none', dim: true }]
-          : isDesktop
-            ? [...queueShown.shown.map(task => ({ text: '\u2022 ' + task.title, hang: 2 })), ...moreRow(queueShown.more)]
-            : queue.flatMap(task =>
-                wrapText(task.title, width - 2).map((text, i) => ({ text: (i === 0 ? '\u2022 ' : '  ') + text })),
-              )
+    // The queued work as one row per project group (queueGroups), each `<project> (<tasks>)`; the open group (one at a
+    // time, groupOpen) marked and bold as a selected open point, its tasks under it as the bullets of before, indented two
+    // blanks further. `cap` keeps a view's part of a list (the groups, and the open group's tasks): capped or every item.
+    const queueRowsOf = (cap: <T>(items: readonly T[]) => Shown<T>): PRow[] => {
+      if (queue === null) return [{ text: 'task queue unreadable.', dim: true }]
+      if (queue.length === 0) return [{ text: 'none', dim: true }]
+      const groupsShown = cap(queueGroups(queue))
+      return [
+        ...groupsShown.shown.flatMap(group => {
+          const id = groupKey(group.project)
+          const press = toggleGroup(group.project)
+          const label = groupLabel(group)
+          if (group.project !== groupOpen) {
+            if (isDesktop) return [{ text: label, key: `q:${id}:0`, press }]
+            const row = `  ${label}`
+            return [{ text: row.length > width ? row.slice(0, width - 1) + '\u2026' : row, key: `q:${id}:0`, press }]
+          }
+          const tasks = cap(group.tasks)
+          if (isDesktop) {
+            return [
+              { text: `\u25B8 ${label}`, key: `q:${id}:t:0`, group: `q:${id}:t`, press, bold: true, hang: 2 },
+              ...tasks.shown.map(task => ({ text: '\u2022 ' + task.title, hang: 2, indent: 2 })),
+              ...moreRow(tasks.more).map(r => ({ ...r, indent: 2 })),
+            ]
+          }
+          // Rows of one block share a hover scope: hovering any line of the group's title lights them together.
+          const lines: PRow[] = []
+          wrapText(label, width - 2).forEach((text, i) => lines.push({ text: (i === 0 ? '\u25B8 ' : '  ') + text, key: `q:${id}:t:${i}`, group: `q:${id}:t`, press, bold: true }))
+          for (const task of tasks.shown) wrapText(task.title, width - 6).forEach((text, i) => lines.push({ text: (i === 0 ? '    \u2022 ' : '      ') + text }))
+          return [...lines, ...moreRow(tasks.more).map(r => ({ ...r, text: '    ' + r.text }))]
+        }),
+        ...moreRow(groupsShown.more),
+      ]
+    }
     const pointRowsOf = (pointsShown: Shown<NonNullable<typeof list>[number]>): PRow[] =>
       list === null
         ? [{ text: 'open points unreadable.', dim: true }]
@@ -4026,7 +4089,7 @@ export const register: Register = (on, options) => {
               body.forEach(text => lines.push({ text: '    ' + text, dim: true }))
               return lines
             }), ...moreRow(pointsShown.more)]
-    const queueRows = queueRowsOf(capped(queue ?? [], 'first'))
+    const queueRows = queueRowsOf(<T,>(items: readonly T[]) => capped(items, 'first'))
     const pointRows = pointRowsOf(capped(list ?? [], 'first'))
     if (isLogOpen && view !== null) {
       // The desktop ends each log line at its own width: one row per line, so the newest lines stay in the box.
