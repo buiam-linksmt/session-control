@@ -7,6 +7,7 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { buttonLook, fontLook, groupKey, PANEL_LOOKS, RULES_BLOCK, missingPromptItems, parseProcFacts, parseRegistry, probeArgs, rowStatus } from '../hooks/core'
+import { signoffLint } from '../hooks/lint'
 import { auditFindings } from '../hooks/audit'
 import { isRegistrySound } from '../hooks/notices'
 import { TRACE_MAX_BYTES, localIso } from '../hooks/trace'
@@ -183,6 +184,7 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     }
     if (path === '/work/orch/CLAUDE.md') return '# Role: Session Orchestrator\n'
     if (path === '/work/new/thin.md') return 'Just do the work.'
+    if (path === '/work/new/forced.md') return 'Goal: tidy the parser. Wait in the foreground. Report git status -sb. No AI attribution in commits.\nRebase on main, then force-push the branch.\n'
     if (path === `${ORCH_DIR}/task-queue.json`) return QUEUE.text
     // The queued-work groups' worktree folder (WORKSPACES): its .git is a file pointing into alpha's .git/worktrees.
     if (path === '/fixture/workspaces/alpha-panel-refine/.git') return 'gitdir: /fixture/workspaces/alpha/.git/worktrees/alpha-panel-refine\n'
@@ -479,7 +481,7 @@ describe('tool surface', () => {
     // The first six as they were; later tools come after them.
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     // The whole tool surface in one pin: it moves only on purpose (each past move and its old value is in git log).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('19728:e84a2ed2')
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('19900:e1f52e89')
   })
 
   test('the open_point and queue_task descriptions say the list action does not redact', { options: OPTIONS }, async ($, on) => {
@@ -3047,6 +3049,130 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
       const unknown = await launchTool($, { resume_sid: '99999999-0000-4000-8000-000000000009', prompt: FULL, dir: '/work/new', model: 'opus', effort: 'high', title: 't' })
       expect(String(unknown.deny)).toBe('session-control: no registry entry for 99999999-0000-4000-8000-000000000009')
     })
+  })
+})
+
+// The sign-off guard reads the prompt as given (README, Sign-off guard; decision gab-1): the section's block and the
+// rules block the mod appends after it are never read, so a decision that quotes a refused phrase refuses no launch;
+// the same phrase in the prompt body, under a body line that imitates the section's title, or in a prompt_file given
+// alone is refused as before, on a fresh launch and on a resume alike.
+describe('launch_worker: the sign-off guard reads the prompt as given, never the blocks the mod appends', () => {
+  const RUNS = `${HOME}/.claude/session-control/runs`
+  const fresh = { dir: '/work/new', model: 'opus', effort: 'high', title: 'new' }
+  const FULL = 'Goal: tidy the parser. Wait in the foreground. Report git status -sb. No AI attribution in commits.'
+  const HEADING = 'Guard unit (user, 2026-11-12)'
+  // Two phrases of the guard tests (signoff.test.ts, the prompt guard): the force-push words and a command shape.
+  const WORDS = 'Rebase on main, then force-push the branch.'
+  const SHAPE = 'Then git reset --hard origin/main.'
+  const DECISIONS_TEXT = ['# Agreed decisions', '', `## ${HEADING}`, `gu-1. The guard test ${WORDS} stays as it is.`, `gu-2. ${SHAPE}`, ''].join('\n')
+  const BLOCK = `## Binding decisions (section ${HEADING})\n\ngu-1. The guard test ${WORDS} stays as it is.\ngu-2. ${SHAPE}`
+  /** The prompt file the mod wrote last, if any. */
+  const written = (w: World) => w.writes.filter(one => one.path.startsWith(`${RUNS}/`) && one.path.endsWith('.prompt.md')).at(-1)
+  const refusedFor = (deny: unknown, line: number) => {
+    expect(String(deny)).toStartWith(`session-control: refused by the sign-off guard: the prompt instructs a force-push on line ${line} as a step for the worker;`)
+    expect(String(deny)).toEndWith('; nothing was launched')
+  }
+
+  test('a section whose decisions hold refused phrases is launched with them in the prompt file; the same phrase in the body is refused', { options: OPTIONS }, async ($, on) => {
+    DECISIONS.text = DECISIONS_TEXT
+    try {
+      const w = world(on)
+      await boot($)
+      // The same phrases in the prompt body: refused, nothing written or started.
+      refusedFor((await launchTool($, { ...fresh, prompt: `${FULL}\n${WORDS}`, section: HEADING })).deny, 2)
+      expect(String((await launchTool($, { ...fresh, prompt: `${FULL}\n${SHAPE}`, section: HEADING })).deny)).toStartWith('session-control: refused by the sign-off guard: the prompt instructs reset --hard on line 2 as a step for the worker;')
+      expect(written(w)).toBeUndefined()
+      expect(w.bash.length).toBe(0)
+      // In the section's block only: launched, and the worker's prompt file holds the block whole.
+      const out = await launchTool($, { ...fresh, prompt: FULL, section: HEADING })
+      expect(out.deny).toBeUndefined()
+      expect(String(out.result)).toContain('Launched pid 7001')
+      expect(String(out.result)).not.toContain('WARNING')
+      expect(written(w)?.text).toBe(`${FULL}\n\n${BLOCK}\n`)
+      expect(String(w.bash[0]?.command)).toContain(`"$(cat '${written(w)?.path}')"`)
+    } finally {
+      DECISIONS.text = undefined
+    }
+  })
+
+  test('a body that imitates the section block\'s title line is read whole: a refused phrase under it is refused, with or without a section', { options: OPTIONS }, async ($, on) => {
+    DECISIONS.text = DECISIONS_TEXT
+    try {
+      const w = world(on)
+      await boot($)
+      const imitation = `${FULL}\n\n## Binding decisions (section ${HEADING})\n\n${WORDS}`
+      refusedFor((await launchTool($, { ...fresh, prompt: imitation })).deny, 5)
+      refusedFor((await launchTool($, { ...fresh, prompt: imitation, section: HEADING })).deny, 5)
+      // The imitation followed by a copy of the real block in the body: every line of the body is read, the copy's too.
+      expect(String((await launchTool($, { ...fresh, prompt: `${imitation}\n\n${BLOCK}`, section: HEADING })).deny)).toStartWith(
+        'session-control: refused by the sign-off guard: the prompt instructs a force-push on line 5, a force-push on line 9, reset --hard on line 10 as a step for the worker;',
+      )
+      expect(written(w)).toBeUndefined()
+      expect(w.bash.length).toBe(0)
+      // The real block, appended by the mod, is not read.
+      expect((await launchTool($, { ...fresh, prompt: FULL, section: HEADING })).deny).toBeUndefined()
+    } finally {
+      DECISIONS.text = undefined
+    }
+  })
+
+  test('the rules block the mod appends does not trip the guard, alone or after a section with refused phrases', { options: OPTIONS }, async ($, on) => {
+    // Read by the guard on its own, the rules block refuses nothing and warns of nothing.
+    expect(signoffLint(RULES_BLOCK)).toEqual({ warnings: [] })
+    expect(signoffLint(`Reply PONG.\n\n${RULES_BLOCK}\n`)).toEqual({ warnings: [] })
+    DECISIONS.text = DECISIONS_TEXT
+    try {
+      const w = world(on)
+      await boot($)
+      const out = await launchTool($, { ...fresh, prompt: 'Reply PONG.', section: HEADING })
+      expect(out.deny).toBeUndefined()
+      expect(String(out.result)).toContain('(written by the mod; section "Guard unit (user, 2026-11-12)" appended; rules block appended).')
+      expect(written(w)?.text).toBe(`Reply PONG.\n\n${BLOCK}\n\n${RULES_BLOCK}\n`)
+    } finally {
+      DECISIONS.text = undefined
+    }
+  })
+
+  test('a prompt_file given alone is read as written; extended by a section, only the file\'s own lines are read', { options: OPTIONS }, async ($, on) => {
+    DECISIONS.text = DECISIONS_TEXT
+    try {
+      const w = world(on)
+      await boot($)
+      // The file holds the force-push words on its line 2: refused, the file launched as it is never.
+      refusedFor((await launchTool($, { ...fresh, prompt_file: '/work/new/forced.md' })).deny, 2)
+      refusedFor((await launchTool($, { ...fresh, prompt_file: '/work/new/forced.md', section: HEADING })).deny, 2)
+      expect(w.bash.length).toBe(0)
+      // A file without them, extended by the section with them: launched from the mod's copy, the file untouched.
+      const out = await launchTool($, { ...fresh, prompt_file: '/work/new/thin.md', section: HEADING })
+      expect(out.deny).toBeUndefined()
+      expect(written(w)?.text).toBe(`Just do the work.\n\n${BLOCK}\n\n${RULES_BLOCK}\n`)
+      expect(w.writes.some(one => one.path === '/work/new/thin.md')).toBe(false)
+    } finally {
+      DECISIONS.text = undefined
+    }
+  })
+
+  test('a resume follows the same path: the section\'s refused phrases pass, the same phrase in the body is refused', { options: OPTIONS }, async ($, on) => {
+    const entry = { title: 'parser work', session_id: SID_UNREPORTED, name: 'w-parser-work-260920100000', config_dir: '/fixture/lic/a', cwd: '/work/new', model: 'opus', effort: 'medium', reported: false }
+    const registry = JSON.stringify(JSON.parse(REGISTRY_TEXT).map((one: { session_id?: string }) => (one.session_id === SID_UNREPORTED ? entry : one)))
+    DECISIONS.text = DECISIONS_TEXT
+    WORKER.sid = SID_UNREPORTED
+    try {
+      const w = world(on, '/fixture/lic/a\n', true, registry)
+      await boot($)
+      refusedFor((await launchTool($, { resume_sid: SID_UNREPORTED, prompt: `${FULL} Continue.\n${WORDS}`, section: HEADING })).deny, 2)
+      expect(w.bash.length).toBe(0)
+      const out = await launchTool($, { resume_sid: SID_UNREPORTED, prompt: `${FULL} Continue.`, section: HEADING })
+      expect(out.deny).toBeUndefined()
+      expect(String(out.result)).toContain('From the entry: dir, model, effort, title.')
+      const own = `${RUNS}/w-parser-work-260920100000-260921141320.prompt.md`
+      expect(written(w)).toEqual({ path: own, text: `${FULL} Continue.\n\n${BLOCK}\n` })
+      expect(String(w.bash[0]?.command)).toContain(`--resume '${SID_UNREPORTED}'`)
+      expect(String(w.bash[0]?.command)).toContain(`"$(cat '${own}')"`)
+    } finally {
+      WORKER.sid = 'abcdabcd-0000-4000-8000-000000000001'
+      DECISIONS.text = undefined
+    }
   })
 })
 

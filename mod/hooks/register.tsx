@@ -2156,13 +2156,16 @@ async function launch($: EngineInterface, given: LaunchInput) {
   // The sign-off guard (lint.ts, README Sign-off guard) refuses a prompt that instructs a force-push, a remote deletion,
   // reset --hard, a forced clean, branch -D or a forced worktree remove as a step, a skill test's too; it warns on a push
   // to main or develop. The words of a describe block are not read for a force-push; its command shapes are.
-  // A signoff block in the prompt as given (never in the section's block or the rules block appended after it) is
-  // checked against the Standing go-ahead lines of agreed-decisions.md, read only then: its lines pass, named in a warning.
+  // The sign-off guard reads the prompt as given (the text, or the prompt_file as read) and nothing the mod appends
+  // after it: the section's block and the rules block are never read for it (decision gab-1). It takes the given text
+  // itself, never the composed text cut at a heading, so a body that imitates the section's title line is read whole.
+  // A signoff block in it is checked against the Standing go-ahead lines of agreed-decisions.md, read only then: its
+  // lines pass, named in a warning. The secret scan and the size cap still read the prompt as composed.
   const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text)
-  const ownLines = (sourceText ?? '').replace(/\s+$/, '').split('\n').length
-  const standing = composed !== undefined && lint.refusal === undefined && hasSignoffBlock(composed.text, ownLines) ? await standingRead($) : undefined
+  const guarded = sourceText
+  const standing = guarded !== undefined && lint.refusal === undefined && hasSignoffBlock(guarded) ? await standingRead($) : undefined
   // A prompt the lint refused is refused for that: the sign-off guard does not read it.
-  const signoff = composed === undefined || lint.refusal !== undefined ? { warnings: [] as string[] } : signoffLint(composed.text, standing, ownLines)
+  const signoff = guarded === undefined || lint.refusal !== undefined ? { warnings: [] as string[] } : signoffLint(guarded, standing)
   const lintRefusal = lint.refusal ?? signoff.refusal
   if (lintRefusal !== undefined) {
     trace($, 'guard', { tool: 'launch_worker', isOk: false, check: lint.refusal === undefined ? 'sign-off' : 'prompt-lint', ...messageFields(lintRefusal, 'reason') })
@@ -2884,6 +2887,7 @@ async function activate($: EngineInterface): Promise<void> {
         'A fresh launch needs dir, model, effort, title and exactly one of prompt_file and prompt (inline text the mod writes to a prompt file of its own); ' +
         'a resume (resume_sid) takes dir, model, effort and title from its entry unless given. section appends a decisions section as binding; ' +
         'rules appends the standard rules block when the prompt lacks the items the guard checks. ' +
+        'The sign-off guard reads only the prompt as given (the text, or the prompt_file as read); the section block and the rules block are appended after it and never read by it. ' +
         'config_dir runs a fresh launch under a discovered licence (list_licences) instead of the licence picker.',
       inputSchema: LAUNCH_SCHEMA as unknown as Record<string, unknown>,
     })
