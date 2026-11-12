@@ -184,6 +184,8 @@ function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists = true,
     if (path === '/work/orch/CLAUDE.md') return '# Role: Session Orchestrator\n'
     if (path === '/work/new/thin.md') return 'Just do the work.'
     if (path === `${ORCH_DIR}/task-queue.json`) return QUEUE.text
+    // The queued-work groups' worktree folder (WORKSPACES): its .git is a file pointing into alpha's .git/worktrees.
+    if (path === '/fixture/workspaces/alpha-panel-refine/.git') return 'gitdir: /fixture/workspaces/alpha/.git/worktrees/alpha-panel-refine\n'
     if (path === `${ORCH_DIR}/open-points.json`) return POINTS.text
     if (path === `${ORCH_DIR}/agreed-decisions.md` && DECISIONS.text !== undefined) return DECISIONS.text
     const result = /^\/fixture\/results\/(\w+)\.json$/.exec(path)?.[1]
@@ -477,7 +479,7 @@ describe('tool surface', () => {
     // The first six as they were; later tools come after them.
     expect(w.tools.slice(0, 6).map(tool => tool.name)).toEqual(['launch_worker', 'acknowledge_workers', 'retire_workers', 'open_point', 'queue_task', 'record_decision'])
     // The whole tool surface in one pin: it moves only on purpose (each past move and its old value is in git log).
-    expect(fingerprint(JSON.stringify(w.tools))).toBe('19623:55e81613')
+    expect(fingerprint(JSON.stringify(w.tools))).toBe('19728:e84a2ed2')
   })
 
   test('the open_point and queue_task descriptions say the list action does not redact', { options: OPTIONS }, async ($, on) => {
@@ -5131,8 +5133,9 @@ describe('the queued work grouped by project (decisions qg-1 to qg-3)', () => {
   type Node = { type?: string; text?: string; props?: Record<string, unknown>; children?: (Node | string)[] }
   const PANE = 'session-control'
   const WORKSPACES = '/fixture/workspaces'
-  // The folders under the workspaces directory (the orchestrator directory's parent): projects, a worktree, a file.
-  const FOLDERS = ['session_control', 'alpha', 'alpha-panel-refine', 'beta', 'notes.md']
+  // The folders under the workspaces directory (the orchestrator directory's parent): projects, a git worktree of alpha
+  // (alpha-panel-refine, its .git file served by the world), a sibling alpha-tools with no .git file of its own, a file.
+  const FOLDERS = ['session_control', 'alpha', 'alpha-panel-refine', 'alpha-tools', 'beta', 'notes.md']
   const LONG_PROJECT = 'a-project-whose-name-runs-on-well-past-the-room-of-any-panel-row-'.repeat(3)
   const QUEUE_GROUPS = (extra: object[] = []) =>
     JSON.stringify({
@@ -5188,6 +5191,21 @@ describe('the queued work grouped by project (decisions qg-1 to qg-3)', () => {
       expect(all).not.toContain('gamma')
       // Each group row is pressable, keyed as an open point's title is.
       for (const key of ['q:alpha:0', 'q:beta:0', 'q:General:0']) expect(await ui.find({ key })).toBeDefined()
+    } finally {
+      QUEUE.text = QUEUE_TEXT
+    }
+  })
+
+  test('a folder <x>-<y> is grouped under <x> only when its .git file points into <x>\'s .git/worktrees; a sibling without one is its own project; only the folders queued tasks name have their .git read (qg-6)', { options: OPTIONS }, async ($, on) => {
+    QUEUE.text = QUEUE_GROUPS([{ id: 't1', status: 'queued', title: 'Tools one', dir: `${WORKSPACES}/alpha-tools/src` }])
+    try {
+      const { ui, w } = await open($, on, 'terminal')
+      expect((await queueOf(ui)).lines).toEqual(['  alpha (2)', '  beta (1)', '  alpha-tools (1)', '  General (2)'])
+      const gitReads = w.reads.filter(path => path.endsWith('/.git'))
+      expect(gitReads).toContain(`${WORKSPACES}/alpha-panel-refine/.git`)
+      expect(gitReads).toContain(`${WORKSPACES}/alpha-tools/.git`)
+      for (const path of gitReads) expect([`${WORKSPACES}/alpha-panel-refine/.git`, `${WORKSPACES}/alpha-tools/.git`, `${WORKSPACES}/alpha/.git`]).toContain(path)
+      expect(gitReads.filter(path => path.includes('session_control') || path.includes('beta') || path.includes('notes'))).toEqual([])
     } finally {
       QUEUE.text = QUEUE_TEXT
     }

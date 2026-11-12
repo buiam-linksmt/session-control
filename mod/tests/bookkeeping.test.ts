@@ -325,6 +325,23 @@ describe('list actions', () => {
     expect(editQueue(text, { action: 'add', id: 'n3', title: 'T', project: ['x'] })).toEqual({ ok: false, error: 'project must be a string' })
   })
 
+  test('queue_task: a non-string fields.project is refused like the project input, on add and on update, never dropped (qg-7)', () => {
+    const text = JSON.stringify({ tasks: [{ id: 'old', title: 'Old', status: 'queued', project: 'arpa' }] })
+    for (const project of [5, null, ['x'], { name: 'x' }, true]) {
+      expect(editQueue(text, { action: 'add', id: 'x', title: 't', fields: { project } })).toEqual({ ok: false, error: 'project must be a string' })
+      expect(editQueue(text, { action: 'update', id: 'old', fields: { project } })).toEqual({ ok: false, error: 'project must be a string' })
+      // A string input beside it does not hide the bad field.
+      expect(editQueue(text, { action: 'update', id: 'old', project: 'own', fields: { project } })).toEqual({ ok: false, error: 'project must be a string' })
+    }
+    // A string fields.project still counts; a missing one changes nothing.
+    const added = editQueue(text, { action: 'add', id: 'x', title: 't', fields: { project: 'lisa', dir: '/ws/x' } })
+    if (!added.ok) throw new Error(added.error)
+    expect((JSON.parse(added.text) as { tasks: Record<string, unknown>[] }).tasks[1]).toEqual({ id: 'x', title: 't', status: 'queued', project: 'lisa', dir: '/ws/x' })
+    const kept = editQueue(text, { action: 'update', id: 'old', fields: { note: 'n' } })
+    if (!kept.ok) throw new Error(kept.error)
+    expect((JSON.parse(kept.text) as { tasks: Record<string, unknown>[] }).tasks[0]?.project).toBe('arpa')
+  })
+
   test('every action but list refuses a missing id', () => {
     for (const action of ['add', 'answer', 'close', 'hold', 'release']) expect(editOpenPoints(LISTED, { action }, '2026-10-09')).toEqual({ ok: false, error: `${action} needs id` })
     for (const action of ['add', 'update', 'remove']) expect(editQueue(TASKS, { action })).toEqual({ ok: false, error: `${action} needs id` })

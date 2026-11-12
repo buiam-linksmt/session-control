@@ -95,6 +95,9 @@ import {
   parseQueuedWork,
   projectFromDir,
   projectOf,
+  queuedFolders,
+  worktreeBase,
+  workspaceFolder,
   queueGroups,
   groupLabel,
   parentDir,
@@ -887,8 +890,26 @@ describe('panel helpers', () => {
   })
 })
 
-describe('queued work grouped by project (decisions qg-1 to qg-3)', () => {
-  const WS = { root: '/ws', folders: ['session_control', 'session_control-panel-refine', 'arpa', 'a', 'a-b', 'notes.txt-x'] }
+describe('queued work grouped by project (decisions qg-1 to qg-3, qg-6)', () => {
+  // The folders under /ws and the .git of each as git writes it: a worktree's is a file pointing into its main folder's
+  // .git/worktrees; tae-playground has its own .git directory (no file text), notes has no .git at all.
+  const FOLDERS = ['session_control', 'session_control-panel-refine', 'session_control-queue-groups', 'arpa', 'arpa-fix-login', 'tae', 'tae-playground', 'notes', 'a', 'a-b', 'a-b-c']
+  const GIT_FILES: Record<string, string> = {
+    'session_control-panel-refine': 'gitdir: /ws/session_control/.git/worktrees/session_control-panel-refine\n',
+    'session_control-queue-groups': 'gitdir: /ws/session_control/.git/worktrees/session_control-queue-groups\n',
+    'arpa-fix-login': 'gitdir: ../arpa/.git/worktrees/arpa-fix-login\r\n',
+    'a-b-c': 'gitdir: /ws/a/.git/worktrees/a-b-c\n',
+  }
+  /** The workspace readWorkspace builds: the listing, and the worktree link of each folder whose .git file names one. */
+  const workspaceOf = (root: string, folders: readonly string[], files: Record<string, string>) => {
+    const base = { root, folders }
+    const worktrees = Object.fromEntries(Object.entries(files).flatMap(([name, text]) => {
+      const linked = worktreeBase(text, base, name)
+      return linked === undefined ? [] : [[name, linked]]
+    }))
+    return { ...base, worktrees }
+  }
+  const WS = workspaceOf('/ws', FOLDERS, GIT_FILES)
 
   test('parentDir: the folder above, in its own separators; none at a root', () => {
     expect(parentDir('/home/u/workspaces/session_control')).toBe('/home/u/workspaces')
@@ -901,22 +922,66 @@ describe('queued work grouped by project (decisions qg-1 to qg-3)', () => {
   test('projectFromDir: the first folder under the workspaces directory, at any depth below it', () => {
     expect(projectFromDir('/ws/arpa', WS)).toBe('arpa')
     expect(projectFromDir('/ws/arpa/lisa-workspace/sub/', WS)).toBe('arpa')
+    expect(workspaceFolder('/ws/arpa-fix-login/sub', WS)).toBe('arpa-fix-login')
     // A folder that does not exist (any more) is still the project its path names.
     expect(projectFromDir('/ws/gone/x', WS)).toBe('gone')
   })
 
-  test('projectFromDir: a worktree folder <project>-<purpose> is its project, taken from the folders that exist, the longest one first', () => {
+  test('projectFromDir: a git worktree (its .git a file pointing into another folder\'s .git/worktrees) is that folder, at any depth', () => {
+    expect(WS.worktrees).toEqual({ 'session_control-panel-refine': 'session_control', 'session_control-queue-groups': 'session_control', 'arpa-fix-login': 'arpa', 'a-b-c': 'a' })
     expect(projectFromDir('/ws/session_control-panel-refine', WS)).toBe('session_control')
     expect(projectFromDir('/ws/session_control-queue-groups/mod', WS)).toBe('session_control')
+    // A relative gitdir (git worktree --relative-paths) with a CRLF line end reads from the worktree folder.
     expect(projectFromDir('/ws/arpa-fix-login', WS)).toBe('arpa')
-    expect(projectFromDir('/ws/a-b-c', WS)).toBe('a-b')
-    expect(projectFromDir('/ws/a-c', WS)).toBe('a')
-    // No folder is its own base; without its base folder a dashed name stays whole.
-    expect(projectFromDir('/ws/a', WS)).toBe('a')
-    expect(projectFromDir('/ws/other-thing', WS)).toBe('other-thing')
-    expect(projectFromDir('/ws/session_control-panel-refine', { ...WS, folders: ['session_control-panel-refine'] })).toBe('session_control-panel-refine')
-    // Nothing is hard-coded: with no folder listed, the dashed name is the project.
-    expect(projectFromDir('/ws/session_control-panel-refine', { root: '/ws', folders: [] })).toBe('session_control-panel-refine')
+    // The link decides, not the name: a-b-c points into a, not a-b.
+    expect(projectFromDir('/ws/a-b-c', WS)).toBe('a')
+    expect(projectFromDir('/ws/session_control', WS)).toBe('session_control')
+  })
+
+  test('projectFromDir: a sibling <x>-<y> with its own .git directory, or with no .git, is its own project although <x> exists (qg-6)', () => {
+    expect(projectFromDir('/ws/tae-playground', WS)).toBe('tae-playground')
+    expect(projectFromDir('/ws/tae-playground/src', WS)).toBe('tae-playground')
+    expect(projectFromDir('/ws/tae', WS)).toBe('tae')
+    expect(projectFromDir('/ws/a-b', WS)).toBe('a-b')
+    expect(projectFromDir('/ws/notes', WS)).toBe('notes')
+    // A removed worktree is no longer listed and has no .git to read: its own name.
+    expect(projectFromDir('/ws/session_control-old-fix/mod', WS)).toBe('session_control-old-fix')
+    // Nothing is hard-coded: with no link read, a dashed name is the project.
+    expect(projectFromDir('/ws/session_control-panel-refine', { root: '/ws', folders: FOLDERS })).toBe('session_control-panel-refine')
+  })
+
+  test('worktreeBase: only a gitdir into another listed folder\'s .git/worktrees links; outside the workspaces, a submodule, itself, an unlisted folder or no gitdir line do not', () => {
+    const ws = { root: '/ws', folders: FOLDERS }
+    expect(worktreeBase('gitdir: /ws/tae/.git/worktrees/x\n', ws, 'tae-playground')).toBe('tae')
+    expect(worktreeBase('gitdir: /elsewhere/session_control/.git/worktrees/x\n', ws, 'session_control-panel-refine')).toBeUndefined()
+    expect(worktreeBase('gitdir: ../../elsewhere/arpa/.git/worktrees/x', ws, 'arpa-fix-login')).toBeUndefined()
+    expect(worktreeBase('gitdir: /wsx/arpa/.git/worktrees/x', ws, 'arpa-fix-login')).toBeUndefined()
+    expect(worktreeBase('gitdir: /ws/arpa/.git/modules/sub', ws, 'arpa-fix-login')).toBeUndefined()
+    expect(worktreeBase('gitdir: /ws/arpa/.git/worktrees/', ws, 'arpa-fix-login')).toBeUndefined()
+    expect(worktreeBase('gitdir: /ws/arpa-fix-login/.git/worktrees/x', ws, 'arpa-fix-login')).toBeUndefined()
+    expect(worktreeBase('gitdir: /ws/removed/.git/worktrees/x', ws, 'arpa-fix-login')).toBeUndefined()
+    expect(worktreeBase('', ws, 'arpa-fix-login')).toBeUndefined()
+    expect(worktreeBase('[core]\n\tbare = false\n', ws, 'arpa-fix-login')).toBeUndefined()
+    expect(worktreeBase('gitdir: /ws/arpa/.git/worktrees/x', { root: '', folders: FOLDERS }, 'arpa-fix-login')).toBeUndefined()
+    // Outside the workspaces directory the folder stays its own project.
+    expect(projectFromDir('/ws/session_control-panel-refine', workspaceOf('/ws', FOLDERS, { 'session_control-panel-refine': 'gitdir: /other/session_control/.git/worktrees/session_control-panel-refine' }))).toBe('session_control-panel-refine')
+  })
+
+  test('queuedFolders: the listed folders of the queued tasks that take their project from their dir, each once', () => {
+    const text = JSON.stringify({
+      tasks: [
+        { id: '1', status: 'queued', title: '1', dir: '/ws/tae-playground/x' },
+        { id: '2', status: 'queued', title: '2', dir: '/ws/tae-playground' },
+        { id: '3', status: 'queued', title: '3', dir: '/ws/arpa', project: 'own' },
+        { id: '4', status: 'done', title: '4', dir: '/ws/tae' },
+        { id: '5', status: 'queued', title: '5', dir: '/ws/gone' },
+        { id: '6', status: 'queued', title: '6', dir: '/elsewhere/tae' },
+        { id: '7', status: 'queued', title: '7', dir: '/ws/session_control-queue-groups/mod', project: '  ' },
+        { id: '8', status: 'queued', title: '8' },
+      ],
+    })
+    expect(queuedFolders(text, { root: '/ws', folders: FOLDERS })).toEqual(['tae-playground', 'session_control-queue-groups'])
+    expect(queuedFolders('{', { root: '/ws', folders: FOLDERS })).toEqual([])
   })
 
   test('projectFromDir: none outside the workspaces directory, for the directory itself, a lookalike prefix or no workspace', () => {
@@ -933,9 +998,10 @@ describe('queued work grouped by project (decisions qg-1 to qg-3)', () => {
   test('projectFromDir: a leading ~ is the home directory; a Windows root compares without case and with either separator', () => {
     expect(projectFromDir('~/ws/arpa/x', { ...WS, root: '/home/u/ws', home: '/home/u' })).toBe('arpa')
     expect(projectFromDir('~/ws/arpa/x', { ...WS, root: '/home/u/ws' })).toBeUndefined()
-    const win = { root: 'C:\\Users\\u\\ws', folders: ['Session_Control'] }
+    const win = workspaceOf('C:\\Users\\u\\ws', ['Session_Control', 'Session_Control-Panel-Refine', 'arpa'], { 'Session_Control-Panel-Refine': 'gitdir: C:/users/U/WS/session_control/.git/worktrees/Session_Control-Panel-Refine\r\n' })
     expect(projectFromDir('c:\\users\\u\\WS\\session_control-panel-refine\\mod', win)).toBe('Session_Control')
     expect(projectFromDir('C:/Users/u/ws/arpa', win)).toBe('arpa')
+    expect(worktreeBase('gitdir: C:\\Users\\u\\ws\\arpa\\.git\\worktrees\\x', win, 'Session_Control-Panel-Refine')).toBe('arpa')
   })
 
   test('projectOf: the own project field first (trimmed), else the dir, else General', () => {

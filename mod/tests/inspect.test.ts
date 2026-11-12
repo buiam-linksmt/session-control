@@ -687,8 +687,10 @@ describe('panel_snapshot', () => {
 
   test('the queued work by project group (decisions qg-1 to qg-3): collapsed rows in order of first task, General last; the workspaces directory is listed only when a task needs it; detail full lists every group with its blocks', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    // The workspaces directory is the orchestrator directory's parent: /m/work, holding the folders alpha, alpha-fix and beta.
-    for (const file of ['/m/work/alpha/README.md', '/m/work/alpha-fix/README.md', '/m/work/beta/README.md']) w.files.set(file, '')
+    // The workspaces directory is the orchestrator directory's parent: /m/work, holding the folders alpha, alpha-fix (a git
+    // worktree of alpha: its .git a file pointing into alpha's .git/worktrees) and beta.
+    for (const file of ['/m/work/alpha/README.md', '/m/work/alpha/.git/HEAD', '/m/work/alpha-fix/README.md', '/m/work/beta/README.md']) w.files.set(file, '')
+    w.files.set('/m/work/alpha-fix/.git', 'gitdir: /m/work/alpha/.git/worktrees/alpha-fix\n')
     w.files.set(`${ORCH}/task-queue.json`, JSON.stringify({ tasks: [{ id: 'g1', status: 'queued', title: 'No project' }, { id: 'w1', status: 'queued', title: 'In a worktree', dir: '/m/work/alpha-fix/mod' }, { id: 'b1', status: 'queued', title: 'Beta task', dir: '/m/work/beta' }, { id: 'o1', status: 'queued', title: 'Own project', project: 'gamma', dir: '/m/work/beta' }, { id: 'a1', status: 'queued', title: 'Alpha task', dir: '/m/work/alpha' }, { id: 'x1', status: 'queued', title: 'Outside', dir: '/elsewhere/beta' }, { id: 'd1', status: 'done', title: 'Done', dir: '/m/work/zeta' }] }))
     const got = await call($, w, 'panel_snapshot')
     expect(section(got.text, 'QUEUED WORK (every group collapsed)', 'OPEN POINTS')).toBe(['  alpha (2)', '  beta (1)', '  gamma (1)', '  General (2)'].join('\n'))

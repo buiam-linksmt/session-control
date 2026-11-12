@@ -2282,9 +2282,10 @@ export const GENERAL_PROJECT = 'General'
 
 /**
  * The workspaces directory (the parent of the orchestrator directory) and the names of the folders directly under it, as
- * a project of a task's dir is derived from them (projectFromDir); `home` expands a dir's leading `~`.
+ * a project of a task's dir is derived from them (projectFromDir); `home` expands a dir's leading `~`; `worktrees` maps a
+ * folder that is a git worktree of another folder there to that folder (worktreeBase), for the folders read so far.
  */
-export type Workspace = { root: string; folders: readonly string[]; home?: string }
+export type Workspace = { root: string; folders: readonly string[]; home?: string; worktrees?: Readonly<Record<string, string>> }
 
 /** The parent of a directory in its own path form (`/` or `\` separators), trailing separators aside; '' at a root. */
 export function parentDir(dir: string): string {
@@ -2293,26 +2294,81 @@ export function parentDir(dir: string): string {
   return at <= 0 ? '' : trimmed.slice(0, at)
 }
 
-/**
- * The project a dir belongs to: the first folder under the workspaces directory, with a worktree suffix taken off (a
- * folder `<project>-<purpose>` where `<project>` is another folder under the workspaces directory, the longest such when
- * several are); undefined for a dir that is not under it, the workspaces directory itself, or no workspace known. Paths
- * compare with `\` read as `/`, and without case when the root is a drive path (Windows).
- */
-export function projectFromDir(dir: string, workspace: Workspace | undefined): string | undefined {
-  if (workspace === undefined) return undefined
-  const norm = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '')
-  const root = norm(workspace.root)
-  if (root === '') return undefined
+/** A workspace's root with `\\` read as `/` and no trailing separator, and how its paths compare (without case under a drive root). */
+function workspaceRoot(workspace: Workspace): { root: string; same: (text: string) => string } {
+  const root = workspace.root.replace(/\\/g, '/').replace(/\/+$/, '')
   const isFolded = /^[A-Za-z]:\//.test(root)
-  const same = (text: string) => (isFolded ? text.toLowerCase() : text)
+  return { root, same: (text: string) => (isFolded ? text.toLowerCase() : text) }
+}
+
+/**
+ * The first folder under the workspaces directory a dir lies in, as the dir spells it; undefined for a dir that is not
+ * under it, the workspaces directory itself, or no workspace known. Paths compare with `\\` read as `/`, and without case
+ * when the root is a drive path (Windows).
+ */
+export function workspaceFolder(dir: string, workspace: Workspace | undefined): string | undefined {
+  if (workspace === undefined) return undefined
+  const { root, same } = workspaceRoot(workspace)
+  if (root === '') return undefined
   const expanded = workspace.home !== undefined && /^~([\\/]|$)/.test(dir) ? workspace.home + dir.slice(1) : dir
-  const path = norm(expanded.trim())
+  const path = expanded.trim().replace(/\\/g, '/').replace(/\/+$/, '')
   if (!same(path).startsWith(same(root) + '/')) return undefined
   const first = path.slice(root.length + 1).split('/')[0] ?? ''
-  if (first === '' || first === '.' || first === '..') return undefined
-  const base = workspace.folders.filter(one => one !== '' && same(one) !== same(first) && same(first).startsWith(same(one) + '-')).sort((a, b) => b.length - a.length)[0]
+  return first === '' || first === '.' || first === '..' ? undefined : first
+}
+
+/**
+ * The project a dir belongs to: the first folder under the workspaces directory (workspaceFolder), or, when that folder
+ * is a git worktree of another folder there (its `.git` a file whose gitdir points into that folder's `.git/worktrees`,
+ * as `worktrees` records it), that other folder. A folder with its own `.git` directory, with none, or no longer there
+ * is its own project.
+ */
+export function projectFromDir(dir: string, workspace: Workspace | undefined): string | undefined {
+  const first = workspaceFolder(dir, workspace)
+  if (first === undefined || workspace === undefined) return undefined
+  const { same } = workspaceRoot(workspace)
+  const base = Object.entries(workspace.worktrees ?? {}).find(([name]) => same(name) === same(first))?.[1]
   return base ?? first
+}
+
+/**
+ * The folder under the workspaces directory that `folder` is a git worktree of, from the text of `folder`'s `.git` file:
+ * its first line `gitdir: <path>` (a relative path read from `folder`) must name `<root>/<base>/.git/worktrees/<name>`
+ * where `<base>` is another folder of the listing; answered as the listing spells it. Undefined otherwise: a gitdir
+ * outside the workspaces directory, into a folder not listed, or not under `.git/worktrees` (a submodule's).
+ */
+export function worktreeBase(gitFile: string, workspace: Workspace, folder: string): string | undefined {
+  const { root, same } = workspaceRoot(workspace)
+  if (root === '') return undefined
+  const given = /^gitdir:(.*)$/.exec(gitFile.split(/\r?\n/)[0] ?? '')?.[1]?.trim().replace(/\\/g, '/') ?? ''
+  if (given === '') return undefined
+  const isAbsolute = given.startsWith('/') || /^[A-Za-z]:\//.test(given)
+  const parts: string[] = []
+  for (const part of (isAbsolute ? given : `${root}/${folder}/${given}`).split('/')) {
+    if (part === '..') parts.pop()
+    else if (part !== '.' && !(part === '' && parts.length > 0)) parts.push(part)
+  }
+  const path = parts.join('/')
+  if (!same(path).startsWith(same(root) + '/')) return undefined
+  const [base = '', git, worktrees, name = ''] = path.slice(root.length + 1).split('/')
+  if (git !== '.git' || worktrees !== 'worktrees' || name === '' || same(base) === same(folder)) return undefined
+  return workspace.folders.find(one => one !== '' && same(one) === same(base))
+}
+
+/**
+ * The folders of the listing that the queued tasks taking their project from their dir (needsWorkspace) lie in, each
+ * once, as the listing spells them: the only folders whose `.git` is read (worktreeBase).
+ */
+export function queuedFolders(text: string, workspace: Workspace): string[] {
+  const { same } = workspaceRoot(workspace)
+  const names = (readTaskRecords(text) ?? []).flatMap(task => {
+    const { dir, project } = task.fields
+    if (task.status !== 'queued' || typeof dir !== 'string' || dir === '' || (typeof project === 'string' && project.trim() !== '')) return []
+    const first = workspaceFolder(dir, workspace)
+    const listed = first === undefined ? undefined : workspace.folders.find(one => same(one) === same(first))
+    return listed === undefined ? [] : [listed]
+  })
+  return [...new Set(names)]
 }
 
 /** A task's project: its own `project` field (trimmed), else the one its `dir` lies in (projectFromDir), else General. */

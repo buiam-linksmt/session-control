@@ -38,7 +38,7 @@ export const QUEUE_SCHEMA = {
     project: {
       type: 'string',
       description:
-        'add/update: the project the task belongs to, shown as its group in the panel\'s queued work. Without it the group is the first folder of the task\'s fields.dir under the workspaces directory (the parent of the orchestrator directory; a worktree folder <project>-<purpose> counts as <project>), else General. update with an empty string removes it.',
+        'add/update: the project the task belongs to, shown as its group in the panel\'s queued work. Without it the group is the first folder of the task\'s fields.dir under the workspaces directory (the parent of the orchestrator directory; a git worktree folder, whose .git file points into another folder\'s .git/worktrees, counts as that folder), else General. A non-string project, as input or in fields, is refused. update with an empty string removes it.',
     },
     fields: { type: 'object', description: 'Any other fields (model, effort, dir, prompt_file, session_id, config_dir, waits_for, note).' },
   },
@@ -228,7 +228,9 @@ export function editQueue(text: string, input: Obj): Edit {
   if (input.fields !== undefined && (input.fields === null || typeof input.fields !== 'object' || Array.isArray(input.fields))) {
     return { ok: false, error: 'fields must be an object' }
   }
-  if (input.project !== undefined && typeof input.project !== 'string') return { ok: false, error: 'project must be a string' }
+  // A project given as input or in fields is a string; any other value is refused, never dropped.
+  const fieldsProject = (input.fields as Obj | undefined)?.project
+  if ((input.project !== undefined && typeof input.project !== 'string') || (fieldsProject !== undefined && typeof fieldsProject !== 'string')) return { ok: false, error: 'project must be a string' }
   // id, title, status and project have their own inputs: fields never overrides them.
   const { id: _id, title: _title, status: _status, project: _project, ...extra } = (input.fields ?? {}) as Obj
   // The project as given (blanks around it taken off); undefined when the call gives none.

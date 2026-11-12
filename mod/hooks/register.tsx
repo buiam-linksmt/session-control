@@ -185,6 +185,8 @@ import {
   parseQueuedWork,
   parentDir,
   needsWorkspace,
+  queuedFolders,
+  worktreeBase,
   queueGroups,
   groupLabel,
   groupKey,
@@ -1401,19 +1403,38 @@ const WORKSPACE_LIST_MS = 60_000
  * The workspaces directory (the parent of the orchestrator directory) and its folders, which a queued task's project is
  * derived from (projectFromDir). The folders are listed only when a queued task needs them (a dir and no project of its
  * own, needsWorkspace) and kept WORKSPACE_LIST_MS; a folder that cannot be listed has none, so a dir's first folder is
- * its project as it is. Kept for panel_snapshot's detail full.
+ * its project as it is. Within that listing's life the `.git` of each listed folder a queued task names (queuedFolders)
+ * is read once, so a worktree counts as the folder its gitdir points into (worktreeBase); a `.git` that is a directory,
+ * missing or unreadable leaves the folder its own project. Kept for panel_snapshot's detail full.
  */
-let lastWorkspace: (Workspace & { at: number }) | undefined
+let lastWorkspace: (Workspace & { at: number; read: ReadonlySet<string> }) | undefined
 async function readWorkspace($: EngineInterface, queueText: string): Promise<Workspace | undefined> {
   const root = parentDir(config.orchestratorDir)
   if (root === '' || !needsWorkspace(queueText)) return undefined
   const nowMs = await $.clock.now()
-  if (lastWorkspace !== undefined && lastWorkspace.root === root && nowMs - lastWorkspace.at < WORKSPACE_LIST_MS) return lastWorkspace
+  const kept = lastWorkspace !== undefined && lastWorkspace.root === root && nowMs - lastWorkspace.at < WORKSPACE_LIST_MS ? lastWorkspace : undefined
+  const listed = kept ?? (await listWorkspace($, root, nowMs))
+  const unread = queuedFolders(queueText, listed).filter(name => !listed.read.has(name))
+  lastWorkspace = listed
+  if (unread.length === 0) return listed
+  const sep = root.includes('/') || !root.includes('\\') ? '/' : '\\'
+  const base = root.replace(/[\\/]+$/, '')
+  const found = await Promise.all(unread.map(async name => [name, await $.fs.read(`${base}${sep}${name}${sep}.git`).catch(() => undefined)] as const))
+  const worktrees: Record<string, string> = { ...listed.worktrees }
+  for (const [name, text] of found) {
+    const linked = text === undefined ? undefined : worktreeBase(text, listed, name)
+    if (linked !== undefined) worktrees[name] = linked
+  }
+  lastWorkspace = { ...listed, worktrees, read: new Set([...listed.read, ...unread]) }
+  return lastWorkspace
+}
+
+/** A fresh listing of the workspaces directory (readWorkspace), no folder's `.git` read yet. */
+async function listWorkspace($: EngineInterface, root: string, nowMs: number): Promise<Workspace & { at: number; read: ReadonlySet<string> }> {
   const entries = await $.fs.list(root).catch(() => undefined)
   const folders = (entries ?? []).filter(one => one.kind === 'dir' || one.isLink === true).map(one => one.name)
   const home = await homeDir($).catch(() => undefined)
-  lastWorkspace = { root, folders, at: nowMs, ...(home === undefined || home === '' ? {} : { home }) }
-  return lastWorkspace
+  return { root, folders, at: nowMs, read: new Set<string>(), worktrees: {}, ...(home === undefined || home === '' ? {} : { home }) }
 }
 
 /** Reads the points and the queue into the panel's atoms; answers the first problem with those files, and their text for the notices. */
