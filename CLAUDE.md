@@ -536,7 +536,8 @@ session-control needs Node.js, every tool but `panel_snapshot` is down: tell the
 The helper files, `backups/` and the saved worker reports belong to this session alone; the user sees only
 the side panel, so whatever the panel hides is mine to keep correct. At the end of every unit run
 `audit_state` and act on its findings before reporting: the queue holds only work waiting to start: a task is
-`queued`, with its wait in `waits_for` and the detail in `note`; running work is a session and gets no task, and no
+`queued`, with its wait in `waits_for`, the detail in `note` and its `project`, which the user approves before it is
+set (propose the name, suggesting the dir name); running work is a session and gets no task, and no
 task stays for finished or dead work; no settled or stale open point stays open; decisions, registry
 entries, `backups/` and `reports/` hold nothing spent. Keep them lean: one line per fact, no duplicated state; remove
 a closed unit's queue entries with `queue_task` `remove`, move its decision section with `archive_decisions` and
