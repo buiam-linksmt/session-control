@@ -106,12 +106,14 @@ export const inboxFields = () => (WORKER.isInboxless ? {} : { name: 'w-new-26092
 // there is none).
 // probeMs: how long each Windows probe takes on the fixture's clock (0: no time). probeLateMs: each probe answers only
 // once the test has moved the fixture's clock that far (0: at once). isAliveGone: the alive worker 4101 has exited.
+// probeMs moves the clock from inside the probe's hook while the test's own advance is still running: where the probe
+// ends then depends on how fast the machine runs. A test that checks what follows the end of a probe uses probeLateMs.
 export const WINDOWS = { isMoveBroken: false, isProbeBroken: false, workerConfigDir: 'C:\\fixture\\home\\.claude', isWorkerUnplaced: false, pidFileText: '7001\r\n' as string | undefined, isWorkerHidden: false, probeMs: 0, probeLateMs: 0, isAliveGone: false }
 // Knobs of the Linux fixture: a probe that cannot run; an append that fails.
 // A trace.log of traceSize bytes is there (0: none).
-// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone, probeMs, probeLateMs: as
-// in WINDOWS; isOrphanGone: the unregistered headless claude 4999 has exited too.
-export const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeMs: 0, probeLateMs: 0 }
+// isWorkerHidden (both fixtures): the probe does not show the launched worker yet. isAliveGone, probeLateMs: as in
+// WINDOWS; isOrphanGone: the unregistered headless claude 4999 has exited too.
+export const LINUX_FIXTURE = { isProbeBroken: false, isAppendBroken: false, traceSize: 0, isWorkerHidden: false, isAliveGone: false, isOrphanGone: false, probeLateMs: 0 }
 // The registry as a real file (both fixtures): with isCurrent a read answers the text the plugin last wrote there (the
 // seed the test gave until its first write), and the probe asked for the launched worker's pid (7001, while it runs)
 // answers its A line from its sessions file, as the helper's probe and PROBE_PS1 do. Off, every read answers the seed and
@@ -242,7 +244,6 @@ export function world(on: On, pickStdout = '/fixture/lic/a\n', promptFileExists 
       PROBES.max = Math.max(PROBES.max, PROBES.inFlight)
       try {
         if (HELD.probe !== undefined) await HELD.probe
-        if (LINUX_FIXTURE.probeMs > 0) await w.clock.advance(LINUX_FIXTURE.probeMs)
         if (LINUX_FIXTURE.probeLateMs > 0) await w.clock.sleep(LINUX_FIXTURE.probeLateMs)
       } finally {
         PROBES.inFlight--

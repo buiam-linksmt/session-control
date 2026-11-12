@@ -808,21 +808,29 @@ describe('one probe at a time, the poll\'s rest and the tracking toast per episo
   test('after a probe longer than the poll interval the poll rests as long again from its end; then it probes as before', { options: TRACED }, async ($, on) => {
     const w = world(on)
     await boot($)
-    LINUX_FIXTURE.probeMs = 12_000
+    const rests = () => traceOf(w).filter(line => line.event === 'poll.skip' && Number(line.restMs) > 0).map(line => line.restMs)
+    // The probe the tick at 5 s starts answers when the test's own advance reaches 17 s: it took 12 s, over the 5 s poll.
+    LINUX_FIXTURE.probeLateMs = 12_000
     try {
       const before = probes(w)
       await w.clock.advance(5000)
-      LINUX_FIXTURE.probeMs = 0
+      LINUX_FIXTURE.probeLateMs = 0
       expect(probes(w)).toBe(before + 1)
-      const rested = traceOf(w).filter(line => line.event === 'poll.skip' && Number(line.restMs) > 0)
+      expect(PROBES.inFlight).toBe(1)
+      // The ticks at 10 s and 15 s skip a probe that is running; it ends at 17 s and the poll rests until 29 s.
+      await w.clock.advance(12_000)
+      expect(PROBES.inFlight).toBe(0)
+      expect(rests()).toEqual([])
+      // The ticks at 20 s and 25 s rest: 9 s and 4 s are left.
       for (let step = 0; step < 2; step++) await w.clock.advance(5000)
-      expect(traceOf(w).filter(line => line.event === 'poll.skip' && Number(line.restMs) > 0).length).toBeGreaterThan(rested.length)
-      const atRestEnd = probes(w)
-      expect(atRestEnd).toBe(before + 1)
-      for (let step = 0; step < 4; step++) await w.clock.advance(5000)
-      expect(probes(w)).toBeGreaterThan(atRestEnd)
+      expect(rests()).toEqual([9000, 4000])
+      expect(probes(w)).toBe(before + 1)
+      // The tick at 30 s, past the rest, probes again.
+      await w.clock.advance(5000)
+      expect(probes(w)).toBe(before + 2)
+      expect(rests()).toEqual([9000, 4000])
     } finally {
-      LINUX_FIXTURE.probeMs = 0
+      LINUX_FIXTURE.probeLateMs = 0
     }
   })
 
