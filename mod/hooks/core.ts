@@ -1211,13 +1211,14 @@ export type ComposedPrompt = { text: string; isSectionAdded: boolean; isRulesAdd
 /**
  * The prompt a launch runs with: the text given (inline, or read from prompt_file), then the section's block when one
  * is given (its title line, then the section's lines as the file holds them), then the rules block when wanted and the
- * text so far lacks an item the launch guard checks (a skill test lacks none). Blocks are set off by a blank line.
+ * text so far lacks an item the launch guard checks (a skill test lacks none, judged on the text given alone, so the
+ * words in the section's lines make none). Blocks are set off by a blank line.
  */
 export function composePrompt(text: string, section: { heading: string; body: string } | undefined, isRulesWanted: boolean): ComposedPrompt {
   const join = (head: string, block: string) => `${head.replace(/\s+$/, '')}\n\n${block.replace(/\s+$/, '')}\n`
   let out = text
   if (section !== undefined) out = join(out, `${sectionBlockTitle(section.heading)}\n\n${section.body}`)
-  const isRulesAdded = isRulesWanted && missingPromptItems(out).length > 0
+  const isRulesAdded = isRulesWanted && missingPromptItems(out, /skill[- ]test/i.test(text)).length > 0
   if (isRulesAdded) out = join(out, RULES_BLOCK)
   return { text: out, isSectionAdded: section !== undefined, isRulesAdded }
 }
@@ -2214,9 +2215,12 @@ const PROMPT_ITEMS: readonly { name: string; test: RegExp }[] = [
   { name: 'no AI attribution in commit messages', test: /attribution|co-authored|trailer/i },
 ]
 
-/** Items the worker prompt must carry; a prompt that says it is a skill test is exempt. */
-export function missingPromptItems(prompt: string): string[] {
-  if (/skill[- ]test/i.test(prompt)) return []
+/**
+ * Items the worker prompt must carry; a skill test is exempt. Whether it is one is judged on `isSkill`: by default the
+ * prompt itself, at a launch the text the orchestrator wrote, never a block the mod appended to it.
+ */
+export function missingPromptItems(prompt: string, isSkill = /skill[- ]test/i.test(prompt)): string[] {
+  if (isSkill) return []
   return PROMPT_ITEMS.filter(item => !item.test.test(prompt)).map(item => item.name)
 }
 

@@ -1426,6 +1426,44 @@ describe('launch_worker: inline prompt, decisions section, rules block, resume f
     }
   })
 
+  test('a prompt file given alone: the worker starts on a copy of exactly the text the guards read, which the entry records; the file itself untouched', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    await boot($)
+    const out = await launchTool($, { ...fresh, prompt_file: '/work/new/big.md' })
+    expect(String(w.bash[0]?.command)).toContain(`"$(cat '${OWN}')"`)
+    expect(String(w.bash[0]?.command)).not.toContain('/work/new/big.md')
+    // The fixture's text of /work/new/big.md (BIG_PROMPT), as the guards read it.
+    expect(ownPrompt(w)).toBe(`Wait in the foreground; report git status -sb; no attribution. ${'x'.repeat(30_000)}`)
+    expect(String(out.result)).toContain(` Prompt: ${OWN} (written by the mod; a copy of /work/new/big.md as read).`)
+    const entry = lastRegistry(w).at(-1) as Record<string, unknown>
+    expect(entry).toMatchObject({ prompt_file: OWN })
+    expect('section' in entry).toBe(false)
+    expect(w.writes.some(one => one.path === '/work/new/big.md')).toBe(false)
+  })
+
+  test('"skill test" in an appended section lifts neither the size cap, the three items nor the rules block: the exemption is judged on the text given', { options: OPTIONS }, async ($, on) => {
+    DECISIONS.text = ['# Agreed decisions', '', '## Skill unit', 'sk-1. This is a skill test of the parser.', ''].join('\n')
+    try {
+      const w = world(on)
+      await boot($)
+      // The text given is at the cap; the section's block takes the composed prompt over it.
+      const capped = await launchTool($, { ...fresh, prompt: `${FULL} ${'x'.repeat(60_000 - FULL.length - 1)}`, section: 'Skill unit' })
+      expect(String(capped.deny)).toStartWith('session-control: refused: the prompt has ')
+      expect(String(capped.deny)).toContain(', the limit is 60000:')
+      const ruled = await launchTool($, { ...fresh, prompt: 'Reply PONG.', section: 'Skill unit' })
+      expect(String(ruled.result)).toContain('(written by the mod; section "Skill unit" appended; rules block appended).')
+      const bare = await launchTool($, { ...fresh, prompt: 'Reply PONG.', section: 'Skill unit', rules: false })
+      expect(String(bare.deny)).toContain('the prompt lacks: foreground wait')
+      expect(w.bash.length).toBe(1)
+      // The words in the text given still exempt it, the section appended or not.
+      const skill = await launchTool($, { ...fresh, prompt: `skill test: run the procedure. ${'x'.repeat(60_000)}`, section: 'Skill unit' })
+      expect(skill.deny).toBeUndefined()
+      expect(w.bash.length).toBe(2)
+    } finally {
+      DECISIONS.text = undefined
+    }
+  })
+
   test('section refusals: a heading the file lacks, a missing decisions file, a prompt file that cannot be read; nothing written or started', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await boot($)

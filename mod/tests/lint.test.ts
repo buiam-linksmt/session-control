@@ -37,6 +37,15 @@ describe('lint.ts', () => {
     expect(promptLint(`skill test ${'x'.repeat(PROMPT_MAX_CHARS)}`).refusal).toBeUndefined()
   })
 
+  test('the skill-test exemption is judged on the text given: the words in an appended section lift neither the size cap nor the rules block', () => {
+    const section = { heading: 'Unit', body: 'u-1. A skill test of the parser.' }
+    const composed = composePrompt(`${ITEMS}${'x'.repeat(PROMPT_MAX_CHARS - ITEMS.length)}`, section, false).text
+    expect(promptLint(composed, false).refusal).toStartWith(`refused: the prompt has ${composed.length} characters, the limit is 60000`)
+    expect(promptLint(composed, true).refusal).toBeUndefined()
+    expect(composePrompt('Reply PONG.', section, true).isRulesAdded).toBe(true)
+    expect(composePrompt('skill test: reply PONG.', section, true).isRulesAdded).toBe(false)
+  })
+
   test('the branch warning: a prompt that asks to commit or push and names no branch, no "create one" and no decision section', () => {
     for (const text of ['Fix the parser and commit it, then push.', 'Work on a branch of your choice.', 'Push the fix when the tests pass.']) {
       expect({ text, warnings: promptLint(`${ITEMS}${text}`).warnings }).toEqual({ text, warnings: [WARNING] })

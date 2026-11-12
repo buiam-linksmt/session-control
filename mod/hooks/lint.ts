@@ -1,7 +1,7 @@
 // The prompt lint of launch_worker, beside the check of the three items every worker prompt carries
 // (missingPromptItems in core.ts): a size cap, the secret scan (secrets.ts) and a missing branch or decision section
 // (decision win-22). The size cap and the secret scan refuse; the branch check only warns, in the launch's answer. A
-// skill test ("skill test" in the prompt) is exempt from the size cap and the warning, as from the three items; the
+// skill test ("skill test" in the text the orchestrator wrote, never in a block the mod appended) is exempt from the size cap and the warning, as from the three items; the
 // secret scan holds for every prompt, a skill test's too. Pure: no `$`, no I/O.
 
 import { RULES_BLOCK } from './core'
@@ -55,10 +55,10 @@ export type PromptLint = { refusal?: string; warnings: string[] }
 /**
  * The lint of the prompt a launch runs with (the text given, the section's block and the rules block, as composed):
  * a refusal (the first that applies: secrets, then the size), and warnings. A refusal names each secret's kind and line,
- * never its value.
+ * never its value. Whether it is a skill test is judged on `isSkill`: by default the prompt itself, at a launch the
+ * text the orchestrator wrote (isSkillTest of it), so the words in an appended section's lines lift nothing.
  */
-export function promptLint(prompt: string): PromptLint {
-  const isSkill = isSkillTest(prompt)
+export function promptLint(prompt: string, isSkill = isSkillTest(prompt)): PromptLint {
   const finds = findSecrets(prompt)
   if (finds.length > 0) {
     const listed = finds.slice(0, FINDS_LISTED).map(one => `${one.kind} on line ${one.line}`)
@@ -789,6 +789,24 @@ const MAIN_READING = 1
 const BLANK_READING = 2
 
 /**
+ * The index of the last line a reading of signoffLint takes for a fence line (FENCE): as the describe blocks read, a
+ * describe block's opening line too (it ends a fenced block open before it) and none of its other lines; in the blank
+ * reading none of a block's lines. -1 when there is none. A fence line at or after it opens a fenced block that no
+ * line closes before the end of the text. One pass from the end, each line read once.
+ */
+function lastFenceLine(lines: readonly string[], described: Uint8Array, reading: number): number {
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const kind = described[index] ?? PROSE
+    if (kind !== PROSE && reading !== MAIN_READING) {
+      if (reading === DESCRIBED_READING && kind === DESCRIBE_OPENING) return index
+      continue
+    }
+    if (FENCE.test(lines[index] ?? '')) return index
+  }
+  return -1
+}
+
+/**
  * How a line inside a describe block opened with the marks `run` reads: 0 a line of the block, DESCRIBE_CLOSING its
  * closing line, DESCRIBE_CLOSING_MORE a closing line with more after its marks. A line closes the block when, after any
  * blanks, `>` and format characters, it starts with at least as many marks as `run` of its kind, lookalikes and format
@@ -1213,6 +1231,9 @@ export function signoffLint(prompt: string, standing?: StandingRead, ownLines = 
     // A list under a negating head line, and whether that head negates the command shapes too.
     let list: { headIndent: number; negatesShapes: boolean } | undefined
     let previous = ''
+    // A fence line from here on opens a fenced block that is never closed: it is no example, and its lines (every line
+    // after it) are read as prose, as a fenced block that closes is read when it is no example.
+    const lastFence = lastFenceLine(lines, described, reading)
     for (const [index, given] of lines.entries()) {
       const kind = described[index] ?? PROSE
       // The blank reading reads each line of a describe block as a blank line, the main reading reads it as main does.
@@ -1230,7 +1251,12 @@ export function signoffLint(prompt: string, standing?: StandingRead, ownLines = 
         }
       } else {
         if (FENCE.test(line)) {
-          fence = fence === undefined ? { isExample: INTRODUCER.test(previous) || isNegatingHead(previous), isShapeExample: INTRODUCER.test(previous) || isNegatingHead(withoutFalseNegations(previous)) } : undefined
+          fence =
+            fence !== undefined
+              ? undefined
+              : index >= lastFence
+                ? { isExample: false, isShapeExample: false }
+                : { isExample: INTRODUCER.test(previous) || isNegatingHead(previous), isShapeExample: INTRODUCER.test(previous) || isNegatingHead(withoutFalseNegations(previous)) }
           list = undefined
           previous = ''
           continue

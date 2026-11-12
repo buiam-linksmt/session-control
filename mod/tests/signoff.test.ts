@@ -198,6 +198,29 @@ describe('the prompt guard: the negation rule of the fix-up (lint.ts)', () => {
     }
   })
 
+  test('a fence after an introducing word or a negating head that no line closes is no example: its lines and every line after it are read as prose', () => {
+    for (const [prompt, label] of [
+      ['For example:\n```\ngit push --force origin x', 'a force-push on line 3'],
+      ['For example:\n```\ngit push --force origin x\n', 'a force-push on line 3'],
+      ['Examples of refused prompts:\n```\nnpm test\ngit reset --hard', 'reset --hard on line 4'],
+      ['For example:\n~~~\ngit branch -D x', 'branch -D on line 3'],
+      ['For example:\n```bash\ngit push --force origin x', 'a force-push on line 3'],
+      ['Never run these:\n```\ngit reset --hard', 'reset --hard on line 3'],
+      ['attack it:\n```\nRebase on main, then force-push the branch.', 'a force-push on line 3'],
+      // A closed example before it stays an example; only the fence that never closes is read as prose.
+      ['For example:\n```\ngit push --force origin x\n```\nFor example:\n```\ngit reset --hard', 'reset --hard on line 7'],
+      // After a describe block, as before one.
+      ['```describe\nthe force-push class\n```\nFor example:\n```\ngit push --force origin x', 'a force-push on line 6'],
+      ['For example:\r\n```\r\ngit push --force origin x\r\n', 'a force-push on line 3'],
+    ] as const) {
+      expect({ prompt, refused: refusedAs(prompt) }).toEqual({ prompt, refused: label })
+    }
+    // Closed, the same fences are examples, as on main.
+    for (const prompt of ['For example:\n```\ngit push --force origin x\n```', 'For example:\n~~~\ngit branch -D x\n~~~', 'Never run these:\n```\ngit reset --hard\n```\nDone.', 'For example:\n```\ngit push --force origin x\n```\nThen report:\n```\nthe status output']) {
+      expect({ prompt, refused: refusedAs(prompt) }).toEqual({ prompt, refused: undefined })
+    }
+  })
+
   test('still refused: a contrast word, a negation in another sentence or clause, and every flag and refspec form; a mirror and a pruning push too', () => {
     for (const [prompt, label] of [
       ['Never force-push, but if needed force-push.', 'a force-push'],

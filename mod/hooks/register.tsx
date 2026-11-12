@@ -67,7 +67,7 @@ import type { DigestEvent } from './digest'
 import { STOP_SCHEMA, abortCheck, stopProofText } from './stop'
 import { signoffDenyText, signoffVerdict } from './guard'
 import { findSecrets, secretScanLine, tallyFromAnswer, tallyOf } from './secrets'
-import { hasSignoffBlock, promptLint, signoffLint } from './lint'
+import { hasSignoffBlock, isSkillTest, promptLint, signoffLint } from './lint'
 import type { StandingRead } from './lint'
 import type { SecretTally } from './secrets'
 import type { StopReport } from './host'
@@ -2280,8 +2280,11 @@ async function standingRead($: EngineInterface): Promise<StandingRead> {
   return { unreadable: stat.size > READ_CAP_BYTES ? `${path} holds ${stat.size} bytes, over the engine's read cap of ${READ_CAP_BYTES} bytes` : `${path} holds ${stat.size} bytes and the engine's read of it failed` }
 }
 
-/** The prompt a launch built itself, and where it goes: an inline prompt, or a prompt_file the launch extended. */
-type OwnPrompt = { path: string; composed: ComposedPrompt; section?: string }
+/**
+ * The prompt a launch built itself, and where it goes: an inline prompt, a prompt_file the launch extended, or a copy of
+ * a prompt_file given alone as it was read (`copyOf` names the file given).
+ */
+type OwnPrompt = { path: string; composed: ComposedPrompt; section?: string; copyOf?: string }
 
 async function launch($: EngineInterface, given: LaunchInput) {
   const machine = await hostOf($)
@@ -2328,8 +2331,11 @@ async function launch($: EngineInterface, given: LaunchInput) {
   // after it: the section's block and the rules block are never read for it (decision gab-1). It takes the given text
   // itself, never the composed text cut at a heading, so a body that imitates the section's title line is read whole.
   // A signoff block in it is checked against the Standing go-ahead lines of agreed-decisions.md, read only then: its
-  // lines pass, named in a warning. The secret scan and the size cap still read the prompt as composed.
-  const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text)
+  // lines pass, named in a warning. The secret scan and the size cap still read the prompt as composed; whether it is a
+  // skill test (exempt from the size cap, the branch warning and the three items) is judged on the text given alone, so
+  // the words in an appended section's lines lift nothing.
+  const isSkill = sourceText !== undefined && isSkillTest(sourceText)
+  const lint = composed === undefined ? { warnings: [] as string[] } : promptLint(composed.text, isSkill)
   const guarded = sourceText
   const standing = guarded !== undefined && lint.refusal === undefined && hasSignoffBlock(guarded) ? await standingRead($) : undefined
   // A prompt the lint refused is refused for that: the sign-off guard does not read it.
@@ -2351,8 +2357,13 @@ async function launch($: EngineInterface, given: LaunchInput) {
   const name = launchName(filled.title ?? '', nowMs, reg.entries, filled.resume_sid, issuedNames)
   issuedNames.add(name)
   const promptStem = filled.resume_sid === undefined ? name : `${name}-${new Date(nowMs).toISOString().replace(/[-:T]/g, '').slice(2, 14)}`
+  // Every prompt the guards read goes to a prompt file of the mod's own, a prompt_file given alone too (a copy of exactly
+  // the text read): the worker reads that file when it starts, so a change to the given file after the guards read it
+  // reaches no worker. The given file is never written. A prompt_file that could not be read is launched as given, and
+  // the check below refuses it as missing or empty.
+  const copyOf = composed !== undefined && filled.prompt === undefined && composed.text === sourceText ? filled.prompt_file : undefined
   const own: OwnPrompt | undefined =
-    composed !== undefined && (filled.prompt !== undefined || composed.text !== sourceText) ? { path: `${runsDir}/${promptStem}.prompt.md`, composed, ...(section === undefined ? {} : { section: section.heading }) } : undefined
+    composed === undefined ? undefined : { path: `${runsDir}/${promptStem}.prompt.md`, composed, ...(section === undefined ? {} : { section: section.heading }), ...(copyOf === undefined ? {} : { copyOf }) }
   const args = launchArgsOf(filled, own?.path ?? filled.prompt_file ?? '')
   const checks = await machine.launchChecks(portOf($), args)
   // The prompt file the mod writes is checked as text: it is written once the guards have passed.
@@ -2395,7 +2406,8 @@ async function launch($: EngineInterface, given: LaunchInput) {
     }
     pick = await run($, picked.argv, { timeoutMs: 20_000 }, false, shownPicker(picked.argv))
   }
-  const verdict = checkLaunch(args, {
+  // A copy is checked under the name of the file given, so a refusal (a path not absolute, a file empty) names that file.
+  const verdict = checkLaunch(copyOf === undefined ? args : { ...args, prompt_file: copyOf }, {
     home,
     orchestratorDir: config.orchestratorDir,
     entries: reg.entries,
@@ -2404,13 +2416,13 @@ async function launch($: EngineInterface, given: LaunchInput) {
     transcriptExists: resumeSid === undefined ? undefined : reg.facts.transcriptMtime.has(resumeSid),
     promptFileOk,
     dirOk: checks.dirOk,
-    missingItems: promptText === undefined ? undefined : missingPromptItems(promptText),
+    missingItems: promptText === undefined ? undefined : missingPromptItems(promptText, isSkill),
     ...machine.launchFacts(promptText),
   })
   trace($, 'guard', verdict.ok ? { tool: 'launch_worker', isOk: true, configDir: verdict.configDir, resumeSid: verdict.resumeSid } : { tool: 'launch_worker', isOk: false, ...messageFields(verdict.reason, 'reason') })
   if (!verdict.ok) return { deny: `${PLUGIN}: ${verdict.reason}` }
   if (own !== undefined) {
-    trace($, 'launch.prompt', { promptFile: own.path, chars: own.composed.text.length, isInline: filled.prompt !== undefined, isSectionAdded: own.composed.isSectionAdded, isRulesAdded: own.composed.isRulesAdded })
+    trace($, 'launch.prompt', { promptFile: own.path, chars: own.composed.text.length, isInline: filled.prompt !== undefined, isSectionAdded: own.composed.isSectionAdded, isRulesAdded: own.composed.isRulesAdded, ...(own.copyOf === undefined ? {} : { isCopy: true }) })
     try {
       await machine.prepareRunsDir(portOf($), runsDir)
       await write($, own.path, own.composed.text)
@@ -2609,7 +2621,8 @@ async function spawnWorker(
   // Said only when the launch's new parameters were used: an old launch's answer is as it was.
   const { own: ownPrompt, fromEntry } = launchRun
   const added = ownPrompt === undefined ? [] : [...(ownPrompt.composed.isSectionAdded ? [`section "${ownPrompt.section}" appended`] : []), ...(ownPrompt.composed.isRulesAdded ? ['rules block appended'] : [])]
-  const promptNote = ownPrompt === undefined ? '' : ` Prompt: ${ownPrompt.path} (written by the mod${added.length === 0 ? '' : `; ${added.join('; ')}`}).`
+  const copied = ownPrompt?.copyOf === undefined ? [] : [`a copy of ${ownPrompt.copyOf} as read`]
+  const promptNote = ownPrompt === undefined ? '' : ` Prompt: ${ownPrompt.path} (written by the mod${[...copied, ...added].length === 0 ? '' : `; ${[...copied, ...added].join('; ')}`}).`
   const entryNote = fromEntry.length === 0 ? '' : ` From the entry: ${fromEntry.join(', ')}.`
   return {
     result: `Launched pid ${worker.pid}, session ${sessionId}, config_dir ${verdict.configDir}, ${note}. Name: ${inbox.name}; socket: ${inbox.socketPath ?? 'none'}. Result: ${files.result}; errors: ${files.err}.${pidNote}${promptNote}${entryNote}${launchRun.licenceNote ?? ''}${refusalNote}${warningLines}`,
